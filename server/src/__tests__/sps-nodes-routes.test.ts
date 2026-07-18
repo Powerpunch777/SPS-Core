@@ -277,6 +277,25 @@ describeEmbeddedPostgres("SPS Node routes", () => {
     expect(denied.body.error).toContain("owners and admins");
   });
 
+  it("keeps the company Node inventory visible only to owners and admins", async () => {
+    const fixture = await createCompanyFixture(db);
+    const ownerApp = await createApp(db, boardActor(fixture.company.id, fixture.ownerUserId, "owner"));
+    const operatorApp = await createApp(db, boardActor(fixture.company.id, fixture.operatorUserId, "operator"));
+
+    const registered = await request(ownerApp)
+      .post(`/api/companies/${fixture.company.id}/sps-nodes`)
+      .send(createNodePayload().payload);
+    expect(registered.status, JSON.stringify(registered.body)).toBe(201);
+
+    const denied = await request(operatorApp).get(`/api/companies/${fixture.company.id}/sps-nodes`);
+    expect(denied.status).toBe(403);
+    expect(denied.body.error).toContain("owners and admins");
+
+    const allowed = await request(ownerApp).get(`/api/companies/${fixture.company.id}/sps-nodes`);
+    expect(allowed.status).toBe(200);
+    expect(allowed.body).toHaveLength(1);
+  });
+
   it("revoking a Node also clears its Agent grants and primary bindings", async () => {
     const fixture = await createCompanyFixture(db);
     const app = await createApp(db, boardActor(fixture.company.id, fixture.ownerUserId, "owner"));

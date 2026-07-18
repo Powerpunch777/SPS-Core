@@ -212,8 +212,7 @@ export function spsNodeRoutes(db: Db) {
 
   router.get("/companies/:companyId/sps-nodes", async (req, res) => {
     const companyId = req.params.companyId as string;
-    assertBoard(req);
-    assertCompanyAccess(req, companyId);
+    await assertSpsNodeAdmin(req, companyId);
 
     const [nodes, grants, bindings, companyAgents] = await Promise.all([
       db
