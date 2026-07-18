@@ -381,4 +381,59 @@ describeEmbeddedPostgres("SPS Node routes", () => {
     expect(failed.status).toBe("failed");
     expect(failed.error).toContain("revoked or reassigned");
   });
+
+  it("invalidates an active command lease when an Agent grant is revoked", async () => {
+    const fixture = await createCompanyFixture(db);
+    const app = await createApp(db, boardActor(fixture.company.id, fixture.ownerUserId, "owner"));
+    const node = createNodePayload();
+    const registered = await request(app)
+      .post(`/api/companies/${fixture.company.id}/sps-nodes`)
+      .send(node.payload);
+    await request(app)
+      .post(`/api/sps-nodes/${registered.body.id}/heartbeat`)
+      .send(createSignedHeartbeat(registered.body.id, node.privateKey));
+    await request(app).post(`/api/sps-nodes/${registered.body.id}/approve`).send({});
+    await request(app)
+      .put(`/api/sps-nodes/${registered.body.id}/agent-grants/${fixture.agent.id}`)
+      .send({});
+    await request(app)
+      .put(`/api/agents/${fixture.agent.id}/sps-node-binding`)
+      .send({ nodeId: registered.body.id });
+    const queued = await db
+      .insert(spsNodeCommands)
+      .values({
+        companyId: fixture.company.id,
+        nodeId: registered.body.id,
+        agentId: fixture.agent.id,
+        command: "codex",
+        args: ["exec"],
+        env: {},
+      })
+      .returning()
+      .then((rows) => rows[0]!);
+    const claimPath = `/sps-nodes/${registered.body.id}/commands/claim-next`;
+    await request(app)
+      .post(`/api${claimPath}`)
+      .send(createSignedNodeRequest(registered.body.id, node.privateKey, claimPath, {}));
+
+    await request(app)
+      .delete(`/api/sps-nodes/${registered.body.id}/agent-grants/${fixture.agent.id}`)
+      .send({});
+
+    const leasePath = `/sps-nodes/${registered.body.id}/commands/${queued.id}/lease`;
+    const lease = await request(app)
+      .post(`/api${leasePath}`)
+      .send(createSignedNodeRequest(registered.body.id, node.privateKey, leasePath, {}));
+    expect(lease.status, JSON.stringify(lease.body)).toBe(200);
+    expect(lease.body.active).toBe(false);
+    expect(lease.body.status).toBe("failed");
+
+    const failed = await db
+      .select()
+      .from(spsNodeCommands)
+      .where(eq(spsNodeCommands.id, queued.id))
+      .then((rows) => rows[0]!);
+    expect(failed.status).toBe("failed");
+    expect(failed.error).toContain("no longer has access");
+  });
 });

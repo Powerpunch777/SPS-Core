@@ -1,6 +1,6 @@
 import { createHash, createPublicKey, verify } from "node:crypto";
 import { Router, type Request } from "express";
-import { and, desc, eq, isNull, lt } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, lt } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   agents,
@@ -158,6 +158,52 @@ export function spsNodeRoutes(db: Db) {
       entityId: input.nodeId,
       details: input.details ?? {},
     });
+  }
+
+  async function commandHasCurrentAuthority(
+    node: typeof spsNodes.$inferSelect,
+    command: typeof spsNodeCommands.$inferSelect,
+  ) {
+    if (node.status !== "active" || !node.keyVerifiedAt) return false;
+    const [grant, binding] = await Promise.all([
+      db
+        .select({ id: spsNodeAgentGrants.id })
+        .from(spsNodeAgentGrants)
+        .where(and(
+          eq(spsNodeAgentGrants.companyId, node.companyId),
+          eq(spsNodeAgentGrants.nodeId, node.id),
+          eq(spsNodeAgentGrants.agentId, command.agentId),
+          isNull(spsNodeAgentGrants.revokedAt),
+        ))
+        .then((rows) => rows[0] ?? null),
+      db
+        .select({ id: spsAgentNodeBindings.id })
+        .from(spsAgentNodeBindings)
+        .where(and(
+          eq(spsAgentNodeBindings.companyId, node.companyId),
+          eq(spsAgentNodeBindings.nodeId, node.id),
+          eq(spsAgentNodeBindings.agentId, command.agentId),
+        ))
+        .then((rows) => rows[0] ?? null),
+    ]);
+    return Boolean(grant && binding);
+  }
+
+  async function failActiveNodeCommands(input: {
+    nodeId: string;
+    agentId?: string;
+    reason: string;
+  }) {
+    const now = new Date();
+    const predicates = [
+      eq(spsNodeCommands.nodeId, input.nodeId),
+      inArray(spsNodeCommands.status, ["queued", "claimed", "running"]),
+    ];
+    if (input.agentId) predicates.push(eq(spsNodeCommands.agentId, input.agentId));
+    await db
+      .update(spsNodeCommands)
+      .set({ status: "failed", error: input.reason, finishedAt: now, updatedAt: now })
+      .where(and(...predicates));
   }
 
   router.get("/companies/:companyId/sps-nodes", async (req, res) => {
@@ -369,6 +415,10 @@ export function spsNodeRoutes(db: Db) {
       .set({ revokedAt: now, updatedAt: now })
       .where(and(eq(spsNodeAgentGrants.nodeId, node.id), isNull(spsNodeAgentGrants.revokedAt)));
     await db.delete(spsAgentNodeBindings).where(eq(spsAgentNodeBindings.nodeId, node.id));
+    await failActiveNodeCommands({
+      nodeId: node.id,
+      reason: "SPS Node access was revoked while this command was running.",
+    });
     await logNodeMutation(req, {
       companyId: node.companyId,
       action: "sps_node.revoked",
@@ -434,6 +484,11 @@ export function spsNodeRoutes(db: Db) {
       eq(spsAgentNodeBindings.nodeId, node.id),
       eq(spsAgentNodeBindings.agentId, agent.id),
     ));
+    await failActiveNodeCommands({
+      nodeId: node.id,
+      agentId: agent.id,
+      reason: "This Agent no longer has access to the SPS Node running this command.",
+    });
     await logNodeMutation(req, {
       companyId: node.companyId,
       action: "sps_node.agent_revoked",
@@ -464,6 +519,15 @@ export function spsNodeRoutes(db: Db) {
         .then((rows) => rows[0] ?? null);
       if (!grant) throw forbidden("Grant this SPS Node to the Agent before making it primary");
 
+      const previousBinding = await db
+        .select()
+        .from(spsAgentNodeBindings)
+        .where(and(
+          eq(spsAgentNodeBindings.companyId, agent.companyId),
+          eq(spsAgentNodeBindings.agentId, agent.id),
+        ))
+        .then((rows) => rows[0] ?? null);
+
       const now = new Date();
       const binding = await db
         .insert(spsAgentNodeBindings)
@@ -484,6 +548,13 @@ export function spsNodeRoutes(db: Db) {
         })
         .returning()
         .then((rows) => rows[0]!);
+      if (previousBinding && previousBinding.nodeId !== node.id) {
+        await failActiveNodeCommands({
+          nodeId: previousBinding.nodeId,
+          agentId: agent.id,
+          reason: "This Agent was reassigned to another SPS Node while this command was running.",
+        });
+      }
       await logNodeMutation(req, {
         companyId: agent.companyId,
         action: "sps_node.agent_primary_bound",
@@ -497,12 +568,27 @@ export function spsNodeRoutes(db: Db) {
   router.delete("/agents/:agentId/sps-node-binding", async (req, res) => {
     const agent = await getAgent(req.params.agentId as string);
     await assertSpsNodeAdmin(req, agent.companyId);
+    const binding = await db
+      .select()
+      .from(spsAgentNodeBindings)
+      .where(and(
+        eq(spsAgentNodeBindings.companyId, agent.companyId),
+        eq(spsAgentNodeBindings.agentId, agent.id),
+      ))
+      .then((rows) => rows[0] ?? null);
     await db
       .delete(spsAgentNodeBindings)
       .where(and(
         eq(spsAgentNodeBindings.companyId, agent.companyId),
         eq(spsAgentNodeBindings.agentId, agent.id),
       ));
+    if (binding) {
+      await failActiveNodeCommands({
+        nodeId: binding.nodeId,
+        agentId: agent.id,
+        reason: "The SPS Node binding was removed while this command was running.",
+      });
+    }
     res.status(204).end();
   });
 
@@ -540,28 +626,7 @@ export function spsNodeRoutes(db: Db) {
         .then((rows) => rows[0] ?? null);
       if (!candidate) return res.status(204).end();
 
-      const [grant, binding] = await Promise.all([
-        db
-          .select({ id: spsNodeAgentGrants.id })
-          .from(spsNodeAgentGrants)
-          .where(and(
-            eq(spsNodeAgentGrants.companyId, node.companyId),
-            eq(spsNodeAgentGrants.nodeId, node.id),
-            eq(spsNodeAgentGrants.agentId, candidate.agentId),
-            isNull(spsNodeAgentGrants.revokedAt),
-          ))
-          .then((rows) => rows[0] ?? null),
-        db
-          .select({ id: spsAgentNodeBindings.id })
-          .from(spsAgentNodeBindings)
-          .where(and(
-            eq(spsAgentNodeBindings.companyId, node.companyId),
-            eq(spsAgentNodeBindings.nodeId, node.id),
-            eq(spsAgentNodeBindings.agentId, candidate.agentId),
-          ))
-          .then((rows) => rows[0] ?? null),
-      ]);
-      if (!grant || !binding) {
+      if (!await commandHasCurrentAuthority(node, candidate)) {
         await db
           .update(spsNodeCommands)
           .set({
@@ -584,6 +649,33 @@ export function spsNodeRoutes(db: Db) {
     }
   });
 
+  router.post("/sps-nodes/:nodeId/commands/:commandId/lease", async (req, res) => {
+    const node = await getNode(req.params.nodeId as string);
+    await assertSignedNodeRequest(req, node);
+    const command = await db
+      .select()
+      .from(spsNodeCommands)
+      .where(and(eq(spsNodeCommands.id, req.params.commandId as string), eq(spsNodeCommands.nodeId, node.id)))
+      .then((rows) => rows[0] ?? null);
+    if (!command) throw notFound("SPS Node command not found");
+    if (command.status !== "claimed" && command.status !== "running") {
+      return res.json({ active: false, status: command.status, error: command.error ?? null });
+    }
+    if (!await commandHasCurrentAuthority(node, command)) {
+      await failActiveNodeCommands({
+        nodeId: node.id,
+        agentId: command.agentId,
+        reason: "SPS Node access was revoked or reassigned while this command was running.",
+      });
+      return res.json({
+        active: false,
+        status: "failed",
+        error: "SPS Node access was revoked or reassigned while this command was running.",
+      });
+    }
+    res.json({ active: true, status: command.status, error: null });
+  });
+
   router.post("/sps-nodes/:nodeId/commands/:commandId/events", async (req, res) => {
     const node = await getNode(req.params.nodeId as string);
     await assertSignedNodeRequest(req, node);
@@ -596,6 +688,14 @@ export function spsNodeRoutes(db: Db) {
     if (!command) throw notFound("SPS Node command not found");
     if (command.status !== "claimed" && command.status !== "running") {
       throw forbidden("SPS Node command is not accepting output");
+    }
+    if (!await commandHasCurrentAuthority(node, command)) {
+      await failActiveNodeCommands({
+        nodeId: node.id,
+        agentId: command.agentId,
+        reason: "SPS Node access was revoked or reassigned while this command was running.",
+      });
+      throw forbidden("SPS Node command access was revoked while it was running");
     }
     if (event.sequence !== command.lastEventSeq + 1) {
       throw badRequest("SPS Node command output sequence is out of order");
@@ -629,6 +729,19 @@ export function spsNodeRoutes(db: Db) {
     if (command.status === "succeeded" || command.status === "failed") return res.json(command);
     if (command.status !== "claimed" && command.status !== "running") {
       throw forbidden("SPS Node command is not active");
+    }
+    if (!await commandHasCurrentAuthority(node, command)) {
+      await failActiveNodeCommands({
+        nodeId: node.id,
+        agentId: command.agentId,
+        reason: "SPS Node access was revoked or reassigned while this command was running.",
+      });
+      const failed = await db
+        .select()
+        .from(spsNodeCommands)
+        .where(eq(spsNodeCommands.id, command.id))
+        .then((rows) => rows[0]!);
+      return res.json(failed);
     }
     const updated = await db
       .update(spsNodeCommands)
