@@ -87,7 +87,7 @@ async function createCompanyFixture(db: Db) {
   ]);
   const agent = await db
     .insert(agents)
-    .values({ companyId: company.id, name: "Worker", role: "engineer" })
+    .values({ companyId: company.id, name: "Worker", role: "engineer", adapterType: "codex_local" })
     .returning()
     .then((rows) => rows[0]!);
   return { company, ownerUserId, operatorUserId, agent };
