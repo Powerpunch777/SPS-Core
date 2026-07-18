@@ -48,7 +48,7 @@ export async function resolveSpsNodeExecutionTarget(input: {
   companyId: string;
   agentId: string;
   adapterType: string;
-  heartbeatRunId: string;
+  heartbeatRunId: string | null;
   projectId: string | null;
 }): Promise<AdapterSpsNodeExecutionTarget | null> {
   const binding = await input.db
