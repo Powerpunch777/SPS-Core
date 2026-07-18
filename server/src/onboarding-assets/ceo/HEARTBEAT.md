@@ -1,6 +1,6 @@
 # HEARTBEAT.md -- CEO Heartbeat Checklist
 
-Run this checklist on every heartbeat. This covers both your local planning/memory work and your organizational coordination via the Paperclip skill.
+Run this checklist on every heartbeat. This covers both your local planning/memory work and your organizational coordination through SPS.
 
 ## 1. Identity and Context
 
@@ -31,7 +31,7 @@ If `PAPERCLIP_APPROVAL_ID` is set:
 
 ## 5. Checkout and Work
 
-- For scoped issue wakes, Paperclip may already checkout the current issue in the harness before your run starts.
+- For scoped issue wakes, SPS may already checkout the current issue in the harness before your run starts.
 - Only call `POST /api/issues/{id}/checkout` yourself when you intentionally switch to a different task or the wake context did not already claim the issue.
 - Never retry a 409 -- that task belongs to someone else.
 - Do the work. Update status and comment when done.
@@ -79,7 +79,7 @@ Status quick guide:
 
 ## Rules
 
-- Always use the Paperclip skill for coordination.
-- Always include `X-Paperclip-Run-Id` header on mutating API calls.
+- Always use SPS coordination tools for work tracking.
+- Include the assigned run identity on mutating API calls when the runtime requires it.
 - Comment in concise markdown: status line + bullets + links.
 - Self-assign via checkout only when explicitly @-mentioned.

@@ -42,14 +42,14 @@ describe("privateHostnameGuard", () => {
     expect(res.status).toBe(200);
   });
 
-  it("blocks unknown hostnames with remediation command", async () => {
+  it("blocks unknown hostnames with SPS remediation guidance", async () => {
     const app = createApp({ enabled: true, allowedHostnames: ["some-other-host"] });
     const res = await request(app).get("/api/health").set("Host", `${unknownHostname}:3100`);
     expect(res.status).toBe(403);
-    expect(res.body?.error).toContain(`please run pnpm paperclipai allowed-hostname ${unknownHostname}`);
+    expect(res.body?.error).toContain("Add it to SPS_ALLOWED_HOSTNAMES and restart SPS.");
   });
 
-  it("blocks unknown hostnames on page routes with plain-text remediation command", async () => {
+  it("blocks unknown hostnames on page routes with plain-text SPS remediation guidance", async () => {
     const middleware = privateHostnameGuard({
       enabled: true,
       allowedHostnames: ["some-other-host"],
@@ -73,7 +73,7 @@ describe("privateHostnameGuard", () => {
     expect(next).not.toHaveBeenCalled();
     expect(res.status).toHaveBeenCalledWith(403);
     expect(res.send).toHaveBeenCalledWith(
-      expect.stringContaining(`please run pnpm paperclipai allowed-hostname ${unknownHostname}`),
+      expect.stringContaining("Add it to SPS_ALLOWED_HOSTNAMES and restart SPS."),
     );
   }, 20_000);
 });
