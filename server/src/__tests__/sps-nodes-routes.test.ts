@@ -230,6 +230,29 @@ describeEmbeddedPostgres("SPS Node routes", () => {
     expect(list.body[0].primaryAgentBindings).toHaveLength(1);
   });
 
+  it("requires the computer owner's active SPS account for signed heartbeats", async () => {
+    const fixture = await createCompanyFixture(db);
+    const ownerApp = await createApp(db, boardActor(fixture.company.id, fixture.ownerUserId, "owner"));
+    const operatorApp = await createApp(db, boardActor(fixture.company.id, fixture.operatorUserId, "operator"));
+    const node = createNodePayload();
+    const registered = await request(ownerApp)
+      .post(`/api/companies/${fixture.company.id}/sps-nodes`)
+      .send(node.payload);
+    expect(registered.status, JSON.stringify(registered.body)).toBe(201);
+
+    const heartbeat = createSignedHeartbeat(registered.body.id, node.privateKey);
+    const denied = await request(operatorApp)
+      .post(`/api/sps-nodes/${registered.body.id}/heartbeat`)
+      .send(heartbeat);
+    expect(denied.status).toBe(403);
+    expect(denied.body.error).toContain("computer owner");
+
+    const accepted = await request(ownerApp)
+      .post(`/api/sps-nodes/${registered.body.id}/heartbeat`)
+      .send(heartbeat);
+    expect(accepted.status, JSON.stringify(accepted.body)).toBe(200);
+  });
+
   it("keeps approval and Agent execution authority with owners and admins", async () => {
     const fixture = await createCompanyFixture(db);
     const ownerApp = await createApp(db, boardActor(fixture.company.id, fixture.ownerUserId, "owner"));

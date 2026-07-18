@@ -87,12 +87,16 @@ export function spsNodeRoutes(db: Db) {
     throw forbidden("Only company owners and admins can manage SPS Nodes");
   }
 
-  async function assertSignedNodeRequest(req: Request, node: typeof spsNodes.$inferSelect) {
+  function assertSpsNodeOwner(req: Request, node: typeof spsNodes.$inferSelect) {
     assertBoard(req);
     assertCompanyAccess(req, node.companyId);
     if (req.actor.source !== "local_implicit" && req.actor.userId !== node.ownerUserId) {
-      throw forbidden("Only the computer owner may claim or complete SPS Node commands");
+      throw forbidden("Only the computer owner may use this SPS Node");
     }
+  }
+
+  async function assertSignedNodeRequest(req: Request, node: typeof spsNodes.$inferSelect) {
+    assertSpsNodeOwner(req, node);
 
     const signed = spsNodeSignedRequestSchema.parse(req.body ?? {});
     const signedAt = new Date(signed.timestamp);
@@ -314,6 +318,7 @@ export function spsNodeRoutes(db: Db) {
     validate(spsNodeHeartbeatSchema),
     async (req, res) => {
       const node = await getNode(req.params.nodeId as string);
+      assertSpsNodeOwner(req, node);
       if (node.status === "revoked") throw forbidden("This SPS Node has been revoked");
 
       const signedAt = new Date(req.body.timestamp);
