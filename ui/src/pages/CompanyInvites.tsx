@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useInfiniteQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Check, Copy, ExternalLink, MailPlus } from "lucide-react";
+import { Check, Copy, ExternalLink, MailPlus, QrCode } from "lucide-react";
+import { QRCodeSVG } from "qrcode.react";
 import { accessApi } from "@/api/access";
 import { ApiError } from "@/api/client";
 import { Button } from "@/components/ui/button";
@@ -307,7 +308,7 @@ export function CompanyInvites() {
         </fieldset>
 
         <div className="rounded-lg border border-border px-4 py-3 text-sm text-muted-foreground">
-          Each invite is single-use. Invitees sign in or create an SPS account before the selected company role is granted.
+          Each invite is single-use. Invitees complete Google sign-in before the selected company role is granted.
         </div>
 
         <div className="flex flex-wrap items-center gap-3">
@@ -358,6 +359,24 @@ export function CompanyInvites() {
                 aria-label="Latest invite URL"
               />
             </label>
+            <div className="flex flex-col gap-3 rounded-lg border border-border bg-muted/20 p-3 sm:flex-row sm:items-center">
+              <div
+                className="w-fit shrink-0 rounded-md bg-white p-2"
+                role="img"
+                aria-label="SPS invitation QR code"
+              >
+                <QRCodeSVG value={latestInvite.inviteUrl} size={120} level="M" includeMargin={false} />
+              </div>
+              <div className="min-w-0 space-y-1">
+                <div className="flex items-center gap-2 text-sm font-medium">
+                  <QrCode className="h-4 w-4 text-muted-foreground" />
+                  Scan on another device
+                </div>
+                <p className="text-sm text-muted-foreground">
+                  The QR code opens the one-time browser invite. On a computer with SPS Desktop installed, use the desktop link or invitation code instead.
+                </p>
+              </div>
+            </div>
             <div className="text-xs text-muted-foreground">
               Expires {new Date(latestInvite.expiresAt).toLocaleString()}.
             </div>

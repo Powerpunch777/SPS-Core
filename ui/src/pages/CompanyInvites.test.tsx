@@ -157,6 +157,7 @@ describe("CompanyInvites", () => {
 
     expect(container.textContent).toContain("Choose a role");
     expect(container.textContent).toContain("Each invite is single-use.");
+    expect(container.textContent).toContain("Google sign-in");
     expect(container.textContent).toContain("Can create agents, invite users, assign tasks, and approve join requests.");
     expect(container.textContent).toContain("Everything in Admin, plus managing members.");
     expect(container.textContent).not.toContain("permission grants");
@@ -216,6 +217,8 @@ describe("CompanyInvites", () => {
     expect(container.textContent).toContain("Copy desktop link");
     expect(container.textContent).toContain("Copy link");
     expect(container.textContent).toContain("Open invite");
+    expect(container.textContent).toContain("Scan on another device");
+    expect(container.querySelector('[aria-label="SPS invitation QR code"] svg')).not.toBeNull();
     expect(pushToastMock).toHaveBeenCalledWith({
       title: "Invite created",
       body: "SPS invite code copied to clipboard.",
