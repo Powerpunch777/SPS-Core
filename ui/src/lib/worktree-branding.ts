@@ -58,7 +58,7 @@ function pickReadableTextColor(background: string): string {
  * worktree name/color branding is absent.
  */
 export function isWorktreeRuntime(): boolean {
-  return readMetaContent("paperclip-worktree-enabled") === "true";
+  return readMetaContent("sps-worktree-enabled") === "true";
 }
 
 /**
@@ -69,20 +69,20 @@ export function isWorktreeRuntime(): boolean {
  * was armed in a different instance.
  */
 export function getWorktreeInstanceId(): string | null {
-  return readMetaContent("paperclip-instance-id");
+  return readMetaContent("sps-instance-id");
 }
 
 export function getWorktreeUiBranding(): WorktreeUiBranding | null {
-  if (readMetaContent("paperclip-worktree-enabled") !== "true") return null;
+  if (readMetaContent("sps-worktree-enabled") !== "true") return null;
 
-  const name = readMetaContent("paperclip-worktree-name");
-  const color = normalizeHexColor(readMetaContent("paperclip-worktree-color"));
+  const name = readMetaContent("sps-worktree-name");
+  const color = normalizeHexColor(readMetaContent("sps-worktree-color"));
   if (!name || !color) return null;
 
   return {
     enabled: true,
     name,
     color,
-    textColor: normalizeHexColor(readMetaContent("paperclip-worktree-text-color")) ?? pickReadableTextColor(color),
+    textColor: normalizeHexColor(readMetaContent("sps-worktree-text-color")) ?? pickReadableTextColor(color),
   };
 }

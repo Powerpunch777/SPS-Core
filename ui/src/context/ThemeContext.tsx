@@ -16,7 +16,8 @@ interface ThemeContextValue {
   toggleTheme: () => void;
 }
 
-const THEME_STORAGE_KEY = "paperclip.theme";
+const THEME_STORAGE_KEY = "sps.theme";
+const LEGACY_THEME_STORAGE_KEY = "paperclip.theme";
 const DARK_THEME_COLOR = "#18181b";
 const LIGHT_THEME_COLOR = "#ffffff";
 const ThemeContext = createContext<ThemeContextValue | undefined>(undefined);
@@ -30,7 +31,11 @@ function hasStoredTheme(): boolean {
   if (typeof window === "undefined") return false;
   try {
     const stored = window.localStorage.getItem(THEME_STORAGE_KEY);
-    return stored === "light" || stored === "dark";
+    if (stored === "light" || stored === "dark") return true;
+    const legacy = window.localStorage.getItem(LEGACY_THEME_STORAGE_KEY);
+    if (legacy !== "light" && legacy !== "dark") return false;
+    window.localStorage.setItem(THEME_STORAGE_KEY, legacy);
+    return true;
   } catch {
     return false;
   }

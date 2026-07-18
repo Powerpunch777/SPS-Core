@@ -5,7 +5,8 @@ import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ThemeProvider, useTheme } from "./ThemeContext";
 
-const THEME_STORAGE_KEY = "paperclip.theme";
+const THEME_STORAGE_KEY = "sps.theme";
+const LEGACY_THEME_STORAGE_KEY = "paperclip.theme";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
@@ -172,6 +173,25 @@ describe("ThemeContext", () => {
     });
     expect(observedTheme).not.toBe("dark");
 
+    act(() => {
+      root.unmount();
+    });
+  });
+
+  it("migrates an existing Paperclip theme preference into the SPS key", () => {
+    window.localStorage.setItem(LEGACY_THEME_STORAGE_KEY, "light");
+    const mql = installMatchMedia(true);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <ThemeProvider>
+          <Probe />
+        </ThemeProvider>,
+      );
+    });
+
+    expect(window.localStorage.getItem(THEME_STORAGE_KEY)).toBe("light");
+    expect(mql.listenerCount()).toBe(0);
     act(() => {
       root.unmount();
     });

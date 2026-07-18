@@ -1,7 +1,7 @@
-const FAVICON_BLOCK_START = "<!-- PAPERCLIP_FAVICON_START -->";
-const FAVICON_BLOCK_END = "<!-- PAPERCLIP_FAVICON_END -->";
-const RUNTIME_BRANDING_BLOCK_START = "<!-- PAPERCLIP_RUNTIME_BRANDING_START -->";
-const RUNTIME_BRANDING_BLOCK_END = "<!-- PAPERCLIP_RUNTIME_BRANDING_END -->";
+const FAVICON_BLOCK_START = "<!-- SPS_FAVICON_START -->";
+const FAVICON_BLOCK_END = "<!-- SPS_FAVICON_END -->";
+const RUNTIME_BRANDING_BLOCK_START = "<!-- SPS_RUNTIME_BRANDING_START -->";
+const RUNTIME_BRANDING_BLOCK_END = "<!-- SPS_RUNTIME_BRANDING_END -->";
 
 const DEFAULT_FAVICON_LINKS = [
   '<link rel="icon" href="/favicon.ico" sizes="48x48" />',
@@ -195,20 +195,20 @@ export function renderRuntimeBrandingMeta(branding: WorktreeUiBranding): string 
   if (!branding.enabled || !branding.name || !branding.color || !branding.textColor) return "";
 
   const tags = [
-    '<meta name="paperclip-worktree-enabled" content="true" />',
-    `<meta name="paperclip-worktree-name" content="${escapeHtmlAttribute(branding.name)}" />`,
-    `<meta name="paperclip-worktree-color" content="${escapeHtmlAttribute(branding.color)}" />`,
-    `<meta name="paperclip-worktree-text-color" content="${escapeHtmlAttribute(branding.textColor)}" />`,
+    '<meta name="sps-worktree-enabled" content="true" />',
+    `<meta name="sps-worktree-name" content="${escapeHtmlAttribute(branding.name)}" />`,
+    `<meta name="sps-worktree-color" content="${escapeHtmlAttribute(branding.color)}" />`,
+    `<meta name="sps-worktree-text-color" content="${escapeHtmlAttribute(branding.textColor)}" />`,
   ];
   if (branding.instanceId) {
-    tags.push(`<meta name="paperclip-instance-id" content="${escapeHtmlAttribute(branding.instanceId)}" />`);
+    tags.push(`<meta name="sps-instance-id" content="${escapeHtmlAttribute(branding.instanceId)}" />`);
   }
   return tags.join("\n");
 }
 
 export function renderWorkplaneModeMeta(env: NodeJS.ProcessEnv = process.env): string {
   return isWorkplaneModeEnabled(env)
-    ? '<meta name="paperclip-workplane-mode" content="true" />'
+    ? '<meta name="sps-workplane-mode" content="true" />'
     : "";
 }
 

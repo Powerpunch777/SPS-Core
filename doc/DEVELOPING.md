@@ -94,7 +94,7 @@ or inject external font CSS to make Paperclip text render correctly.
 
 Font assets live in Vite's public directory so `pnpm --filter @paperclipai/ui build`
 emits them under `ui/dist/fonts/`. The server package copies the same output into
-`server/ui-dist/fonts/` through `scripts/prepare-server-ui-dist.sh`.
+`server/ui-dist/fonts/` through `scripts/prepare-server-ui-dist.mjs`.
 
 Inspect or stop the current repo's managed dev runner:
 

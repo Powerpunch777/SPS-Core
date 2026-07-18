@@ -7,7 +7,7 @@ const WORKPLANE_ROOM_ORIGIN_KINDS = new Set([
 
 export function isWorkplaneModeEnabled(): boolean {
   if (typeof document === "undefined") return false;
-  return document.querySelector('meta[name="paperclip-workplane-mode"]')?.getAttribute("content") === "true";
+  return document.querySelector('meta[name="sps-workplane-mode"]')?.getAttribute("content") === "true";
 }
 
 export function isWorkplaneRoomOriginKind(originKind: string | null | undefined): boolean {

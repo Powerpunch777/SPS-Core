@@ -85,7 +85,7 @@ const WORKTREE_RUN_EXECUTION_TOGGLE_SELECTOR =
   'button[aria-label="Toggle worktree run execution setting"]';
 
 function setWorktreeRuntimeMeta(enabled: boolean) {
-  const name = "paperclip-worktree-enabled";
+  const name = "sps-worktree-enabled";
   let meta = document.querySelector<HTMLMetaElement>(`meta[name="${name}"]`);
   if (enabled) {
     if (!meta) {
@@ -100,7 +100,7 @@ function setWorktreeRuntimeMeta(enabled: boolean) {
 }
 
 function setWorktreeInstanceIdMeta(instanceId: string | null) {
-  const name = "paperclip-instance-id";
+  const name = "sps-instance-id";
   let meta = document.querySelector<HTMLMetaElement>(`meta[name="${name}"]`);
   if (instanceId) {
     if (!meta) {

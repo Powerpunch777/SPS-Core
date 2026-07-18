@@ -11,14 +11,14 @@ import {
 
 const TEMPLATE = `<!doctype html>
 <head>
-    <!-- PAPERCLIP_RUNTIME_BRANDING_START -->
-    <!-- PAPERCLIP_RUNTIME_BRANDING_END -->
-    <!-- PAPERCLIP_FAVICON_START -->
+    <!-- SPS_RUNTIME_BRANDING_START -->
+    <!-- SPS_RUNTIME_BRANDING_END -->
+    <!-- SPS_FAVICON_START -->
     <link rel="icon" href="/favicon.ico" sizes="48x48" />
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png" />
     <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png" />
-    <!-- PAPERCLIP_FAVICON_END -->
+    <!-- SPS_FAVICON_END -->
 </head>`;
 
 describe("ui branding", () => {
@@ -32,11 +32,11 @@ describe("ui branding", () => {
     expect(isWorkplaneModeEnabled({ PAPERCLIP_WORKPLANE_MODE: "true" })).toBe(true);
     expect(isWorkplaneModeEnabled({ PAPERCLIP_WORKPLANE_MODE: "false" })).toBe(false);
     expect(renderWorkplaneModeMeta({ PAPERCLIP_WORKPLANE_MODE: "1" })).toContain(
-      'name="paperclip-workplane-mode"',
+      'name="sps-workplane-mode"',
     );
 
     const branded = applyUiBranding(TEMPLATE, { PAPERCLIP_WORKPLANE_MODE: "true" });
-    expect(branded).toContain('<meta name="paperclip-workplane-mode" content="true" />');
+    expect(branded).toContain('<meta name="sps-workplane-mode" content="true" />');
     expect(branded).toContain('href="/favicon.svg"');
   });
 
@@ -74,9 +74,9 @@ describe("ui branding", () => {
         PAPERCLIP_WORKTREE_COLOR: "#4f86f7",
       }),
     );
-    expect(meta).toContain('name="paperclip-worktree-name"');
+    expect(meta).toContain('name="sps-worktree-name"');
     expect(meta).toContain('content="paperclip-pr-432"');
-    expect(meta).toContain('name="paperclip-worktree-color"');
+    expect(meta).toContain('name="sps-worktree-color"');
   });
 
   it("surfaces the runtime instance id so the UI can fail closed on copied rows", () => {
@@ -89,7 +89,7 @@ describe("ui branding", () => {
     expect(branding.instanceId).toBe("inst-abc123");
 
     const meta = renderRuntimeBrandingMeta(branding);
-    expect(meta).toContain('name="paperclip-instance-id"');
+    expect(meta).toContain('name="sps-instance-id"');
     expect(meta).toContain('content="inst-abc123"');
   });
 
@@ -100,7 +100,7 @@ describe("ui branding", () => {
       PAPERCLIP_WORKTREE_COLOR: "#4f86f7",
     });
     expect(branding.instanceId).toBeNull();
-    expect(renderRuntimeBrandingMeta(branding)).not.toContain('name="paperclip-instance-id"');
+    expect(renderRuntimeBrandingMeta(branding)).not.toContain('name="sps-instance-id"');
   });
 
   it("rewrites the favicon and runtime branding blocks for worktree instances only", () => {
@@ -110,11 +110,11 @@ describe("ui branding", () => {
       PAPERCLIP_WORKTREE_COLOR: "#4f86f7",
     });
     expect(branded).toContain("data:image/svg+xml,");
-    expect(branded).toContain('name="paperclip-worktree-name"');
+    expect(branded).toContain('name="sps-worktree-name"');
     expect(branded).not.toContain('href="/favicon.svg"');
 
     const defaultHtml = applyUiBranding(TEMPLATE, {});
     expect(defaultHtml).toContain('href="/favicon.svg"');
-    expect(defaultHtml).not.toContain('name="paperclip-worktree-name"');
+    expect(defaultHtml).not.toContain('name="sps-worktree-name"');
   });
 });
