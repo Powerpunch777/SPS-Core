@@ -1,4 +1,5 @@
 import { createHash, generateKeyPairSync, randomBytes, randomUUID, sign } from "node:crypto";
+import { eq } from "drizzle-orm";
 import express from "express";
 import request from "supertest";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
@@ -8,7 +9,6 @@ import {
   companies,
   companyMemberships,
   createDb,
-  eq,
   spsAgentNodeBindings,
   spsNodeCommandEvents,
   spsNodeCommands,
