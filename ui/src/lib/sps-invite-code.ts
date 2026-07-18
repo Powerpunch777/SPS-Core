@@ -1,6 +1,7 @@
 const LEGACY_INVITE_TOKEN_PREFIX = "pcp_invite_";
 const SPS_INVITE_TOKEN_PREFIX = "sps_invite_";
-const INVITE_SUFFIX_PATTERN = /^[a-z0-9]{8}$/;
+const INVITE_SUFFIX_PATTERN = /^[a-z0-9]{8}(?:[a-z0-9]{8})?$/;
+const INVITE_CODE_INPUT_PATTERN = /^(?:[a-z0-9]{8}|[a-z0-9]{16}|[a-z0-9]{4}(?:[\s_-][a-z0-9]{4}){1,3})$/i;
 
 function inviteSuffixFromToken(token: string): string | null {
   const normalized = token.trim().toLowerCase();
@@ -18,14 +19,13 @@ function inviteSuffixFromToken(token: string): string | null {
 export function inviteTokenToSpsCode(token: string): string | null {
   const suffix = inviteSuffixFromToken(token);
   if (!suffix) return null;
-  return `SPS-${suffix.slice(0, 4).toUpperCase()}-${suffix.slice(4).toUpperCase()}`;
+  return `SPS-${suffix.match(/.{1,4}/g)!.map((part) => part.toUpperCase()).join("-")}`;
 }
 
 export function spsCodeToInviteToken(input: string): string | null {
   const trimmed = input.trim();
   const withoutPrefix = trimmed.replace(/^sps[\s_-]*/i, "");
-  if (!/^[a-z0-9]{4}(?:[\s_-]?[a-z0-9]{4})$/i.test(withoutPrefix)) return null;
-
+  if (!INVITE_CODE_INPUT_PATTERN.test(withoutPrefix)) return null;
   const suffix = withoutPrefix.replace(/[\s_-]/g, "").toLowerCase();
   if (!INVITE_SUFFIX_PATTERN.test(suffix)) return null;
   return `${SPS_INVITE_TOKEN_PREFIX}${suffix}`;

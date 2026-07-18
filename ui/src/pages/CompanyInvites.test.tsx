@@ -95,8 +95,8 @@ describe("CompanyInvites", () => {
 
     createCompanyInviteMock.mockImplementation(() => {
       return Promise.resolve({
-        token: "pcp_invite_ab12cd34",
-        inviteUrl: "https://sps.local/invite/pcp_invite_ab12cd34",
+        token: "sps_invite_ab12cd34ef56gh78",
+        inviteUrl: "https://sps.local/invite/sps_invite_ab12cd34ef56gh78",
         expiresAt: "2026-04-20T01:00:00.000Z",
         onboardingTextUrl: null,
         onboardingTextPath: null,
@@ -202,15 +202,15 @@ describe("CompanyInvites", () => {
       agentMessage: null,
       expiresInMinutes: 60,
     });
-    expect(clipboardWriteTextMock).toHaveBeenCalledWith("SPS-AB12-CD34");
+    expect(clipboardWriteTextMock).toHaveBeenCalledWith("SPS-AB12-CD34-EF56-GH78");
     expect(container.textContent).toContain("Latest SPS invitation");
     expect(container.querySelector('input[aria-label="SPS invitation code"]')).toHaveProperty(
       "value",
-      "SPS-AB12-CD34",
+      "SPS-AB12-CD34-EF56-GH78",
     );
     expect(container.querySelector('input[aria-label="Latest invite URL"]')).toHaveProperty(
       "value",
-      "https://sps.local/invite/pcp_invite_ab12cd34",
+      "https://sps.local/invite/sps_invite_ab12cd34ef56gh78",
     );
     expect(container.textContent).toContain("Copy code");
     expect(container.textContent).toContain("Copy desktop link");
@@ -288,7 +288,7 @@ describe("CompanyInvites", () => {
     await flushReact();
 
     const inviteInput = container.querySelector('input[aria-label="Latest invite URL"]') as HTMLInputElement | null;
-    expect(inviteInput?.value).toBe("https://sps.local/invite/pcp_invite_ab12cd34");
+    expect(inviteInput?.value).toBe("https://sps.local/invite/sps_invite_ab12cd34ef56gh78");
     expect(document.execCommand).toHaveBeenCalledWith("copy");
     expect(pushToastMock).toHaveBeenCalledWith({
       title: "Invite created",

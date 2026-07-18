@@ -886,17 +886,20 @@ export function buildHostServices(
 
   const INVITE_TOKEN_PREFIX = "sps_invite_";
   const INVITE_TOKEN_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789";
-  const INVITE_TOKEN_SUFFIX_LENGTH = 8;
+  const INVITE_TOKEN_SUFFIX_LENGTH = 16;
   const INVITE_TOKEN_MAX_RETRIES = 5;
   const COMPANY_INVITE_TTL_MS = 72 * 60 * 60 * 1000;
 
   const hashToken = (token: string) => createHash("sha256").update(token).digest("hex");
 
   const createInviteToken = () => {
-    const bytes = randomBytes(INVITE_TOKEN_SUFFIX_LENGTH);
     let suffix = "";
-    for (let idx = 0; idx < INVITE_TOKEN_SUFFIX_LENGTH; idx += 1) {
-      suffix += INVITE_TOKEN_ALPHABET[bytes[idx]! % INVITE_TOKEN_ALPHABET.length];
+    const upperBound = Math.floor(256 / INVITE_TOKEN_ALPHABET.length) * INVITE_TOKEN_ALPHABET.length;
+    while (suffix.length < INVITE_TOKEN_SUFFIX_LENGTH) {
+      for (const byte of randomBytes(INVITE_TOKEN_SUFFIX_LENGTH - suffix.length)) {
+        if (byte >= upperBound) continue;
+        suffix += INVITE_TOKEN_ALPHABET[byte % INVITE_TOKEN_ALPHABET.length]!;
+      }
     }
     return `${INVITE_TOKEN_PREFIX}${suffix}`;
   };

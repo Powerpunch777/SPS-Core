@@ -18,7 +18,7 @@ export function SpsJoinPage() {
     event.preventDefault();
     const token = spsCodeToInviteToken(code);
     if (!token) {
-      setError("Enter an SPS code in the form SPS-XXXX-XXXX.");
+      setError("Enter an SPS code in the form SPS-XXXX-XXXX-XXXX-XXXX.");
       return;
     }
 
@@ -65,7 +65,7 @@ export function SpsJoinPage() {
             <input
               value={code}
               onChange={(event) => setCode(event.target.value.toUpperCase())}
-              placeholder="SPS-AB12-CD34"
+              placeholder="SPS-AB12-CD34-EF56-GH78"
               className="w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-sm uppercase tracking-wide outline-none focus:border-ring"
               autoComplete="one-time-code"
               aria-describedby={error ? "sps-join-error" : undefined}

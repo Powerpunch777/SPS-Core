@@ -21,6 +21,13 @@ describe("SPS invite token compatibility", () => {
     ]);
   });
 
+  it("keeps a current long SPS invite compatible with the previous prefix", () => {
+    expect(inviteTokenHashCandidates("sps_invite_ab12cd34ef56gh78")).toEqual([
+      hash("sps_invite_ab12cd34ef56gh78"),
+      hash("pcp_invite_ab12cd34ef56gh78"),
+    ]);
+  });
+
   it("does not broaden lookup for malformed tokens", () => {
     expect(inviteTokenHashCandidates("sps_invite_not-a-token")).toEqual([
       hash("sps_invite_not-a-token"),
