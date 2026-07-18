@@ -382,13 +382,12 @@ describeEmbeddedPostgres("SPS Node routes", () => {
       .put(`/api/agents/${fixture.agent.id}/sps-node-binding`)
       .send({ nodeId: registered.body.id });
 
-    const heartbeatRunId = randomUUID();
     const target = await resolveSpsNodeExecutionTarget({
       db,
       companyId: fixture.company.id,
       agentId: fixture.agent.id,
       adapterType: "codex_local",
-      heartbeatRunId,
+      heartbeatRunId: null,
       projectId: null,
     });
     expect(target).toMatchObject({
@@ -417,7 +416,7 @@ describeEmbeddedPostgres("SPS Node routes", () => {
     expect(queued).not.toBeNull();
     expect(queued).toMatchObject({
       nodeId: registered.body.id,
-      heartbeatRunId,
+      heartbeatRunId: null,
       command: "codex",
       args: ["exec", "--json"],
       stdin: "Summarize the assigned task.",
