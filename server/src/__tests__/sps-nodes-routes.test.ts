@@ -241,6 +241,35 @@ describeEmbeddedPostgres("SPS Node routes", () => {
     expect(list.body[0].primaryAgentBindings).toHaveLength(1);
   });
 
+  it("rejects an Agent grant when the approved Node lacks that Agent's runtime", async () => {
+    const fixture = await createCompanyFixture(db);
+    await db
+      .update(agents)
+      .set({ adapterType: "sps_lm_studio_local" })
+      .where(eq(agents.id, fixture.agent.id));
+    const app = await createApp(db, boardActor(fixture.company.id, fixture.ownerUserId, "owner"));
+    const node = createNodePayload();
+
+    const registered = await request(app)
+      .post(`/api/companies/${fixture.company.id}/sps-nodes`)
+      .send(node.payload);
+    await request(app)
+      .post(`/api/sps-nodes/${registered.body.id}/heartbeat`)
+      .send(createSignedHeartbeat(registered.body.id, node.privateKey));
+    await request(app).post(`/api/sps-nodes/${registered.body.id}/approve`).send({});
+
+    const denied = await request(app)
+      .put(`/api/sps-nodes/${registered.body.id}/agent-grants/${fixture.agent.id}`)
+      .send({});
+    expect(denied.status).toBe(400);
+    expect(denied.body.error).toContain("lm_studio");
+
+    const listed = await request(app).get(`/api/companies/${fixture.company.id}/sps-nodes`);
+    expect(listed.status).toBe(200);
+    expect(listed.body[0].agentGrants).toEqual([]);
+    expect(listed.body[0].primaryAgentBindings).toEqual([]);
+  });
+
   it("requires the computer owner's active SPS account for signed heartbeats", async () => {
     const fixture = await createCompanyFixture(db);
     const ownerApp = await createApp(db, boardActor(fixture.company.id, fixture.ownerUserId, "owner"));

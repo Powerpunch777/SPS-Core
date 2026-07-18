@@ -20,6 +20,8 @@ import {
   spsNodeCommandEventSchema,
   spsNodeSignedRequestMessage,
   spsNodeSignedRequestSchema,
+  spsNodeCapabilityForAdapter,
+  spsNodeSupportsAdapter,
 } from "@paperclipai/shared";
 import { badRequest, forbidden, notFound, unauthorized } from "../errors.js";
 import { validate } from "../middleware/validate.js";
@@ -68,6 +70,19 @@ export function spsNodeRoutes(db: Db) {
       .then((rows) => rows[0] ?? null);
     if (!agent) throw notFound("Agent not found");
     return agent;
+  }
+
+  function assertNodeSupportsAgentAdapter(
+    node: typeof spsNodes.$inferSelect,
+    agent: typeof agents.$inferSelect,
+  ) {
+    const capabilityKind = spsNodeCapabilityForAdapter(agent.adapterType);
+    if (!capabilityKind) {
+      throw badRequest(`Agent \"${agent.name}\" uses adapter \"${agent.adapterType}\", which cannot run through an SPS Desktop Node.`);
+    }
+    if (!spsNodeSupportsAdapter(node.capabilities, agent.adapterType)) {
+      throw badRequest(`SPS Node \"${node.displayName}\" does not advertise the ${capabilityKind} runtime required by Agent \"${agent.name}\".`);
+    }
   }
 
   async function assertSpsNodeAdmin(req: Request, companyId: string) {
@@ -458,6 +473,7 @@ export function spsNodeRoutes(db: Db) {
     }
     const agent = await getAgent(req.params.agentId as string);
     if (agent.companyId !== node.companyId) throw forbidden("Agent belongs to another company");
+    assertNodeSupportsAgentAdapter(node, agent);
 
     const now = new Date();
     const grant = await db
@@ -558,6 +574,7 @@ export function spsNodeRoutes(db: Db) {
       const node = await getNode(req.body.nodeId);
       if (node.companyId !== agent.companyId) throw forbidden("SPS Node belongs to another company");
       if (node.status !== "active") throw forbidden("SPS Node is not active");
+      assertNodeSupportsAgentAdapter(node, agent);
 
       const grant = await db
         .select()

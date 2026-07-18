@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import type { Agent } from "@paperclipai/shared";
+import { spsNodeCapabilityForAdapter, type Agent } from "@paperclipai/shared";
 import {
   CheckCircle2,
   CirclePause,
@@ -37,6 +37,11 @@ function nodeStatusBadge(status: SpsNode["status"]) {
 
 function agentLabel(agent: Pick<Agent, "name" | "title" | "role">) {
   return agent.title?.trim() || `${agent.name} (${agent.role})`;
+}
+
+function nodeSupportsAgent(node: SpsNode, agent: Agent) {
+  const capabilityKind = spsNodeCapabilityForAdapter(agent.adapterType);
+  return capabilityKind !== null && node.capabilities.some((capability) => capability.kind === capabilityKind);
 }
 
 function nodeIsOnline(lastSeenAt: string | null) {
@@ -183,7 +188,9 @@ export function SpsNodes() {
         <div className="space-y-4">
           {nodes.map((node) => {
             const grantedAgentIds = new Set(node.agentGrants.map((grant) => grant.agentId));
-            const availableAgents = activeAgents.filter((agent) => !grantedAgentIds.has(agent.id));
+            const availableAgents = activeAgents.filter(
+              (agent) => !grantedAgentIds.has(agent.id) && nodeSupportsAgent(node, agent),
+            );
             const selectedAgentId = agentDrafts[node.id] ?? "";
             const isOnline = node.status === "active" && nodeIsOnline(node.lastSeenAt);
 
@@ -243,7 +250,7 @@ export function SpsNodes() {
                   <div className="space-y-3 border-t border-border pt-5">
                     <div>
                       <h3 className="text-sm font-semibold">Agent execution access</h3>
-                      <p className="text-sm text-muted-foreground">Only granted Agents can use this computer. The first approved Node granted to an Agent becomes its primary execution Node. Later grants are available for reassignment and leave the current primary unchanged. Ollama and LM Studio each have an SPS local adapter; OpenCode can also use either provider when configured on this Node.</p>
+                      <p className="text-sm text-muted-foreground">Only granted Agents can use this computer. The picker lists only Agents whose adapter has been discovered on this Node. The first approved Node granted to an Agent becomes its primary execution Node. Later grants are available for reassignment and leave the current primary unchanged. Ollama and LM Studio each have an SPS local adapter; OpenCode can also use either provider when configured on this Node.</p>
                     </div>
 
                     {node.status === "active" ? (

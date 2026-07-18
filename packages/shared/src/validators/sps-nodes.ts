@@ -1,5 +1,31 @@
 import { z } from "zod";
 
+// This is the public, capability-only contract between the Hub and SPS
+// Desktop. Keep it shared so the Node management screen cannot offer a grant
+// that the Hub will later reject at dispatch time.
+export const SPS_NODE_CAPABILITY_BY_ADAPTER = {
+  claude_local: "claude_cli",
+  codex_local: "codex_cli",
+  sps_agy_local: "agy_cli",
+  gemini_local: "gemini_cli",
+  opencode_local: "opencode_cli",
+  pi_local: "pi_cli",
+  sps_ollama_local: "ollama",
+  sps_lm_studio_local: "lm_studio",
+} as const;
+
+export function spsNodeCapabilityForAdapter(adapterType: string): string | null {
+  return SPS_NODE_CAPABILITY_BY_ADAPTER[adapterType as keyof typeof SPS_NODE_CAPABILITY_BY_ADAPTER] ?? null;
+}
+
+export function spsNodeSupportsAdapter(
+  capabilities: ReadonlyArray<{ kind: string }>,
+  adapterType: string,
+): boolean {
+  const capabilityKind = spsNodeCapabilityForAdapter(adapterType);
+  return capabilityKind !== null && capabilities.some((capability) => capability.kind === capabilityKind);
+}
+
 export const spsNodeCapabilitySchema = z.object({
   kind: z.enum([
     "claude_cli",

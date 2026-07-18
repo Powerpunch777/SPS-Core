@@ -7,23 +7,13 @@ import {
   spsNodeCommands,
   spsNodes,
 } from "@paperclipai/db";
+import { spsNodeCapabilityForAdapter, spsNodeSupportsAdapter } from "@paperclipai/shared";
 import type { AdapterSpsNodeExecutionTarget } from "@paperclipai/adapter-utils/execution-target";
 
 const NODE_ONLINE_WINDOW_MS = 2 * 60 * 1000;
 const COMMAND_RESULT_GRACE_MS = 90 * 1000;
 const COMMAND_POLL_MS = 300;
 const MAX_CAPTURED_OUTPUT_BYTES = 2 * 1024 * 1024;
-const SPS_NODE_CAPABILITY_BY_ADAPTER = new Map<string, string>([
-  ["claude_local", "claude_cli"],
-  ["codex_local", "codex_cli"],
-  ["opencode_local", "opencode_cli"],
-  ["sps_agy_local", "agy_cli"],
-  ["gemini_local", "gemini_cli"],
-  ["pi_local", "pi_cli"],
-  ["sps_lm_studio_local", "lm_studio"],
-  ["sps_ollama_local", "ollama"],
-]);
-
 export class SpsNodeExecutionUnavailableError extends Error {
   constructor(message: string) {
     super(message);
@@ -36,12 +26,11 @@ function isNodeOnline(lastSeenAt: Date | null, now = Date.now()) {
 }
 
 export function isSpsNodeExecutionAdapterType(adapterType: string) {
-  return SPS_NODE_CAPABILITY_BY_ADAPTER.has(adapterType);
+  return spsNodeCapabilityForAdapter(adapterType) !== null;
 }
 
 function supportedByNode(adapterType: string, capabilities: Array<{ kind: string }>) {
-  const capabilityKind = SPS_NODE_CAPABILITY_BY_ADAPTER.get(adapterType);
-  return capabilityKind ? capabilities.some((item) => item.kind === capabilityKind) : false;
+  return spsNodeSupportsAdapter(capabilities, adapterType);
 }
 
 function appendExcerpt(current: string, chunk: string) {

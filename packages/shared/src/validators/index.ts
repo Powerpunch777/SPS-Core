@@ -659,6 +659,9 @@ export {
 
 export {
   spsNodeCapabilitySchema,
+  SPS_NODE_CAPABILITY_BY_ADAPTER,
+  spsNodeCapabilityForAdapter,
+  spsNodeSupportsAdapter,
   createSpsNodeSchema,
   updateSpsNodeStatusSchema,
   bindSpsAgentNodeSchema,
