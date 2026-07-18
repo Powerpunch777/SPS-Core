@@ -26,9 +26,12 @@ function isNodeOnline(lastSeenAt: Date | null, now = Date.now()) {
 }
 
 function supportedByNode(adapterType: string, capabilities: Array<{ kind: string }>) {
+  if (adapterType === "claude_local") return capabilities.some((item) => item.kind === "claude_cli");
   if (adapterType === "codex_local") return capabilities.some((item) => item.kind === "codex_cli");
   if (adapterType === "opencode_local") return capabilities.some((item) => item.kind === "opencode_cli");
   if (adapterType === "sps_agy_local") return capabilities.some((item) => item.kind === "agy_cli");
+  if (adapterType === "gemini_local") return capabilities.some((item) => item.kind === "gemini_cli");
+  if (adapterType === "pi_local") return capabilities.some((item) => item.kind === "pi_cli");
   if (adapterType === "sps_lm_studio_local") return capabilities.some((item) => item.kind === "lm_studio");
   if (adapterType === "sps_ollama_local") return capabilities.some((item) => item.kind === "ollama");
   return false;

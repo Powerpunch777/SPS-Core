@@ -15,7 +15,17 @@ import { heartbeatRuns } from "./heartbeat_runs.js";
 import { projects } from "./projects.js";
 
 export type SpsNodeCapability = {
-  kind: "codex_cli" | "agy_cli" | "opencode_cli" | "ollama" | "lm_studio" | "specialist_api" | "custom";
+  kind:
+    | "claude_cli"
+    | "codex_cli"
+    | "agy_cli"
+    | "gemini_cli"
+    | "opencode_cli"
+    | "pi_cli"
+    | "ollama"
+    | "lm_studio"
+    | "specialist_api"
+    | "custom";
   label: string;
   version?: string | null;
   models?: string[];

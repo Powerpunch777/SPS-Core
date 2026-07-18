@@ -24,6 +24,12 @@ const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
 
 type Db = ReturnType<typeof createDb>;
+type SpsNodeCapability = NonNullable<(typeof spsNodes.$inferInsert)["capabilities"]>[number];
+const REMOTE_CLI_RUNTIME_CASES = [
+  ["claude_local", "claude_cli", "Claude Code"],
+  ["gemini_local", "gemini_cli", "Gemini CLI"],
+  ["pi_local", "pi_cli", "Pi CLI"],
+] as const satisfies ReadonlyArray<readonly [string, SpsNodeCapability["kind"], string]>;
 
 function wait(milliseconds: number) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -52,7 +58,10 @@ describeEmbeddedPostgres("SPS Node execution target", () => {
     await tempDb?.cleanup();
   });
 
-  async function createFixture() {
+  async function createFixture(input: {
+    adapterType?: string;
+    capabilities?: SpsNodeCapability[];
+  } = {}) {
     const company = await db
       .insert(companies)
       .values({
@@ -63,7 +72,12 @@ describeEmbeddedPostgres("SPS Node execution target", () => {
       .then((rows) => rows[0]!);
     const agent = await db
       .insert(agents)
-      .values({ companyId: company.id, name: "Remote Codex", role: "engineer", adapterType: "codex_local" })
+      .values({
+        companyId: company.id,
+        name: "Remote Codex",
+        role: "engineer",
+        adapterType: input.adapterType ?? "codex_local",
+      })
       .returning()
       .then((rows) => rows[0]!);
     const node = await db
@@ -77,7 +91,7 @@ describeEmbeddedPostgres("SPS Node execution target", () => {
         status: "active",
         keyVerifiedAt: new Date(),
         lastSeenAt: new Date(),
-        capabilities: [{ kind: "codex_cli", label: "Codex CLI" }],
+        capabilities: input.capabilities ?? [{ kind: "codex_cli", label: "Codex CLI" }],
       })
       .returning()
       .then((rows) => rows[0]!);
@@ -163,5 +177,20 @@ describeEmbeddedPostgres("SPS Node execution target", () => {
       heartbeatRunId: null,
       projectId: null,
     })).rejects.toBeInstanceOf(SpsNodeExecutionUnavailableError);
+  });
+
+  it.each(REMOTE_CLI_RUNTIME_CASES)("accepts the advertised runtime for %s", async (adapterType, capabilityKind, label) => {
+    const fixture = await createFixture({
+      adapterType,
+      capabilities: [{ kind: capabilityKind, label }],
+    });
+    await expect(resolveSpsNodeExecutionTarget({
+      db,
+      companyId: fixture.company.id,
+      agentId: fixture.agent.id,
+      adapterType,
+      heartbeatRunId: null,
+      projectId: null,
+    })).resolves.toMatchObject({ transport: "sps_node", nodeId: fixture.node.id });
   });
 });

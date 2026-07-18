@@ -1,7 +1,18 @@
 import { z } from "zod";
 
 export const spsNodeCapabilitySchema = z.object({
-  kind: z.enum(["codex_cli", "agy_cli", "opencode_cli", "ollama", "lm_studio", "specialist_api", "custom"]),
+  kind: z.enum([
+    "claude_cli",
+    "codex_cli",
+    "agy_cli",
+    "gemini_cli",
+    "opencode_cli",
+    "pi_cli",
+    "ollama",
+    "lm_studio",
+    "specialist_api",
+    "custom",
+  ]),
   label: z.string().trim().min(1).max(120),
   version: z.string().trim().max(120).optional().nullable(),
   models: z.array(z.string().trim().min(1).max(160)).max(100).optional(),
