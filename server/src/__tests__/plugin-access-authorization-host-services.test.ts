@@ -108,7 +108,7 @@ describeEmbeddedPostgres("plugin access and authorization host services", () => 
       },
     });
 
-    expect(created.token).toMatch(/^sps_invite_/);
+    expect(created.token).toMatch(/^sps_invite_[a-z0-9]{16}$/);
     expect("tokenHash" in created).toBe(false);
     expect(created.defaultsPayload).toMatchObject({
       human: { role: "operator", apiKey: "***REDACTED***" },
