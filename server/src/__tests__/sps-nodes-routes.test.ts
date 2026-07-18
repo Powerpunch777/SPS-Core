@@ -403,7 +403,7 @@ describeEmbeddedPostgres("SPS Node routes", () => {
       .where(eq(spsNodeCommands.id, queued.id))
       .then((rows) => rows[0]!);
     expect(failed.status).toBe("failed");
-    expect(failed.error).toContain("revoked or reassigned");
+    expect(failed.error).toContain("no longer has access");
   });
 
   it("invalidates an active command lease when an Agent grant is revoked", async () => {
