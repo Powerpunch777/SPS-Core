@@ -8,6 +8,7 @@ import {
   companies,
   companyMemberships,
   createDb,
+  eq,
   spsAgentNodeBindings,
   spsNodeCommandEvents,
   spsNodeCommands,
