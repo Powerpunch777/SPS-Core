@@ -46,8 +46,11 @@ import { cn, SIDEBAR_RAIL_HIDDEN_LABEL } from "../lib/utils";
 import { PluginSlotOutlet } from "@/plugins/slots";
 import { PluginLauncherOutlet } from "@/plugins/launchers";
 import { SidebarCompanyMenu } from "./SidebarCompanyMenu";
+import { ProductBrand } from "./ProductBrand";
+import { isWorkplaneModeEnabled } from "../lib/workplane-mode";
 
 export function Sidebar() {
+  const workplaneMode = isWorkplaneModeEnabled();
   const { openNewIssue } = useDialogActions();
   // Every labeled section is collapsible (session-scoped, default open) —
   // one policy across static nav groups and the data-driven sections.
@@ -114,7 +117,7 @@ export function Sidebar() {
     <aside className="w-full h-full min-h-0 border-r border-border bg-background flex flex-col">
       {/* Top bar: Company name (bold) + Search — aligned with top sections (no visible border) */}
       <div className="flex items-center gap-1 px-3 h-12 shrink-0">
-        <SidebarCompanyMenu />
+        <ProductBrand compact={rail} className="mr-auto" />
         {/* In the collapsed rail the search/toggle controls don't fit beside the
             logo — keeping them would overflow the 64px rail and squeeze the logo
             out of alignment with the icon column below it (PAP-10676). They return
@@ -171,6 +174,9 @@ export function Sidebar() {
       </div>
 
       <nav className="flex-1 min-h-0 overflow-y-auto scrollbar-auto-hide flex flex-col gap-4 pointer-coarse:gap-3 px-3 py-2">
+        <div className="flex flex-col gap-0.5">
+          <SidebarCompanyMenu />
+        </div>
         <div className="flex flex-col gap-0.5">
           {/* New Task button aligned with nav items */}
           {(() => {
@@ -267,8 +273,8 @@ export function Sidebar() {
 
         <SidebarAgents streamlined={streamlined} />
 
-        <SidebarSection label="Company" collapsible={{ open: companyOpen, onOpenChange: setCompanyOpen }}>
-          <SidebarNavItem to="/org" label="Org" icon={Network} />
+        <SidebarSection label={workplaneMode ? "System" : "Company"} collapsible={{ open: companyOpen, onOpenChange: setCompanyOpen }}>
+          {!workplaneMode ? <SidebarNavItem to="/org" label="Org" icon={Network} /> : null}
           <SidebarNavItem to="/timeline" label="Timeline" icon={GanttChartSquare} />
           <SidebarNavItem to="/costs" label="Costs" icon={DollarSign} />
           <SidebarNavItem to="/activity" label="Activity" icon={History} />

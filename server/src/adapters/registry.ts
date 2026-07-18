@@ -122,6 +122,9 @@ import {
   modelProfiles as piModelProfiles,
 } from "@paperclipai/adapter-pi-local";
 import { BUILTIN_ADAPTER_TYPES } from "./builtin-adapter-types.js";
+import { spsAgyLocalAdapter } from "./sps-agy-local.js";
+import { spsLmStudioLocalAdapter } from "./sps-lm-studio-local.js";
+import { spsOllamaLocalAdapter } from "./sps-ollama-local.js";
 import { buildExternalAdapters } from "./plugin-loader.js";
 import { getDisabledAdapterTypes } from "../services/adapter-plugin-store.js";
 import { processAdapter } from "./process/index.js";
@@ -438,6 +441,9 @@ function registerBuiltInAdapters() {
     claudeLocalAdapter,
     codexLocalAdapter,
     openCodeLocalAdapter,
+    spsAgyLocalAdapter,
+    spsLmStudioLocalAdapter,
+    spsOllamaLocalAdapter,
     piLocalAdapter,
     cursorCloudAdapter,
     cursorLocalAdapter,

@@ -44,6 +44,7 @@ import type {
 } from "@paperclipai/shared";
 import {
   PLUGIN_STATUSES,
+  PERMISSION_KEYS,
 } from "@paperclipai/shared";
 import { pluginRegistryService } from "../services/plugin-registry.js";
 import { pluginLifecycleManager } from "../services/plugin-lifecycle.js";
@@ -56,6 +57,7 @@ import {
 import { logActivity } from "../services/activity-log.js";
 import { publishGlobalLiveEvent } from "../services/live-events.js";
 import { issueService } from "../services/issues.js";
+import { accessService } from "../services/access.js";
 import type { PluginJobScheduler } from "../services/plugin-job-scheduler.js";
 import type { PluginJobStore } from "../services/plugin-job-store.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
@@ -515,6 +517,7 @@ export function pluginRoutes(
     workerManager: bridgeDeps?.workerManager ?? webhookDeps?.workerManager,
   });
   const issuesSvc = issueService(db);
+  const accessSvc = accessService(db);
 
   function matchScopedApiRoute(route: PluginApiRouteDeclaration, method: string, requestPath: string) {
     if (route.method !== method) return null;
@@ -710,8 +713,50 @@ export function pluginRoutes(
     return companyId;
   }
 
-  function performActionActorContext(req: Request, companyId: string | undefined): PluginPerformActionActorContext {
+  const PLUGIN_ACTION_PERMISSION_REQUEST_PARAM = "__paperclipRequestedPermissions";
+
+  function requestedPluginActionPermissions(params: Record<string, unknown> | undefined) {
+    const rawPermissions = params?.[PLUGIN_ACTION_PERMISSION_REQUEST_PARAM];
+    if (!Array.isArray(rawPermissions)) return [];
+    return [...new Set(rawPermissions.filter((permission): permission is (typeof PERMISSION_KEYS)[number] => (
+      typeof permission === "string" && (PERMISSION_KEYS as readonly string[]).includes(permission)
+    )))];
+  }
+
+  async function effectivePluginActionPermissions(
+    req: Request,
+    companyId: string | undefined,
+    requestedPermissions: readonly (typeof PERMISSION_KEYS)[number][],
+  ) {
+    if (!companyId || requestedPermissions.length === 0) return [];
+    if (req.actor.type === "board" && (req.actor.source === "local_implicit" || req.actor.isInstanceAdmin)) {
+      return [...requestedPermissions];
+    }
+    if (req.actor.type === "board" && req.actor.userId) {
+      const decisions = await Promise.all(requestedPermissions.map(async (permissionKey) => ({
+        permissionKey,
+        allowed: await accessSvc.canUser(companyId, req.actor.userId, permissionKey),
+      })));
+      return decisions.filter((decision) => decision.allowed).map((decision) => decision.permissionKey);
+    }
+    if (req.actor.type === "agent" && req.actor.agentId) {
+      const decisions = await Promise.all(requestedPermissions.map(async (permissionKey) => ({
+        permissionKey,
+        allowed: await accessSvc.hasPermission(companyId, "agent", req.actor.agentId!, permissionKey),
+      })));
+      return decisions.filter((decision) => decision.allowed).map((decision) => decision.permissionKey);
+    }
+    return [];
+  }
+
+  async function performActionActorContext(
+    req: Request,
+    companyId: string | undefined,
+    requestedPermissions: readonly (typeof PERMISSION_KEYS)[number][],
+  ): Promise<PluginPerformActionActorContext> {
     const scopedCompanyId = companyId ?? null;
+    const permissions = await effectivePluginActionPermissions(req, companyId, requestedPermissions);
+    const permissionContext = permissions.length ? { permissions } : {};
     if (req.actor.type === "agent") {
       return {
         type: "agent",
@@ -719,6 +764,7 @@ export function pluginRoutes(
         agentId: req.actor.agentId ?? null,
         runId: req.actor.runId ?? null,
         companyId: scopedCompanyId,
+        ...permissionContext,
       };
     }
     if (req.actor.type === "board") {
@@ -728,6 +774,7 @@ export function pluginRoutes(
         agentId: null,
         runId: req.actor.runId ?? null,
         companyId: scopedCompanyId,
+        ...permissionContext,
       };
     }
     return {
@@ -736,6 +783,7 @@ export function pluginRoutes(
       agentId: null,
       runId: req.actor.runId ?? null,
       companyId: scopedCompanyId,
+      ...permissionContext,
     };
   }
 
@@ -743,7 +791,7 @@ export function pluginRoutes(
     params: Record<string, unknown> | undefined,
     companyId: string | undefined,
   ): Record<string, unknown> {
-    const base = params ?? {};
+    const { [PLUGIN_ACTION_PERMISSION_REQUEST_PARAM]: _permissionRequest, ...base } = params ?? {};
     return companyId === undefined ? base : { ...base, companyId };
   }
 
@@ -1391,6 +1439,7 @@ export function pluginRoutes(
     }
 
     const companyId = assertPluginBridgeScope(req, body.companyId);
+    const requestedPermissions = requestedPluginActionPermissions(body.params);
 
     try {
       const result = await bridgeDeps.workerManager.call(
@@ -1399,7 +1448,7 @@ export function pluginRoutes(
         {
           key: body.key,
           params: actionParamsWithAuthorizedCompanyScope(body.params, companyId),
-          actorContext: performActionActorContext(req, companyId),
+          actorContext: await performActionActorContext(req, companyId, requestedPermissions),
           renderEnvironment: body.renderEnvironment ?? null,
         },
       );
@@ -1575,6 +1624,7 @@ export function pluginRoutes(
     } | undefined;
 
     const companyId = assertPluginBridgeScope(req, body?.companyId);
+    const requestedPermissions = requestedPluginActionPermissions(body?.params);
 
     try {
       const result = await bridgeDeps.workerManager.call(
@@ -1583,7 +1633,7 @@ export function pluginRoutes(
         {
           key,
           params: actionParamsWithAuthorizedCompanyScope(body?.params, companyId),
-          actorContext: performActionActorContext(req, companyId),
+          actorContext: await performActionActorContext(req, companyId, requestedPermissions),
           renderEnvironment: body?.renderEnvironment ?? null,
         },
       );

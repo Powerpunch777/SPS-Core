@@ -1,4 +1,7 @@
 import type {
+  ProjectAccessGrant,
+  ProjectAccessMode,
+  ProjectAccessRole,
   Project,
   ProjectWorkspace,
   WorkspaceOperation,
@@ -24,6 +27,22 @@ export const projectsApi = {
     api.post<Project>(`/companies/${companyId}/projects`, data),
   update: (id: string, data: Record<string, unknown>, companyId?: string) =>
     api.patch<Project>(projectPath(id, companyId), data),
+  getAccessPolicy: (id: string, companyId?: string) =>
+    api.get<{ accessMode: ProjectAccessMode; grants: ProjectAccessGrant[] }>(
+      projectPath(id, companyId, "/access-policy"),
+    ),
+  updateAccessPolicy: (
+    id: string,
+    data: { accessMode: ProjectAccessMode; grants: Array<{
+      principalType: "user" | "agent";
+      principalId: string;
+      accessRole: ProjectAccessRole;
+    }> },
+    companyId?: string,
+  ) => api.put<{ accessMode: ProjectAccessMode; grants: ProjectAccessGrant[] }>(
+    projectPath(id, companyId, "/access-policy"),
+    data,
+  ),
   listWorkspaces: (projectId: string, companyId?: string) =>
     api.get<ProjectWorkspace[]>(projectPath(projectId, companyId, "/workspaces")),
   createWorkspace: (projectId: string, data: Record<string, unknown>, companyId?: string) =>

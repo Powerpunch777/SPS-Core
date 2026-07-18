@@ -44,6 +44,7 @@ import { parseWakePayloadFromMessage } from "./helpers/wake-message.js";
 import { errorHandler } from "../middleware/index.js";
 import { agentRoutes } from "../routes/agents.js";
 import { issueRoutes } from "../routes/issues.js";
+import { projectRoutes } from "../routes/projects.js";
 import { heartbeatService } from "../services/heartbeat.js";
 import { LOW_TRUST_QUARANTINED_BODY } from "../services/source-trust.js";
 
@@ -157,6 +158,7 @@ function createApp(db: Db, actor: Express.Request["actor"]) {
     next();
   });
   app.use("/api", agentRoutes(db));
+  app.use("/api", projectRoutes(db));
   app.use("/api", issueRoutes(db, {} as any));
   app.use(errorHandler);
   return app;
@@ -944,6 +946,10 @@ describeEmbeddedPostgres("low-trust red-team HTTP route regression suite", () =>
       {
         id: "LT external object summary",
         req: () => request(app).get(`/api/issues/${fixture.issues.siblingOutOfScope.id}/external-object-summary`),
+      },
+      {
+        id: "LT project external object summary",
+        req: () => request(app).get(`/api/projects/${fixture.projects.outOfScope.id}/external-object-summary`),
       },
       {
         id: "LT approvals",

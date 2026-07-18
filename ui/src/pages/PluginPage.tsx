@@ -1,5 +1,5 @@
 import { useEffect, useMemo } from "react";
-import { Link, Navigate, useParams } from "@/lib/router";
+import { Link, Navigate, useParams, useSearchParams } from "@/lib/router";
 import { useQuery } from "@tanstack/react-query";
 import { useCompany } from "@/context/CompanyContext";
 import { useBreadcrumbs } from "@/context/BreadcrumbContext";
@@ -23,6 +23,7 @@ import { NotFoundPage } from "./NotFound";
  * @see doc/plugins/PLUGIN_SPEC.md §24.4 — Company-Context Plugin Page
  */
 export function PluginPage() {
+  const [searchParams] = useSearchParams();
   const params = useParams<{
     companyPrefix?: string;
     pluginId?: string;
@@ -95,6 +96,12 @@ export function PluginPage() {
     }),
     [resolvedCompanyId, companyPrefix],
   );
+  const projectRef = searchParams.get("project");
+  const backHref = projectRef
+    ? `${companyPrefix ? `/${companyPrefix}` : ""}/projects/${encodeURIComponent(projectRef)}`
+    : companyPrefix
+      ? `/${companyPrefix}/dashboard`
+      : "/dashboard";
 
   // When the active route has a routeSidebar slot, the sidebar provides the
   // back affordance, but the top bar still needs a route-specific title.
@@ -168,7 +175,7 @@ export function PluginPage() {
       {!routeSidebarActive && (
         <div className="flex items-center gap-2">
           <Button variant="ghost" size="sm" asChild>
-            <Link to={companyPrefix ? `/${companyPrefix}/dashboard` : "/dashboard"}>
+            <Link to={backHref}>
               <ArrowLeft className="h-4 w-4 mr-1" />
               Back
             </Link>

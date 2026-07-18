@@ -528,6 +528,12 @@ export function createPluginWorkerHandle(
       return companyId ? { companyId } : null;
     }
 
+    // Scheduled plugin Jobs are instance-scoped unless their host-to-worker
+    // payload explicitly carries a company. They still need a durable
+    // invocation identity so nested host calls cannot be mistaken for an
+    // unscoped call while another company invocation is active.
+    if (method === "runJob") return {};
+
     return null;
   }
 

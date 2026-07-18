@@ -128,3 +128,52 @@ describe("createTestHarness issue interactions", () => {
     });
   });
 });
+
+describe("createTestHarness issue reports", () => {
+  it("enforces capability and mirrors final-report idempotency", async () => {
+    const deniedHarness = createTestHarness({
+      manifest,
+      capabilities: ["issues.create"],
+    });
+    const deniedIssue = await deniedHarness.ctx.issues.create({
+      companyId: "company-1",
+      title: "Denied report",
+      status: "in_progress",
+      assigneeAgentId: "agent-1",
+    });
+    await expect(deniedHarness.ctx.issues.submitReport({
+      issueId: deniedIssue.id,
+      companyId: "company-1",
+      kind: "final",
+      body: "## Paperclip Final Report\nVerified output and changed paths are recorded.",
+      actorAgentId: "agent-1",
+      actorRunId: "run-1",
+    })).rejects.toThrow("issues.report");
+
+    const harness = createTestHarness({
+      manifest,
+      capabilities: ["issues.create", "issues.report"],
+    });
+    const issue = await harness.ctx.issues.create({
+      companyId: "company-1",
+      title: "Atomic report",
+      status: "in_progress",
+      assigneeAgentId: "agent-1",
+    });
+    const input = {
+      issueId: issue.id,
+      companyId: "company-1",
+      kind: "final" as const,
+      body: "## Paperclip Final Report\nVerified output and changed paths are recorded.",
+      actorAgentId: "agent-1",
+      actorRunId: "run-1",
+    };
+
+    const first = await harness.ctx.issues.submitReport(input);
+    const retry = await harness.ctx.issues.submitReport(input);
+    expect(first.issue.status).toBe("in_review");
+    expect(first.idempotent).toBe(false);
+    expect(retry.idempotent).toBe(true);
+    expect(retry.comment.id).toBe(first.comment.id);
+  });
+});

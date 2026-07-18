@@ -28,6 +28,7 @@ export {
   refreshIssueContinuationSummary,
 } from "./issue-continuation-summary.js";
 export { projectService } from "./projects.js";
+export { projectAccessService, type ProjectAccessGrantInput } from "./project-access.js";
 export {
   clampIssueListLimit,
   ISSUE_LIST_DEFAULT_LIMIT,
@@ -35,6 +36,12 @@ export {
   issueService,
   type IssueFilters,
 } from "./issues.js";
+export {
+  issueReportService,
+  type IssueReportKind,
+  type SubmitIssueReportInput,
+  type SubmitIssueReportResult,
+} from "./issue-reports.js";
 export { issueThreadInteractionService } from "./issue-thread-interactions.js";
 export { issueTreeControlService } from "./issue-tree-control.js";
 export { issueApprovalService } from "./issue-approvals.js";

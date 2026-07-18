@@ -89,7 +89,8 @@ function hashToken(token: string) {
   return createHash("sha256").update(token).digest("hex");
 }
 
-const INVITE_TOKEN_PREFIX = "pcp_invite_";
+const INVITE_TOKEN_PREFIX = "sps_invite_";
+const LEGACY_INVITE_TOKEN_PREFIX = "pcp_invite_";
 const INVITE_TOKEN_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789";
 const INVITE_TOKEN_SUFFIX_LENGTH = 8;
 const INVITE_TOKEN_MAX_RETRIES = 5;
@@ -110,12 +111,44 @@ function createInviteToken() {
   return `${INVITE_TOKEN_PREFIX}${suffix}`;
 }
 
+function inviteTokenCandidates(token: string) {
+  const normalized = token.trim().toLowerCase();
+  const prefix = normalized.startsWith(INVITE_TOKEN_PREFIX)
+    ? INVITE_TOKEN_PREFIX
+    : normalized.startsWith(LEGACY_INVITE_TOKEN_PREFIX)
+      ? LEGACY_INVITE_TOKEN_PREFIX
+      : null;
+  if (!prefix) return [token];
+
+  const suffix = normalized.slice(prefix.length);
+  if (!/^[a-z0-9]{8}$/.test(suffix)) return [token];
+
+  const alternatePrefix = prefix === INVITE_TOKEN_PREFIX
+    ? LEGACY_INVITE_TOKEN_PREFIX
+    : INVITE_TOKEN_PREFIX;
+  return [normalized, `${alternatePrefix}${suffix}`];
+}
+
+export function inviteTokenHashCandidates(token: string) {
+  return [...new Set(inviteTokenCandidates(token).map(hashToken))];
+}
+
+function inviteTokenWhereClause(token: string) {
+  return inArray(invites.tokenHash, inviteTokenHashCandidates(token));
+}
+
 function createClaimSecret() {
   return `pcp_claim_${randomBytes(24).toString("hex")}`;
 }
 
-export function companyInviteExpiresAt(nowMs: number = Date.now()) {
-  return new Date(nowMs + COMPANY_INVITE_TTL_MS);
+export function companyInviteExpiresAt(
+  nowMs: number = Date.now(),
+  expiresInMinutes?: number,
+) {
+  const ttlMs = expiresInMinutes === undefined
+    ? COMPANY_INVITE_TTL_MS
+    : expiresInMinutes * 60 * 1000;
+  return new Date(nowMs + ttlMs);
 }
 
 function tokenHashesMatch(left: string, right: string) {
@@ -2994,6 +3027,7 @@ export function accessRoutes(
     humanRole?: "owner" | "admin" | "operator" | "viewer" | null;
     defaultsPayload?: Record<string, unknown> | null;
     agentMessage?: string | null;
+    expiresInMinutes?: number;
   }) {
     const normalizedAgentMessage =
       typeof input.agentMessage === "string"
@@ -3012,7 +3046,7 @@ export function accessRoutes(
         normalizedAgentMessage,
         effectiveHumanRole,
       ),
-      expiresAt: companyInviteExpiresAt(),
+      expiresAt: companyInviteExpiresAt(Date.now(), input.expiresInMinutes),
       invitedByUserId: input.req.actor.userId ?? null
     };
 
@@ -3254,7 +3288,8 @@ export function accessRoutes(
           allowedJoinTypes: req.body.allowedJoinTypes,
           humanRole: req.body.humanRole ?? null,
           defaultsPayload: req.body.defaultsPayload ?? null,
-          agentMessage: req.body.agentMessage ?? null
+          agentMessage: req.body.agentMessage ?? null,
+          expiresInMinutes: req.body.expiresInMinutes,
         });
 
       await logActivity(db, {
@@ -3356,7 +3391,7 @@ export function accessRoutes(
     const invite = await db
       .select()
       .from(invites)
-      .where(eq(invites.tokenHash, hashToken(token)))
+      .where(inviteTokenWhereClause(token))
       .then((rows) => rows[0] ?? null);
     const inviteJoinRequest = await resolveAcceptedInviteJoinRequest(db, req, invite);
     if (
@@ -3388,7 +3423,7 @@ export function accessRoutes(
     const invite = await db
       .select()
       .from(invites)
-      .where(eq(invites.tokenHash, hashToken(token)))
+      .where(inviteTokenWhereClause(token))
       .then((rows) => rows[0] ?? null);
     const inviteJoinRequest = await resolveAcceptedInviteJoinRequest(db, req, invite);
     if (
@@ -3442,7 +3477,7 @@ export function accessRoutes(
     const invite = await db
       .select()
       .from(invites)
-      .where(eq(invites.tokenHash, hashToken(token)))
+      .where(inviteTokenWhereClause(token))
       .then((rows) => rows[0] ?? null);
     if (!invite || invite.revokedAt || inviteExpired(invite)) {
       throw notFound("Invite not found");
@@ -3461,7 +3496,7 @@ export function accessRoutes(
     const invite = await db
       .select()
       .from(invites)
-      .where(eq(invites.tokenHash, hashToken(token)))
+      .where(inviteTokenWhereClause(token))
       .then((rows) => rows[0] ?? null);
     if (!invite || invite.revokedAt || inviteExpired(invite)) {
       throw notFound("Invite not found");
@@ -3484,7 +3519,7 @@ export function accessRoutes(
     const invite = await db
       .select()
       .from(invites)
-      .where(eq(invites.tokenHash, hashToken(token)))
+      .where(inviteTokenWhereClause(token))
       .then((rows) => rows[0] ?? null);
     if (!invite || invite.revokedAt || inviteExpired(invite)) {
       throw notFound("Invite not found");
@@ -3506,7 +3541,7 @@ export function accessRoutes(
     const invite = await db
       .select()
       .from(invites)
-      .where(eq(invites.tokenHash, hashToken(token)))
+      .where(inviteTokenWhereClause(token))
       .then((rows) => rows[0] ?? null);
     if (!invite || invite.revokedAt || inviteExpired(invite)) {
       throw notFound("Invite not found");
@@ -3525,7 +3560,7 @@ export function accessRoutes(
     const invite = await db
       .select()
       .from(invites)
-      .where(eq(invites.tokenHash, hashToken(token)))
+      .where(inviteTokenWhereClause(token))
       .then((rows) => rows[0] ?? null);
     if (!invite || invite.revokedAt || inviteExpired(invite)) {
       throw notFound("Invite not found");
@@ -3572,7 +3607,7 @@ export function accessRoutes(
       const invite = await db
         .select()
         .from(invites)
-        .where(eq(invites.tokenHash, hashToken(token)))
+        .where(inviteTokenWhereClause(token))
         .then((rows) => rows[0] ?? null);
       if (!invite || invite.revokedAt || inviteExpired(invite)) {
         throw notFound("Invite not found");

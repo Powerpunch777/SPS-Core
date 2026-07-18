@@ -487,6 +487,12 @@ export const PROJECT_STATUSES = [
 ] as const;
 export type ProjectStatus = (typeof PROJECT_STATUSES)[number];
 
+export const PROJECT_ACCESS_MODES = ["company", "restricted"] as const;
+export type ProjectAccessMode = (typeof PROJECT_ACCESS_MODES)[number];
+
+export const PROJECT_ACCESS_ROLES = ["viewer", "collaborator", "manager"] as const;
+export type ProjectAccessRole = (typeof PROJECT_ACCESS_ROLES)[number];
+
 export const ENVIRONMENT_DRIVERS = ["local", "ssh", "sandbox", "plugin"] as const;
 export type EnvironmentDriver = (typeof ENVIRONMENT_DRIVERS)[number];
 
@@ -930,6 +936,7 @@ export const PLUGIN_CAPABILITIES = [
   "companies.read",
   "projects.read",
   "project.workspaces.read",
+  "project.workspaces.write",
   "execution.workspaces.read",
   "issues.read",
   "issue.relations.read",
@@ -955,6 +962,7 @@ export const PLUGIN_CAPABILITIES = [
   "issue.relations.write",
   "issues.checkout",
   "issues.wakeup",
+  "issues.report",
   "issue.comments.create",
   "issue.interactions.create",
   "issue.documents.write",
@@ -1062,6 +1070,7 @@ export type PluginApiRouteCheckoutPolicy = (typeof PLUGIN_API_ROUTE_CHECKOUT_POL
 export const PLUGIN_UI_SLOT_TYPES = [
   "page",
   "detailTab",
+  "agentConfiguration",
   "taskDetailView",
   "dashboardWidget",
   "sidebar",
@@ -1285,6 +1294,7 @@ export const PLUGIN_EVENT_TYPES = [
   "issue.assignment_wakeup_requested",
   "agent.created",
   "agent.updated",
+  "agent.deleted",
   "agent.status_changed",
   "agent.error_cleared",
   "agent.run.started",

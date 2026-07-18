@@ -37,6 +37,7 @@ import { DEFAULT_CODEX_LOCAL_BYPASS_APPROVALS_AND_SANDBOX } from "@paperclipai/a
 import { DEFAULT_CURSOR_LOCAL_MODEL } from "@paperclipai/adapter-cursor-local";
 import { DEFAULT_GEMINI_LOCAL_MODEL } from "@paperclipai/adapter-gemini-local";
 import { DEFAULT_OPENCODE_LOCAL_MODEL, isValidOpenCodeModelId } from "@paperclipai/adapter-opencode-local";
+import { isWorkplaneModeEnabled } from "../lib/workplane-mode";
 
 function createValuesForAdapterType(
   adapterType: CreateConfigValues["adapterType"],
@@ -57,6 +58,7 @@ function createValuesForAdapterType(
 }
 
 export function NewAgent() {
+  const workplaneMode = isWorkplaneModeEnabled();
   const { selectedCompanyId } = useCompany();
   const { setBreadcrumbs } = useBreadcrumbs();
   const queryClient = useQueryClient();
@@ -172,7 +174,7 @@ export function NewAgent() {
         name,
         effectiveRole,
         title,
-        reportsTo,
+        reportsTo: workplaneMode ? null : reportsTo,
         selectedSkillKeys,
         configValues,
         adapterConfig: buildAdapterConfig(),
@@ -269,12 +271,14 @@ export function NewAgent() {
             </PopoverContent>
           </Popover>
 
-          <ReportsToPicker
-            agents={agents ?? []}
-            value={reportsTo}
-            onChange={setReportsTo}
-            disabled={isFirstAgent}
-          />
+          {!workplaneMode ? (
+            <ReportsToPicker
+              agents={agents ?? []}
+              value={reportsTo}
+              onChange={setReportsTo}
+              disabled={isFirstAgent}
+            />
+          ) : null}
         </div>
 
         <div className="border-t border-border px-4 py-4">

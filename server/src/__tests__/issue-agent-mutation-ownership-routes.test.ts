@@ -133,6 +133,9 @@ const mockExternalObjectService = vi.hoisted(() => ({
   syncIssueSafely: vi.fn(async () => undefined),
 }));
 const mockLogActivity = vi.hoisted(() => vi.fn(async () => undefined));
+const mockIssueReportService = vi.hoisted(() => ({
+  submit: vi.fn(),
+}));
 
 function registerRouteMocks() {
   vi.doMock("@paperclipai/shared/telemetry", () => ({
@@ -159,6 +162,10 @@ function registerRouteMocks() {
 
   vi.doMock("../services/issues.js", () => ({
     issueService: () => mockIssueService,
+  }));
+
+  vi.doMock("../services/issue-reports.js", () => ({
+    issueReportService: () => mockIssueReportService,
   }));
 
   vi.doMock("../services/work-products.js", () => ({
@@ -368,6 +375,7 @@ describe("agent issue mutation checkout ownership", () => {
     vi.doUnmock("../services/external-objects.js");
     vi.doUnmock("../services/index.js");
     vi.doUnmock("../services/issues.js");
+    vi.doUnmock("../services/issue-reports.js");
     vi.doUnmock("../services/work-products.js");
     vi.doUnmock("../routes/issues.js");
     vi.doUnmock("../routes/authz.js");
@@ -499,6 +507,7 @@ describe("agent issue mutation checkout ownership", () => {
     mockIssueService.removeAttachment.mockReset();
     mockIssueService.update.mockReset();
     mockIssueService.findMentionedAgents.mockReset();
+    mockIssueReportService.submit.mockReset();
     mockLogActivity.mockClear();
     mockDocumentService.upsertIssueDocument.mockReset();
     mockWorkProductService.createForIssue.mockReset();
@@ -587,6 +596,16 @@ describe("agent issue mutation checkout ownership", () => {
     mockIssueService.listWakeableBlockedDependents.mockResolvedValue([]);
     mockIssueService.getWakeableParentAfterChildCompletion.mockResolvedValue(null);
     mockIssueService.findMentionedAgents.mockResolvedValue([]);
+    mockIssueReportService.submit.mockResolvedValue({
+      issue: makeIssue({ status: "in_review" }),
+      comment: {
+        id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+        issueId,
+        companyId,
+        body: "## Paperclip Final Report\nCompleted and verified the requested work.",
+      },
+      idempotent: false,
+    });
     mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
       ...makeIssue(),
       ...patch,
@@ -688,6 +707,67 @@ describe("agent issue mutation checkout ownership", () => {
     expect(res.status).toBe(403);
     expect(res.body.error).toContain("Task bridge keys cannot use company-wide issue list APIs");
     expect(mockIssueService.list).not.toHaveBeenCalled();
+  });
+
+  describe("atomic Task reports", () => {
+    const finalReport = {
+      kind: "final",
+      body: "## Paperclip Final Report\nCompleted and verified the requested work.",
+    };
+
+    it("accepts a report from the assigned active agent run", async () => {
+      const app = await createApp(ownerActor());
+      const res = await request(app).post(`/api/issues/${issueId}/reports`).send(finalReport);
+
+      expect(res.status, JSON.stringify(res.body)).toBe(201);
+      expect(mockIssueReportService.submit).toHaveBeenCalledWith({
+        companyId,
+        issueId,
+        kind: "final",
+        body: finalReport.body,
+        actorAgentId: ownerAgentId,
+        actorRunId: ownerRunId,
+      });
+      expect(mockLogActivity).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ action: "issue.comment_added", runId: ownerRunId }),
+      );
+      expect(mockLogActivity).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ action: "issue.updated", runId: ownerRunId }),
+      );
+    });
+
+    it("returns 200 when the same run retries an existing report", async () => {
+      mockIssueReportService.submit.mockResolvedValueOnce({
+        issue: makeIssue({ status: "in_review" }),
+        comment: {
+          id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+          issueId,
+          companyId,
+          body: finalReport.body,
+        },
+        idempotent: true,
+      });
+      const app = await createApp(ownerActor());
+      const res = await request(app).post(`/api/issues/${issueId}/reports`).send(finalReport);
+
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(res.body.idempotent).toBe(true);
+    });
+
+    it("rejects board users and agent requests without a run id", async () => {
+      const boardApp = await createApp(boardActor());
+      const boardRes = await request(boardApp).post(`/api/issues/${issueId}/reports`).send(finalReport);
+      expect(boardRes.status).toBe(403);
+
+      const missingRunApp = await createApp({ ...ownerActor(), runId: null });
+      const missingRunRes = await request(missingRunApp)
+        .post(`/api/issues/${issueId}/reports`)
+        .send(finalReport);
+      expect(missingRunRes.status).toBe(401);
+      expect(mockIssueReportService.submit).not.toHaveBeenCalled();
+    });
   });
 
   it("uses the company-scope fast path on the issue list route", async () => {

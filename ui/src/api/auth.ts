@@ -74,6 +74,16 @@ async function authPost(path: string, body: Record<string, unknown>) {
   return payload;
 }
 
+function safeCallbackUrl(value: string): string {
+  try {
+    const target = new URL(value, window.location.origin);
+    if (target.origin !== window.location.origin) return window.location.origin;
+    return target.toString();
+  } catch {
+    return window.location.origin;
+  }
+}
+
 async function authPatch<T>(path: string, body: Record<string, unknown>, parse: (value: unknown) => T): Promise<T> {
   const res = await fetch(`/api/auth${path}`, {
     method: "PATCH",
@@ -113,6 +123,18 @@ export const authApi = {
     await authPost("/sign-up/email", input);
   },
 
+  signInGoogle: async (input: { callbackURL: string }) => {
+    const payload = await authPost("/sign-in/social", {
+      provider: "google",
+      callbackURL: safeCallbackUrl(input.callbackURL),
+      errorCallbackURL: safeCallbackUrl(input.callbackURL),
+    }) as { url?: unknown };
+    if (typeof payload.url !== "string" || payload.url.length === 0) {
+      throw new Error("Google sign-in could not start. Ask the SPS owner to configure Google OAuth.");
+    }
+    window.location.assign(payload.url);
+  },
+
   getProfile: async (): Promise<CurrentUserProfile> => {
     const res = await fetch("/api/auth/profile", {
       credentials: "include",
@@ -129,6 +151,10 @@ export const authApi = {
     authPatch("/profile", input, (payload) => currentUserProfileSchema.parse(payload)),
 
   signOut: async () => {
+    if (typeof window !== "undefined" && window.spsDesktop?.signOut) {
+      await window.spsDesktop.signOut();
+      return;
+    }
     await authPost("/sign-out", {});
   },
 };

@@ -95,8 +95,9 @@ describe("CompanyInvites", () => {
 
     createCompanyInviteMock.mockImplementation(() => {
       return Promise.resolve({
-        token: "new-token",
-        inviteUrl: "https://paperclip.local/invite/new-token",
+        token: "pcp_invite_ab12cd34",
+        inviteUrl: "https://sps.local/invite/pcp_invite_ab12cd34",
+        expiresAt: "2026-04-20T01:00:00.000Z",
         onboardingTextUrl: null,
         onboardingTextPath: null,
         humanRole: "viewer",
@@ -136,7 +137,7 @@ describe("CompanyInvites", () => {
     await flushReact();
     await flushReact();
 
-    expect(container.textContent).toContain("Company Invites");
+    expect(container.textContent).toContain("SPS invites");
     expect(container.textContent).toContain("Invite a person");
     expect(container.textContent).not.toContain("Invite an agent");
     expect(container.textContent).not.toContain("Generate agent onboarding prompt");
@@ -155,7 +156,7 @@ describe("CompanyInvites", () => {
     expect(container.textContent).not.toContain("OpenClaw shortcut");
 
     expect(container.textContent).toContain("Choose a role");
-    expect(container.textContent).toContain("Each invite link is single-use.");
+    expect(container.textContent).toContain("Each invite is single-use.");
     expect(container.textContent).toContain("Can create agents, invite users, assign tasks, and approve join requests.");
     expect(container.textContent).toContain("Everything in Admin, plus managing members.");
     expect(container.textContent).not.toContain("permission grants");
@@ -183,7 +184,7 @@ describe("CompanyInvites", () => {
     });
 
     const buttons = Array.from(container.querySelectorAll("button"));
-    const createButton = buttons.find((button) => button.textContent === "Create invite");
+    const createButton = buttons.find((button) => button.textContent === "Create SPS invite");
     const revokeButton = buttons.find((button) => button.textContent === "Revoke");
 
     expect(createButton).toBeTruthy();
@@ -199,19 +200,25 @@ describe("CompanyInvites", () => {
       allowedJoinTypes: "human",
       humanRole: "viewer",
       agentMessage: null,
+      expiresInMinutes: 60,
     });
-    expect(clipboardWriteTextMock).toHaveBeenCalledWith("https://paperclip.local/invite/new-token");
-    expect(container.textContent).toContain("Latest invite link");
-    expect(container.textContent).toContain("This URL includes the current Paperclip domain returned by the server.");
+    expect(clipboardWriteTextMock).toHaveBeenCalledWith("SPS-AB12-CD34");
+    expect(container.textContent).toContain("Latest SPS invitation");
+    expect(container.querySelector('input[aria-label="SPS invitation code"]')).toHaveProperty(
+      "value",
+      "SPS-AB12-CD34",
+    );
     expect(container.querySelector('input[aria-label="Latest invite URL"]')).toHaveProperty(
       "value",
-      "https://paperclip.local/invite/new-token",
+      "https://sps.local/invite/pcp_invite_ab12cd34",
     );
+    expect(container.textContent).toContain("Copy code");
+    expect(container.textContent).toContain("Copy desktop link");
     expect(container.textContent).toContain("Copy link");
     expect(container.textContent).toContain("Open invite");
     expect(pushToastMock).toHaveBeenCalledWith({
       title: "Invite created",
-      body: "Invite ready below and copied to clipboard.",
+      body: "SPS invite code copied to clipboard.",
       tone: "success",
     });
 
@@ -271,7 +278,7 @@ describe("CompanyInvites", () => {
     await flushReact();
 
     const createButton = Array.from(container.querySelectorAll("button")).find(
-      (button) => button.textContent === "Create invite",
+      (button) => button.textContent === "Create SPS invite",
     );
 
     await act(async () => {
@@ -281,11 +288,11 @@ describe("CompanyInvites", () => {
     await flushReact();
 
     const inviteInput = container.querySelector('input[aria-label="Latest invite URL"]') as HTMLInputElement | null;
-    expect(inviteInput?.value).toBe("https://paperclip.local/invite/new-token");
+    expect(inviteInput?.value).toBe("https://sps.local/invite/pcp_invite_ab12cd34");
     expect(document.execCommand).toHaveBeenCalledWith("copy");
     expect(pushToastMock).toHaveBeenCalledWith({
       title: "Invite created",
-      body: "Invite ready below and copied to clipboard.",
+      body: "SPS invite code copied to clipboard.",
       tone: "success",
     });
 

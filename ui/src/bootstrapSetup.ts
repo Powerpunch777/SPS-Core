@@ -1,1 +1,1 @@
-export const BOOTSTRAP_FALLBACK_COMMAND = "pnpm paperclipai auth bootstrap-ceo";
+export const BOOTSTRAP_FALLBACK_COMMAND = ".\\sps-server\\scripts\\New-SPSBootstrapInvite.ps1";

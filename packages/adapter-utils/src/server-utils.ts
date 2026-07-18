@@ -2950,6 +2950,25 @@ export async function runChildProcess(
         let timedOut = false;
         let stdout = "";
         let stderr = "";
+        const stdoutDecoder = new TextDecoder("utf-8", { fatal: true });
+        const stderrDecoder = new TextDecoder("utf-8", { fatal: true });
+        let utf8DecodeError: string | null = null;
+        const decodeUtf8Chunk = (
+          decoder: TextDecoder,
+          chunk: unknown,
+          stream: "stdout" | "stderr",
+        ) => {
+          if (utf8DecodeError) return "";
+          try {
+            const bytes = Buffer.isBuffer(chunk)
+              ? chunk
+              : Buffer.from(typeof chunk === "string" ? chunk : String(chunk), "utf8");
+            return decoder.decode(bytes, { stream: true });
+          } catch {
+            utf8DecodeError = `Invalid UTF-8 emitted on ${stream}; Paperclip refused to save corrupted agent output.`;
+            return "";
+          }
+        };
         let logChain: Promise<void> = Promise.resolve();
         let terminalResultSeen = false;
         let terminalCleanupStarted = false;
@@ -3021,7 +3040,7 @@ export async function runChildProcess(
           const readable = child.stdout;
           if (!readable) return;
           readable.pause();
-          const text = String(chunk);
+          const text = decodeUtf8Chunk(stdoutDecoder, chunk, "stdout");
           stdout = appendWithCap(stdout, text);
           maybeArmTerminalResultCleanup();
           logChain = logChain
@@ -3037,7 +3056,7 @@ export async function runChildProcess(
           const readable = child.stderr;
           if (!readable) return;
           readable.pause();
-          const text = String(chunk);
+          const text = decodeUtf8Chunk(stderrDecoder, chunk, "stderr");
           stderr = appendWithCap(stderr, text);
           maybeArmTerminalResultCleanup();
           logChain = logChain
@@ -3080,10 +3099,35 @@ export async function runChildProcess(
           if (timeout) clearTimeout(timeout);
           clearTerminalCleanupTimers();
           runningProcesses.delete(runId);
+          if (!utf8DecodeError) {
+            try {
+              const stdoutTail = stdoutDecoder.decode();
+              const stderrTail = stderrDecoder.decode();
+              if (stdoutTail) {
+                stdout = appendWithCap(stdout, stdoutTail);
+                logChain = logChain
+                  .then(() => opts.onLog("stdout", stdoutTail))
+                  .catch((err) => onLogError(err, runId, "failed to append stdout log tail"));
+              }
+              if (stderrTail) {
+                stderr = appendWithCap(stderr, stderrTail);
+                logChain = logChain
+                  .then(() => opts.onLog("stderr", stderrTail))
+                  .catch((err) => onLogError(err, runId, "failed to append stderr log tail"));
+              }
+              maybeArmTerminalResultCleanup();
+            } catch {
+              utf8DecodeError = "Invalid UTF-8 emitted at process close; Paperclip refused to save corrupted agent output.";
+            }
+          }
           void logChain.finally(() => {
             void Promise.resolve()
               .then(() => target.cleanup?.())
               .finally(() => {
+              if (utf8DecodeError) {
+                reject(new Error(utf8DecodeError));
+                return;
+              }
               resolve({
                 exitCode: code,
                 signal,

@@ -80,7 +80,7 @@ function mapInviteAuthFeedback(
     return {
       tone: "error",
       message:
-        "That email and password did not match an existing Paperclip account. Check both fields, or create an account first if you are new here.",
+        "That email and password did not match an existing SPS account. Check both fields, or create an account first if you are new here.",
     };
   }
 
@@ -88,7 +88,7 @@ function mapInviteAuthFeedback(
     return {
       tone: "error",
       message:
-        "That email and password did not match an existing Paperclip account. Check both fields, or create an account first if you are new here.",
+        "That email and password did not match an existing SPS account. Check both fields, or create an account first if you are new here.",
     };
   }
 
@@ -279,7 +279,7 @@ export function InviteLandingPage() {
     Boolean(invite?.companyId) &&
     companyList.some((company) => company.id === invite?.companyId);
   const companyName = invite?.companyName?.trim() || null;
-  const companyDisplayName = companyName || "this Paperclip company";
+  const companyDisplayName = companyName || "this SPS company";
   const companyLogoUrl = invite?.companyLogoUrl?.trim() || null;
   const companyBrandColor = invite?.companyBrandColor?.trim() || null;
   const invitedByUserName = invite?.invitedByUserName?.trim() || null;
@@ -548,16 +548,16 @@ export function InviteLandingPage() {
               />
               <div className="min-w-0">
                 <p className="text-xs uppercase tracking-(--tracking-caps) text-zinc-500">
-                  You&apos;ve been invited to join Paperclip
+                  You&apos;ve been invited to join SPS
                 </p>
                 <h1 className="mt-2 text-2xl font-semibold">
-                  {invite.inviteType === "bootstrap_ceo" ? "Set up Paperclip" : `Join ${companyDisplayName}`}
+                  {invite.inviteType === "bootstrap_ceo" ? "Set up SPS" : `Join ${companyDisplayName}`}
                 </h1>
                 <p className="mt-2 max-w-2xl text-sm leading-6 text-zinc-300">
                   {showsAgentForm
                     ? "Review the invite details, then submit the agent information below to start the join request."
                     : requiresHumanAccount
-                      ? "Create your Paperclip account first. If you already have one, switch to sign in and continue the invite with the same email."
+                      ? "Create your SPS account first. If you already have one, switch to sign in and continue the invite with the same email."
                       : "Your account is ready. Review the invite details, then accept it to continue."}
                 </p>
               </div>
@@ -570,7 +570,7 @@ export function InviteLandingPage() {
               </div>
               <div className="border border-zinc-800 p-3">
                 <div className="text-xs uppercase tracking-(--tracking-caps) text-zinc-500">Invited by</div>
-                <div className="mt-1 text-sm text-zinc-100">{invitedByUserName ?? "Paperclip board"}</div>
+                <div className="mt-1 text-sm text-zinc-100">{invitedByUserName ?? "SPS board"}</div>
               </div>
               <div className="border border-zinc-800 p-3">
                 <div className="text-xs uppercase tracking-(--tracking-caps) text-zinc-500">Requested access</div>
@@ -650,151 +650,18 @@ export function InviteLandingPage() {
             ) : requiresHumanAccount ? (
               <div className="space-y-5">
                 <div>
-                  <h2 className="text-lg font-semibold">
-                    {authMode === "sign_up" ? "Create your account" : "Sign in to continue"}
-                  </h2>
+                  <h2 className="text-lg font-semibold">Continue with Google</h2>
                   <p className="mt-1 text-sm text-zinc-400">
-                    {authMode === "sign_up"
-                      ? `Start with a Paperclip account. After that, you'll come right back here to accept the invite for ${companyDisplayName}.`
-                      : "Use the Paperclip account that already matches this invite. If you do not have one yet, switch back to create account."}
+                    Sign in with Google, then return here to accept the invite for {companyDisplayName}.
                   </p>
                 </div>
-
-                <div className="flex gap-2">
-                  <button
-                    type="button"
-                    className={`${modeButtonBaseClassName} ${
-                      authMode === "sign_up"
-                        ? "border-zinc-100 bg-zinc-100 text-zinc-950"
-                        : "border-zinc-800 text-zinc-300 hover:border-zinc-600"
-                    }`}
-                    onClick={() => {
-                      setAuthFeedback(null);
-                      setAuthMode("sign_up");
-                    }}
-                  >
-                    Create account
-                  </button>
-                  <button
-                    type="button"
-                    className={`${modeButtonBaseClassName} ${
-                      authMode === "sign_in"
-                        ? "border-zinc-100 bg-zinc-100 text-zinc-950"
-                        : "border-zinc-800 text-zinc-300 hover:border-zinc-600"
-                    }`}
-                    onClick={() => {
-                      setAuthFeedback(null);
-                      setAuthMode("sign_in");
-                    }}
-                  >
-                    I already have an account
-                  </button>
-                </div>
-
-                <form
-                  className="space-y-4"
-                  method="post"
-                  action={authMode === "sign_up" ? "/api/auth/sign-up/email" : "/api/auth/sign-in/email"}
-                  onSubmit={(event) => {
-                    event.preventDefault();
-                    if (authMutation.isPending) return;
-                    if (!authCanSubmit) {
-                      setAuthFeedback({ tone: "error", message: "Please fill in all required fields." });
-                      return;
-                    }
-                    authMutation.mutate();
-                  }}
-                  data-testid="invite-inline-auth"
-                >
-                  {authMode === "sign_up" ? (
-                    <label className="block text-sm" htmlFor="invite-name">
-                      <span className="mb-1 block text-zinc-400">Name</span>
-                      <input
-                        id="invite-name"
-                        name="name"
-                        className={fieldClassName}
-                        value={name}
-                        onChange={(event) => {
-                          setName(event.target.value);
-                          setAuthFeedback(null);
-                        }}
-                        autoComplete="name"
-                        required
-                        aria-required="true"
-                        aria-invalid={authFeedback?.tone === "error" ? true : undefined}
-                        aria-describedby={authFeedback ? authErrorId : undefined}
-                        autoFocus
-                      />
-                    </label>
-                  ) : null}
-                  <label className="block text-sm" htmlFor="invite-email">
-                    <span className="mb-1 block text-zinc-400">Email</span>
-                    <input
-                      id="invite-email"
-                      name="email"
-                      type="email"
-                      className={fieldClassName}
-                      value={email}
-                      onChange={(event) => {
-                        setEmail(event.target.value);
-                        setAuthFeedback(null);
-                      }}
-                      autoComplete="username"
-                      required
-                      aria-required="true"
-                      aria-invalid={authFeedback?.tone === "error" ? true : undefined}
-                      aria-describedby={authFeedback ? authErrorId : undefined}
-                      autoFocus={authMode === "sign_in"}
-                    />
-                  </label>
-                  <label className="block text-sm" htmlFor="invite-password">
-                    <span className="mb-1 block text-zinc-400">Password</span>
-                    <input
-                      id="invite-password"
-                      name="password"
-                      type="password"
-                      className={fieldClassName}
-                      value={password}
-                      onChange={(event) => {
-                        setPassword(event.target.value);
-                        setAuthFeedback(null);
-                      }}
-                      autoComplete={authMode === "sign_in" ? "current-password" : "new-password"}
-                      required
-                      aria-required="true"
-                      aria-invalid={authFeedback?.tone === "error" ? true : undefined}
-                      aria-describedby={authFeedback ? authErrorId : undefined}
-                    />
-                  </label>
-                  {authFeedback ? (
-                    <p
-                      id={authErrorId}
-                      role="alert"
-                      className={`text-xs ${
-                        authFeedback.tone === "info" ? "text-amber-300" : "text-red-400"
-                      }`}
-                    >
-                      {authFeedback.message}
-                    </p>
-                  ) : null}
-                  <Button
-                    type="submit"
-                    className="w-full rounded-none"
-                    disabled={authMutation.isPending}
-                    aria-disabled={!authCanSubmit || authMutation.isPending}
-                  >
-                    {authMutation.isPending
-                      ? "Working..."
-                      : authMode === "sign_in"
-                        ? "Sign in and continue"
-                        : "Create account and continue"}
-                  </Button>
-                </form>
-
+                <Button asChild className="w-full rounded-none">
+                  <Link to={`/auth?next=${encodeURIComponent(`/invite/${encodeURIComponent(token)}`)}`}>
+                    Continue with Google
+                  </Link>
+                </Button>
                 <p className="text-xs leading-5 text-zinc-500">
-                  {authMode === "sign_up"
-                    ? "Already signed up before? Use the existing-account option instead so the invite lands on the right Paperclip user."
-                    : "No account yet? Switch back to create account so you can accept the invite with a new login."}
+                  SPS uses your Google account only to identify you. Company membership remains controlled by this invite.
                 </p>
               </div>
             ) : (
@@ -815,7 +682,7 @@ export function InviteLandingPage() {
                       : isCurrentMember
                       ? `This account already belongs to ${companyDisplayName}.`
                       : `This will ${
-                          invite.inviteType === "bootstrap_ceo" ? "finish setting up Paperclip" : `grant or complete your access to ${companyDisplayName}`
+                          invite.inviteType === "bootstrap_ceo" ? "finish setting up SPS" : `grant or complete your access to ${companyDisplayName}`
                         }.`}
                   </p>
                 </div>

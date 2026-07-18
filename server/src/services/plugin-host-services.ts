@@ -11,6 +11,7 @@ import {
   pluginLogs,
   principalPermissionGrants,
   projects as projectsTable,
+  projectWorkspaces as projectWorkspacesTable,
 } from "@paperclipai/db";
 import { eq, and, like, desc, inArray, sql, isNull, isNotNull, gt, lte } from "drizzle-orm";
 import type {
@@ -26,13 +27,15 @@ import type {
   PluginIssueOrchestrationSummary,
   PluginExecutionWorkspaceMetadata,
 } from "@paperclipai/plugin-sdk";
-import type { CreateIssueThreadInteraction, InviteJoinType, IssueDocumentSummary, PermissionKey, PrincipalType } from "@paperclipai/shared";
+import type { CreateIssueThreadInteraction, InviteJoinType, IssueDocumentSummary, PermissionKey, PrincipalType, ProjectWorkspace } from "@paperclipai/shared";
 import { pluginOperationIssueOriginKind } from "@paperclipai/shared";
+import { badRequest } from "../errors.js";
 import { companyService } from "./companies.js";
 import { agentService } from "./agents.js";
 import { projectService } from "./projects.js";
 import { executionWorkspaceService } from "./execution-workspaces.js";
 import { issueService } from "./issues.js";
+import { issueReportService } from "./issue-reports.js";
 import { issueThreadInteractionService } from "./issue-thread-interactions.js";
 import { goalService } from "./goals.js";
 import { documentService } from "./documents.js";
@@ -343,6 +346,22 @@ function sanitizeWorkspaceName(name: string, fallbackPath: string): string {
   return segments[segments.length - 1] ?? "Workspace";
 }
 
+function toPluginWorkspace(workspace: ProjectWorkspace): PluginWorkspace {
+  const path = sanitizeWorkspacePath(workspace.cwd);
+  return {
+    id: workspace.id,
+    projectId: workspace.projectId,
+    name: sanitizeWorkspaceName(workspace.name, path),
+    path,
+    repoUrl: workspace.repoUrl,
+    repoRef: workspace.repoRef,
+    defaultRef: workspace.defaultRef,
+    isPrimary: workspace.isPrimary,
+    createdAt: workspace.createdAt.toISOString(),
+    updatedAt: workspace.updatedAt.toISOString(),
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Buffered plugin log writes
 // ---------------------------------------------------------------------------
@@ -537,6 +556,7 @@ export function buildHostServices(
   const projects = projectService(db);
   const executionWorkspaces = executionWorkspaceService(db);
   const issues = issueService(db);
+  const issueReports = issueReportService(db);
   const documents = documentService(db);
   const goals = goalService(db);
   const access = accessService(db);
@@ -864,7 +884,7 @@ export function buildHostServices(
     }));
   };
 
-  const INVITE_TOKEN_PREFIX = "pcp_invite_";
+  const INVITE_TOKEN_PREFIX = "sps_invite_";
   const INVITE_TOKEN_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789";
   const INVITE_TOKEN_SUFFIX_LENGTH = 8;
   const INVITE_TOKEN_MAX_RETRIES = 5;
@@ -1361,22 +1381,31 @@ export function buildHostServices(
         const project = await projects.getById(params.projectId);
         if (!inCompany(project, companyId)) return [];
         const rows = await projects.listWorkspaces(params.projectId);
-        return rows.map((row) => {
-          const path = sanitizeWorkspacePath(row.cwd);
-          const name = sanitizeWorkspaceName(row.name, path);
-          return {
-            id: row.id,
-            projectId: row.projectId,
-            name,
-            path,
-            repoUrl: row.repoUrl,
-            repoRef: row.repoRef,
-            defaultRef: row.defaultRef,
-            isPrimary: row.isPrimary,
-            createdAt: row.createdAt.toISOString(),
-            updatedAt: row.updatedAt.toISOString(),
-          };
-        });
+        return rows.map(toPluginWorkspace);
+      },
+      async createWorkspace(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        const project = await projects.getById(params.projectId);
+        if (!inCompany(project, companyId)) return null;
+        const created = await projects.createWorkspace(params.projectId, params.input);
+        return created ? toPluginWorkspace(created) : null;
+      },
+      async updateWorkspace(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        const project = await projects.getById(params.projectId);
+        if (!inCompany(project, companyId)) return null;
+        const updated = await projects.updateWorkspace(params.projectId, params.workspaceId, params.input);
+        return updated ? toPluginWorkspace(updated) : null;
+      },
+      async removeWorkspace(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        const project = await projects.getById(params.projectId);
+        if (!inCompany(project, companyId)) return null;
+        const removed = await projects.removeWorkspace(params.projectId, params.workspaceId);
+        return removed ? toPluginWorkspace(removed) : null;
       },
       async getPrimaryWorkspace(params) {
         const companyId = ensureCompanyId(params.companyId);
@@ -2053,6 +2082,49 @@ export function buildHostServices(
         });
         return interaction as any;
       },
+      async submitReport(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        const result = await issueReports.submit({
+          ...params,
+          companyId,
+        });
+
+        // These standard domain events are what Room orchestration consumes.
+        // Re-emitting them on an idempotent retry also repairs a prior
+        // post-commit event-delivery failure without duplicating the report.
+        await logPluginActivity({
+          companyId,
+          action: "issue.comment.created",
+          entityType: "issue",
+          entityId: params.issueId,
+          actor: { actorAgentId: params.actorAgentId, actorRunId: params.actorRunId },
+          details: {
+            commentId: result.comment.id,
+            bodySnippet: result.comment.body.slice(0, 120),
+            identifier: result.issue.identifier,
+            reportKind: params.kind,
+            idempotent: result.idempotent,
+          },
+        });
+        await logPluginActivity({
+          companyId,
+          action: "issue.updated",
+          entityType: "issue",
+          entityId: params.issueId,
+          actor: { actorAgentId: params.actorAgentId, actorRunId: params.actorRunId },
+          details: {
+            status: result.issue.status,
+            identifier: result.issue.identifier,
+            reportKind: params.kind,
+            commentId: result.comment.id,
+            idempotent: result.idempotent,
+            _previous: { status: "in_progress" },
+          },
+        });
+
+        return result as any;
+      },
     },
 
     issueDocuments: {
@@ -2555,6 +2627,85 @@ export function buildHostServices(
         requireInCompany("Agent", agent, companyId);
         const taskKey = params.taskKey ?? `plugin:${pluginKey}:session:${randomUUID()}`;
 
+        let normalizedContext: import("@paperclipai/shared").AgentSessionContext | null = null;
+        if (params.context) {
+          const { projectId, projectWorkspaceId, issueId } = params.context;
+
+          let validatedProjectId = projectId || null;
+          if (projectId) {
+            const project = await db
+              .select()
+              .from(projectsTable)
+              .where(and(eq(projectsTable.id, projectId), eq(projectsTable.companyId, companyId)))
+              .then((rows) => rows[0] ?? null);
+            if (!project) {
+              throw new Error("Project not found");
+            }
+          }
+
+          let workspaceProjectId: string | null = null;
+          if (projectWorkspaceId) {
+            const workspace = await db
+              .select()
+              .from(projectWorkspacesTable)
+              .where(and(eq(projectWorkspacesTable.id, projectWorkspaceId), eq(projectWorkspacesTable.companyId, companyId)))
+              .then((rows) => rows[0] ?? null);
+            if (!workspace) {
+              throw new Error("Project workspace not found");
+            }
+            workspaceProjectId = workspace.projectId;
+          }
+
+          let issueProjectId: string | null = null;
+          if (issueId) {
+            const issue = await db
+              .select()
+              .from(issuesTable)
+              .where(and(eq(issuesTable.id, issueId), eq(issuesTable.companyId, companyId)))
+              .then((rows) => rows[0] ?? null);
+            if (!issue) {
+              throw new Error("Issue not found");
+            }
+            issueProjectId = issue.projectId;
+          }
+
+          if (projectWorkspaceId && projectId && workspaceProjectId !== projectId) {
+            throw new Error("Workspace does not belong to the project");
+          }
+
+          if (issueId && projectId && issueProjectId !== projectId) {
+            throw new Error("Issue does not belong to the project");
+          }
+
+          if (!validatedProjectId) {
+            if (workspaceProjectId && issueProjectId) {
+              if (workspaceProjectId !== issueProjectId) {
+                throw new Error("Workspace and issue point to different projects");
+              }
+              validatedProjectId = workspaceProjectId;
+            } else if (workspaceProjectId) {
+              validatedProjectId = workspaceProjectId;
+            } else if (issueProjectId) {
+              validatedProjectId = issueProjectId;
+            }
+          }
+
+          const builtContext: import("@paperclipai/shared").AgentSessionContext = {};
+          if (validatedProjectId) {
+            builtContext.projectId = validatedProjectId;
+          }
+          if (projectWorkspaceId) {
+            builtContext.projectWorkspaceId = projectWorkspaceId;
+          }
+          if (issueId) {
+            builtContext.issueId = issueId;
+          }
+
+          if (Object.keys(builtContext).length > 0) {
+            normalizedContext = builtContext;
+          }
+        }
+
         const row = await db
           .insert(agentTaskSessionsTable)
           .values({
@@ -2564,6 +2715,7 @@ export function buildHostServices(
             taskKey,
             sessionParamsJson: null,
             sessionDisplayId: null,
+            contextJson: normalizedContext,
             lastRunId: null,
             lastError: null,
           })
@@ -2576,6 +2728,9 @@ export function buildHostServices(
           companyId,
           status: "active" as const,
           createdAt: row!.createdAt.toISOString(),
+          context: row!.contextJson ?? undefined,
+          lastRunId: row!.lastRunId,
+          lastError: row!.lastError,
         };
       },
 
@@ -2600,6 +2755,9 @@ export function buildHostServices(
           companyId: row.companyId,
           status: "active" as const,
           createdAt: row.createdAt.toISOString(),
+          context: row.contextJson ?? undefined,
+          lastRunId: row.lastRunId,
+          lastError: row.lastError,
         }));
       },
 
@@ -2634,22 +2792,120 @@ export function buildHostServices(
             taskKey: session.taskKey,
             wakeSource: "automation",
             wakeTriggerDetail: "system",
+            ...(session.contextJson ? session.contextJson : {}),
           },
           requestedByActorType: "system",
           requestedByActorId: pluginId,
         });
         if (!run) throw new Error("Agent wakeup was skipped by heartbeat policy");
 
+        await db
+          .update(agentTaskSessionsTable)
+          .set({ lastRunId: run.id, lastError: null, updatedAt: new Date() })
+          .where(
+            and(
+              eq(agentTaskSessionsTable.id, params.sessionId),
+              eq(agentTaskSessionsTable.companyId, companyId),
+              like(agentTaskSessionsTable.taskKey, `plugin:${pluginKey}:session:%`),
+            ),
+          );
+
         // Subscribe to live events and forward to the plugin worker as notifications.
         // Track the subscription so it can be cleaned up on dispose() if the run
         // never reaches a terminal status (hang, crash, network partition).
         if (notifyWorker) {
           const TERMINAL_STATUSES = new Set(["succeeded", "interrupted", "failed", "cancelled", "timed_out"]);
+          let terminalDelivered = false;
+          let terminalDeliveryInProgress = false;
 
           const cleanup = () => {
             unsubscribe();
             clearTimeout(timeoutTimer);
             activeSubscriptions.delete(entry);
+          };
+
+          const emitTerminal = async (status: string, observedPayload: Record<string, unknown>) => {
+            if (terminalDelivered || terminalDeliveryInProgress) return;
+            terminalDeliveryInProgress = true;
+
+            let finalRun: {
+              resultJson: unknown;
+              usageJson: unknown;
+              error: string | null;
+              errorCode: string | null;
+            } | null = null;
+            try {
+              finalRun = await db
+                .select({
+                  resultJson: heartbeatRuns.resultJson,
+                  usageJson: heartbeatRuns.usageJson,
+                  error: heartbeatRuns.error,
+                  errorCode: heartbeatRuns.errorCode,
+                })
+                .from(heartbeatRuns)
+                .where(eq(heartbeatRuns.id, run.id))
+                .then((rows) => rows[0] ?? null);
+            } catch (error) {
+              logger.error(
+                { error, pluginId, pluginKey, runId: run.id },
+                "Failed to enrich terminal Agent Session event from the run record",
+              );
+            }
+            const lastError = status === "succeeded"
+              ? null
+              : String(
+                  finalRun?.error
+                  ?? finalRun?.errorCode
+                  ?? observedPayload.error
+                  ?? observedPayload.errorCode
+                  ?? `Run ${status}`,
+                ).slice(0, 4_000);
+
+            try {
+              await db
+                .update(agentTaskSessionsTable)
+                .set({ lastRunId: run.id, lastError, updatedAt: new Date() })
+                .where(
+                  and(
+                    eq(agentTaskSessionsTable.id, params.sessionId),
+                    eq(agentTaskSessionsTable.companyId, companyId),
+                    like(agentTaskSessionsTable.taskKey, `plugin:${pluginKey}:session:%`),
+                  ),
+                );
+            } catch (error) {
+              logger.error(
+                { error, pluginId, pluginKey, runId: run.id, sessionId: params.sessionId },
+                "Failed to persist terminal Agent Session state",
+              );
+            }
+
+            try {
+              notifyWorker("agents.sessions.event", {
+                sessionId: params.sessionId,
+                runId: run.id,
+                seq: 0,
+                eventType: status === "succeeded" ? "done" : "error",
+                stream: "system",
+                message: status === "succeeded" ? "Run completed" : `Run ${status}`,
+                payload: {
+                  ...observedPayload,
+                  status,
+                  resultJson: finalRun?.resultJson ?? null,
+                  usageJson: finalRun?.usageJson ?? null,
+                  error: finalRun?.error ?? observedPayload.error ?? null,
+                  errorCode: finalRun?.errorCode ?? observedPayload.errorCode ?? null,
+                },
+              });
+            } catch (error) {
+              logger.error(
+                { error, pluginId, pluginKey, runId: run.id, sessionId: params.sessionId },
+                "Failed to notify plugin worker of terminal Agent Session event",
+              );
+            } finally {
+              terminalDelivered = true;
+              terminalDeliveryInProgress = false;
+              cleanup();
+            }
           };
 
           const unsubscribe = subscribeCompanyLiveEvents(companyId, (event) => {
@@ -2669,16 +2925,9 @@ export function buildHostServices(
             } else if (event.type === "heartbeat.run.status") {
               const status = payload.status as string;
               if (TERMINAL_STATUSES.has(status)) {
-                notifyWorker("agents.sessions.event", {
-                  sessionId: params.sessionId,
-                  runId: run.id,
-                  seq: 0,
-                  eventType: status === "succeeded" ? "done" : "error",
-                  stream: "system",
-                  message: status === "succeeded" ? "Run completed" : `Run ${status}`,
-                  payload: payload,
+                void emitTerminal(status, payload).catch((error) => {
+                  logger.error({ error, pluginId, pluginKey, runId: run.id }, "Failed to deliver terminal Agent Session event");
                 });
-                cleanup();
               } else {
                 notifyWorker("agents.sessions.event", {
                   sessionId: params.sessionId,
@@ -2705,6 +2954,25 @@ export function buildHostServices(
 
           const entry = { unsubscribe, timer: timeoutTimer };
           activeSubscriptions.add(entry);
+
+          const currentRun = await db
+            .select({
+              status: heartbeatRuns.status,
+              error: heartbeatRuns.error,
+              errorCode: heartbeatRuns.errorCode,
+            })
+            .from(heartbeatRuns)
+            .where(eq(heartbeatRuns.id, run.id))
+            .then((rows) => rows[0] ?? null);
+          if (currentRun && TERMINAL_STATUSES.has(currentRun.status)) {
+            await emitTerminal(currentRun.status, {
+              runId: run.id,
+              agentId: session.agentId,
+              status: currentRun.status,
+              error: currentRun.error,
+              errorCode: currentRun.errorCode,
+            });
+          }
         }
 
         return { runId: run.id };

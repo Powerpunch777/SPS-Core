@@ -10,6 +10,7 @@ import { useToast } from "@/context/ToastContext";
 import { Link } from "@/lib/router";
 import { queryKeys } from "@/lib/queryKeys";
 import { Badge } from "@/components/ui/badge";
+import { buildSpsDesktopJoinUri, inviteTokenToSpsCode } from "@/lib/sps-invite-code";
 
 const inviteRoleOptions = [
   {
@@ -40,6 +41,21 @@ const inviteRoleOptions = [
 
 const INVITE_HISTORY_PAGE_SIZE = 5;
 
+type InviteExpiryMinutes = 15 | 60 | 1440 | 10080;
+
+const inviteExpiryOptions: ReadonlyArray<{ value: InviteExpiryMinutes; label: string }> = [
+  { value: 15, label: "15 minutes" },
+  { value: 60, label: "1 hour" },
+  { value: 1440, label: "24 hours" },
+  { value: 10080, label: "7 days" },
+];
+
+type LatestInvite = {
+  token: string;
+  inviteUrl: string;
+  expiresAt: string;
+};
+
 function isInviteHistoryRow(value: unknown): value is Awaited<ReturnType<typeof accessApi.listInvites>>["invites"][number] {
   if (!value || typeof value !== "object") return false;
   return "id" in value && "state" in value && "createdAt" in value;
@@ -51,7 +67,8 @@ export function CompanyInvites() {
   const { pushToast } = useToast();
   const queryClient = useQueryClient();
   const [humanRole, setHumanRole] = useState<"owner" | "admin" | "operator" | "viewer">("operator");
-  const [latestInviteUrl, setLatestInviteUrl] = useState<string | null>(null);
+  const [expiresInMinutes, setExpiresInMinutes] = useState<InviteExpiryMinutes>(60);
+  const [latestInvite, setLatestInvite] = useState<LatestInvite | null>(null);
   const [latestInviteCopied, setLatestInviteCopied] = useState(false);
   const latestInviteInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -151,16 +168,21 @@ export function CompanyInvites() {
         allowedJoinTypes: "human",
         humanRole,
         agentMessage: null,
+        expiresInMinutes,
       }),
     onSuccess: async (invite) => {
-      setLatestInviteUrl(invite.inviteUrl);
+      setLatestInvite({ token: invite.token, inviteUrl: invite.inviteUrl, expiresAt: invite.expiresAt });
       setLatestInviteCopied(false);
-      const copied = await copyText(invite.inviteUrl, "Copy the invite URL manually from the field below.");
+      const inviteCode = inviteTokenToSpsCode(invite.token);
+      const copied = await copyText(
+        inviteCode ?? invite.inviteUrl,
+        "Copy the invite code or link manually from the fields below.",
+      );
 
       await queryClient.invalidateQueries({ queryKey: inviteHistoryQueryKey });
       pushToast({
         title: "Invite created",
-        body: copied ? "Invite ready below and copied to clipboard." : "Invite ready below.",
+        body: copied ? "SPS invite code copied to clipboard." : "SPS invite ready below.",
         tone: "success",
       });
     },
@@ -206,15 +228,20 @@ export function CompanyInvites() {
     return <div className="text-sm text-destructive">{message}</div>;
   }
 
+  const latestInviteCode = latestInvite ? inviteTokenToSpsCode(latestInvite.token) : null;
+  const latestDesktopJoinUri = latestInvite
+    ? buildSpsDesktopJoinUri(latestInvite.inviteUrl, latestInvite.token)
+    : null;
+
   return (
     <div className="max-w-5xl space-y-8">
       <div className="space-y-3">
         <div className="flex items-center gap-2">
           <MailPlus className="h-5 w-5 text-muted-foreground" />
-          <h1 className="text-lg font-semibold">Company Invites</h1>
+          <h1 className="text-lg font-semibold">SPS invites</h1>
         </div>
         <p className="max-w-3xl text-sm text-muted-foreground">
-          Invite people to request access to this company. New invite links are copied to your clipboard when they are generated.
+          Invite people to sign in to this SPS company. Each invite has a readable code, a desktop deep link, and a one-time browser link.
         </p>
       </div>
 
@@ -262,22 +289,39 @@ export function CompanyInvites() {
           </div>
         </fieldset>
 
+        <fieldset className="space-y-2">
+          <legend className="text-sm font-medium">Invite expiration</legend>
+          <div className="flex flex-wrap gap-2">
+            {inviteExpiryOptions.map((option) => (
+              <Button
+                key={option.value}
+                type="button"
+                size="sm"
+                variant={expiresInMinutes === option.value ? "default" : "outline"}
+                onClick={() => setExpiresInMinutes(option.value)}
+              >
+                {option.label}
+              </Button>
+            ))}
+          </div>
+        </fieldset>
+
         <div className="rounded-lg border border-border px-4 py-3 text-sm text-muted-foreground">
-          Each invite link is single-use. Human invitees get the selected role immediately after sign-in; agent invites still create a join request for approval.
+          Each invite is single-use. Invitees sign in or create an SPS account before the selected company role is granted.
         </div>
 
         <div className="flex flex-wrap items-center gap-3">
           <Button onClick={() => createInviteMutation.mutate()} disabled={createInviteMutation.isPending}>
-            {createInviteMutation.isPending ? "Creating…" : "Create invite"}
+            {createInviteMutation.isPending ? "Creating…" : "Create SPS invite"}
           </Button>
           <span className="text-sm text-muted-foreground">Invite history below keeps the audit trail.</span>
         </div>
 
-        {latestInviteUrl ? (
+        {latestInvite ? (
           <div className="space-y-3 rounded-lg border border-border px-4 py-4">
             <div className="space-y-1">
               <div className="flex items-center justify-between gap-3">
-                <div className="text-sm font-medium">Latest invite link</div>
+                <div className="text-sm font-medium">Latest SPS invitation</div>
                 {latestInviteCopied ? (
                   <div className="inline-flex items-center gap-1 text-xs font-medium text-foreground">
                     <Check className="h-3.5 w-3.5" />
@@ -286,28 +330,72 @@ export function CompanyInvites() {
                 ) : null}
               </div>
               <div className="text-sm text-muted-foreground">
-                This URL includes the current Paperclip domain returned by the server.
+                Share the code in chat, or use the desktop link on a computer with SPS Desktop installed.
               </div>
             </div>
+            {latestInviteCode ? (
+              <label className="block space-y-1">
+                <span className="text-xs font-medium text-muted-foreground">Invitation code</span>
+                <input
+                  readOnly
+                  value={latestInviteCode}
+                  onFocus={(event) => event.currentTarget.select()}
+                  onClick={(event) => event.currentTarget.select()}
+                  className="w-full rounded-md border border-border bg-muted/60 px-3 py-2 font-mono text-sm font-semibold tracking-wide text-foreground outline-none transition-colors selection:bg-primary selection:text-primary-foreground focus:border-ring"
+                  aria-label="SPS invitation code"
+                />
+              </label>
+            ) : null}
             <label className="block space-y-1">
-              <span className="sr-only">Latest invite URL</span>
+              <span className="text-xs font-medium text-muted-foreground">Browser invite link</span>
               <input
                 ref={latestInviteInputRef}
                 readOnly
-                value={latestInviteUrl}
+                value={latestInvite.inviteUrl}
                 onFocus={(event) => event.currentTarget.select()}
                 onClick={(event) => event.currentTarget.select()}
                 className="w-full rounded-md border border-border bg-muted/60 px-3 py-2 text-sm text-foreground outline-none transition-colors selection:bg-primary selection:text-primary-foreground focus:border-ring"
                 aria-label="Latest invite URL"
               />
             </label>
+            <div className="text-xs text-muted-foreground">
+              Expires {new Date(latestInvite.expiresAt).toLocaleString()}.
+            </div>
             <div className="flex flex-wrap gap-2">
+              {latestInviteCode ? (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={async () => {
+                    const copied = await copyText(latestInviteCode, "Copy the invitation code manually from the field above.");
+                    setLatestInviteCopied(copied);
+                  }}
+                >
+                  <Copy className="h-4 w-4" />
+                  Copy code
+                </Button>
+              ) : null}
+              {latestDesktopJoinUri ? (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  onClick={async () => {
+                    const copied = await copyText(latestDesktopJoinUri, "Copy the SPS Desktop link manually from the browser link field.");
+                    setLatestInviteCopied(copied);
+                  }}
+                >
+                  <Copy className="h-4 w-4" />
+                  Copy desktop link
+                </Button>
+              ) : null}
               <Button
                 type="button"
                 size="sm"
                 variant="outline"
                 onClick={async () => {
-                  const copied = await copyInviteUrl(latestInviteUrl);
+                  const copied = await copyInviteUrl(latestInvite.inviteUrl);
                   setLatestInviteCopied(copied);
                 }}
               >
@@ -315,7 +403,7 @@ export function CompanyInvites() {
                 Copy link
               </Button>
               <Button size="sm" variant="outline" asChild>
-                <a href={latestInviteUrl} target="_blank" rel="noreferrer">
+                <a href={latestInvite.inviteUrl} target="_blank" rel="noreferrer">
                   <ExternalLink className="h-4 w-4" />
                   Open invite
                 </a>

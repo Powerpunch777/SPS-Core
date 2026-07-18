@@ -621,6 +621,19 @@ Examples:
 - "create branch from issue"
 - "restart process"
 
+#### Privileged action permissions
+
+Plugin actions that mutate privileged host-managed state may include the reserved
+parameter `__paperclipRequestedPermissions`, containing a list of `PermissionKey`
+values. The host removes this parameter before invoking the worker, evaluates only
+the requested permissions for the authenticated, company-scoped actor, and exposes
+the allowed subset as `context.actor.permissions`.
+
+This is an authorization snapshot, not a grant mechanism. A plugin action must
+still verify the specific permission it requires before mutating state; requesting
+a different or unknown key cannot elevate a caller. Normal actions omit the
+parameter and do not incur permission-resolution work.
+
 ### 13.10 `executeTool`
 
 Runs a plugin-contributed agent tool during a run.
@@ -905,6 +918,7 @@ Minimum event set:
 - `issue.assignment_wakeup_requested`
 - `agent.created`
 - `agent.updated`
+- `agent.deleted`
 - `agent.status_changed`
 - `agent.run.started`
 - `agent.run.finished`

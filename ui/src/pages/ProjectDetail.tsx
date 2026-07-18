@@ -28,6 +28,11 @@ import { MembershipAction } from "../components/MembershipAction";
 import { StarToggle } from "../components/StarToggle";
 import { buildProjectWorkspaceSummaries } from "../lib/project-workspaces-tab";
 import { collectLiveIssueIds } from "../lib/liveIssueIds";
+import {
+  filterWorkplaneTaskIssues,
+  isWorkplaneModeEnabled,
+  WORKPLANE_PROJECT_TAB,
+} from "../lib/workplane-mode";
 import { projectRouteRef } from "../lib/utils";
 import { PROJECT_ICONS } from "../lib/project-icons";
 import { usePublishSharedQueryData, useSharedPollingQuery } from "../hooks/useSharedPolling";
@@ -228,6 +233,7 @@ function ProjectTilePicker({
 
 function ProjectIssuesList({ projectId, companyId }: { projectId: string; companyId: string }) {
   const queryClient = useQueryClient();
+  const workplaneMode = isWorkplaneModeEnabled();
 
   const { data: agents } = useQuery({
     queryKey: queryKeys.agents.list(companyId),
@@ -264,6 +270,10 @@ function ProjectIssuesList({ projectId, companyId }: { projectId: string; compan
     queryFn: () => issuesApi.list(companyId, { projectId }),
     enabled: !!companyId,
   });
+  const visibleIssues = useMemo(
+    () => filterWorkplaneTaskIssues(issues ?? [], workplaneMode),
+    [issues, workplaneMode],
+  );
 
   const updateIssue = useMutation({
     mutationFn: ({ id, data }: { id: string; data: Record<string, unknown> }) =>
@@ -276,7 +286,7 @@ function ProjectIssuesList({ projectId, companyId }: { projectId: string; compan
 
   return (
     <IssuesList
-      issues={issues ?? []}
+      issues={visibleIssues}
       isLoading={isLoading}
       error={error as Error | null}
       agents={agents}
@@ -363,6 +373,7 @@ function ProjectPluginOperationsList({
 /* ── Main project page ── */
 
 export function ProjectDetail() {
+  const workplaneMode = isWorkplaneModeEnabled();
   const { companyPrefix, projectId, filter } = useParams<{
     companyPrefix?: string;
     projectId: string;
@@ -682,6 +693,16 @@ export function ProjectDetail() {
 
   // Redirect bare /projects/:id to cached tab or default /issues
   if (routeProjectRef && activeTab === null) {
+    // The project, selected company, and plugin slots do not resolve in the
+    // same render. In Workplane mode, wait for all three before choosing a
+    // default so a transient empty slot list cannot send a Room-first Project
+    // to the native Tasks tab.
+    if (workplaneMode && (isLoading || !resolvedCompanyId || pluginDetailSlotsLoading)) {
+      return <PageSkeleton variant="detail" />;
+    }
+    if (workplaneMode && pluginTabItems.some((item) => item.value === WORKPLANE_PROJECT_TAB)) {
+      return <Navigate to={`/projects/${canonicalProjectRef}?tab=${encodeURIComponent(WORKPLANE_PROJECT_TAB)}`} replace />;
+    }
     let cachedTab: string | null = null;
     if (project?.id) {
       try { cachedTab = localStorage.getItem(`paperclip:project-tab:${project.id}`); } catch {}

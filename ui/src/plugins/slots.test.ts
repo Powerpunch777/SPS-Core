@@ -7,7 +7,11 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   PluginSlotMount,
   _collectRegisterableExportNamesForTests,
+  _filterContributionsForSlotsForTests,
   _resetPluginModuleLoader,
+  _registerPluginLoadListenerForTests,
+  _setPluginLoadStateForTests,
+  _unregisterPluginLoadListenerForTests,
   registerPluginWebComponent,
   type ResolvedPluginSlot,
 } from "./slots";
@@ -25,6 +29,47 @@ afterEach(() => {
 });
 
 describe("plugin slot export registration", () => {
+  it("notifies every mounted surface when a shared plugin module finishes loading", () => {
+    let notifications = 0;
+    const listener = () => {
+      notifications += 1;
+    };
+    _registerPluginLoadListenerForTests(listener);
+    _setPluginLoadStateForTests("room-chat:1", "loaded");
+    _unregisterPluginLoadListenerForTests(listener);
+
+    expect(notifications).toBe(1);
+  });
+
+  it("loads only contributions that can render the requested surface", () => {
+    const matching = _filterContributionsForSlotsForTests(
+      [
+        {
+          pluginId: "room-chat",
+          pluginKey: "room-chat",
+          displayName: "Room Chat",
+          version: "1.0.0",
+          uiEntryFile: "index.js",
+          slots: [{ type: "companySettingsPage", id: "organization", displayName: "Organization", exportName: "OrganizationSettingsPage" }],
+          launchers: [],
+        },
+        {
+          pluginId: "memory-sidecar",
+          pluginKey: "memory-sidecar",
+          displayName: "Memory Sidecar",
+          version: "1.0.0",
+          uiEntryFile: "index.js",
+          slots: [{ type: "detailTab", id: "memory", displayName: "Memory", exportName: "MemoryTab", entityTypes: ["project"] }],
+          launchers: [],
+        },
+      ],
+      new Set(["companySettingsPage"]),
+      null,
+    );
+
+    expect(matching.map((contribution) => contribution.pluginId)).toEqual(["room-chat"]);
+  });
+
   it("keeps declared missing exports visible for diagnostics", () => {
     const exports = _collectRegisterableExportNamesForTests(
       { Page: () => null },

@@ -22,6 +22,9 @@ function cacheKeyForTarget(command: string, target: AdapterExecutionTarget | nul
       command,
     ].join(":");
   }
+  if (target.transport === "sps_node") {
+    return ["sps_node", target.nodeId, target.projectId ?? "", command].join(":");
+  }
   return [
     "ssh",
     target.environmentId ?? "",

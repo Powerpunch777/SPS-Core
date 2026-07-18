@@ -39,6 +39,8 @@ import type {
   Routine,
   RoutineRun,
   Agent,
+  AgentSessionContext,
+  IssueExecutionPolicy,
   Goal,
   HumanCompanyMembershipRole,
   InviteJoinType,
@@ -131,6 +133,8 @@ export type {
   PluginIssueOriginKind,
   IssueSurfaceVisibility,
   Agent,
+  AgentSessionContext,
+  IssueExecutionPolicy,
   Goal,
   HumanCompanyMembershipRole,
   InviteJoinType,
@@ -343,7 +347,7 @@ export interface PluginEntityQuery {
 }
 
 // ---------------------------------------------------------------------------
-// Project workspace metadata (read-only via ctx.projects)
+// Project workspace metadata via ctx.projects
 // ---------------------------------------------------------------------------
 
 /**
@@ -374,6 +378,30 @@ export interface PluginWorkspace {
   createdAt: string;
   /** ISO 8601 last-updated timestamp. */
   updatedAt: string;
+}
+
+/**
+ * Generic workspace coordinates a plugin may register for a Project.
+ *
+ * The host deliberately does not assign product-specific meaning to a
+ * workspace name. Plugins can model design, source, research, asset, or any
+ * other workflow on top of this neutral project primitive.
+ */
+export interface PluginWorkspaceInput {
+  /** Human-readable workspace label. */
+  name?: string | null;
+  /** Absolute local directory when the workspace is available on this host. */
+  cwd?: string | null;
+  /** Optional remote repository URL. */
+  repoUrl?: string | null;
+  /** Optional requested checkout/ref. */
+  repoRef?: string | null;
+  /** Optional comparison/default ref. */
+  defaultRef?: string | null;
+  /** Host workspace source type, such as `local_path` or `git_repo`. */
+  sourceType?: string | null;
+  /** Promote this workspace to the Project's primary workspace. */
+  isPrimary?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -815,7 +843,8 @@ export interface PluginEntitiesClient {
  * `ctx.projects` — read project and workspace metadata.
  *
  * Requires `projects.read` capability.
- * Requires `project.workspaces.read` capability for workspace operations.
+ * Requires `project.workspaces.read` capability to read Workspaces and
+ * `project.workspaces.write` to register, edit, or remove them.
  *
  * @see PLUGIN_SPEC.md §7 — Project Workspaces
  */
@@ -842,6 +871,15 @@ export interface PluginProjectsClient {
    * @returns All workspaces for the project, ordered with primary first
    */
   listWorkspaces(projectId: string, companyId: string): Promise<PluginWorkspace[]>;
+
+  /** Register a generic Project Workspace. Requires `project.workspaces.write`. */
+  createWorkspace(projectId: string, input: PluginWorkspaceInput, companyId: string): Promise<PluginWorkspace | null>;
+
+  /** Update generic Project Workspace coordinates. Requires `project.workspaces.write`. */
+  updateWorkspace(projectId: string, workspaceId: string, input: PluginWorkspaceInput, companyId: string): Promise<PluginWorkspace | null>;
+
+  /** Remove a Project Workspace. Requires `project.workspaces.write`. */
+  removeWorkspace(projectId: string, workspaceId: string, companyId: string): Promise<PluginWorkspace | null>;
 
   /**
    * Get the primary workspace for a project.
@@ -1324,6 +1362,7 @@ export interface PluginIssueSummariesClient {
  * - `issues.checkout` for checkout ownership assertions
  * - `issues.wakeup` for assignment wakeup requests
  * - `issues.orchestration.read` for orchestration summaries
+ * - `issues.report` for submitting reports
  * - `issue.comments.read` for `listComments`
  * - `issue.comments.create` for `createComment`
  * - `issue.interactions.create` for `createInteraction`, `suggestTasks`, `askUserQuestions`, `requestConfirmation`, and `requestCheckboxConfirmation`
@@ -1368,6 +1407,8 @@ export interface PluginIssuesClient {
     executionWorkspaceId?: string | null;
     executionWorkspacePreference?: string | null;
     executionWorkspaceSettings?: Record<string, unknown> | null;
+    projectWorkspaceId?: string;
+    executionPolicy?: IssueExecutionPolicy | null;
     actor?: PluginIssueMutationActor;
   }): Promise<Issue>;
   update(
@@ -1471,6 +1512,22 @@ export interface PluginIssuesClient {
   relations: PluginIssueRelationsClient;
   /** Read compact orchestration summaries. */
   summaries: PluginIssueSummariesClient;
+  /**
+   * Submit exactly one terminal report for the assigned Task.
+   * Requires `issues.report` capability.
+   */
+  submitReport(input: {
+    issueId: string;
+    companyId: string;
+    kind: "final" | "blocker";
+    body: string;
+    actorAgentId: string;
+    actorRunId: string;
+  }): Promise<{
+    issue: Issue;
+    comment: IssueComment;
+    idempotent: boolean;
+  }>;
 }
 
 /**
@@ -1512,6 +1569,9 @@ export interface AgentSession {
   companyId: string;
   status: "active" | "closed";
   createdAt: string;
+  context?: AgentSessionContext;
+  lastRunId: string | null;
+  lastError: string | null;
 }
 
 /**
@@ -1547,6 +1607,7 @@ export interface PluginAgentSessionsClient {
   create(agentId: string, companyId: string, opts?: {
     taskKey?: string;
     reason?: string;
+    context?: AgentSessionContext;
   }): Promise<AgentSession>;
 
   /** List active sessions for an agent owned by this plugin. Requires `agent.sessions.list`. */

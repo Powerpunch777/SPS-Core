@@ -9,6 +9,7 @@ import { AgentStatusBadge } from "./StatusBadge";
 import { Identity } from "./Identity";
 import { formatDate, agentUrl } from "../lib/utils";
 import { Separator } from "@/components/ui/separator";
+import { isWorkplaneModeEnabled } from "../lib/workplane-mode";
 
 interface AgentPropertiesProps {
   agent: Agent;
@@ -28,12 +29,13 @@ function PropertyRow({ label, children }: { label: string; children: React.React
 
 export function AgentProperties({ agent, runtimeState }: AgentPropertiesProps) {
   const { selectedCompanyId } = useCompany();
+  const workplaneMode = isWorkplaneModeEnabled();
   const lastErrorIsActive = agent.status === "error";
 
   const { data: agents } = useQuery({
     queryKey: queryKeys.agents.list(selectedCompanyId!),
     queryFn: () => agentsApi.list(selectedCompanyId!),
-    enabled: !!selectedCompanyId && !!agent.reportsTo,
+    enabled: !workplaneMode && !!selectedCompanyId && !!agent.reportsTo,
   });
 
   const reportsToAgent = agent.reportsTo ? agents?.find((a) => a.id === agent.reportsTo) : null;
@@ -92,7 +94,7 @@ export function AgentProperties({ agent, runtimeState }: AgentPropertiesProps) {
             <span className="text-sm">{formatDate(agent.lastHeartbeatAt)}</span>
           </PropertyRow>
         )}
-        {agent.reportsTo && (
+        {!workplaneMode && agent.reportsTo && (
           <PropertyRow label="Reports To">
             {reportsToAgent ? (
               <Link to={agentUrl(reportsToAgent)} className="hover:underline">

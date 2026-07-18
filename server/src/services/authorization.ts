@@ -1,4 +1,4 @@
-import { and, eq, inArray, isNull, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, notInArray, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   agents,
@@ -8,6 +8,7 @@ import {
   instanceUserRoles,
   issueComments,
   issues,
+  projectAccessGrants,
   principalPermissionGrants,
   projects,
 } from "@paperclipai/db";
@@ -64,6 +65,7 @@ export type AuthorizationAction =
   | "issue:mutate"
   | "issue:read"
   | "project:read"
+  | "project:write"
   | "runtime:manage"
   | "secrets:read";
 
@@ -139,6 +141,7 @@ function permissionForAction(action: AuthorizationAction): PermissionKey | null 
     action === "company_scope:read" ||
     action === "issue:read" ||
     action === "project:read" ||
+    action === "project:write" ||
     action === "runtime:manage" ||
     action === "secrets:read"
   ) {
@@ -222,6 +225,8 @@ type AgentAuthorizationRow = {
 type ProjectAuthorizationRow = {
   id: string;
   companyId: string;
+  leadAgentId: string | null;
+  accessMode: string;
   executionWorkspacePolicy: unknown;
 };
 type IssueAuthorizationRow = {
@@ -691,6 +696,8 @@ export function authorizationService(db: Db) {
       .select({
         id: projects.id,
         companyId: projects.companyId,
+        leadAgentId: projects.leadAgentId,
+        accessMode: projects.accessMode,
         executionWorkspacePolicy: projects.executionWorkspacePolicy,
       })
       .from(projects)
@@ -764,6 +771,135 @@ export function authorizationService(db: Db) {
           : null;
     const project = projectId ? await loadProject(projectId) : null;
     return { issue, project };
+  }
+
+  type ProjectAccessRole = "viewer" | "collaborator" | "manager";
+
+  function isProjectScopedAction(action: AuthorizationAction) {
+    return action === "project:read" ||
+      action === "project:write" ||
+      action === "issue:read" ||
+      action === "issue:comment" ||
+      action === "issue:mutate" ||
+      action === "tasks:assign";
+  }
+
+  function normalizedProjectAccessRole(value: string | null | undefined): ProjectAccessRole {
+    if (value === "viewer" || value === "manager") return value;
+    return "collaborator";
+  }
+
+  function projectRoleAllowsAction(
+    role: ProjectAccessRole,
+    action: AuthorizationAction,
+  ) {
+    if (action === "project:read" || action === "issue:read") return true;
+    if (action === "project:write" || action === "tasks:assign") return role === "manager";
+    return role === "collaborator" || role === "manager";
+  }
+
+  async function loadProjectAccessGrant(input: {
+    companyId: string;
+    projectId: string;
+    principalType: "user" | "agent";
+    principalId: string;
+  }) {
+    return db
+      .select({ accessRole: projectAccessGrants.accessRole })
+      .from(projectAccessGrants)
+      .where(and(
+        eq(projectAccessGrants.companyId, input.companyId),
+        eq(projectAccessGrants.projectId, input.projectId),
+        eq(projectAccessGrants.principalType, input.principalType),
+        eq(projectAccessGrants.principalId, input.principalId),
+      ))
+      .then((rows) => rows[0] ?? null);
+  }
+
+  async function agentHasActiveProjectAssignment(
+    companyId: string,
+    projectId: string,
+    agentId: string,
+  ) {
+    return db
+      .select({ id: issues.id })
+      .from(issues)
+      .where(and(
+        eq(issues.companyId, companyId),
+        eq(issues.projectId, projectId),
+        eq(issues.assigneeAgentId, agentId),
+        notInArray(issues.status, ["done", "cancelled", "failed", "timed_out"]),
+      ))
+      .limit(1)
+      .then((rows) => rows.length > 0);
+  }
+
+  /**
+   * Company mode intentionally preserves Paperclip's existing company-wide
+   * collaboration behavior. Restricted mode adds an allow-list over it.
+   */
+  async function projectAccessScopeDeny(input: {
+    actor: AuthorizationActor;
+    action: AuthorizationAction;
+    resource: AuthorizationResource;
+    companyId: string;
+  }): Promise<AuthorizationDecision | null> {
+    if (!isProjectScopedAction(input.action)) return null;
+    const { issue, project } = await loadResourceContext(input.resource);
+    if (!project || project.companyId !== input.companyId || project.accessMode !== "restricted") return null;
+
+    let role: ProjectAccessRole | null = null;
+    if (input.actor.type === "board" && input.actor.userId) {
+      const membership = await getActiveMembership(input.companyId, "user", input.actor.userId);
+      if (membership?.membershipRole === "owner" || membership?.membershipRole === "admin") {
+        role = "manager";
+      } else {
+        const grant = await loadProjectAccessGrant({
+          companyId: input.companyId,
+          projectId: project.id,
+          principalType: "user",
+          principalId: input.actor.userId,
+        });
+        role = grant ? normalizedProjectAccessRole(grant.accessRole) : null;
+      }
+    }
+
+    if (input.actor.type === "agent" && input.actor.agentId) {
+      const grant = await loadProjectAccessGrant({
+        companyId: input.companyId,
+        projectId: project.id,
+        principalType: "agent",
+        principalId: input.actor.agentId,
+      });
+      if (grant) {
+        role = normalizedProjectAccessRole(grant.accessRole);
+      } else if (project.leadAgentId === input.actor.agentId) {
+        role = "manager";
+      } else if (issue?.assigneeAgentId === input.actor.agentId) {
+        role = "collaborator";
+      } else if (
+        input.resource.type === "project" &&
+        await agentHasActiveProjectAssignment(input.companyId, project.id, input.actor.agentId)
+      ) {
+        role = "collaborator";
+      }
+    }
+
+    if (!role) {
+      return deny({
+        action: input.action,
+        reason: "deny_policy_restricted",
+        explanation: "Project is restricted and this actor has no Project access grant.",
+      });
+    }
+    if (!projectRoleAllowsAction(role, input.action)) {
+      return deny({
+        action: input.action,
+        reason: "deny_policy_restricted",
+        explanation: `Project access role ${role} does not permit ${input.action}.`,
+      });
+    }
+    return null;
   }
 
   async function resolveActorTrust(input: {
@@ -1460,6 +1596,13 @@ export function authorizationService(db: Db) {
           explanation: "Allowed because the actor is an instance admin.",
         });
       }
+      const boardProjectScopeDeny = await projectAccessScopeDeny({
+        actor: input.actor,
+        action: input.action,
+        resource: input.resource,
+        companyId,
+      });
+      if (boardProjectScopeDeny) return boardProjectScopeDeny;
       // What instance-admin elevation used to give cloud tenant users is
       // replaced by company-scoped visibility: an active membership in the
       // resource company grants the same read surface a same-company agent
@@ -1481,7 +1624,9 @@ export function authorizationService(db: Db) {
             });
           }
           if (
-            (input.action === "issue:comment" || input.action === "issue:mutate") &&
+            (input.action === "issue:comment" ||
+              input.action === "issue:mutate" ||
+              input.action === "project:write") &&
             membership.membershipRole !== "viewer"
           ) {
             return allow({
@@ -1526,6 +1671,7 @@ export function authorizationService(db: Db) {
           input.action === "company_scope:read" ||
           input.action === "issue:read" ||
           input.action === "project:read" ||
+          input.action === "project:write" ||
           input.action === "runtime:manage" ||
           input.action === "secrets:read"
         ) {
@@ -1533,7 +1679,9 @@ export function authorizationService(db: Db) {
           // Mirroring the tasks:assign carve-out above, viewers keep the
           // read-only visibility actions but not the privileged ones.
           const requiresNonViewer =
-            input.action === "runtime:manage" || input.action === "secrets:read";
+            input.action === "runtime:manage" ||
+            input.action === "secrets:read" ||
+            input.action === "project:write";
           if (membership && (!requiresNonViewer || membership.membershipRole !== "viewer")) {
             return allow({
               action: input.action,
@@ -1671,6 +1819,14 @@ export function authorizationService(db: Db) {
         return lowTrustDecision;
       }
     }
+
+    const agentProjectScopeDeny = await projectAccessScopeDeny({
+      actor: input.actor,
+      action: input.action,
+      resource: input.resource,
+      companyId,
+    });
+    if (agentProjectScopeDeny) return agentProjectScopeDeny;
 
     if (
       input.action === "agent:read" ||

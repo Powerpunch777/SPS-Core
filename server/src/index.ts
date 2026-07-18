@@ -625,7 +625,7 @@ export async function startServer(): Promise<StartedServer> {
         connectionString: activeDatabaseConnectionString,
         backupDir: config.databaseBackupDir,
         retention,
-        filenamePrefix: "paperclip",
+        filenamePrefix: "sps",
       });
       const finishedAt = new Date();
       const response: InstanceDatabaseBackupRunResult = {

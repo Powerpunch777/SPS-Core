@@ -1,4 +1,5 @@
 import { execFile as execFileCallback } from "node:child_process";
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -26,6 +27,23 @@ describe("sandbox callback bridge", () => {
   const cleanupFns: Array<() => Promise<void>> = [];
 
   function createExecRunner() {
+    const resolveShellCommand = (command: string) => {
+      if (command !== "sh" && command !== "bash") return command;
+      if (process.platform !== "win32") return command === "sh" ? "/bin/sh" : "/bin/bash";
+
+      const shellName = command === "sh" ? "sh.exe" : "bash.exe";
+      const candidates = [
+        process.env.PAPERCLIP_TEST_POSIX_SHELL,
+        path.join(process.env.ProgramFiles ?? "C:\\Program Files", "Git", "usr", "bin", shellName),
+        path.join(process.env.ProgramFiles ?? "C:\\Program Files", "Git", "bin", "bash.exe"),
+      ].filter((candidate): candidate is string => Boolean(candidate));
+      const resolved = candidates.find((candidate) => existsSync(candidate));
+      if (!resolved) {
+        throw new Error("Git Bash is required to run sandbox callback bridge tests on Windows.");
+      }
+      return resolved;
+    };
+
     return {
       execute: async (input: {
         command: string;
@@ -40,9 +58,24 @@ describe("sandbox callback bridge", () => {
           ...process.env,
           ...input.env,
         };
-        const command =
-          input.command === "sh" ? "/bin/sh" : input.command === "bash" ? "/bin/bash" : input.command;
+        const command = resolveShellCommand(input.command);
+        if (process.platform === "win32" && (input.command === "sh" || input.command === "bash")) {
+          const inheritedPath = Object.entries(env).find(([key]) => key.toLowerCase() === "path")?.[1] ?? "";
+          for (const key of Object.keys(env)) {
+            if (key.toLowerCase() === "path") delete env[key];
+          }
+          env.PATH = [path.dirname(command), inheritedPath].filter(Boolean).join(path.delimiter);
+        }
         const args = [...(input.args ?? [])];
+        if (
+          process.platform === "win32" &&
+          (input.command === "sh" || input.command === "bash") &&
+          typeof args[1] === "string"
+        ) {
+          args[1] = args[1].replace(/([A-Za-z]):\\([^'"\r\n]*)/g, (_match, drive: string, remainder: string) =>
+            `/${drive.toLowerCase()}/${remainder.replaceAll("\\", "/")}`,
+          );
+        }
         if (
           input.stdin != null &&
           (input.command === "sh" || input.command === "bash") &&
@@ -888,6 +921,7 @@ describe("sandbox callback bridge", () => {
       { method: "GET", path: "/api/issues/issue-1/comments" },
       { method: "GET", path: "/api/issues/issue-1/comments/c-1" },
       { method: "POST", path: "/api/issues/issue-1/comments" },
+      { method: "POST", path: "/api/issues/issue-1/reports" },
       { method: "GET", path: "/api/issues/issue-1/documents" },
       { method: "GET", path: "/api/issues/issue-1/documents/plan" },
       { method: "GET", path: "/api/issues/issue-1/documents/plan/revisions" },
@@ -942,6 +976,8 @@ describe("sandbox callback bridge", () => {
       { method: "POST", path: "/api/companies/co-1/imports/apply" },
       { method: "POST", path: "/api/companies/co-1/archive" },
       { method: "DELETE", path: "/api/issues/issue-1/documents/plan" },
+      { method: "GET", path: "/api/issues/issue-1/reports" },
+      { method: "DELETE", path: "/api/issues/issue-1/reports" },
       { method: "DELETE", path: "/api/issues/issue-1/approvals/ap-1" },
       { method: "DELETE", path: "/api/work-products/wp-1" },
       { method: "POST", path: "/api/approvals/ap-1/approve" },

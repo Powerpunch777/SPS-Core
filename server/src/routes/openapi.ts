@@ -21,6 +21,7 @@ import {
   updateIssueSchema,
   createIssueLabelSchema,
   addIssueCommentSchema,
+  submitIssueReportSchema,
   checkoutIssueSchema,
   linkIssueApprovalSchema,
   createIssueWorkProductSchema,
@@ -31,6 +32,7 @@ import {
   upsertIssueWatchdogSchema,
   // Project
   createProjectSchema,
+  updateProjectAccessPolicySchema,
   updateProjectSchema,
   createProjectWorkspaceSchema,
   updateProjectWorkspaceSchema,
@@ -753,6 +755,7 @@ const CREATED_OPERATIONS = new Set([
   "POST /api/issues/{id}/children",
   "POST /api/issues/{id}/interactions",
   "POST /api/issues/{id}/comments",
+  "POST /api/issues/{id}/reports",
   "POST /api/companies/{companyId}/issues/{issueId}/attachments",
   "POST /api/companies/{companyId}/projects",
   "POST /api/projects/{id}/workspaces",
@@ -1848,6 +1851,45 @@ registry.registerPath({
     body: jsonBody(addIssueCommentSchema),
   },
   responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/api/projects/{id}/access-policy",
+  tags: ["projects"],
+  summary: "Read a Project access policy",
+  request: { params: z.object({ id: z.string() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registry.registerPath({
+  method: "put",
+  path: "/api/projects/{id}/access-policy",
+  tags: ["projects"],
+  summary: "Replace a Project access policy",
+  request: {
+    params: z.object({ id: z.string() }),
+    body: jsonBody(updateProjectAccessPolicySchema),
+  },
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/issues/{id}/reports",
+  tags: ["issues"],
+  summary: "Atomically submit a terminal report for the current agent run",
+  request: {
+    params: z.object({ id: z.string() }),
+    body: jsonBody(submitIssueReportSchema),
+  },
+  responses: {
+    200: r.ok(),
+    201: r.ok(),
+    400: r.badRequest,
+    401: r.unauthorized,
+    403: FORBIDDEN_RESPONSE,
+  },
 });
 
 registry.registerPath({

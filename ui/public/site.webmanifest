@@ -1,8 +1,8 @@
 {
   "id": "/",
-  "name": "Paperclip",
-  "short_name": "Paperclip",
-  "description": "AI-powered project management and agent coordination platform",
+  "name": "SPS - SonParkServer",
+  "short_name": "SPS",
+  "description": "AI team operations and agent coordination platform",
   "start_url": "/",
   "scope": "/",
   "display": "browser",

@@ -24,6 +24,14 @@ const mockHeartbeatsApi = vi.hoisted(() => ({
   liveRunsForCompany: vi.fn(),
 }));
 
+const mockBuiltInAgentsApi = vi.hoisted(() => ({
+  list: vi.fn(),
+}));
+
+const mockInstanceSettingsApi = vi.hoisted(() => ({
+  getExperimental: vi.fn(),
+}));
+
 const mockResourceMembershipsApi = vi.hoisted(() => ({
   listMine: vi.fn(),
   updateAgent: vi.fn(),
@@ -99,6 +107,14 @@ vi.mock("../api/auth", () => ({
 
 vi.mock("../api/heartbeats", () => ({
   heartbeatsApi: mockHeartbeatsApi,
+}));
+
+vi.mock("../api/builtInAgents", () => ({
+  builtInAgentsApi: mockBuiltInAgentsApi,
+}));
+
+vi.mock("../api/instanceSettings", () => ({
+  instanceSettingsApi: mockInstanceSettingsApi,
 }));
 
 vi.mock("../api/resourceMemberships", () => ({
@@ -227,6 +243,8 @@ describe("SidebarAgents", () => {
       user: { id: "user-1" },
     });
     mockHeartbeatsApi.liveRunsForCompany.mockResolvedValue([]);
+    mockBuiltInAgentsApi.list.mockResolvedValue([]);
+    mockInstanceSettingsApi.getExperimental.mockResolvedValue({ enableBuiltInAgents: false });
     memberships = {
       projectMemberships: {},
       agentMemberships: {},
@@ -356,6 +374,12 @@ describe("SidebarAgents", () => {
 
     // The section header collapses to a divider (no caret / section menu).
     expect(container.querySelector('button[aria-label="Agents section actions"]')).toBeNull();
+  });
+
+  it("does not query disabled built-in agents from the sidebar", async () => {
+    await renderSidebarAgents();
+
+    expect(mockBuiltInAgentsApi.list).not.toHaveBeenCalled();
   });
 
   it("pins starred agents at the top without subheadings and dedupes them from the recent list", async () => {

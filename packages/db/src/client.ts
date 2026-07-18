@@ -441,15 +441,14 @@ async function loadAppliedMigrations(
       .map((row) => hashesToMigrationFiles.get(row.hash))
       .filter((name): name is string => Boolean(name));
 
-    if (appliedFromHashes.length > 0) {
-      // Best-effort: when all hashes resolve, this is authoritative.
-      if (appliedFromHashes.length === rows.length) return appliedFromHashes;
+    // When every stored hash resolves, the journal is authoritative. A partial
+    // match is different: published bundles and source checkouts can contain
+    // equivalent migrations with different bytes, leaving only a few legacy
+    // hashes equal by chance. In that case, merge the timestamp lineage below
+    // instead of treating every unresolved row as an unapplied migration.
+    if (appliedFromHashes.length === rows.length) return appliedFromHashes;
 
-      // Partial hash resolution can happen when files have changed; return what we can trust.
-      return appliedFromHashes;
-    }
-
-    // Fallback only when hashes are unavailable/unresolved.
+    // Fallback when hashes are wholly or partially unresolved.
     if (columnNames.has("created_at")) {
       const journalEntries = await listJournalMigrationEntries();
       if (journalEntries.length > 0) {
@@ -458,14 +457,18 @@ async function loadAppliedMigrations(
         );
         const lastCreatedAt = Number(lastDbRows[0]?.created_at ?? -1);
         if (Number.isFinite(lastCreatedAt) && lastCreatedAt >= 0) {
-          return journalEntries
+          const appliedFromTimestamp = journalEntries
             .filter((entry) => availableMigrations.includes(entry.fileName))
             .filter((entry) => entry.folderMillis <= lastCreatedAt)
             .map((entry) => entry.fileName)
             .slice(0, rows.length);
+          const applied = new Set([...appliedFromTimestamp, ...appliedFromHashes]);
+          return availableMigrations.filter((migrationFile) => applied.has(migrationFile));
         }
       }
     }
+
+    if (appliedFromHashes.length > 0) return appliedFromHashes;
   }
 
   const rows = await sql.unsafe<{ id: number }[]>(`SELECT id FROM ${qualifiedTable} ORDER BY id`);

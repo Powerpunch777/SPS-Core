@@ -23,6 +23,7 @@ import { DraftInput } from "./agent-config-primitives";
 import { InlineEditor } from "./InlineEditor";
 import { EnvironmentVariablesEditor } from "./environment-variables-editor";
 import { Badge } from "@/components/ui/badge";
+import { ProjectAccessPolicy } from "./ProjectAccessPolicy";
 
 const PROJECT_STATUSES = [
   { value: "backlog", label: "Backlog" },
@@ -1173,6 +1174,13 @@ export function ProjectProperties({ project, onUpdate, onFieldUpdate, getFieldSa
         ) : null}
 
       </div>
+
+      {selectedCompanyId ? (
+        <>
+          <Separator className="my-4" />
+          <ProjectAccessPolicy project={project} companyId={selectedCompanyId} />
+        </>
+      ) : null}
 
       {onArchive && (
         <>

@@ -246,6 +246,9 @@ export const queryKeys = {
     invite: (token: string) => ["access", "invite", token] as const,
     currentBoardAccess: ["access", "current-board-access"] as const,
   },
+  spsNodes: {
+    list: (companyId: string) => ["sps-nodes", companyId] as const,
+  },
   auth: {
     session: ["auth", "session"] as const,
   },

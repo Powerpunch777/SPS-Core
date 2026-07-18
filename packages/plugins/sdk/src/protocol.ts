@@ -24,6 +24,7 @@ import type {
   Company,
   Project,
   Issue,
+  IssueExecutionPolicy,
   IssueComment,
   IssueDocument,
   IssueDocumentSummary,
@@ -37,6 +38,7 @@ import type {
   Routine,
   RoutineRun,
   Agent,
+  AgentSessionContext,
   Goal,
   PluginLocalFolderDeclaration,
   PrincipalPermissionGrant,
@@ -45,6 +47,7 @@ import type {
   ExternalObjectLivenessState,
   ExternalObjectMentionConfidence,
   ExternalObjectMentionSourceKind,
+  PermissionKey,
 } from "@paperclipai/shared";
 export type { PluginLauncherRenderContextSnapshot } from "@paperclipai/shared";
 
@@ -59,6 +62,7 @@ import type {
   PluginJobContext,
   PluginExecutionWorkspaceMetadata,
   PluginWorkspace,
+  PluginWorkspaceInput,
   ToolRunContext,
   ToolResult,
   PluginLocalFolderListing,
@@ -269,7 +273,7 @@ export type PluginRpcErrorCode =
  * Absence of this metadata means the invocation is instance/global scoped.
  */
 export interface PluginInvocationScope {
-  companyId: string;
+  companyId?: string | null;
 }
 
 /**
@@ -401,6 +405,12 @@ export interface PluginPerformActionActorContext {
   runId: string | null;
   /** Company id authorized by the host bridge for this action, when applicable. */
   companyId: string | null;
+  /**
+   * Requested company permissions calculated by the Paperclip host for this
+   * authenticated action. Plugins may use this snapshot to protect their own
+   * privileged actions without trusting UI-supplied role data.
+   */
+  permissions?: readonly PermissionKey[];
 }
 
 export interface PluginPerformActionContext {
@@ -1140,6 +1150,18 @@ export interface WorkerToHostMethods {
     params: { projectId: string; companyId: string },
     result: PluginWorkspace[],
   ];
+  "projects.createWorkspace": [
+    params: { projectId: string; companyId: string; input: PluginWorkspaceInput },
+    result: PluginWorkspace | null,
+  ];
+  "projects.updateWorkspace": [
+    params: { projectId: string; workspaceId: string; companyId: string; input: PluginWorkspaceInput },
+    result: PluginWorkspace | null,
+  ];
+  "projects.removeWorkspace": [
+    params: { projectId: string; workspaceId: string; companyId: string },
+    result: PluginWorkspace | null,
+  ];
   "projects.getPrimaryWorkspace": [
     params: { projectId: string; companyId: string },
     result: PluginWorkspace | null,
@@ -1264,11 +1286,28 @@ export interface WorkerToHostMethods {
       executionWorkspaceId?: string | null;
       executionWorkspacePreference?: string | null;
       executionWorkspaceSettings?: Record<string, unknown> | null;
+      projectWorkspaceId?: string;
+      executionPolicy?: IssueExecutionPolicy | null;
       actorAgentId?: string | null;
       actorUserId?: string | null;
       actorRunId?: string | null;
     },
     result: Issue,
+  ];
+  "issues.submitReport": [
+    params: {
+      issueId: string;
+      companyId: string;
+      kind: "final" | "blocker";
+      body: string;
+      actorAgentId: string;
+      actorRunId: string;
+    },
+    result: {
+      issue: Issue;
+      comment: IssueComment;
+      idempotent: boolean;
+    },
   ];
   "issues.update": [
     params: {
@@ -1453,12 +1492,12 @@ export interface WorkerToHostMethods {
 
   // Agent Sessions
   "agents.sessions.create": [
-    params: { agentId: string; companyId: string; taskKey?: string; reason?: string },
-    result: { sessionId: string; agentId: string; companyId: string; status: "active" | "closed"; createdAt: string },
+    params: { agentId: string; companyId: string; taskKey?: string; reason?: string; context?: AgentSessionContext },
+    result: { sessionId: string; agentId: string; companyId: string; status: "active" | "closed"; createdAt: string; context?: AgentSessionContext; lastRunId: string | null; lastError: string | null },
   ];
   "agents.sessions.list": [
     params: { agentId: string; companyId: string },
-    result: Array<{ sessionId: string; agentId: string; companyId: string; status: "active" | "closed"; createdAt: string }>,
+    result: Array<{ sessionId: string; agentId: string; companyId: string; status: "active" | "closed"; createdAt: string; context?: AgentSessionContext; lastRunId: string | null; lastError: string | null }>,
   ];
   "agents.sessions.sendMessage": [
     params: { sessionId: string; companyId: string; prompt: string; reason?: string },

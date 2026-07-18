@@ -195,8 +195,14 @@ function resolveManagedCodexHomeDir(companyId: string): string {
 export async function findAncestorBin(startDir: string, binName: string): Promise<string | null> {
   let current = path.resolve(startDir);
   while (true) {
-    const candidate = path.join(current, "node_modules", ".bin", binName);
-    if (await pathExists(candidate)) return candidate;
+    const binDir = path.join(current, "node_modules", ".bin");
+    const candidates =
+      process.platform === "win32"
+        ? [path.join(binDir, `${binName}.cmd`), path.join(binDir, `${binName}.exe`), path.join(binDir, binName)]
+        : [path.join(binDir, binName)];
+    for (const candidate of candidates) {
+      if (await pathExists(candidate)) return candidate;
+    }
     const parent = path.dirname(current);
     if (parent === current) return null;
     current = parent;
@@ -271,7 +277,9 @@ async function normalizeGeminiAcpCommandShell(commandShell: string, env: NodeJS.
   if (!tokens) return commandShell;
   let versionParts: number[] | null = null;
   try {
-    const { stdout } = await execFileAsync(tokens[0], ["--version"], {
+    const probeCommand = process.platform === "win32" ? env.ComSpec || process.env.ComSpec || "cmd.exe" : tokens[0];
+    const probeArgs = process.platform === "win32" ? ["/d", "/s", "/c", `${tokens[0]} --version`] : ["--version"];
+    const { stdout } = await execFileAsync(probeCommand, probeArgs, {
       timeout: GEMINI_VERSION_PROBE_TIMEOUT_MS,
       encoding: "utf8",
       env,
@@ -858,10 +866,11 @@ async function writePaperclipClaudeSettings(input: {
 async function writeAgentWrapper(input: {
   stateDir: string;
   acpxAgent: string;
+  agentCommand: string;
   agentCommandShell: string;
   env: Record<string, string>;
   childStderrDir: string;
-}): Promise<{ wrapperPath: string; envFilePath: string }> {
+}): Promise<{ wrapperPath: string; envFilePath: string; agentRegistryCommand: string }> {
   const wrappersDir = path.join(input.stateDir, "wrappers");
   await fs.mkdir(wrappersDir, { recursive: true });
   const envLines = Object.entries(input.env)
@@ -874,7 +883,7 @@ async function writeAgentWrapper(input: {
     env: envLines,
     childStderrDir: input.childStderrDir,
   });
-  const wrapperPath = path.join(wrappersDir, `${input.acpxAgent}-${wrapperHash}.sh`);
+  const shellWrapperPath = path.join(wrappersDir, `${input.acpxAgent}-${wrapperHash}.sh`);
   const envFilePath = path.join(wrappersDir, `${input.acpxAgent}-${wrapperHash}.env`);
   const script = [
     "#!/usr/bin/env bash",
@@ -901,15 +910,95 @@ async function writeAgentWrapper(input: {
     mode: 0o600,
   });
   await writeFileAtomically({
-    target: wrapperPath,
+    target: shellWrapperPath,
     contents: script,
     mode: 0o700,
   });
+  let wrapperPath = shellWrapperPath;
+  let agentRegistryCommand = shellWrapperPath;
+  const currentFileNames = new Set([path.basename(shellWrapperPath), path.basename(envFilePath)]);
+  if (process.platform === "win32") {
+    const windowsWrapperPath = path.join(wrappersDir, `${input.acpxAgent}-${wrapperHash}.mjs`);
+    const windowsConfigPath = path.join(wrappersDir, `${input.acpxAgent}-${wrapperHash}.json`);
+    const commandLine = path.isAbsolute(input.agentCommand)
+      ? `"${input.agentCommand.replace(/"/g, '""')}"`
+      : input.agentCommand;
+    const windowsConfig = {
+      commandLine,
+      env: input.env,
+      childStderrDir: input.childStderrDir,
+    };
+    const windowsScript = [
+      'import { spawn } from "node:child_process";',
+      'import { appendFileSync, mkdirSync, readFileSync } from "node:fs";',
+      'import path from "node:path";',
+      'import { fileURLToPath } from "node:url";',
+      '',
+      'const configPath = fileURLToPath(import.meta.url).replace(/\\.mjs$/u, ".json");',
+      'const config = JSON.parse(readFileSync(configPath, "utf8"));',
+      'const env = { ...process.env, ...config.env };',
+      'const quoteArgument = (value) => `"${String(value).replace(/"/g, `""`)}"`;',
+      'const extraArguments = process.argv.slice(2).map(quoteArgument).join(" ");',
+      'const commandLine = extraArguments ? `${config.commandLine} ${extraArguments}` : config.commandLine;',
+      'const child = spawn(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", `"${commandLine}"`], {',
+      '  cwd: process.cwd(),',
+      '  env,',
+      '  stdio: ["inherit", "inherit", "pipe"],',
+      '  windowsHide: true,',
+      '  windowsVerbatimArguments: true',
+      '});',
+      'const runId = env.PAPERCLIP_RUN_ID || "";',
+      'const stderrPath = runId ? path.join(config.childStderrDir, `${runId}.log`) : "";',
+      'if (stderrPath) mkdirSync(config.childStderrDir, { recursive: true });',
+      'let pendingStderr = "";',
+      'const isBenignCleanupError = (line) => line.includes("nes/close") && line.includes("-32601");',
+      'const flushLiveStderr = (flush) => {',
+      '  const lines = pendingStderr.split(/\\r?\\n/u);',
+      '  const remainder = lines.pop() || "";',
+      '  pendingStderr = flush ? "" : remainder;',
+      '  for (const line of lines) {',
+      '    if (!isBenignCleanupError(line)) process.stderr.write(`${line}\\n`);',
+      '  }',
+      '  if (flush && remainder && !isBenignCleanupError(remainder)) process.stderr.write(remainder);',
+      '};',
+      'child.stderr.setEncoding("utf8");',
+      'child.stderr.on("data", (chunk) => {',
+      '  if (stderrPath) appendFileSync(stderrPath, chunk, "utf8");',
+      '  pendingStderr += chunk;',
+      '  flushLiveStderr(false);',
+      '});',
+      'child.stderr.on("end", () => flushLiveStderr(true));',
+      'for (const signal of ["SIGINT", "SIGTERM"]) {',
+      '  process.on(signal, () => { if (!child.killed) child.kill(signal); });',
+      '}',
+      'child.once("error", (error) => {',
+      '  process.stderr.write(`[paperclip] Failed to spawn Windows ACP agent command: ${error.message}\\n`);',
+      '  process.exitCode = 1;',
+      '});',
+      'child.once("close", (code) => { process.exitCode = typeof code === "number" ? code : 1; });',
+      '',
+    ].join("\n");
+    await writeFileAtomically({
+      target: windowsConfigPath,
+      contents: `${JSON.stringify(windowsConfig)}\n`,
+      mode: 0o600,
+    });
+    await writeFileAtomically({
+      target: windowsWrapperPath,
+      contents: windowsScript,
+      mode: 0o700,
+    });
+    const quoteRegistryArgument = (value: string) => `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+    wrapperPath = windowsWrapperPath;
+    agentRegistryCommand = `${quoteRegistryArgument(process.execPath)} ${quoteRegistryArgument(windowsWrapperPath)}`;
+    currentFileNames.add(path.basename(windowsWrapperPath));
+    currentFileNames.add(path.basename(windowsConfigPath));
+  }
   await cleanupStaleAgentWrappers({
     wrappersDir,
-    currentFileNames: new Set([path.basename(wrapperPath), path.basename(envFilePath)]),
+    currentFileNames,
   });
-  return { wrapperPath, envFilePath };
+  return { wrapperPath, envFilePath, agentRegistryCommand };
 }
 
 async function cleanupStaleAgentWrappers(input: { wrappersDir: string; currentFileNames: Set<string> }) {
@@ -917,7 +1006,8 @@ async function cleanupStaleAgentWrappers(input: { wrappersDir: string; currentFi
   const now = Date.now();
   await Promise.all(
     wrappers.map(async (name) => {
-      const isManagedWrapperFile = name.endsWith(".sh") || name.endsWith(".env");
+      const isManagedWrapperFile =
+        name.endsWith(".sh") || name.endsWith(".env") || name.endsWith(".mjs") || name.endsWith(".json");
       if (!isManagedWrapperFile || input.currentFileNames.has(name)) return;
       const wrapperPath = path.join(input.wrappersDir, name);
       const stats = await fs.stat(wrapperPath).catch(() => null);
@@ -1042,6 +1132,14 @@ async function buildRuntime(input: {
   if (requestedModel && acpxAgent === "claude" && !env.ANTHROPIC_MODEL) {
     env.ANTHROPIC_MODEL = requestedModel;
   }
+  if (acpxAgent === "codex") {
+    env.CODEX_CONFIG = mergeCodexStartupConfig({
+      existing: env.CODEX_CONFIG,
+      requestedModel,
+      requestedThinkingEffort,
+      fastMode,
+    });
+  }
 
   let skillPromptInstructions = "";
   let skillsIdentity: Record<string, unknown> = { mode: "unsupported" };
@@ -1118,12 +1216,13 @@ async function buildRuntime(input: {
   const childStderrDir = path.join(stateDir, "run-stderr");
   const childStderrLogPath = agentCommand ? path.join(childStderrDir, `${runId}.log`) : null;
   const wrapper = agentCommand
-    ? await writeAgentWrapper({
-        stateDir,
-        acpxAgent,
-        agentCommandShell,
-        env,
-        childStderrDir,
+      ? await writeAgentWrapper({
+          stateDir,
+          acpxAgent,
+          agentCommand,
+          agentCommandShell,
+          env,
+          childStderrDir,
       })
     : null;
   const wrapperPath = wrapper?.wrapperPath ?? null;
@@ -1177,7 +1276,7 @@ async function buildRuntime(input: {
     await paperclipBridge?.stop().catch(() => {});
     throw err;
   }
-  const overrideCommand = processSessionBridge?.agentCommand ?? wrapperPath;
+  const overrideCommand = processSessionBridge?.agentCommand ?? wrapper?.agentRegistryCommand ?? null;
   const overrides = overrideCommand ? { [acpxAgent]: overrideCommand } : undefined;
   const agentRegistry = createAgentRegistry({ overrides });
   const fingerprint = shortHash({
@@ -1207,7 +1306,7 @@ async function buildRuntime(input: {
   const loggedEnv = buildInvocationEnvForLogs(env, {
     runtimeEnv,
     includeRuntimeKeys: ["HOME"],
-    resolvedCommand: wrapperPath ?? agentCommand ?? acpxAgent,
+    resolvedCommand: overrideCommand ?? agentCommand ?? acpxAgent,
   });
 
   return {
@@ -1244,21 +1343,51 @@ async function buildRuntime(input: {
   };
 }
 
+export function mergeCodexStartupConfig(input: {
+  existing?: string;
+  requestedModel: string;
+  requestedThinkingEffort: string;
+  fastMode: boolean;
+}): string {
+  let config: Record<string, unknown> = {};
+  if (input.existing?.trim()) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(input.existing);
+    } catch (err) {
+      throw new Error(
+        `Invalid CODEX_CONFIG JSON: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error("Invalid CODEX_CONFIG JSON: expected an object.");
+    }
+    config = { ...(parsed as Record<string, unknown>) };
+  }
+  if (input.requestedModel) config.model = input.requestedModel;
+  if (input.requestedThinkingEffort) {
+    config.model_reasoning_effort = input.requestedThinkingEffort;
+  }
+  if (input.fastMode) config.service_tier = "fast";
+  return JSON.stringify(config);
+}
+
 function sessionConfigOptions(prepared: AcpxPreparedRuntime): Array<{ key: string; value: string }> {
   const options: Array<{ key: string; value: string }> = [];
-  // Model for the claude agent is pre-set via ANTHROPIC_MODEL env var at
-  // startup; skip set_config_option to avoid ACP-server model-name validation
-  // that rejects bare IDs like "claude-opus-4-7" in some runtime versions.
-  if (prepared.requestedModel && prepared.acpxAgent !== "claude") {
+  // Codex and Claude receive these controls during ACP startup. Applying them
+  // again through session/set_config_option can reject a valid newly released
+  // model when the ACP adapter's advertised model list is stale.
+  const usesStartupConfig = prepared.acpxAgent === "codex" || prepared.acpxAgent === "claude";
+  if (prepared.requestedModel && !usesStartupConfig) {
     options.push({ key: "model", value: prepared.requestedModel });
   }
-  if (prepared.requestedThinkingEffort) {
+  if (prepared.requestedThinkingEffort && !usesStartupConfig) {
     options.push({
-      key: prepared.acpxAgent === "codex" ? "reasoning_effort" : "effort",
+      key: "effort",
       value: prepared.requestedThinkingEffort,
     });
   }
-  if (prepared.fastMode) {
+  if (prepared.fastMode && prepared.acpxAgent !== "codex") {
     options.push(
       { key: "service_tier", value: "fast" },
       { key: "features.fast_mode", value: "true" },
@@ -2036,7 +2165,7 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
     let controller: AbortController | null = null;
     let timeout: NodeJS.Timeout | null = null;
     let timedOut = false;
-    const textParts: string[] = [];
+    const outputTextParts: string[] = [];
     let eventBreakdown: AcpRuntimeUsageBreakdown | null = null;
     let eventCostUsd: number | null = null;
     try {
@@ -2064,7 +2193,9 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
         await turn.cancel({ reason });
       };
       for await (const event of turn.events) {
-        if (event.type === "text_delta") textParts.push(event.text);
+        if (event.type === "text_delta" && event.stream !== "thought") {
+          outputTextParts.push(event.text);
+        }
         if (event.type === "status" && event.tag === "usage_update") {
           eventBreakdown = event.breakdown ?? eventBreakdown;
           eventCostUsd = usdCostAmount(event.cost) ?? eventCostUsd;
@@ -2177,7 +2308,7 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
             ? { cumulativeCostUsd: turnUsage.cumulativeCostUsd }
             : {}),
         },
-        summary: textParts.join("").trim() || terminalStopReason || terminal.status,
+        summary: outputTextParts.join("").trim() || terminalStopReason || terminal.status,
         clearSession,
       };
     } catch (err) {

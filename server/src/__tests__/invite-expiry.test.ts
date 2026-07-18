@@ -7,4 +7,10 @@ describe("companyInviteExpiresAt", () => {
     const expiresAt = companyInviteExpiresAt(createdAtMs);
     expect(expiresAt.toISOString()).toBe("2026-03-09T00:00:00.000Z");
   });
+
+  it("honors a validated custom invite expiration", () => {
+    const createdAtMs = Date.parse("2026-03-06T00:00:00.000Z");
+    const expiresAt = companyInviteExpiresAt(createdAtMs, 15);
+    expect(expiresAt.toISOString()).toBe("2026-03-06T00:15:00.000Z");
+  });
 });

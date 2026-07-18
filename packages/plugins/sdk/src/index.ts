@@ -290,6 +290,7 @@ export type {
   PluginEntityRecord,
   PluginEntityQuery,
   PluginWorkspace,
+  PluginWorkspaceInput,
   PluginExecutionWorkspaceMetadata,
   Company,
   Project,

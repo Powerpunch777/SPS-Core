@@ -40,7 +40,10 @@ import path from "node:path";
 import { createInterface, type Interface as ReadlineInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
-import type {
+import {
+  PERMISSION_KEYS,
+  type PermissionKey,
+  type
   AskUserQuestionsInteraction,
   PaperclipPluginManifestV1,
   RequestCheckboxConfirmationInteraction,
@@ -65,6 +68,7 @@ import type {
   ToolResult,
   EventFilter,
   AgentSessionEvent,
+  AgentSessionContext,
 } from "./types.js";
 import type {
   JsonRpcId,
@@ -662,6 +666,18 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
           return callHost("projects.listWorkspaces", { projectId, companyId });
         },
 
+        async createWorkspace(projectId, input, companyId) {
+          return callHost("projects.createWorkspace", { projectId, input, companyId });
+        },
+
+        async updateWorkspace(projectId, workspaceId, input, companyId) {
+          return callHost("projects.updateWorkspace", { projectId, workspaceId, input, companyId });
+        },
+
+        async removeWorkspace(projectId, workspaceId, companyId) {
+          return callHost("projects.removeWorkspace", { projectId, workspaceId, companyId });
+        },
+
         async getPrimaryWorkspace(projectId: string, companyId: string) {
           return callHost("projects.getPrimaryWorkspace", { projectId, companyId });
         },
@@ -793,6 +809,8 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
             executionWorkspaceId: input.executionWorkspaceId,
             executionWorkspacePreference: input.executionWorkspacePreference,
             executionWorkspaceSettings: input.executionWorkspaceSettings,
+            projectWorkspaceId: input.projectWorkspaceId,
+            executionPolicy: input.executionPolicy,
             actorAgentId: input.actor?.actorAgentId,
             actorUserId: input.actor?.actorUserId,
             actorRunId: input.actor?.actorRunId,
@@ -860,6 +878,17 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
 
         async createComment(issueId: string, body: string, companyId: string, options?: { authorAgentId?: string }) {
           return callHost("issues.createComment", { issueId, body, companyId, authorAgentId: options?.authorAgentId });
+        },
+
+        async submitReport(input) {
+          return callHost("issues.submitReport", {
+            issueId: input.issueId,
+            companyId: input.companyId,
+            kind: input.kind,
+            body: input.body,
+            actorAgentId: input.actorAgentId,
+            actorRunId: input.actorRunId,
+          });
         },
 
         async createInteraction(issueId: string, interaction, companyId: string, options?: { authorAgentId?: string }) {
@@ -1052,12 +1081,13 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
         },
 
         sessions: {
-          async create(agentId: string, companyId: string, opts?: { taskKey?: string; reason?: string }) {
+          async create(agentId: string, companyId: string, opts?: { taskKey?: string; reason?: string; context?: AgentSessionContext }) {
             return callHost("agents.sessions.create", {
               agentId,
               companyId,
               taskKey: opts?.taskKey,
               reason: opts?.reason,
+              context: opts?.context,
             });
           },
 
@@ -1585,16 +1615,26 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
     return value === "user" || value === "agent" || value === "system" ? value : "system";
   }
 
+  function permissionKeys(value: unknown): PluginPerformActionActorContext["permissions"] {
+    if (!Array.isArray(value)) return undefined;
+    const permissions = value.filter((entry): entry is PermissionKey => (
+      typeof entry === "string" && (PERMISSION_KEYS as readonly string[]).includes(entry)
+    ));
+    return permissions.length ? permissions : undefined;
+  }
+
   function actionContextFromParams(params: PerformActionParams): PluginPerformActionContext {
     const rawActor = params.actorContext && typeof params.actorContext === "object"
       ? params.actorContext
       : null;
+    const permissions = permissionKeys(rawActor?.permissions);
     const actor = Object.freeze({
       type: actorTypeOrSystem(rawActor?.type),
       userId: stringOrNull(rawActor?.userId),
       agentId: stringOrNull(rawActor?.agentId),
       runId: stringOrNull(rawActor?.runId),
       companyId: stringOrNull(rawActor?.companyId),
+      ...(permissions ? { permissions } : {}),
     });
     return Object.freeze({
       actor,

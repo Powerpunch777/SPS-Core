@@ -172,4 +172,39 @@ describe("createHostClientHandlers invocation company scope", () => {
     ).rejects.toBeInstanceOf(InvocationScopeDeniedError);
     expect(searchAudit).not.toHaveBeenCalled();
   });
+
+  it("requires issues.report before delegating atomic Task reports", async () => {
+    const submitReport = vi.fn(async () => ({
+      issue: { id: "issue-a" },
+      comment: { id: "comment-a" },
+      idempotent: false,
+    }));
+    const services = {
+      issues: { submitReport },
+    } as unknown as HostServices;
+    const params = {
+      issueId: "issue-a",
+      companyId: "company-a",
+      kind: "final" as const,
+      body: "## Paperclip Final Report\nVerified output and changed paths are recorded.",
+      actorAgentId: "agent-a",
+      actorRunId: "run-a",
+    };
+
+    const deniedHandlers = createHostClientHandlers({
+      pluginId: "paperclip.test",
+      capabilities: [],
+      services,
+    });
+    await expect(deniedHandlers["issues.submitReport"](params)).rejects.toBeInstanceOf(CapabilityDeniedError);
+    expect(submitReport).not.toHaveBeenCalled();
+
+    const allowedHandlers = createHostClientHandlers({
+      pluginId: "paperclip.test",
+      capabilities: ["issues.report"],
+      services,
+    });
+    await allowedHandlers["issues.submitReport"](params);
+    expect(submitReport).toHaveBeenCalledOnce();
+  });
 });

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { pluginOperationIssueOriginKind } from "@paperclipai/shared";
+import { PERMISSION_KEYS, pluginOperationIssueOriginKind, validateIssueReportBody } from "@paperclipai/shared";
+import type { PermissionKey as SharedPermissionKey } from "@paperclipai/shared";
 import type {
   PaperclipPluginManifestV1,
   PluginCapability,
@@ -33,6 +34,7 @@ import type {
   ToolResult,
   ToolRunContext,
   PluginWorkspace,
+  PluginWorkspaceInput,
   PluginExecutionWorkspaceMetadata,
   AgentSession,
   AgentSessionEvent,
@@ -562,18 +564,28 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
     return value === "user" || value === "agent" || value === "system" ? value : "system";
   }
 
+  function permissionKeys(value: unknown): PluginPerformActionActorContext["permissions"] {
+    if (!Array.isArray(value)) return undefined;
+    const permissions = value.filter((entry): entry is SharedPermissionKey => (
+      typeof entry === "string" && (PERMISSION_KEYS as readonly string[]).includes(entry)
+    ));
+    return permissions.length ? permissions : undefined;
+  }
+
   function actionContextFor(
     params: Record<string, unknown>,
     options?: TestHarnessPerformActionOptions,
   ): PluginPerformActionContext {
     const actorInput = options?.actor ?? null;
     const companyId = stringOrNull(options?.companyId) ?? stringOrNull(actorInput?.companyId) ?? stringOrNull(params.companyId);
+    const permissions = permissionKeys(actorInput?.permissions);
     const actor = Object.freeze({
       type: actorTypeOrSystem(actorInput?.type),
       userId: stringOrNull(actorInput?.userId),
       agentId: stringOrNull(actorInput?.agentId),
       runId: stringOrNull(actorInput?.runId),
       companyId,
+      ...(permissions ? { permissions } : {}),
     });
     return Object.freeze({ actor, companyId });
   }
@@ -972,6 +984,66 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
         requireCapability(manifest, capabilitySet, "project.workspaces.read");
         if (!isInCompany(projects.get(projectId), companyId)) return [];
         return projectWorkspaces.get(projectId) ?? [];
+      },
+      async createWorkspace(projectId, input: PluginWorkspaceInput, companyId) {
+        requireCapability(manifest, capabilitySet, "project.workspaces.write");
+        if (!isInCompany(projects.get(projectId), companyId)) return null;
+        const existing = projectWorkspaces.get(projectId) ?? [];
+        const timestamp = new Date().toISOString();
+        const shouldBePrimary = input.isPrimary === true || existing.length === 0;
+        const workspace: PluginWorkspace = {
+          id: `workspace-${randomUUID()}`,
+          projectId,
+          name: input.name?.trim() || "Workspace",
+          path: input.cwd?.trim() || "",
+          repoUrl: input.repoUrl?.trim() || null,
+          repoRef: input.repoRef?.trim() || null,
+          defaultRef: input.defaultRef?.trim() || null,
+          isPrimary: shouldBePrimary,
+          createdAt: timestamp,
+          updatedAt: timestamp,
+        };
+        projectWorkspaces.set(projectId, [
+          ...existing.map((entry) => shouldBePrimary ? { ...entry, isPrimary: false, updatedAt: timestamp } : entry),
+          workspace,
+        ]);
+        return workspace;
+      },
+      async updateWorkspace(projectId, workspaceId, input: PluginWorkspaceInput, companyId) {
+        requireCapability(manifest, capabilitySet, "project.workspaces.write");
+        if (!isInCompany(projects.get(projectId), companyId)) return null;
+        const existing = projectWorkspaces.get(projectId) ?? [];
+        const current = existing.find((entry) => entry.id === workspaceId);
+        if (!current) return null;
+        const timestamp = new Date().toISOString();
+        const next: PluginWorkspace = {
+          ...current,
+          ...(input.name !== undefined ? { name: input.name?.trim() || current.name } : {}),
+          ...(input.cwd !== undefined ? { path: input.cwd?.trim() || "" } : {}),
+          ...(input.repoUrl !== undefined ? { repoUrl: input.repoUrl?.trim() || null } : {}),
+          ...(input.repoRef !== undefined ? { repoRef: input.repoRef?.trim() || null } : {}),
+          ...(input.defaultRef !== undefined ? { defaultRef: input.defaultRef?.trim() || null } : {}),
+          ...(input.isPrimary !== undefined ? { isPrimary: input.isPrimary } : {}),
+          updatedAt: timestamp,
+        };
+        projectWorkspaces.set(projectId, existing.map((entry) => {
+          if (entry.id === workspaceId) return next;
+          return input.isPrimary === true ? { ...entry, isPrimary: false, updatedAt: timestamp } : entry;
+        }));
+        return next;
+      },
+      async removeWorkspace(projectId, workspaceId, companyId) {
+        requireCapability(manifest, capabilitySet, "project.workspaces.write");
+        if (!isInCompany(projects.get(projectId), companyId)) return null;
+        const existing = projectWorkspaces.get(projectId) ?? [];
+        const removed = existing.find((entry) => entry.id === workspaceId) ?? null;
+        if (!removed) return null;
+        const remaining = existing.filter((entry) => entry.id !== workspaceId);
+        if (removed.isPrimary && remaining.length > 0) {
+          remaining[0] = { ...remaining[0]!, isPrimary: true, updatedAt: new Date().toISOString() };
+        }
+        projectWorkspaces.set(projectId, remaining);
+        return removed;
       },
       async getPrimaryWorkspace(projectId, companyId) {
         requireCapability(manifest, capabilitySet, "project.workspaces.read");
@@ -1559,7 +1631,7 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
           id: randomUUID(),
           companyId: input.companyId,
           projectId: input.projectId ?? null,
-          projectWorkspaceId: null,
+          projectWorkspaceId: input.projectWorkspaceId ?? null,
           goalId: input.goalId ?? null,
           parentId: input.parentId ?? null,
           title: input.title,
@@ -1584,6 +1656,7 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
           requestDepth: input.requestDepth ?? 0,
           billingCode: input.billingCode ?? null,
           assigneeAdapterOverrides: input.assigneeAdapterOverrides ?? null,
+          executionPolicy: input.executionPolicy ?? null,
           executionWorkspaceId: input.executionWorkspaceId ?? null,
           executionWorkspacePreference: input.executionWorkspacePreference ?? null,
           executionWorkspaceSettings: input.executionWorkspaceSettings ?? null,
@@ -1597,6 +1670,77 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
         issues.set(record.id, record);
         if (input.blockedByIssueIds) blockedByIssueIds.set(record.id, [...new Set(input.blockedByIssueIds)]);
         return record;
+      },
+      async submitReport(input) {
+        requireCapability(manifest, capabilitySet, "issues.report");
+        const validation = validateIssueReportBody(input.body, input.kind);
+        if (!validation.valid) {
+          throw new Error(validation.error || "Invalid report body");
+        }
+
+        const issue = issues.get(input.issueId);
+        if (!issue) {
+          throw new Error("Issue not found");
+        }
+        if (issue.companyId !== input.companyId) {
+          throw new Error("Issue does not belong to the company");
+        }
+        if (issue.assigneeAgentId !== input.actorAgentId) {
+          throw new Error("Actor agent is not the assignee of the issue");
+        }
+
+        const currentComments = issueComments.get(input.issueId) ?? [];
+        const finalHeader = "## Paperclip Final Report";
+        const blockerHeader = "## Paperclip Blocker Report";
+        const existingReports = currentComments.filter((comment: IssueComment) => {
+          if (comment.createdByRunId !== input.actorRunId) return false;
+          const firstLine = comment.body.split(/\r?\n/, 1)[0];
+          return firstLine === finalHeader || firstLine === blockerHeader;
+        });
+        const existingKinds = new Set(existingReports.map((comment) =>
+          comment.body.split(/\r?\n/, 1)[0] === finalHeader ? "final" : "blocker",
+        ));
+        if (existingKinds.size > 1) {
+          throw new Error("Conflicting reports already exist for this run");
+        }
+        const existingReport = existingReports[0];
+        if (existingReport) {
+          const existingKind = existingReport.body.split(/\r?\n/, 1)[0] === finalHeader
+            ? "final"
+            : "blocker";
+          if (existingKind !== input.kind) {
+            throw new Error("An opposite-kind report was already submitted for this run");
+          }
+          return { issue, comment: existingReport, idempotent: true };
+        }
+
+        if (issue.status !== "in_progress") {
+          throw new Error(`Cannot submit report for issue in status: ${issue.status}`);
+        }
+
+        const now = new Date();
+        const createdComment: IssueComment = {
+          id: randomUUID(),
+          issueId: input.issueId,
+          companyId: input.companyId,
+          body: input.body,
+          authorType: "agent",
+          authorAgentId: input.actorAgentId,
+          authorUserId: null,
+          presentation: null,
+          metadata: null,
+          createdByRunId: input.actorRunId,
+          createdAt: now,
+          updatedAt: now,
+        };
+        currentComments.push(createdComment);
+        issueComments.set(input.issueId, currentComments);
+
+        issue.status = input.kind === "final" ? "in_review" : "blocked";
+        issue.updatedAt = new Date();
+        issues.set(input.issueId, issue);
+
+        return { issue, comment: createdComment, idempotent: false };
       },
       async update(issueId, patch, companyId) {
         requireCapability(manifest, capabilitySet, "issues.update");
@@ -2075,6 +2219,9 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
             companyId: cid,
             status: "active",
             createdAt: new Date().toISOString(),
+            context: opts?.context,
+            lastRunId: null,
+            lastError: null,
           };
           sessions.set(session.sessionId, session);
           return session;
@@ -2094,7 +2241,10 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
           if (opts.onEvent) {
             sessionEventCallbacks.set(sessionId, opts.onEvent);
           }
-          return { runId: randomUUID() };
+          const runId = randomUUID();
+          session.lastRunId = runId;
+          session.lastError = null;
+          return { runId };
         },
         async close(sessionId, companyId) {
           requireCapability(manifest, capabilitySet, "agent.sessions.close");

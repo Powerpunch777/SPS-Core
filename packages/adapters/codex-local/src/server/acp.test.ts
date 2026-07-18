@@ -390,7 +390,7 @@ describe("codex_local ACP lane", () => {
     );
   });
 
-  it("executes through ACPX with Codex session config and ephemeral skills", async () => {
+  it("executes through ACPX with Codex startup config and ephemeral skills", async () => {
     const root = await makeTempRoot("paperclip-codex-acp-exec-");
     const skill = await createRuntimeSkill(root);
     const runtimes: FakeRuntime[] = [];
@@ -442,14 +442,14 @@ describe("codex_local ACP lane", () => {
       mode: "persistent",
       cwd: root,
     });
-    expect(runtimes[0]?.setConfigInputs.map((input) => [input.key, input.value])).toEqual([
-      ["model", "gpt-5.5"],
-      ["reasoning_effort", "high"],
-      ["service_tier", "fast"],
-      ["features.fast_mode", "true"],
-    ]);
+    expect(runtimes[0]?.setConfigInputs).toEqual([]);
     expect(meta[0]?.commandNotes?.join("\n")).toContain("Prepared ACPX Codex skill home");
     expect(meta[0]?.env?.CODEX_HOME).toBe(path.join(root, "codex-home"));
+    expect(JSON.parse(meta[0]?.env?.CODEX_CONFIG ?? "{}")).toMatchObject({
+      model: "gpt-5.5",
+      model_reasoning_effort: "high",
+      service_tier: "fast",
+    });
   });
 
   it("resumes compatible ACP sessions on later Codex ACP runs", async () => {

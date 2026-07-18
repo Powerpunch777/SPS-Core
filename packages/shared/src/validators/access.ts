@@ -14,6 +14,13 @@ export const createCompanyInviteSchema = z.object({
   humanRole: z.enum(HUMAN_COMPANY_MEMBERSHIP_ROLES).optional().nullable(),
   defaultsPayload: z.record(z.string(), z.unknown()).optional().nullable(),
   agentMessage: z.string().max(4000).optional().nullable(),
+  expiresInMinutes: z
+    .number()
+    .int()
+    .refine((value) => [15, 60, 24 * 60, 7 * 24 * 60].includes(value), {
+      message: "expiresInMinutes must be one of 15, 60, 1440, or 10080",
+    })
+    .optional(),
 });
 
 export type CreateCompanyInvite = z.infer<typeof createCompanyInviteSchema>;

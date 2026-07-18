@@ -2,9 +2,11 @@ import { describe, expect, it } from "vitest";
 import {
   applyUiBranding,
   getWorktreeUiBranding,
+  isWorkplaneModeEnabled,
   isWorktreeUiBrandingEnabled,
   renderFaviconLinks,
   renderRuntimeBrandingMeta,
+  renderWorkplaneModeMeta,
 } from "../ui-branding.js";
 
 const TEMPLATE = `<!doctype html>
@@ -24,6 +26,18 @@ describe("ui branding", () => {
     expect(isWorktreeUiBrandingEnabled({ PAPERCLIP_IN_WORKTREE: "true" })).toBe(true);
     expect(isWorktreeUiBrandingEnabled({ PAPERCLIP_IN_WORKTREE: "1" })).toBe(true);
     expect(isWorktreeUiBrandingEnabled({ PAPERCLIP_IN_WORKTREE: "false" })).toBe(false);
+  });
+
+  it("surfaces workplane mode independently from worktree branding", () => {
+    expect(isWorkplaneModeEnabled({ PAPERCLIP_WORKPLANE_MODE: "true" })).toBe(true);
+    expect(isWorkplaneModeEnabled({ PAPERCLIP_WORKPLANE_MODE: "false" })).toBe(false);
+    expect(renderWorkplaneModeMeta({ PAPERCLIP_WORKPLANE_MODE: "1" })).toContain(
+      'name="paperclip-workplane-mode"',
+    );
+
+    const branded = applyUiBranding(TEMPLATE, { PAPERCLIP_WORKPLANE_MODE: "true" });
+    expect(branded).toContain('<meta name="paperclip-workplane-mode" content="true" />');
+    expect(branded).toContain('href="/favicon.svg"');
   });
 
   it("resolves name, color, and text color for worktree branding", () => {

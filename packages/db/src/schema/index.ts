@@ -23,6 +23,7 @@ export { agentRuntimeState } from "./agent_runtime_state.js";
 export { agentTaskSessions } from "./agent_task_sessions.js";
 export { agentWakeupRequests } from "./agent_wakeup_requests.js";
 export { projects } from "./projects.js";
+export { projectAccessGrants } from "./project_access_grants.js";
 export { projectMemberships } from "./project_memberships.js";
 export { projectWorkspaces } from "./project_workspaces.js";
 export { executionWorkspaces } from "./execution_workspaces.js";
@@ -87,6 +88,14 @@ export { documentAnnotationAnchorSnapshots } from "./document_annotation_anchor_
 export { heartbeatRuns } from "./heartbeat_runs.js";
 export { heartbeatRunEvents } from "./heartbeat_run_events.js";
 export { heartbeatRunWatchdogDecisions } from "./heartbeat_run_watchdog_decisions.js";
+export {
+  spsNodes,
+  spsNodeHeartbeats,
+  spsNodeAgentGrants,
+  spsAgentNodeBindings,
+  spsNodeCommands,
+  spsNodeCommandEvents,
+} from "./sps_nodes.js";
 export { costEvents } from "./cost_events.js";
 export { financeEvents } from "./finance_events.js";
 export { approvals } from "./approvals.js";

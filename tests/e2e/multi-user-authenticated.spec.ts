@@ -7,6 +7,7 @@ const BASE = process.env.PAPERCLIP_E2E_BASE_URL ?? "http://127.0.0.1:3105";
 const DATA_DIR = process.env.PAPERCLIP_E2E_DATA_DIR ?? process.env.PAPERCLIP_HOME;
 const CONFIG_PATH = process.env.PAPERCLIP_E2E_CONFIG_PATH ?? path.resolve(process.cwd(), ".paperclip/config.json");
 const BOOTSTRAP_SCRIPT_PATH = path.resolve(process.cwd(), "packages/db/scripts/create-auth-bootstrap-invite.ts");
+const TSX_CLI_PATH = path.resolve(process.cwd(), "cli/node_modules/tsx/dist/cli.mjs");
 const OWNER_PASSWORD = "paperclip-owner-password";
 const INVITED_PASSWORD = "paperclip-invited-password";
 
@@ -59,15 +60,14 @@ function createBootstrapInvite() {
   if (!existsSync(BOOTSTRAP_SCRIPT_PATH)) {
     throw new Error(`Authenticated bootstrap helper not found at ${BOOTSTRAP_SCRIPT_PATH}`);
   }
+  if (!existsSync(TSX_CLI_PATH)) {
+    throw new Error(`Workspace tsx runtime not found at ${TSX_CLI_PATH}`);
+  }
 
-  const pnpmCommand = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
   return execFileSync(
-    pnpmCommand,
+    process.execPath,
     [
-      "--filter",
-      "@paperclipai/db",
-      "exec",
-      "tsx",
+      TSX_CLI_PATH,
       BOOTSTRAP_SCRIPT_PATH,
       "--config",
       CONFIG_PATH,
@@ -102,8 +102,9 @@ async function signUp(page: Page, user: HumanUser) {
 
 async function acceptBootstrapInvite(page: Page, inviteUrl: string) {
   await page.goto(inviteUrl);
-  await expect(page.getByRole("heading", { name: "Bootstrap your Paperclip instance" })).toBeVisible();
-  await page.getByRole("button", { name: "Accept bootstrap invite" }).click();
+  await expect(page.getByRole("heading", { name: "Set up Paperclip" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Accept bootstrap invite" })).toBeVisible();
+  await page.getByRole("button", { name: "Accept invite" }).click();
   await expect(page.getByRole("heading", { name: "Bootstrap complete" })).toBeVisible({
     timeout: 20_000,
   });
@@ -121,38 +122,26 @@ async function createCompanyForSession(page: Page, nextCompanyName: string) {
 }
 
 async function createAuthenticatedInvite(page: Page, companyPrefix: string) {
-  await page.goto(`${BASE}/${companyPrefix}/company/settings`);
-  await expect(page.getByTestId("company-settings-invites-section")).toBeVisible({
-    timeout: 20_000,
-  });
-  await page.getByTestId("company-settings-human-invite-role").selectOption("operator");
-  await page.getByTestId("company-settings-create-human-invite").click();
-  const inviteField = page.getByTestId("company-settings-human-invite-url");
+  await page.goto(`${BASE}/${companyPrefix}/company/settings/invites`);
+  await expect(page.getByRole("heading", { name: "Company Invites" })).toBeVisible({ timeout: 20_000 });
+  await page.getByRole("radio", { name: /Operator/ }).check();
+  await page.getByRole("button", { name: "Create invite" }).click();
+  const inviteField = page.getByRole("textbox", { name: "Latest invite URL" });
   await expect(inviteField).toBeVisible({ timeout: 20_000 });
   return (await inviteField.inputValue()).trim();
 }
 
 async function signUpFromInvite(page: Page, inviteUrl: string, user: HumanUser) {
   await page.goto(inviteUrl);
-  await expect(page.getByText("Sign in or create an account before submitting a human join request.")).toBeVisible();
-  await page.getByRole("link", { name: "Sign in / Create account" }).click();
-  await expect(page).toHaveURL(/\/auth\?next=/);
-  await expect(page.getByRole("heading", { name: "Sign in to Paperclip" })).toBeVisible();
-  await page.getByRole("button", { name: "Create one" }).click();
+  await expect(page.getByRole("heading", { name: "Create your account" })).toBeVisible();
   await page.getByLabel("Name").fill(user.name);
   await page.getByLabel("Email").fill(user.email);
   await page.getByLabel("Password").fill(user.password);
-  await page.getByRole("button", { name: "Create Account" }).click();
-  await expect(page).toHaveURL(new RegExp(`/invite/[^/]+$`), { timeout: 20_000 });
-}
-
-async function acceptHumanInvite(page: Page) {
-  await expect(page.getByRole("button", { name: "Join company" })).toBeEnabled();
-  await page.getByRole("button", { name: "Join company" }).click();
-  await expect(page.getByRole("heading", { name: "You joined the company" })).toBeVisible({
+  await page.getByRole("button", { name: "Create account and continue" }).click();
+  await expect(page).not.toHaveURL(/\/auth/, { timeout: 20_000 });
+  await expect(page.getByRole("button", { name: "Open account menu" })).toContainText(user.name, {
     timeout: 20_000,
   });
-  await page.getByRole("link", { name: "Open board" }).click();
 }
 
 async function sessionJsonRequest<T>(
@@ -252,6 +241,24 @@ async function waitForMemberRole(
     });
 }
 
+async function setMemberRole(
+  page: Page,
+  companyPrefix: string,
+  email: string,
+  membershipRole: CompanyMember["membershipRole"]
+) {
+  await page.goto(`${BASE}/${companyPrefix}/company/settings/members`);
+  await expect(page.getByRole("heading", { name: "Company Members" })).toBeVisible({ timeout: 20_000 });
+  const memberRow = page.getByText(email, { exact: true }).locator("xpath=../..");
+  await expect(memberRow.getByRole("button", { name: "Edit" })).toBeVisible({ timeout: 20_000 });
+  await memberRow.getByRole("button", { name: "Edit" }).click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.getByRole("heading", { name: "Edit member" })).toBeVisible();
+  await dialog.getByLabel("Company role").selectOption(membershipRole ?? "");
+  await dialog.getByRole("button", { name: "Save member" }).click();
+  await expect(dialog).toHaveCount(0, { timeout: 20_000 });
+}
+
 async function newPage(browser: Browser) {
   const context = await browser.newContext();
   const page = await context.newPage();
@@ -279,32 +286,28 @@ test.describe("Multi-user: authenticated mode", () => {
     const company = await createCompanyForSession(page, companyName);
     const companyPrefix = company.issuePrefix ?? company.id;
     await page.goto(`${BASE}/${companyPrefix}/dashboard`);
-    await expect(page.getByTestId("layout-account-menu-trigger")).toContainText(ownerUser.name);
-    await page.getByTestId("layout-account-menu-trigger").click();
+    const accountMenuTrigger = page.getByRole("button", { name: "Open account menu" });
+    await expect(accountMenuTrigger).toContainText(ownerUser.name);
+    await accountMenuTrigger.click();
     await expect(page.getByText(ownerUser.email)).toBeVisible();
     const inviteUrl = await createAuthenticatedInvite(page, companyPrefix);
 
     const invited = await newPage(browser);
     try {
       await signUpFromInvite(invited.page, inviteUrl, invitedUser);
-      await acceptHumanInvite(invited.page);
       await expect(invited.page).not.toHaveURL(/\/auth/, { timeout: 10_000 });
 
       const joinedMember = await waitForMember(page, company.id, invitedUser.email);
 
-      await page.goto(`${BASE}/${companyPrefix}/company/settings`);
-      const roleSelect = page.getByTestId(`company-settings-member-role-${joinedMember.id}`);
-      await expect(roleSelect).toBeVisible({ timeout: 20_000 });
-      await roleSelect.selectOption("viewer");
-      await expect(roleSelect).toHaveValue("viewer");
+      await setMemberRole(page, companyPrefix, invitedUser.email, "viewer");
       await waitForMemberRole(page, company.id, joinedMember.id, "viewer");
 
-      await invited.page.goto(`${BASE}/${companyPrefix}/company/settings`);
+      await invited.page.goto(`${BASE}/${companyPrefix}/company/settings/invites`);
       await expect(
-        invited.page.getByText("Your current company role cannot create human invites.")
+        invited.page.getByText("You do not have permission to manage company invites.")
       ).toBeVisible({ timeout: 20_000 });
       await expect(
-        invited.page.getByTestId("company-settings-create-human-invite")
+        invited.page.getByRole("button", { name: "Create invite" })
       ).toHaveCount(0);
 
       const forbiddenInviteRes = await sessionJsonRequest(

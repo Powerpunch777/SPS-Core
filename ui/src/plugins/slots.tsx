@@ -149,7 +149,32 @@ function usePluginRegistrySubscription(): void {
 }
 
 function requiresEntityType(slotType: PluginUiSlotType): boolean {
-  return slotType === "detailTab" || slotType === "taskDetailView" || slotType === "contextMenuItem" || slotType === "commentAnnotation" || slotType === "commentContextMenuItem" || slotType === "projectSidebarItem" || slotType === "toolbarButton";
+  return slotType === "detailTab" || slotType === "agentConfiguration" || slotType === "taskDetailView" || slotType === "contextMenuItem" || slotType === "commentAnnotation" || slotType === "commentContextMenuItem" || slotType === "projectSidebarItem" || slotType === "toolbarButton";
+}
+
+function slotMatchesFilters(
+  slot: PluginUiSlotDeclaration,
+  allowedTypes: Set<PluginUiSlotType>,
+  entityType: PluginUiSlotEntityType | null | undefined,
+): boolean {
+  if (!allowedTypes.has(slot.type)) return false;
+  if (!requiresEntityType(slot.type)) return true;
+  return Boolean(entityType && slot.entityTypes?.includes(entityType));
+}
+
+/**
+ * A plugin can contribute UI to several unrelated host surfaces. Loading every
+ * plugin module for each surface couples a single slow module to every route;
+ * only load modules that can render a requested slot type.
+ */
+function filterContributionsForSlots(
+  contributions: PluginUiContribution[] | undefined,
+  allowedTypes: Set<PluginUiSlotType>,
+  entityType: PluginUiSlotEntityType | null | undefined,
+): PluginUiContribution[] {
+  return (contributions ?? []).filter((contribution) =>
+    contribution.slots.some((slot) => slotMatchesFilters(slot, allowedTypes, entityType)),
+  );
 }
 
 function getErrorMessage(error: unknown): string {
@@ -230,6 +255,14 @@ type PluginLoadState = "idle" | "loading" | "loaded" | "error";
  * can find them when slots render.
  */
 const pluginLoadStates = new Map<string, PluginLoadState>();
+const pluginLoadListeners = new Set<() => void>();
+
+function setPluginLoadState(moduleKey: string, state: PluginLoadState): void {
+  pluginLoadStates.set(moduleKey, state);
+  for (const listener of pluginLoadListeners) {
+    listener();
+  }
+}
 
 /**
  * Promise cache to prevent concurrent duplicate imports for the same plugin.
@@ -485,7 +518,7 @@ async function loadPluginModule(contribution: PluginUiContribution): Promise<voi
     }
   }
 
-  pluginLoadStates.set(moduleKey, "loading");
+  setPluginLoadState(moduleKey, "loading");
 
   const url = buildPluginUiUrl(contribution);
 
@@ -537,9 +570,9 @@ async function loadPluginModule(contribution: PluginUiContribution): Promise<voi
         }
       }
 
-      pluginLoadStates.set(moduleKey, "loaded");
+      setPluginLoadState(moduleKey, "loaded");
     } catch (err) {
-      pluginLoadStates.set(moduleKey, "error");
+      setPluginLoadState(moduleKey, "error");
       console.error(`Failed to load UI module for plugin "${pluginKey}"`, err);
     } finally {
       inflightImports.delete(pluginId);
@@ -605,6 +638,14 @@ function usePluginModuleLoader(contributions: PluginUiContribution[] | undefined
   const [, setTick] = useState(0);
 
   useEffect(() => {
+    const listener = () => setTick((tick) => tick + 1);
+    pluginLoadListeners.add(listener);
+    return () => {
+      pluginLoadListeners.delete(listener);
+    };
+  }, []);
+
+  useEffect(() => {
     if (!contributions || contributions.length === 0) return;
 
     // Filter to contributions that haven't been loaded yet.
@@ -615,15 +656,7 @@ function usePluginModuleLoader(contributions: PluginUiContribution[] | undefined
 
     if (unloaded.length === 0) return;
 
-    let cancelled = false;
-    void ensurePluginModulesLoaded(unloaded).then(() => {
-      // Re-render so the slot mount can resolve the newly-registered components.
-      if (!cancelled) setTick((t) => t + 1);
-    });
-
-    return () => {
-      cancelled = true;
-    };
+    void ensurePluginModulesLoaded(unloaded);
   }, [contributions]);
 }
 
@@ -646,21 +679,24 @@ export function usePluginSlots(filters: SlotFilters): UsePluginSlotsResult {
     enabled: queryEnabled,
   });
 
-  // Kick off dynamic imports for any new plugin contributions.
-  usePluginModuleLoader(data);
-
   const slotTypesKey = useMemo(() => [...filters.slotTypes].sort().join("|"), [filters.slotTypes]);
+  const allowedTypes = useMemo(
+    () => new Set(slotTypesKey.split("|").filter(Boolean) as PluginUiSlotType[]),
+    [slotTypesKey],
+  );
+  const matchingContributions = useMemo(
+    () => filterContributionsForSlots(data, allowedTypes, filters.entityType),
+    [allowedTypes, data, filters.entityType],
+  );
+
+  // Kick off imports only for modules capable of rendering this host surface.
+  usePluginModuleLoader(matchingContributions);
 
   const slots = useMemo(() => {
-    const allowedTypes = new Set(slotTypesKey.split("|").filter(Boolean) as PluginUiSlotType[]);
     const rows: ResolvedPluginSlot[] = [];
-    for (const contribution of data ?? []) {
+    for (const contribution of matchingContributions) {
       for (const slot of contribution.slots) {
-        if (!allowedTypes.has(slot.type)) continue;
-        if (requiresEntityType(slot.type)) {
-          if (!filters.entityType) continue;
-          if (!slot.entityTypes?.includes(filters.entityType)) continue;
-        }
+        if (!slotMatchesFilters(slot, allowedTypes, filters.entityType)) continue;
         rows.push({
           ...slot,
           pluginId: contribution.pluginId,
@@ -679,10 +715,10 @@ export function usePluginSlots(filters: SlotFilters): UsePluginSlotsResult {
       return a.displayName.localeCompare(b.displayName);
     });
     return rows;
-  }, [data, filters.entityType, slotTypesKey]);
+  }, [allowedTypes, filters.entityType, matchingContributions]);
 
   // Consider loading until both query and module imports are done.
-  const modulesLoaded = data ? aggregateLoadState(data) === "loaded" : true;
+  const modulesLoaded = data ? aggregateLoadState(matchingContributions) === "loaded" : true;
   const isLoading = queryEnabled && (isQueryLoading || !modulesLoaded);
 
   return {
@@ -938,6 +974,7 @@ export function _resetPluginModuleLoader(): void {
   pluginLoadStates.clear();
   inflightImports.clear();
   registry.clear();
+  pluginLoadListeners.clear();
   if (typeof URL.revokeObjectURL === "function") {
     for (const url of Object.values(shimBlobUrls)) {
       URL.revokeObjectURL(url);
@@ -952,3 +989,11 @@ export const _applyJsxRuntimeKeyForTests = applyJsxRuntimeKey;
 export const _createReactShimSourceForTests = createReactShimSource;
 export const _rewriteBareSpecifiersForTests = rewriteBareSpecifiers;
 export const _collectRegisterableExportNamesForTests = collectRegisterableExportNames;
+export const _filterContributionsForSlotsForTests = filterContributionsForSlots;
+export const _setPluginLoadStateForTests = setPluginLoadState;
+export const _registerPluginLoadListenerForTests = (listener: () => void): void => {
+  pluginLoadListeners.add(listener);
+};
+export const _unregisterPluginLoadListenerForTests = (listener: () => void): void => {
+  pluginLoadListeners.delete(listener);
+};

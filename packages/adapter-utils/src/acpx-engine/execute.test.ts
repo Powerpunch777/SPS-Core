@@ -10,6 +10,7 @@ import {
   createAcpxEngineExecutor,
   findAncestorBin,
   geminiVersionSupportsNativeAcpFlag,
+  mergeCodexStartupConfig,
   parseGeminiVersionParts,
   rewriteGeminiAcpFlagForVersion,
   summarizeAcpxTurnUsage,
@@ -152,6 +153,41 @@ async function runExecutor(
 }
 
 describe("shared ACPX engine runtime behavior", () => {
+  it("merges Codex model controls into startup config without session config calls", async () => {
+    const root = await makeTempRoot();
+    const codexHome = path.join(root, "codex-home");
+    const { meta } = await runExecutor({
+      agent: "codex",
+      stateDir: path.join(root, "state"),
+      model: "gpt-5.6-sol",
+      modelReasoningEffort: "xhigh",
+      fastMode: true,
+      env: {
+        CODEX_HOME: codexHome,
+        CODEX_CONFIG: JSON.stringify({ web_search: "live", service_tier: "default" }),
+      },
+    });
+
+    const invocationEnv = meta[0]?.env as Record<string, string>;
+    expect(JSON.parse(invocationEnv.CODEX_CONFIG!)).toEqual({
+      web_search: "live",
+      service_tier: "fast",
+      model: "gpt-5.6-sol",
+      model_reasoning_effort: "xhigh",
+    });
+  });
+
+  it("rejects malformed Codex startup config before launching ACP", () => {
+    expect(() =>
+      mergeCodexStartupConfig({
+        existing: "not-json",
+        requestedModel: "gpt-5.6-sol",
+        requestedThinkingEffort: "xhigh",
+        fastMode: false,
+      }),
+    ).toThrow("Invalid CODEX_CONFIG JSON");
+  });
+
   it("includes Paperclip env and API access notes in the ACPX prompt without leaking the token", async () => {
     const { meta } = await runExecutor(
       { agent: "custom", agentCommand: "node ./fake-acp.js" },
@@ -213,6 +249,12 @@ describe("shared ACPX engine runtime behavior", () => {
           events: (async function* () {
             yield {
               type: "text_delta",
+              text: "private analysis",
+              stream: "thought",
+              tag: "agent_thought_chunk",
+            };
+            yield {
+              type: "text_delta",
               text: "streamed hello",
               stream: "output",
               tag: "agent_message_chunk",
@@ -242,6 +284,7 @@ describe("shared ACPX engine runtime behavior", () => {
     } as never);
 
     expect(result.exitCode).toBe(0);
+    expect(result.summary).toBe("streamed hello");
     expect(logs).toContainEqual({
       stream: "stdout",
       text: `${JSON.stringify({
@@ -544,8 +587,10 @@ describe("shared ACPX engine runtime behavior", () => {
     const envPath = path.join(stateDir, "wrappers", wrappers.find((name) => name.startsWith("custom-b-") && name.endsWith(".env"))!);
     const wrapper = await fs.readFile(wrapperPath, "utf8");
     const env = await fs.readFile(envPath, "utf8");
-    expect((await fs.stat(envPath)).mode & 0o777).toBe(0o600);
-    expect((await fs.stat(wrapperPath)).mode & 0o777).toBe(0o700);
+    if (process.platform !== "win32") {
+      expect((await fs.stat(envPath)).mode & 0o777).toBe(0o600);
+      expect((await fs.stat(wrapperPath)).mode & 0o777).toBe(0o700);
+    }
     expect(wrapper).toContain("node ./fake-acp.js");
     expect(wrapper).not.toContain("PAPERCLIP_API_KEY");
     expect(wrapper).not.toContain("new-key");
@@ -786,7 +831,46 @@ describe("shared ACPX engine runtime behavior", () => {
     expect(wrapper).toContain("exec node ./fake-acp.js");
   });
 
-  it("starts sandbox ACP process sessions in the remote execution cwd", async () => {
+  it.runIf(process.platform === "win32")(
+    "launches ACP commands through the Windows Node wrapper with UTF-8 paths and environment",
+    async () => {
+      const root = await makeTempRoot();
+      const stateDir = path.join(root, "state");
+      const agentDir = path.join(root, "agent space \uacbd\ub85c");
+      const fakeAgentPath = path.join(agentDir, "fake-agent.mjs");
+      await fs.mkdir(agentDir, { recursive: true });
+      await fs.writeFile(
+        fakeAgentPath,
+        'process.stdout.write(JSON.stringify({ marker: process.env.PAPERCLIP_WRAPPER_TEST, cwd: process.cwd() }));\n',
+        "utf8",
+      );
+
+      const { runtimeOptions } = await runExecutor({
+        agent: "custom",
+        agentCommand: `"${process.execPath}" "${fakeAgentPath}"`,
+        stateDir,
+        env: { PAPERCLIP_WRAPPER_TEST: "\ud658\uacbd-ok" },
+      });
+
+      const registry = runtimeOptions[0]?.agentRegistry as { resolve(agentName: string): string };
+      const registryCommand = registry.resolve("custom");
+      expect(registryCommand).toContain(".mjs");
+      expect(registryCommand).not.toContain(".sh");
+
+      const wrappers = await fs.readdir(path.join(stateDir, "wrappers"));
+      const wrapperName = wrappers.find((name) => name.endsWith(".mjs"));
+      expect(wrapperName).toBeTypeOf("string");
+      const { stdout, stderr } = await execFileAsync(
+        process.execPath,
+        [path.join(stateDir, "wrappers", wrapperName!)],
+        { cwd: root, encoding: "utf8" },
+      );
+      expect(JSON.parse(stdout)).toEqual({ marker: "\ud658\uacbd-ok", cwd: root });
+      expect(stderr).toBe("");
+    },
+  );
+
+  it.skipIf(process.platform === "win32")("starts sandbox ACP process sessions in the remote execution cwd", async () => {
     const root = await makeTempRoot();
     const stateDir = path.join(root, "state");
     const localCwd = path.join(root, "worktree");
@@ -1171,6 +1255,20 @@ describe("findAncestorBin", () => {
     expect(resolved).toBe(expectedBin);
   });
 
+  it.runIf(process.platform === "win32")("prefers the executable cmd shim over the POSIX shim on Windows", async () => {
+    const root = await makeTempRoot();
+    const packageDir = path.join(root, "node_modules", "@paperclipai", "adapter-utils");
+    await fs.mkdir(packageDir, { recursive: true });
+    await writeFakeBin(root, "claude-agent-acp");
+    const binDir = path.join(root, "node_modules", ".bin");
+    const cmdPath = path.join(binDir, "claude-agent-acp.cmd");
+    await fs.writeFile(cmdPath, "@echo off\r\nexit /b 0\r\n", "utf8");
+
+    const resolved = await findAncestorBin(packageDir, "claude-agent-acp");
+
+    expect(resolved).toBe(cmdPath);
+  });
+
   it("returns null when the binary is not present in any ancestor", async () => {
     const root = await makeTempRoot();
     const packageDir = path.join(root, "node_modules", "@paperclipai", "adapter-utils");
@@ -1216,6 +1314,9 @@ describe("gemini ACP flag selection", () => {
     await fs.mkdir(binDir, { recursive: true });
     const binPath = path.join(binDir, "gemini");
     await fs.writeFile(binPath, `#!/bin/sh\necho "${version}"\n`, { mode: 0o755 });
+    if (process.platform === "win32") {
+      await fs.writeFile(`${binPath}.cmd`, `@echo off\r\necho ${version}\r\n`, "utf8");
+    }
   }
 
   function pathWithFakeBin(binDir: string): string {

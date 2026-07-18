@@ -58,6 +58,7 @@ import { useDisabledAdaptersSync } from "../adapters/use-disabled-adapters";
 import { buildAgentUpdatePatch, omitUndefinedEntries, type AgentConfigOverlay } from "../lib/agent-config-patch";
 import { useAdapterCapabilities } from "../adapters/use-adapter-capabilities";
 import { resolveForcedKubernetesEnvironment } from "../lib/forced-kubernetes-environment";
+import { isWorkplaneModeEnabled } from "../lib/workplane-mode";
 
 /* ---- Create mode values ---- */
 
@@ -200,6 +201,7 @@ function clampDelayMsFromSeconds(value: number) {
 export function AgentConfigForm(props: AgentConfigFormProps) {
   const { mode, adapterModels: externalModels } = props;
   const isCreate = mode === "create";
+  const workplaneMode = isWorkplaneModeEnabled();
   const cards = props.sectionLayout === "cards";
   const showAdapterTypeField = props.showAdapterTypeField ?? true;
   const showAdapterTestEnvironmentButton = props.showAdapterTestEnvironmentButton ?? true;
@@ -486,7 +488,7 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
   const { data: companyAgents = [] } = useQuery({
     queryKey: selectedCompanyId ? queryKeys.agents.list(selectedCompanyId) : ["agents", "none", "list"],
     queryFn: () => agentsApi.list(selectedCompanyId!),
-    enabled: Boolean(!isCreate && selectedCompanyId),
+    enabled: Boolean(!workplaneMode && !isCreate && selectedCompanyId),
   });
 
   /** Props passed to adapter-specific config field components */
@@ -947,15 +949,17 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
                 placeholder="e.g. VP of Engineering"
               />
             </Field>
-            <Field label="Reports to" hint={help.reportsTo}>
-              <ReportsToPicker
-                agents={companyAgents}
-                value={eff("identity", "reportsTo", props.agent.reportsTo ?? null)}
-                onChange={(id) => mark("identity", "reportsTo", id)}
-                excludeAgentIds={[props.agent.id]}
-                chooseLabel="Choose manager…"
-              />
-            </Field>
+            {!workplaneMode ? (
+              <Field label="Reports to" hint={help.reportsTo}>
+                <ReportsToPicker
+                  agents={companyAgents}
+                  value={eff("identity", "reportsTo", props.agent.reportsTo ?? null)}
+                  onChange={(id) => mark("identity", "reportsTo", id)}
+                  excludeAgentIds={[props.agent.id]}
+                  chooseLabel="Choose manager…"
+                />
+              </Field>
+            ) : null}
             <Field label="Capabilities" hint={help.capabilities}>
               <MarkdownEditor
                 value={eff("identity", "capabilities", props.agent.capabilities ?? "") ?? ""}

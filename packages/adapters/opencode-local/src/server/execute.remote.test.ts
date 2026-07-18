@@ -250,6 +250,72 @@ describe("opencode remote execution", () => {
     expect(restoreWorkspaceFromSshExecution).toHaveBeenCalledTimes(1);
   });
 
+  it("runs directly on an SPS Desktop Node without sandbox workspace preparation or credential bridging", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-opencode-sps-node-"));
+    cleanupDirs.push(rootDir);
+    const workspaceDir = path.join(rootDir, "workspace");
+    await mkdir(workspaceDir, { recursive: true });
+    const nodeRunner = vi.fn(async () => ({
+      exitCode: 0,
+      signal: null,
+      timedOut: false,
+      stdout: [
+        JSON.stringify({ type: "step_start", sessionID: "node-session-1" }),
+        JSON.stringify({ type: "text", sessionID: "node-session-1", part: { text: "node result" } }),
+        JSON.stringify({
+          type: "step_finish",
+          sessionID: "node-session-1",
+          part: { cost: 0, tokens: { input: 1, output: 1, reasoning: 0, cache: { read: 0, write: 0 } } },
+        }),
+      ].join("\n"),
+      stderr: "",
+      pid: null,
+      startedAt: new Date().toISOString(),
+    }));
+
+    const result = await execute({
+      runId: "run-sps-node",
+      agent: {
+        id: "agent-1",
+        companyId: "company-1",
+        name: "OpenCode Worker",
+        adapterType: "opencode_local",
+        adapterConfig: {},
+      },
+      runtime: { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: null },
+      config: { command: "opencode", model: "ollama/qwen2.5-coder" },
+      context: { paperclipWorkspace: { cwd: workspaceDir, source: "project_primary" } },
+      executionTarget: {
+        kind: "remote",
+        transport: "sps_node",
+        nodeId: "node-1",
+        nodeLabel: "Friend PC",
+        projectId: "project-1",
+        remoteCwd: "sps-project://project-1",
+        runner: { execute: nodeRunner },
+      },
+      onLog: async () => {},
+    });
+
+    expect(nodeRunner).toHaveBeenCalledTimes(1);
+    expect(nodeRunner).toHaveBeenCalledWith(expect.objectContaining({
+      command: "opencode",
+      cwd: "sps-project://project-1",
+      args: expect.arrayContaining(["run", "--format", "json", "--model", "ollama/qwen2.5-coder"]),
+    }));
+    expect(prepareWorkspaceForSshExecution).not.toHaveBeenCalled();
+    expect(syncDirectoryToSsh).not.toHaveBeenCalled();
+    expect(startAdapterExecutionTargetPaperclipBridge).not.toHaveBeenCalled();
+    expect(result.sessionParams).toMatchObject({
+      sessionId: "node-session-1",
+      remoteExecution: {
+        transport: "sps_node",
+        nodeId: "node-1",
+        projectId: "project-1",
+      },
+    });
+  });
+
   it("fails before the remote run when the configured model is unavailable on the SSH target", async () => {
     runChildProcess.mockImplementationOnce(async () => ({
       exitCode: 0,

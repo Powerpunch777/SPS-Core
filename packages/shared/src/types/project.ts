@@ -1,4 +1,11 @@
-import type { BudgetWindowKind, PauseReason, ProjectStatus } from "../constants.js";
+import type {
+  BudgetWindowKind,
+  PauseReason,
+  ProjectAccessMode,
+  ProjectAccessRole,
+  ProjectStatus,
+} from "../constants.js";
+export type { ProjectAccessMode, ProjectAccessRole } from "../constants.js";
 import type {
   ProjectExecutionWorkspacePolicy,
   ProjectWorkspaceRuntimeConfig,
@@ -12,6 +19,22 @@ export type ProjectWorkspaceVisibility = "default" | "advanced";
 export interface ProjectGoalRef {
   id: string;
   title: string;
+}
+
+export interface ProjectAccessGrant {
+  id: string;
+  companyId: string;
+  projectId: string;
+  principalType: "user" | "agent";
+  principalId: string;
+  accessRole: ProjectAccessRole;
+  grantedByUserId: string | null;
+  createdAt: Date;
+  updatedAt: Date;
+  principal: {
+    name: string | null;
+    email: string | null;
+  } | null;
 }
 
 /**
@@ -93,6 +116,8 @@ export interface Project {
   env: AgentEnvConfig | null;
   pauseReason: PauseReason | null;
   pausedAt: Date | null;
+  /** Optional during rolling upgrades; omitted payloads retain Company access. */
+  accessMode?: ProjectAccessMode;
   executionWorkspacePolicy: ProjectExecutionWorkspacePolicy | null;
   codebase: ProjectCodebase;
   workspaces: ProjectWorkspace[];

@@ -124,6 +124,7 @@ import {
   sanitizeRuntimeServiceBaseEnv,
 } from "./workspace-runtime.js";
 import { issueService } from "./issues.js";
+import { issueReportService, parseIssueReportSummary } from "./issue-reports.js";
 import { visibleIssueCondition } from "./issue-visibility.js";
 import {
   ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
@@ -133,6 +134,7 @@ import {
   buildIssueMonitorTriggeredPatch,
   normalizeIssueExecutionPolicy,
   parseIssueExecutionState,
+  parseIssueExecutionFailurePolicy,
 } from "./issue-execution-policy.js";
 import {
   ISSUE_TREE_CONTROL_INTERACTION_WAKE_REASONS,
@@ -148,6 +150,7 @@ import { buildPlanReviewContext } from "./plan-review-context.js";
 import { executionWorkspaceService, mergeExecutionWorkspaceConfig } from "./execution-workspaces.js";
 import { workspaceOperationService, type WorkspaceOperationRecorder } from "./workspace-operations.js";
 import { isProcessGroupAlive, terminateLocalService } from "./local-service-supervisor.js";
+import { resolveSpsNodeExecutionTarget } from "./sps-node-execution.js";
 import {
   HEARTBEAT_RUN_SCRATCH_MARKER,
   buildHeartbeatRunScratchEnv,
@@ -5075,6 +5078,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
   const secretsSvc = secretService(db);
   const companySkills = companySkillService(db);
   const issuesSvc = issueService(db);
+  const issueReportsSvc = issueReportService(db);
   const treeControlSvc = issueTreeControlService(db);
   const executionWorkspacesSvc = executionWorkspaceService(db);
   const environmentsSvc = environmentService(db);
@@ -8123,6 +8127,29 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         issueCommentRetryQueuedAt: null,
       });
       return { outcome: "satisfied" as const, queuedRun: null };
+    }
+
+    if (run.status !== "succeeded") {
+      const issue = await db
+        .select({ executionPolicy: issues.executionPolicy })
+        .from(issues)
+        .where(and(eq(issues.id, issueId), eq(issues.companyId, run.companyId)))
+        .then((rows) => rows[0] ?? null);
+      const failurePolicy = parseIssueExecutionFailurePolicy(issue?.executionPolicy);
+      if (failurePolicy.automaticRetry === false) {
+        await patchRunIssueCommentStatus(run.id, {
+          issueCommentStatus: "not_applicable",
+          issueCommentSatisfiedByCommentId: null,
+          issueCommentRetryQueuedAt: null,
+        });
+        await appendRunEvent(run, await nextRunEventSeq(run.id), {
+          eventType: "lifecycle",
+          stream: "system",
+          level: "info",
+          message: "Failed-run comment retry was suppressed by issue policy",
+        });
+        return { outcome: "not_applicable" as const, queuedRun: null };
+      }
     }
 
     if (readNonEmptyString(contextSnapshot.retryReason) === "missing_issue_comment") {
@@ -12032,8 +12059,19 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     };
     persistedExecutionWorkspace = realizationResult.persistedExecutionWorkspace;
     const workspaceRealization = realizationResult.workspaceRealization;
-    const executionTarget = realizationResult.executionTarget;
-    const remoteExecution = realizationResult.remoteExecution;
+    const spsNodeExecutionTarget = await resolveSpsNodeExecutionTarget({
+      db,
+      companyId: agent.companyId,
+      agentId: agent.id,
+      adapterType: agent.adapterType,
+      heartbeatRunId: run.id,
+      projectId: resolvedProjectId,
+    });
+    // A primary SPS Node binding is authoritative. The Hub still persists the
+    // normal workspace/lease context for auditability, but the CLI command is
+    // dispatched only to the approved member computer.
+    const executionTarget = spsNodeExecutionTarget ?? realizationResult.executionTarget;
+    const remoteExecution = spsNodeExecutionTarget ? null : realizationResult.remoteExecution;
     if (!executionTarget || executionTarget.kind === "local") {
       try {
         runScratch = await prepareHeartbeatRunScratch({
@@ -13058,6 +13096,68 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           );
         }
         const livenessRun = finalizedRun;
+        const terminalIssueReport = issueId && outcome === "succeeded"
+          ? parseIssueReportSummary(
+            adapterResult.summary ?? parseObject(persistedResultJson).summary,
+          )
+          : null;
+        if (issueId && terminalIssueReport) {
+          try {
+            const reportResult = await issueReportsSvc.submit({
+              companyId: livenessRun.companyId,
+              issueId,
+              kind: terminalIssueReport.kind,
+              body: terminalIssueReport.body,
+              actorAgentId: agent.id,
+              actorRunId: livenessRun.id,
+            });
+            await logActivity(db, {
+              companyId: livenessRun.companyId,
+              actorType: "agent",
+              actorId: agent.id,
+              agentId: agent.id,
+              runId: livenessRun.id,
+              action: "issue.comment_added",
+              entityType: "issue",
+              entityId: issueId,
+              details: {
+                commentId: reportResult.comment.id,
+                bodySnippet: reportResult.comment.body.slice(0, 120),
+                identifier: reportResult.issue.identifier,
+                issueTitle: reportResult.issue.title,
+                reportKind: terminalIssueReport.kind,
+                idempotent: reportResult.idempotent,
+              },
+            });
+            await logActivity(db, {
+              companyId: livenessRun.companyId,
+              actorType: "agent",
+              actorId: agent.id,
+              agentId: agent.id,
+              runId: livenessRun.id,
+              action: "issue.updated",
+              entityType: "issue",
+              entityId: issueId,
+              details: {
+                status: reportResult.issue.status,
+                identifier: reportResult.issue.identifier,
+                reportKind: terminalIssueReport.kind,
+                commentId: reportResult.comment.id,
+                idempotent: reportResult.idempotent,
+                _previous: { status: "in_progress" },
+              },
+            });
+          } catch (err) {
+            logger.warn(
+              { err, runId: livenessRun.id, issueId },
+              "failed to apply terminal issue report atomically",
+            );
+            await onLog(
+              "stderr",
+              `[paperclip] Failed to apply terminal Task report atomically: ${err instanceof Error ? err.message : String(err)}\n`,
+            );
+          }
+        }
         await refreshContinuationSummaryForRun(livenessRun, agent);
         const skipRunIssueComment = parseObject(livenessRun.contextSnapshot).skipIssueComment === true;
         if (issueId && outcome === "succeeded" && !skipRunIssueComment) {
@@ -13076,9 +13176,20 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             );
           }
         }
+        let automaticRetry = true;
+        if (issueId) {
+          const issue = await db
+            .select({ executionPolicy: issues.executionPolicy })
+            .from(issues)
+            .where(and(eq(issues.id, issueId), eq(issues.companyId, livenessRun.companyId)))
+            .then((rows) => rows[0] ?? null);
+          const failurePolicy = parseIssueExecutionFailurePolicy(issue?.executionPolicy);
+          automaticRetry = failurePolicy.automaticRetry;
+        }
+
         if (outcome === "failed" && isMaxTurnExhaustionRun(livenessRun)) {
           const policy = parseMaxTurnContinuationPolicy(agent);
-          if (policy.enabled && policy.maxAttempts > 0) {
+          if (automaticRetry && policy.enabled && policy.maxAttempts > 0) {
             await scheduleBoundedRetryForRun(livenessRun, agent, {
               retryReason: MAX_TURN_CONTINUATION_RETRY_REASON,
               wakeReason: MAX_TURN_CONTINUATION_WAKE_REASON,
@@ -13090,7 +13201,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
               eventType: "lifecycle",
               stream: "system",
               level: "warn",
-              message: "Max-turn continuation suppressed because the policy is disabled",
+              message: !automaticRetry
+                ? "Max-turn continuation retry was suppressed by issue policy"
+                : "Max-turn continuation suppressed because the policy is disabled",
               payload: {
                 retryReason: MAX_TURN_CONTINUATION_RETRY_REASON,
                 policy,
@@ -13098,7 +13211,16 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             });
           }
         } else if (outcome === "failed" && readTransientRecoveryContractFromRun(livenessRun)) {
-          await scheduleBoundedRetryForRun(livenessRun, agent);
+          if (automaticRetry) {
+            await scheduleBoundedRetryForRun(livenessRun, agent);
+          } else {
+            await appendRunEvent(livenessRun, await nextRunEventSeq(livenessRun.id), {
+              eventType: "lifecycle",
+              stream: "system",
+              level: "info",
+              message: "Transient/provider retry was suppressed by issue policy",
+            });
+          }
         }
         const issueCommentPolicyResult = await finalizeIssueCommentPolicy(livenessRun, agent);
         await releaseIssueExecutionAndPromote(livenessRun);
@@ -14115,7 +14237,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         };
       }
 
+      const failurePolicy = parseIssueExecutionFailurePolicy(issue.executionPolicy);
       const shouldBlockImmediately =
+        failurePolicy.automaticRetry === false ||
         !recoveryAgentInvokable ||
         !recoveryAgent ||
         isWorkspaceValidationFailedRun(run) ||

@@ -409,6 +409,57 @@ describe("runChildProcess", () => {
     expect(result.stdout).toBe("done");
   });
 
+  it("preserves UTF-8 characters split across child-process chunks", async () => {
+    const logged: string[] = [];
+    const expected = "안녕하세요, Image Worker입니다.";
+    const writer = [
+      `const bytes = Buffer.from(${JSON.stringify(expected)}, 'utf8');`,
+      "let offset = 0;",
+      "const writeNext = () => {",
+      "  if (offset >= bytes.length) return;",
+      "  process.stdout.write(bytes.subarray(offset, offset + 1));",
+      "  offset += 1;",
+      "  setTimeout(writeNext, 2);",
+      "};",
+      "writeNext();",
+    ].join("\n");
+
+    const result = await runChildProcess(
+      randomUUID(),
+      process.execPath,
+      ["-e", writer],
+      {
+        cwd: process.cwd(),
+        env: {},
+        timeoutSec: 5,
+        graceSec: 1,
+        onLog: async (stream, chunk) => {
+          if (stream === "stdout") logged.push(chunk);
+        },
+      },
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toBe(expected);
+    expect(logged.join("")).toBe(expected);
+    expect(result.stdout).not.toContain("�");
+  });
+
+  it("rejects invalid UTF-8 instead of persisting replacement characters", async () => {
+    await expect(runChildProcess(
+      randomUUID(),
+      process.execPath,
+      ["-e", "process.stdout.write(Buffer.from([0xc3, 0x28]));"],
+      {
+        cwd: process.cwd(),
+        env: {},
+        timeoutSec: 5,
+        graceSec: 1,
+        onLog: async () => {},
+      },
+    )).rejects.toThrow("Invalid UTF-8 emitted on stdout");
+  });
+
   it("waits for onSpawn before sending stdin to the child", async () => {
     const spawnDelayMs = 150;
     const startedAt = Date.now();

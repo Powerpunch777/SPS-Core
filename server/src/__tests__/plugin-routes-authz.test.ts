@@ -18,6 +18,11 @@ const mockLifecycle = vi.hoisted(() => ({
   disable: vi.fn(),
 }));
 
+const mockAccess = vi.hoisted(() => ({
+  canUser: vi.fn(),
+  hasPermission: vi.fn(),
+}));
+
 vi.mock("../services/plugin-registry.js", () => ({
   pluginRegistryService: () => mockRegistry,
 }));
@@ -32,6 +37,10 @@ vi.mock("../services/activity-log.js", () => ({
 
 vi.mock("../services/live-events.js", () => ({
   publishGlobalLiveEvent: vi.fn(),
+}));
+
+vi.mock("../services/access.js", () => ({
+  accessService: () => mockAccess,
 }));
 
 async function createApp(
@@ -137,6 +146,8 @@ function readyPlugin() {
 describe.sequential("plugin install and upgrade authz", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockAccess.canUser.mockResolvedValue(false);
+    mockAccess.hasPermission.mockResolvedValue(false);
   });
 
   it("lists bundled monorepo plugin packages", async () => {
@@ -735,6 +746,28 @@ describe.sequential("plugin tool and bridge authz", () => {
       },
       renderEnvironment: null,
     });
+  });
+
+  it("adds host-calculated permissions to scoped plugin actions", async () => {
+    readyPlugin();
+    mockAccess.canUser.mockImplementation(async (_companyId: string, _userId: string, permissionKey: string) => permissionKey === "agents:configure");
+    const call = vi.fn().mockResolvedValue({ ok: true });
+    const { app } = await createApp(boardActor(), {}, {
+      bridgeDeps: { workerManager: { call } },
+    });
+
+    const res = await request(app)
+      .post(`/api/plugins/${pluginId}/actions/sync`)
+      .send({
+        companyId: companyA,
+        params: { __paperclipRequestedPermissions: ["agents:configure"] },
+      });
+
+    expect(res.status).toBe(200);
+    expect(call).toHaveBeenCalledWith(pluginId, "performAction", expect.objectContaining({
+      params: { companyId: companyA },
+      actorContext: expect.objectContaining({ permissions: ["agents:configure"] }),
+    }));
   });
 
   it("uses null for board actor userId when no authenticated user id is present", async () => {

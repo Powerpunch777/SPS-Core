@@ -151,6 +151,10 @@ export function isWorktreeUiBrandingEnabled(env: NodeJS.ProcessEnv = process.env
   return isTruthyEnvValue(env.PAPERCLIP_IN_WORKTREE);
 }
 
+export function isWorkplaneModeEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return isTruthyEnvValue(env.PAPERCLIP_WORKPLANE_MODE);
+}
+
 export function getWorktreeUiBranding(env: NodeJS.ProcessEnv = process.env): WorktreeUiBranding {
   if (!isWorktreeUiBrandingEnabled(env)) {
     return {
@@ -202,6 +206,12 @@ export function renderRuntimeBrandingMeta(branding: WorktreeUiBranding): string 
   return tags.join("\n");
 }
 
+export function renderWorkplaneModeMeta(env: NodeJS.ProcessEnv = process.env): string {
+  return isWorkplaneModeEnabled(env)
+    ? '<meta name="paperclip-workplane-mode" content="true" />'
+    : "";
+}
+
 function replaceMarkedBlock(html: string, startMarker: string, endMarker: string, content: string): string {
   const start = html.indexOf(startMarker);
   const end = html.indexOf(endMarker);
@@ -221,10 +231,13 @@ function replaceMarkedBlock(html: string, startMarker: string, endMarker: string
 export function applyUiBranding(html: string, env: NodeJS.ProcessEnv = process.env): string {
   const branding = getWorktreeUiBranding(env);
   const withFavicon = replaceMarkedBlock(html, FAVICON_BLOCK_START, FAVICON_BLOCK_END, renderFaviconLinks(branding));
+  const runtimeMeta = [renderRuntimeBrandingMeta(branding), renderWorkplaneModeMeta(env)]
+    .filter(Boolean)
+    .join("\n");
   return replaceMarkedBlock(
     withFavicon,
     RUNTIME_BRANDING_BLOCK_START,
     RUNTIME_BRANDING_BLOCK_END,
-    renderRuntimeBrandingMeta(branding),
+    runtimeMeta,
   );
 }

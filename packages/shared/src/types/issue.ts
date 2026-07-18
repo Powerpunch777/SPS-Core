@@ -613,6 +613,12 @@ export interface IssueExecutionMonitorPolicy {
   recoveryPolicy?: IssueExecutionMonitorRecoveryPolicy | null;
 }
 
+export interface IssueExecutionFailurePolicy {
+  automaticRetry: boolean;
+  preserveAssignee: boolean;
+  wakeRecoveryOwner: boolean;
+}
+
 export interface IssueExecutionPolicy {
   mode: IssueExecutionPolicyMode;
   commentRequired: boolean;
@@ -620,6 +626,7 @@ export interface IssueExecutionPolicy {
   monitor?: IssueExecutionMonitorPolicy | null;
   reviewPreset?: LowTrustReviewPresetPolicy;
   authorizationPolicy?: TrustAuthorizationPolicy;
+  failure?: IssueExecutionFailurePolicy;
 }
 
 export interface IssueExecutionMonitorState {

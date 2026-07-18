@@ -12,6 +12,7 @@ import { useVisibilityRefetchInterval } from "@/lib/polling";
 import { usePublishSharedQueryData, useSharedPollingQuery } from "@/hooks/useSharedPolling";
 import { queryKeys } from "../lib/queryKeys";
 import { createIssueDetailLocationState } from "../lib/issueDetailBreadcrumb";
+import { filterWorkplaneTaskIssues, isWorkplaneModeEnabled } from "../lib/workplane-mode";
 import { EmptyState } from "../components/EmptyState";
 import { IssuesList } from "../components/IssuesList";
 import { CircleDot } from "lucide-react";
@@ -169,7 +170,14 @@ export function Issues() {
     placeholderData: (previousData) => previousData,
   });
 
-  const issues = useMemo(() => mergeIssuePagesStable(issuePages?.pages ?? []) as Issue[], [issuePages]);
+  const workplaneMode = isWorkplaneModeEnabled();
+  const issues = useMemo(
+    () => filterWorkplaneTaskIssues(
+      mergeIssuePagesStable(issuePages?.pages ?? []) as Issue[],
+      workplaneMode,
+    ),
+    [issuePages, workplaneMode],
+  );
   const hasMoreServerIssues = syncedSearch.trim().length === 0
     && hasNextPage === true;
   const loadMoreServerIssues = useCallback(() => {

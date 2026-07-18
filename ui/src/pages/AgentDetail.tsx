@@ -53,6 +53,7 @@ import { FileTree, buildFileTree } from "../components/FileTree";
 import { ScrollToBottom } from "../components/ScrollToBottom";
 import { SourceResolvedFoldCallout } from "../components/SourceResolvedFoldCallout";
 import { SourceResolvedFoldBadge } from "../components/SourceResolvedFoldBadge";
+import { PluginSlotOutlet } from "@/plugins/slots";
 import { readSourceResolvedWatchdogFold } from "../lib/source-resolved-watchdog-fold";
 import { buildSameOriginWebSocketUrl } from "../lib/websocket-url";
 import { formatCents, formatDate, relativeTime, formatTokens, visibleRunCostUsd } from "../lib/utils";
@@ -1714,6 +1715,19 @@ function AgentConfigurePage({
         hidePromptTemplate
         hideInstructionsFile
       />
+      {companyId ? (
+        <PluginSlotOutlet
+          slotTypes={["agentConfiguration"]}
+          entityType="agent"
+          context={{
+            companyId,
+            entityId: agent.id,
+            entityType: "agent",
+          }}
+          className="space-y-4"
+          itemClassName="w-full"
+        />
+      ) : null}
       <div>
         <h3 className="text-sm font-medium mb-3">API Keys</h3>
         <KeysTab agentId={agentId} companyId={companyId} />

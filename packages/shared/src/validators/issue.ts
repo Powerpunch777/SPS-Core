@@ -197,6 +197,12 @@ export const issueExecutionMonitorPolicySchema = z.object({
   recoveryPolicy: z.enum(ISSUE_EXECUTION_MONITOR_RECOVERY_POLICIES).optional().nullable().default(null),
 });
 
+export const issueExecutionFailurePolicySchema = z.object({
+  automaticRetry: z.boolean().optional().default(true),
+  preserveAssignee: z.boolean().optional().default(false),
+  wakeRecoveryOwner: z.boolean().optional().default(true),
+}).strict();
+
 export const issueExecutionPolicySchema = z.object({
   mode: z.enum(ISSUE_EXECUTION_POLICY_MODES).optional().default("normal"),
   commentRequired: z.boolean().optional().default(true),
@@ -204,6 +210,7 @@ export const issueExecutionPolicySchema = z.object({
   monitor: issueExecutionMonitorPolicySchema.optional().nullable(),
   reviewPreset: lowTrustReviewPresetPolicySchema.optional(),
   authorizationPolicy: trustAuthorizationPolicySchema.optional(),
+  failure: issueExecutionFailurePolicySchema.optional(),
 });
 
 export const issueExecutionMonitorStateSchema = z.object({
@@ -1167,3 +1174,53 @@ export const restoreIssueDocumentRevisionSchema = z.object({});
 export type IssueDocumentFormat = z.infer<typeof issueDocumentFormatSchema>;
 export type UpsertIssueDocument = z.infer<typeof upsertIssueDocumentSchema>;
 export type RestoreIssueDocumentRevision = z.infer<typeof restoreIssueDocumentRevisionSchema>;
+
+export function validateIssueReportBody(body: string, kind: "final" | "blocker"): { valid: boolean; error?: string } {
+  if (typeof body !== "string") {
+    return { valid: false, error: "Report body must be a string" };
+  }
+
+  const lines = body.split(/\r?\n/);
+  const expectedHeader = kind === "final" ? "## Paperclip Final Report" : "## Paperclip Blocker Report";
+
+  if (lines[0] !== expectedHeader) {
+    return {
+      valid: false,
+      error: `First line must be exactly "${expectedHeader}"`,
+    };
+  }
+
+  const contentLines = lines.slice(1).map((line) => line.trim()).filter((line) => line.length > 0);
+  if (contentLines.length === 0) {
+    return {
+      valid: false,
+      error: "Report body must contain content after the header",
+    };
+  }
+
+  const substantiveText = contentLines.join("").replace(/[^\p{L}\p{N}]/gu, "");
+  if (substantiveText.length < 8) {
+    return {
+      valid: false,
+      error: "Report body is too short or trivial",
+    };
+  }
+
+  return { valid: true };
+}
+
+export const submitIssueReportSchema = z.object({
+  kind: z.enum(["final", "blocker"]),
+  body: multilineTextSchema.pipe(z.string().min(1)),
+}).superRefine((value, ctx) => {
+  const result = validateIssueReportBody(value.body, value.kind);
+  if (!result.valid) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: result.error || "Invalid report body",
+      path: ["body"],
+    });
+  }
+});
+
+export type SubmitIssueReport = z.infer<typeof submitIssueReportSchema>;

@@ -1,5 +1,10 @@
 import { z } from "zod";
-import { PROJECT_STATUSES, PROJECT_ICON_NAMES } from "../constants.js";
+import {
+  PROJECT_ACCESS_MODES,
+  PROJECT_ACCESS_ROLES,
+  PROJECT_ICON_NAMES,
+  PROJECT_STATUSES,
+} from "../constants.js";
 import { envConfigSchema } from "./secret.js";
 import { trustAuthorizationPolicySchema } from "./trust-policy.js";
 
@@ -109,6 +114,7 @@ const projectFields = {
   color: z.string().optional().nullable(),
   icon: z.enum(PROJECT_ICON_NAMES).optional().nullable(),
   env: envConfigSchema.optional().nullable(),
+  accessMode: z.enum(PROJECT_ACCESS_MODES).optional(),
   executionWorkspacePolicy: projectExecutionWorkspacePolicySchema.optional().nullable(),
   archivedAt: z.string().datetime().optional().nullable(),
 };
@@ -123,5 +129,18 @@ export type CreateProject = z.infer<typeof createProjectSchema>;
 export const updateProjectSchema = z.object(projectFields).partial();
 
 export type UpdateProject = z.infer<typeof updateProjectSchema>;
+
+export const projectAccessGrantSchema = z.object({
+  principalType: z.enum(["user", "agent"]),
+  principalId: z.string().trim().min(1),
+  accessRole: z.enum(PROJECT_ACCESS_ROLES),
+}).strict();
+
+export const updateProjectAccessPolicySchema = z.object({
+  accessMode: z.enum(PROJECT_ACCESS_MODES),
+  grants: z.array(projectAccessGrantSchema).max(200),
+}).strict();
+
+export type UpdateProjectAccessPolicy = z.infer<typeof updateProjectAccessPolicySchema>;
 
 export type ProjectExecutionWorkspacePolicy = z.infer<typeof projectExecutionWorkspacePolicySchema>;

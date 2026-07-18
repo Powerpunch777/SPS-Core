@@ -8,6 +8,7 @@ import {
   KeyRound,
   MailPlus,
   MonitorCog,
+  Network,
   Puzzle,
   Settings,
   Shield,
@@ -132,6 +133,7 @@ export function CompanySettingsSidebar() {
               />
             ))}
           <SidebarNavItem to="/company/settings/invites" label="Invites" icon={MailPlus} end />
+          <SidebarNavItem to="/company/settings/nodes" label="Nodes" icon={Network} end />
           <SidebarNavItem to="/company/settings/secrets" label="Secrets" icon={KeyRound} end />
         </div>
         <div className="mt-5 px-3 pb-1 text-(length:--text-micro) font-semibold uppercase tracking-wide text-muted-foreground">

@@ -153,3 +153,9 @@ export interface AdapterEnvironmentTestResult {
   checks: AdapterEnvironmentCheck[];
   testedAt: string;
 }
+
+export interface AgentSessionContext {
+  projectId?: string;
+  projectWorkspaceId?: string;
+  issueId?: string;
+}

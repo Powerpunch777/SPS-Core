@@ -54,6 +54,7 @@ import {
   resolveSharedCodexHomeDir,
   seedManagedCodexHome,
 } from "./codex-home.js";
+import { resolveSelectedCodexHome } from "./codex-account.js";
 import { prepareCodexRuntimeConfig } from "./runtime-config.js";
 import { resolveCodexDesiredSkillNames } from "./skills.js";
 import { buildCodexExecArgs } from "./codex-args.js";
@@ -328,7 +329,18 @@ export async function ensureCodexSkillsInjected(
 }
 
 export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
-  const engineSelection = await resolveCodexExecutionEngineForRun(ctx);
+  const executionTarget = readAdapterExecutionTarget({
+    executionTarget: ctx.executionTarget,
+    legacyRemoteExecution: ctx.executionTransport?.remoteExecution,
+  });
+  const useSpsNodeCredentials =
+    executionTarget?.kind === "remote" && executionTarget.transport === "sps_node";
+  // ACP is a Hub-side process protocol. A member Node intentionally executes
+  // its own Codex CLI so the member's login and local compact/session state
+  // stay on that computer.
+  const engineSelection = useSpsNodeCredentials
+    ? { engine: "cli" as const, explicit: true, fallbackReason: null }
+    : await resolveCodexExecutionEngineForRun(ctx);
   if (engineSelection.engine === "acp") {
     try {
       return await executeCodexAcp(ctx);
@@ -385,11 +397,22 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const effectiveWorkspaceCwd = useConfiguredInsteadOfAgentHome ? "" : workspaceCwd;
   const cwd = effectiveWorkspaceCwd || configuredCwd || process.cwd();
   const envConfig = parseObject(config.env);
-  const executionTarget = readAdapterExecutionTarget({
-    executionTarget: ctx.executionTarget,
-    legacyRemoteExecution: ctx.executionTransport?.remoteExecution,
-  });
+  const selectedCodexHome = useSpsNodeCredentials ? null : resolveSelectedCodexHome(config.codexAccount);
+  if (selectedCodexHome) {
+    try {
+      await fs.access(path.join(selectedCodexHome, "auth.json"));
+    } catch {
+      throw new Error(`Selected Codex account is not signed in: ${selectedCodexHome}`);
+    }
+    envConfig.CODEX_HOME = selectedCodexHome;
+  }
   const executionTargetIsRemote = adapterExecutionTargetIsRemote(executionTarget);
+  if (useSpsNodeCredentials) {
+    // Provider credentials never cross the Hub/Node boundary. SPS forwards
+    // only short-lived Paperclip agent auth to let the local CLI use tools.
+    delete envConfig.CODEX_HOME;
+    delete envConfig.OPENAI_API_KEY;
+  }
   const configuredCodexHome =
     typeof envConfig.CODEX_HOME === "string" && envConfig.CODEX_HOME.trim().length > 0
       ? path.resolve(envConfig.CODEX_HOME.trim())
@@ -409,18 +432,18 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const configuredHomeIsManaged =
     configuredCodexHome != null &&
     isManagedCodexHomePath(process.env, agent.companyId, configuredCodexHome);
-  if (configuredCodexHome == null) {
+  if (!useSpsNodeCredentials && configuredCodexHome == null) {
     await prepareManagedCodexHome(process.env, onLog, agent.companyId, {
       apiKey: configuredOpenAiApiKey,
     });
-  } else if (configuredHomeIsManaged) {
+  } else if (!useSpsNodeCredentials && configuredHomeIsManaged) {
     await seedManagedCodexHome(configuredCodexHome, process.env, onLog, {
       apiKey: configuredOpenAiApiKey,
     });
   }
   const defaultCodexHome = resolveManagedCodexHomeDir(process.env, agent.companyId);
   const effectiveCodexHome = configuredCodexHome ?? defaultCodexHome;
-  await fs.mkdir(effectiveCodexHome, { recursive: true });
+  if (!useSpsNodeCredentials) await fs.mkdir(effectiveCodexHome, { recursive: true });
 
   // Never launch a managed CODEX_HOME with no credentials. Without auth.json and
   // with OPENAI_API_KEY="" the provider rejects every request with
@@ -430,13 +453,15 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   // configuration-incomplete gate (see server heartbeat) — both decide
   // readiness through the same `evaluateCodexCredentialReadiness` predicate, so
   // they cannot drift.
-  const credentialReadiness = await evaluateCodexCredentialReadiness({
-    env: process.env,
-    companyId: agent.companyId,
-    configuredCodexHome,
-    configuredApiKey: configuredOpenAiApiKey,
-  });
-  if (credentialReadiness.managed && !credentialReadiness.ready) {
+  const credentialReadiness = useSpsNodeCredentials
+    ? { managed: false, ready: true }
+    : await evaluateCodexCredentialReadiness({
+        env: process.env,
+        companyId: agent.companyId,
+        configuredCodexHome,
+        configuredApiKey: configuredOpenAiApiKey,
+      });
+  if (!useSpsNodeCredentials && credentialReadiness.managed && !credentialReadiness.ready) {
     throw new Error(
       `no Codex credentials provisioned for managed home "${effectiveCodexHome}" ` +
         `(no usable auth.json and OPENAI_API_KEY is empty). ` +
@@ -453,25 +478,29 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       (entry): entry is [string, string] => typeof entry[1] === "string",
     ),
   );
-  const preparedRuntimeConfig = await prepareCodexRuntimeConfig({
-    env: envConfigStrings,
-    codexHome: configuredCodexHome ? null : effectiveCodexHome,
-  });
+  const preparedRuntimeConfig = useSpsNodeCredentials
+    ? { notes: [], cleanup: async () => {} }
+    : await prepareCodexRuntimeConfig({
+        env: envConfigStrings,
+        codexHome: configuredCodexHome ? null : effectiveCodexHome,
+      });
   try {
     for (const note of preparedRuntimeConfig.notes) {
       await onLog("stdout", `[paperclip] ${note}\n`);
     }
     // Inject skills into the same CODEX_HOME that Codex will actually run with
     // (managed home in the default case, or an explicit override from adapter config).
-    const codexSkillsDir = resolveCodexSkillsDir(effectiveCodexHome);
-    await ensureCodexSkillsInjected(
-      onLog,
-      {
-        skillsHome: codexSkillsDir,
-        skillsEntries: codexSkillEntries,
-        desiredSkillNames,
-      },
-    );
+    if (!useSpsNodeCredentials) {
+      const codexSkillsDir = resolveCodexSkillsDir(effectiveCodexHome);
+      await ensureCodexSkillsInjected(
+        onLog,
+        {
+          skillsHome: codexSkillsDir,
+          skillsEntries: codexSkillEntries,
+          desiredSkillNames,
+        },
+      );
+    }
     const timeoutSec = resolveAdapterExecutionTargetTimeoutSec(
       executionTarget,
       asNumber(config.timeoutSec, 0),
@@ -526,7 +555,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       ? () => preparedExecutionTargetRuntime.restoreWorkspace((line) => onLog("stdout", line))
       : null;
     let paperclipBridge: Awaited<ReturnType<typeof startAdapterExecutionTargetPaperclipBridge>> = null;
-    const remoteCodexHome = executionTargetIsRemote
+    const remoteCodexHome = executionTargetIsRemote && !useSpsNodeCredentials
       ? preparedExecutionTargetRuntime?.assetDirs.home ??
         path.posix.join(effectiveExecutionCwd, ".paperclip-runtime", "codex", "home")
       : null;
@@ -608,7 +637,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     if (runtimePrimaryUrl) {
       env.PAPERCLIP_RUNTIME_PRIMARY_URL = runtimePrimaryUrl;
     }
-    env.CODEX_HOME = remoteCodexHome ?? effectiveCodexHome;
+    if (!useSpsNodeCredentials) env.CODEX_HOME = remoteCodexHome ?? effectiveCodexHome;
     if (!hasExplicitApiKey && authToken) {
       env.PAPERCLIP_API_KEY = authToken;
     }

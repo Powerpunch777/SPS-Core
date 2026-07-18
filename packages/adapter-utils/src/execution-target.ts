@@ -75,10 +75,39 @@ export interface AdapterSandboxExecutionTarget {
   streamRunLogs?: boolean | null;
 }
 
+/**
+ * SPS Desktop Nodes execute commands on a member's own computer. The runner
+ * is an in-memory Hub service and is never serialized into agent config.
+ */
+export interface AdapterSpsNodeRunner {
+  execute(input: {
+    command: string;
+    args: string[];
+    cwd: string;
+    env: Record<string, string>;
+    stdin?: string;
+    timeoutMs?: number;
+    onLog?: (stream: "stdout" | "stderr", chunk: string) => Promise<void>;
+    onSpawn?: (meta: { pid: number; startedAt: string }) => Promise<void>;
+  }): Promise<RunProcessResult>;
+}
+
+export interface AdapterSpsNodeExecutionTarget {
+  kind: "remote";
+  transport: "sps_node";
+  nodeId: string;
+  nodeLabel: string;
+  projectId?: string | null;
+  remoteCwd: string;
+  timeoutMs?: number | null;
+  runner: AdapterSpsNodeRunner;
+}
+
 export type AdapterExecutionTarget =
   | AdapterLocalExecutionTarget
   | AdapterSshExecutionTarget
-  | AdapterSandboxExecutionTarget;
+  | AdapterSandboxExecutionTarget
+  | AdapterSpsNodeExecutionTarget;
 
 export type AdapterRemoteExecutionSpec = SshRemoteExecutionSpec;
 
@@ -185,6 +214,10 @@ function isAdapterExecutionTargetInstance(value: unknown): value is AdapterExecu
   if (parsed.kind === "local") return true;
   if (parsed.kind !== "remote") return false;
   if (parsed.transport === "ssh") return parseSshRemoteExecutionSpec(parseObject(parsed.spec)) !== null;
+  if (parsed.transport === "sps_node") {
+    const runner = parseObject(parsed.runner);
+    return readStringMeta(parsed, "remoteCwd") !== null && typeof runner.execute === "function";
+  }
   if (parsed.transport !== "sandbox") return false;
   return readStringMeta(parsed, "remoteCwd") !== null;
 }
@@ -199,6 +232,16 @@ export function adapterExecutionTargetIsRemote(
   target: AdapterExecutionTarget | null | undefined,
 ): boolean {
   return target?.kind === "remote";
+}
+
+/**
+ * SPS Nodes own their workspace and provider credentials locally. They are
+ * remote from the Hub, but do not use the sandbox runtime preparation path.
+ */
+export function adapterExecutionTargetIsSpsNode(
+  target: AdapterExecutionTarget | null | undefined,
+): target is AdapterSpsNodeExecutionTarget {
+  return target?.kind === "remote" && target.transport === "sps_node";
 }
 
 export function adapterExecutionTargetUsesManagedHome(
@@ -255,7 +298,7 @@ export function resolveAdapterExecutionTargetCwd(
 export function adapterExecutionTargetUsesPaperclipBridge(
   target: AdapterExecutionTarget | null | undefined,
 ): boolean {
-  return target?.kind === "remote";
+  return target?.kind === "remote" && target.transport === "sandbox";
 }
 
 export function describeAdapterExecutionTarget(
@@ -264,6 +307,9 @@ export function describeAdapterExecutionTarget(
   if (!target || target.kind === "local") return "local environment";
   if (target.transport === "ssh") {
     return `SSH environment ${target.spec.username}@${target.spec.host}:${target.spec.port}`;
+  }
+  if (target.transport === "sps_node") {
+    return `SPS Desktop Node ${target.nodeLabel}`;
   }
   return `sandbox environment${target.providerKey ? ` (${target.providerKey})` : ""}`;
 }
@@ -378,6 +424,11 @@ function requireSandboxRunner(target: AdapterSandboxExecutionTarget): CommandMan
   );
 }
 
+function requireSpsNodeRunner(target: AdapterSpsNodeExecutionTarget): AdapterSpsNodeRunner {
+  if (target.runner) return target.runner;
+  throw new Error("SPS Node execution target is missing its Hub dispatch runner.");
+}
+
 function preferredSandboxShell(target: AdapterSandboxExecutionTarget): "bash" | "sh" {
   return preferredShellForSandbox(target.shellCommand);
 }
@@ -419,6 +470,11 @@ export async function ensureAdapterExecutionTargetCommandResolvable(
       options.installCommand?.trim() || null,
       options.timeoutSec,
     );
+    return;
+  }
+  if (target?.kind === "remote" && target.transport === "sps_node") {
+    // Capability scanning is the Node preflight. A missing local command is
+    // reported by the real Node command with its own stdout/stderr.
     return;
   }
   await ensureCommandResolvable(command, cwd, env, {
@@ -516,6 +572,9 @@ export async function resolveAdapterExecutionTargetCommandForLogs(
   if (target?.kind === "remote" && target.transport === "sandbox") {
     return `sandbox://${target.providerKey ?? "provider"}/${target.leaseId ?? "lease"}/${target.remoteCwd} :: ${command}`;
   }
+  if (target?.kind === "remote" && target.transport === "sps_node") {
+    return `sps-node://${target.nodeId}/${target.projectId ?? "default"} :: ${command}`;
+  }
   return await resolveCommandForLogs(command, cwd, env, {
     remoteExecution: adapterExecutionTargetToRemoteSpec(target),
   });
@@ -528,6 +587,24 @@ export async function runAdapterExecutionTargetProcess(
   args: string[],
   options: AdapterExecutionTargetProcessOptions,
 ): Promise<RunProcessResult> {
+  if (target?.kind === "remote" && target.transport === "sps_node") {
+    await options.onRuntimeProgress?.({
+      phase: "adapter_startup",
+      message: `Starting adapter on SPS Desktop Node ${target.nodeLabel}`,
+    });
+    return requireSpsNodeRunner(target).execute({
+      command,
+      args,
+      cwd: target.remoteCwd,
+      env: options.env,
+      stdin: options.stdin,
+      timeoutMs: options.timeoutSec > 0 ? options.timeoutSec * 1000 : target.timeoutMs ?? undefined,
+      onLog: options.onLog,
+      onSpawn: options.onSpawn
+        ? async (meta) => options.onSpawn?.({ ...meta, processGroupId: null })
+        : undefined,
+    });
+  }
   if (target?.kind === "remote" && target.transport === "sandbox") {
     const runner = requireSandboxRunner(target);
     const env = sanitizeRemoteExecutionEnv(options.env);
@@ -655,6 +732,10 @@ export async function runAdapterExecutionTargetShellCommand(
           startedAt,
         };
       }
+    }
+
+    if (target.transport === "sps_node") {
+      throw new Error("SPS Desktop Node targets do not accept Hub shell snippets.");
     }
 
     const shellCommand = preferredSandboxShell(target);
@@ -965,6 +1046,14 @@ export function adapterExecutionTargetSessionIdentity(
 ): Record<string, unknown> | null {
   if (!target || target.kind === "local") return null;
   if (target.transport === "ssh") return buildRemoteExecutionSessionIdentity(target.spec);
+  if (target.transport === "sps_node") {
+    return {
+      transport: "sps_node",
+      nodeId: target.nodeId,
+      projectId: target.projectId ?? null,
+      remoteCwd: target.remoteCwd,
+    };
+  }
   return {
     transport: "sandbox",
     providerKey: target.providerKey ?? null,
@@ -984,6 +1073,14 @@ export function adapterExecutionTargetSessionMatches(
   if (target.transport === "ssh") return remoteExecutionSessionMatches(saved, target.spec);
   const current = adapterExecutionTargetSessionIdentity(target);
   const parsedSaved = parseObject(saved);
+  if (target.transport === "sps_node") {
+    return (
+      readStringMeta(parsedSaved, "transport") === "sps_node" &&
+      readStringMeta(parsedSaved, "nodeId") === target.nodeId &&
+      readStringMeta(parsedSaved, "projectId") === (target.projectId ?? null) &&
+      readStringMeta(parsedSaved, "remoteCwd") === target.remoteCwd
+    );
+  }
   return (
     readStringMeta(parsedSaved, "transport") === current?.transport &&
     readStringMeta(parsedSaved, "providerKey") === current?.providerKey &&
@@ -1094,6 +1191,16 @@ export async function prepareAdapterExecutionTargetRuntime(input: {
     return {
       target,
       workspaceRemoteDir: null,
+      runtimeRootDir: null,
+      assetDirs: {},
+      restoreWorkspace: async () => {},
+    };
+  }
+
+  if (target.transport === "sps_node") {
+    return {
+      target,
+      workspaceRemoteDir: target.remoteCwd,
       runtimeRootDir: null,
       assetDirs: {},
       restoreWorkspace: async () => {},
@@ -1629,7 +1736,7 @@ export async function startAdapterExecutionTargetPaperclipBridge(input: {
   if (!adapterExecutionTargetUsesPaperclipBridge(input.target)) {
     return null;
   }
-  if (!input.target || input.target.kind !== "remote") {
+  if (!input.target || input.target.kind !== "remote" || input.target.transport !== "sandbox") {
     return null;
   }
 

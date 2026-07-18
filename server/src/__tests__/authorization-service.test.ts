@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   agents,
@@ -9,6 +10,7 @@ import {
   instanceUserRoles,
   issueComments,
   issues,
+  projectAccessGrants,
   principalPermissionGrants,
   projects,
 } from "@paperclipai/db";
@@ -172,6 +174,7 @@ describeEmbeddedPostgres("authorization service", () => {
 
   afterEach(async () => {
     await db.delete(issueComments);
+    await db.delete(projectAccessGrants);
     await db.delete(principalPermissionGrants);
     await db.delete(companyMemberships);
     await db.delete(instanceUserRoles);
@@ -222,6 +225,68 @@ describeEmbeddedPostgres("authorization service", () => {
       },
     });
     expect(decision.explanation).toContain("Allowed by explicit grant tasks:assign");
+  });
+
+  it("enforces restricted Project grants while preserving Lead and assigned Worker task access", async () => {
+    const company = await createCompany(db, "RestrictedProject");
+    const lead = await createAgent(db, company.id, { role: "cto" });
+    const worker = await createAgent(db, company.id, { role: "engineer" });
+    const project = await createProject(db, company.id, "Restricted");
+    const assignedIssue = await createIssue(db, company.id, {
+      projectId: project.id,
+      assigneeAgentId: worker.id,
+    });
+    const collaboratorId = await createUser(db);
+    const outsiderId = await createUser(db);
+    await db.insert(companyMemberships).values([
+      { companyId: company.id, principalType: "user", principalId: collaboratorId, status: "active", membershipRole: "operator" },
+      { companyId: company.id, principalType: "user", principalId: outsiderId, status: "active", membershipRole: "operator" },
+    ]);
+    await db.update(projects).set({ accessMode: "restricted", leadAgentId: lead.id }).where(eq(projects.id, project.id));
+    await db.insert(projectAccessGrants).values({
+      companyId: company.id,
+      projectId: project.id,
+      principalType: "user",
+      principalId: collaboratorId,
+      accessRole: "collaborator",
+    });
+
+    const authorization = authorizationService(db);
+    const projectResource = { type: "project" as const, companyId: company.id, projectId: project.id };
+    const issueResource = {
+      type: "issue" as const,
+      companyId: company.id,
+      issueId: assignedIssue.id,
+      projectId: project.id,
+      assigneeAgentId: worker.id,
+      status: assignedIssue.status,
+    };
+
+    await expect(authorization.decide({
+      actor: { type: "board", userId: outsiderId, source: "session" },
+      action: "project:read",
+      resource: projectResource,
+    })).resolves.toMatchObject({ allowed: false, reason: "deny_policy_restricted" });
+    await expect(authorization.decide({
+      actor: { type: "board", userId: collaboratorId, source: "session" },
+      action: "issue:mutate",
+      resource: issueResource,
+    })).resolves.toMatchObject({ allowed: true });
+    await expect(authorization.decide({
+      actor: { type: "agent", agentId: lead.id, companyId: company.id, source: "agent_key" },
+      action: "tasks:assign",
+      resource: issueResource,
+    })).resolves.toMatchObject({ allowed: true });
+    await expect(authorization.decide({
+      actor: { type: "agent", agentId: worker.id, companyId: company.id, source: "agent_key" },
+      action: "issue:comment",
+      resource: issueResource,
+    })).resolves.toMatchObject({ allowed: true });
+    await expect(authorization.decide({
+      actor: { type: "agent", agentId: worker.id, companyId: company.id, source: "agent_key" },
+      action: "tasks:assign",
+      resource: issueResource,
+    })).resolves.toMatchObject({ allowed: false, reason: "deny_policy_restricted" });
   });
 
   it("allows suggest grants to read peer agent configuration", async () => {

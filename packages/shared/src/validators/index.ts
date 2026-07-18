@@ -292,12 +292,15 @@ export {
   createProjectSchema,
   updateProjectSchema,
   createProjectWorkspaceSchema,
+  projectAccessGrantSchema,
   updateProjectWorkspaceSchema,
+  updateProjectAccessPolicySchema,
   projectExecutionWorkspacePolicySchema,
   projectWorkspaceRuntimeConfigSchema,
   type CreateProject,
   type UpdateProject,
   type CreateProjectWorkspace,
+  type UpdateProjectAccessPolicy,
   type UpdateProjectWorkspace,
   type ProjectExecutionWorkspacePolicy,
 } from "./project.js";
@@ -331,6 +334,7 @@ export {
   issueBlockedInboxStateSchema,
   updateIssueSchema,
   issueExecutionPolicySchema,
+  issueExecutionFailurePolicySchema,
   issueExecutionStateSchema,
   issueRecoveryActionReadModelSchema,
   resolveIssueRecoveryActionSchema,
@@ -404,6 +408,9 @@ export {
   type UpsertIssueDocument,
   type RestoreIssueDocumentRevision,
   type UpsertIssueWatchdog,
+  submitIssueReportSchema,
+  type SubmitIssueReport,
+  validateIssueReportBody,
 } from "./issue.js";
 
 export {
@@ -649,6 +656,27 @@ export {
   type SearchAdminUsersQuery,
   type UpdateUserCompanyAccess,
 } from "./access.js";
+
+export {
+  spsNodeCapabilitySchema,
+  createSpsNodeSchema,
+  updateSpsNodeStatusSchema,
+  bindSpsAgentNodeSchema,
+  spsNodeHeartbeatSchema,
+  spsNodeHeartbeatMessage,
+  spsNodeSignedRequestSchema,
+  spsNodeCommandEventSchema,
+  spsNodeCommandCompleteSchema,
+  spsNodeSignedRequestMessage,
+  type SpsNodeCapability,
+  type CreateSpsNode,
+  type UpdateSpsNodeStatus,
+  type BindSpsAgentNode,
+  type SpsNodeHeartbeat,
+  type SpsNodeSignedRequest,
+  type SpsNodeCommandEvent,
+  type SpsNodeCommandComplete,
+} from "./sps-nodes.js";
 
 export {
   jsonSchemaSchema,

@@ -84,6 +84,10 @@ export const DEFAULT_LOCAL_PLUGIN_DIR = path.join(
 
 const DEV_TSX_LOADER_PATH = path.resolve(__dirname, "../../../cli/node_modules/tsx/dist/loader.mjs");
 
+export function resolveDevTsxLoaderImportSpecifier(): string {
+  return pathToFileURL(DEV_TSX_LOADER_PATH).href;
+}
+
 /**
  * Model-provider API keys that sandbox-provider plugins (e.g.
  * `@paperclipai/plugin-kubernetes`) are allowed to read from the
@@ -2165,7 +2169,7 @@ export function pluginLoader(
       // (for example @paperclipai/shared exports). Run those workers through
       // the tsx loader so first-party example plugins work in development.
       if (activePlugin.packagePath && existsSync(DEV_TSX_LOADER_PATH)) {
-        workerOptions.execArgv = ["--import", DEV_TSX_LOADER_PATH];
+        workerOptions.execArgv = ["--import", resolveDevTsxLoaderImportSpecifier()];
       }
 
       await workerManager.startWorker(pluginId, workerOptions);

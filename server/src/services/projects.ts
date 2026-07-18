@@ -360,6 +360,15 @@ async function attachListMetrics(
   if (rows.length === 0) return rows;
 
   const projectIds = rows.map((r) => r.id);
+  const workplaneTaskVisibility = process.env.PAPERCLIP_WORKPLANE_MODE === "true"
+    ? sql<boolean>`NOT (
+        COALESCE(${issues.originKind}, '') LIKE 'plugin:local.room-chat:operation:agent-room%'
+        OR COALESCE(${issues.originKind}, '') IN (
+          'plugin:local.room-chat:agent-room-provisioning',
+          'plugin:local.room-chat:project-room-provisioning'
+        )
+      )`
+    : undefined;
 
   const [taskCountRows, budgetRows] = await Promise.all([
     db
@@ -368,7 +377,11 @@ async function attachListMetrics(
         count: sql<number>`count(*)::int`,
       })
       .from(issues)
-      .where(and(eq(issues.companyId, companyId), inArray(issues.projectId, projectIds)))
+      .where(and(
+        eq(issues.companyId, companyId),
+        inArray(issues.projectId, projectIds),
+        workplaneTaskVisibility,
+      ))
       .groupBy(issues.projectId),
     db
       .select({
@@ -576,6 +589,7 @@ export function projectService(db: Db) {
   };
 
   const getProjectById = async (id: string): Promise<ProjectWithGoals | null> => {
+    if (!isUuidLike(id)) return null;
     const row = await db
       .select()
       .from(projects)

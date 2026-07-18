@@ -107,7 +107,20 @@ If an important file intentionally remains in the project or execution workspace
 For technical upload instructions, read `references/artifacts.md`.
 
 **Step 8 — Update status and communicate.** Always include the run ID header.
-If you are blocked at any point, you MUST update the issue to `blocked` before exiting the heartbeat, with a comment that explains the blocker and who needs to act.
+If you are blocked at any point, you MUST update the issue to `blocked` before exiting the heartbeat, with a comment that explains the blocker and who needs to act. When the company instructions require the Workplane terminal-report contract, use the atomic report endpoint below instead of a separate comment and status update.
+
+**Workplane terminal-report contract.** A Worker whose `AGENTS.md` requires this contract MUST finish its assigned Task with exactly one request to `POST /api/issues/{issueId}/reports`. Do not create an approval request, post the terminal comment separately, or PATCH the terminal status yourself. The endpoint atomically stores the report and changes a final report to `in_review` or a blocker report to `blocked`. Retrying the same kind from the same run is idempotent.
+
+```json
+POST /api/issues/{issueId}/reports
+Headers: Authorization: Bearer $PAPERCLIP_API_KEY, X-Paperclip-Run-Id: $PAPERCLIP_RUN_ID
+{
+  "kind": "final",
+  "body": "## Paperclip Final Report\nCompleted work, verification, changed files, and remaining risks."
+}
+```
+
+For a blocker, use `kind: "blocker"` and make the first line exactly `## Paperclip Blocker Report`. Name the blocking condition, evidence, and the specific owner/action needed to resume.
 
 Before ending any heartbeat, apply this final-disposition checklist:
 
@@ -442,6 +455,7 @@ If `plan` already exists, fetch the current document first and send its latest `
 | Update task                           | `PATCH /api/issues/:issueId` (optional `comment` field)                                                                         |
 | Get comments / delta / single         | `GET /api/issues/:issueId/comments[?after=:commentId&order=asc]` • `/comments/:commentId`                                       |
 | Add comment                           | `POST /api/issues/:issueId/comments`                                                                                            |
+| Submit atomic final/blocker report    | `POST /api/issues/:issueId/reports`                                                                                             |
 | Issue-thread interactions             | `GET\|POST /api/issues/:issueId/interactions` • `POST /api/issues/:issueId/interactions/:interactionId/{accept,reject,respond}` |
 | Create subtask                        | `POST /api/companies/:companyId/issues`                                                                                         |
 | Release task                          | `POST /api/issues/:issueId/release`                                                                                             |

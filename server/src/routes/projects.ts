@@ -7,13 +7,20 @@ import {
   isUuidLike,
   matchWorkspaceRuntimeServiceToCommand,
   updateProjectSchema,
+  updateProjectAccessPolicySchema,
   updateProjectWorkspaceSchema,
   workspaceRuntimeControlTargetSchema,
 } from "@paperclipai/shared";
 import type { WorkspaceRuntimeDesiredState, WorkspaceRuntimeServiceStateMap } from "@paperclipai/shared";
 import { trackProjectCreated } from "@paperclipai/shared/telemetry";
 import { validate } from "../middleware/validate.js";
-import { accessService, projectService, logActivity, workspaceOperationService } from "../services/index.js";
+import {
+  accessService,
+  logActivity,
+  projectAccessService,
+  projectService,
+  workspaceOperationService,
+} from "../services/index.js";
 import { conflict, forbidden } from "../errors.js";
 import { externalObjectService } from "../services/external-objects.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
@@ -43,6 +50,7 @@ const SHARED_WORKSPACE_STOP_AND_RESTART_ACTIONS = new Set(["stop", "restart"]);
 export function projectRoutes(db: Db) {
   const router = Router();
   const svc = projectService(db);
+  const projectAccess = projectAccessService(db);
   const access = accessService(db);
   const secretsSvc = secretService(db);
   const workspaceOperations = workspaceOperationService(db);
@@ -95,15 +103,36 @@ export function projectRoutes(db: Db) {
     return resolved.project?.id ?? rawId;
   }
 
-  async function assertProjectReadAllowed(req: Request, res: Response, project: { id: string; companyId: string }) {
+  async function assertProjectAllowed(
+    req: Request,
+    res: Response,
+    project: { id: string; companyId: string },
+    action: "project:read" | "project:write" = "project:read",
+  ) {
     const decision = await access.decide({
       actor: req.actor,
-      action: "project:read",
+      action,
       resource: { type: "project", companyId: project.companyId, projectId: project.id },
     });
     if (decision.allowed) return true;
-    res.status(403).json({ error: "Project is outside this actor's authorization boundary" });
+    res.status(403).json({ error: "Project is outside this actor's authorization boundary", reason: decision.reason });
     return false;
+  }
+
+  async function assertProjectReadAllowed(req: Request, res: Response, project: { id: string; companyId: string }) {
+    return assertProjectAllowed(req, res, project, "project:read");
+  }
+
+  async function assertProjectWriteAllowed(req: Request, res: Response, project: { id: string; companyId: string }) {
+    return assertProjectAllowed(req, res, project, "project:write");
+  }
+
+  function assertCompanyProjectAccessAdmin(req: Request, companyId: string) {
+    assertCompanyAccess(req, companyId);
+    if (req.actor.source === "local_implicit" || req.actor.isInstanceAdmin) return;
+    const membership = req.actor.memberships?.find((item) => item.companyId === companyId && item.status === "active");
+    if (membership && (membership.membershipRole === "owner" || membership.membershipRole === "admin")) return;
+    throw forbidden("Company owner or admin access is required to change Project access.");
   }
 
   async function filterProjectsForActor<T extends { id: string; companyId: string }>(req: Request, rows: T[]) {
@@ -153,6 +182,7 @@ export function projectRoutes(db: Db) {
       return;
     }
     assertCompanyAccess(req, project.companyId);
+    if (!(await assertProjectReadAllowed(req, res, project))) return;
     const summary = await externalObjectsSvc.getProjectSummary(project.id);
     res.json(summary);
   });
@@ -165,6 +195,9 @@ export function projectRoutes(db: Db) {
     };
 
     const { workspace, ...projectData } = req.body as CreateProjectPayload;
+    if (projectData.accessMode && projectData.accessMode !== "company") {
+      throw conflict("Create the Project in Company access mode, then configure restricted access with the Project access policy endpoint.");
+    }
     await assertProjectEnvironmentSelection(
       companyId,
       readProjectPolicyEnvironmentId(projectData.executionWorkspacePolicy),
@@ -233,7 +266,11 @@ export function projectRoutes(db: Db) {
       return;
     }
     assertCompanyAccess(req, existing.companyId);
+    if (!(await assertProjectWriteAllowed(req, res, existing))) return;
     const body = { ...req.body };
+    if (body.accessMode !== undefined) {
+      throw conflict("Use the Project access policy endpoint to change Project access mode.");
+    }
     assertNoAgentHostWorkspaceCommandMutation(
       req,
       collectProjectExecutionWorkspaceCommandPaths(body.executionWorkspacePolicy),
@@ -285,6 +322,52 @@ export function projectRoutes(db: Db) {
     res.json(project);
   });
 
+  router.get("/projects/:id/access-policy", async (req, res) => {
+    const id = req.params.id as string;
+    const project = await svc.getById(id);
+    if (!project) {
+      res.status(404).json({ error: "Project not found" });
+      return;
+    }
+    assertCompanyProjectAccessAdmin(req, project.companyId);
+    res.json({
+      accessMode: project.accessMode,
+      grants: await projectAccess.list(project.companyId, project.id),
+    });
+  });
+
+  router.put("/projects/:id/access-policy", validate(updateProjectAccessPolicySchema), async (req, res) => {
+    const id = req.params.id as string;
+    const project = await svc.getById(id);
+    if (!project) {
+      res.status(404).json({ error: "Project not found" });
+      return;
+    }
+    assertCompanyProjectAccessAdmin(req, project.companyId);
+    const result = await projectAccess.replace({
+      companyId: project.companyId,
+      projectId: project.id,
+      accessMode: req.body.accessMode,
+      grants: req.body.grants,
+      grantedByUserId: req.actor.userId ?? null,
+    });
+    const actor = getActorInfo(req);
+    await logActivity(db, {
+      companyId: project.companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      action: "project.access_policy_updated",
+      entityType: "project",
+      entityId: project.id,
+      details: {
+        accessMode: result.accessMode,
+        grantCount: result.grants.length,
+      },
+    });
+    res.json(result);
+  });
+
   router.get("/projects/:id/workspaces", async (req, res) => {
     const id = req.params.id as string;
     const existing = await svc.getById(id);
@@ -293,6 +376,7 @@ export function projectRoutes(db: Db) {
       return;
     }
     assertCompanyAccess(req, existing.companyId);
+    if (!(await assertProjectReadAllowed(req, res, existing))) return;
     const workspaces = await svc.listWorkspaces(id);
     res.json(workspaces);
   });
@@ -305,6 +389,7 @@ export function projectRoutes(db: Db) {
       return;
     }
     assertCompanyAccess(req, existing.companyId);
+    if (!(await assertProjectWriteAllowed(req, res, existing))) return;
     assertNoAgentHostWorkspaceCommandMutation(
       req,
       collectProjectWorkspaceCommandPaths(req.body),
@@ -347,6 +432,7 @@ export function projectRoutes(db: Db) {
         return;
       }
       assertCompanyAccess(req, existing.companyId);
+      if (!(await assertProjectWriteAllowed(req, res, existing))) return;
       assertNoAgentHostWorkspaceCommandMutation(
         req,
         collectProjectWorkspaceCommandPaths(req.body),
@@ -396,6 +482,7 @@ export function projectRoutes(db: Db) {
       return;
     }
     assertCompanyAccess(req, project.companyId);
+    if (!(await assertProjectWriteAllowed(req, res, project))) return;
 
     const workspace = project.workspaces.find((entry) => entry.id === workspaceId) ?? null;
     if (!workspace) {
@@ -668,6 +755,7 @@ export function projectRoutes(db: Db) {
       return;
     }
     assertCompanyAccess(req, existing.companyId);
+    if (!(await assertProjectWriteAllowed(req, res, existing))) return;
     const workspace = await svc.removeWorkspace(id, workspaceId);
     if (!workspace) {
       res.status(404).json({ error: "Project workspace not found" });
@@ -699,7 +787,7 @@ export function projectRoutes(db: Db) {
       res.status(404).json({ error: "Project not found" });
       return;
     }
-    assertCompanyAccess(req, existing.companyId);
+    assertCompanyProjectAccessAdmin(req, existing.companyId);
     const project = await svc.remove(id);
     if (!project) {
       res.status(404).json({ error: "Project not found" });

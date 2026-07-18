@@ -15,5 +15,8 @@ export const BUILTIN_ADAPTER_TYPES = new Set([
   "opencode_local",
   "pi_local",
   "process",
+  "sps_agy_local",
+  "sps_lm_studio_local",
+  "sps_ollama_local",
   "http",
 ]);

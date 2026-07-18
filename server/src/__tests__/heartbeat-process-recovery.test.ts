@@ -16,6 +16,7 @@ import {
   documentAnnotationAnchorSnapshots,
   documentAnnotationComments,
   documentAnnotationThreads,
+  applyPendingMigrations,
   createDb,
   documentRevisions,
   documents,
@@ -110,7 +111,16 @@ import {
   UNMANAGED_BACKGROUND_TASK_LIVENESS_REASON,
   UNMANAGED_BACKGROUND_TASK_STOP_REASON,
 } from "@paperclipai/adapter-utils/server-utils";
-const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
+const externalPostgresUrl = process.env.PAPERCLIP_TEST_DATABASE_URL?.trim() || null;
+if (externalPostgresUrl) {
+  const databaseName = new URL(externalPostgresUrl).pathname.slice(1);
+  if (!databaseName.toLowerCase().includes("test")) {
+    throw new Error("PAPERCLIP_TEST_DATABASE_URL must name a test-only database");
+  }
+}
+const embeddedPostgresSupport = externalPostgresUrl
+  ? { supported: true as const }
+  : await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
 
 if (!embeddedPostgresSupport.supported) {
@@ -292,6 +302,11 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
   const cleanupPids = new Set<number>();
 
   beforeAll(async () => {
+    if (externalPostgresUrl) {
+      await applyPendingMigrations(externalPostgresUrl);
+      db = createDb(externalPostgresUrl);
+      return;
+    }
     tempDb = await startEmbeddedPostgresTestDatabase("paperclip-heartbeat-recovery-");
     db = createDb(tempDb.connectionString);
   }, 20_000);
@@ -2495,6 +2510,64 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       .from(activityLog)
       .where(eq(activityLog.entityId, issueId));
     expect(activity.some((event) => event.action === "issue.successful_run_handoff_required")).toBe(true);
+  });
+
+  it("applies a terminal Worker report atomically without queuing generic recovery", async () => {
+    const { agentId, runId, issueId } = await seedQueuedIssueRunFixture();
+    const reportBody = [
+      "## Paperclip Final Report",
+      "한글 산출물과 구현 결과를 검증했고 작업을 완료했습니다.",
+      "검증: 대상 파일과 결과 형식을 확인했습니다.",
+    ].join("\n");
+    mockAdapterExecute.mockResolvedValueOnce({
+      exitCode: 0,
+      signal: null,
+      timedOut: false,
+      errorMessage: null,
+      summary: reportBody,
+      provider: "test",
+      model: "test-model",
+    });
+    const heartbeat = heartbeatService(db);
+
+    await heartbeat.resumeQueuedRuns();
+    await waitForRunToSettle(heartbeat, runId, 5_000);
+    const issue = await waitForValue(async () => {
+      const row = await db
+        .select()
+        .from(issues)
+        .where(eq(issues.id, issueId))
+        .then((rows) => rows[0] ?? null);
+      return row?.status === "in_review" && row.executionRunId === null ? row : null;
+    }, 5_000);
+    await waitForHeartbeatIdle(db, 5_000);
+
+    expect(issue?.status).toBe("in_review");
+    expect(issue?.assigneeAgentId).toBe(agentId);
+    expect(issue?.checkoutRunId).toBeNull();
+    expect(issue?.executionRunId).toBeNull();
+
+    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
+    expect(comments).toHaveLength(1);
+    expect(comments[0]).toMatchObject({
+      authorAgentId: agentId,
+      createdByRunId: runId,
+      body: reportBody,
+    });
+
+    const recoveryWakeups = await db
+      .select()
+      .from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.reason, "finish_successful_run_handoff"));
+    expect(recoveryWakeups).toHaveLength(0);
+
+    const activity = await db
+      .select()
+      .from(activityLog)
+      .where(eq(activityLog.entityId, issueId));
+    expect(activity.some((event) => event.action === "issue.comment_added")).toBe(true);
+    expect(activity.some((event) => event.action === "issue.updated")).toBe(true);
+    expect(activity.some((event) => event.action === "issue.successful_run_handoff_required")).toBe(false);
   });
 
   it("requeues a missing-disposition handoff when the previous corrective wake was cancelled", async () => {

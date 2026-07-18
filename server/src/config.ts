@@ -60,6 +60,10 @@ export interface Config {
   authBaseUrlMode: AuthBaseUrlMode;
   authPublicBaseUrl: string | undefined;
   authDisableSignUp: boolean;
+  authGoogleClientId: string | undefined;
+  authGoogleClientSecret: string | undefined;
+  authGoogleHostedDomain: string | undefined;
+  authGoogleOnly: boolean;
   databaseMode: DatabaseMode;
   databaseUrl: string | undefined;
   databaseMigrationUrl: string | undefined;
@@ -157,7 +161,7 @@ export function loadConfig(): Config {
     process.env.PAPERCLIP_TELEMETRY_BACKEND_TOKEN?.trim() ||
     undefined;
 
-  const deploymentModeFromEnvRaw = process.env.PAPERCLIP_DEPLOYMENT_MODE;
+  const deploymentModeFromEnvRaw = process.env.SPS_DEPLOYMENT_MODE ?? process.env.PAPERCLIP_DEPLOYMENT_MODE;
   const deploymentModeFromEnv =
     deploymentModeFromEnvRaw && DEPLOYMENT_MODES.includes(deploymentModeFromEnvRaw as DeploymentMode)
       ? (deploymentModeFromEnvRaw as DeploymentMode)
@@ -168,7 +172,7 @@ export function loadConfig(): Config {
     strictModeFromEnv !== undefined
       ? strictModeFromEnv === "true"
       : (fileSecrets?.strictMode ?? deploymentMode === "authenticated");
-  const deploymentExposureFromEnvRaw = process.env.PAPERCLIP_DEPLOYMENT_EXPOSURE;
+  const deploymentExposureFromEnvRaw = process.env.SPS_DEPLOYMENT_EXPOSURE ?? process.env.PAPERCLIP_DEPLOYMENT_EXPOSURE;
   const deploymentExposureFromEnv =
     deploymentExposureFromEnvRaw &&
     DEPLOYMENT_EXPOSURES.includes(deploymentExposureFromEnvRaw as DeploymentExposure)
@@ -178,7 +182,7 @@ export function loadConfig(): Config {
     deploymentMode === "local_trusted"
       ? "private"
       : (deploymentExposureFromEnv ?? fileConfig?.server.exposure ?? "private");
-  const bindFromEnvRaw = process.env.PAPERCLIP_BIND;
+  const bindFromEnvRaw = process.env.SPS_BIND ?? process.env.PAPERCLIP_BIND;
   const bindFromEnv =
     bindFromEnvRaw && BIND_MODES.includes(bindFromEnvRaw as BindMode)
       ? (bindFromEnvRaw as BindMode)
@@ -189,15 +193,16 @@ export function loadConfig(): Config {
     bindFromEnv ??
     fileConfig?.server.bind ??
     inferBindModeFromHost(configuredHost, { tailnetBindHost });
-  const customBindHost = process.env.PAPERCLIP_BIND_HOST ?? fileConfig?.server.customBindHost;
-  const authBaseUrlModeFromEnvRaw = process.env.PAPERCLIP_AUTH_BASE_URL_MODE;
+  const customBindHost = process.env.SPS_BIND_HOST ?? process.env.PAPERCLIP_BIND_HOST ?? fileConfig?.server.customBindHost;
+  const authBaseUrlModeFromEnvRaw = process.env.SPS_AUTH_BASE_URL_MODE ?? process.env.PAPERCLIP_AUTH_BASE_URL_MODE;
   const authBaseUrlModeFromEnv =
     authBaseUrlModeFromEnvRaw &&
     AUTH_BASE_URL_MODES.includes(authBaseUrlModeFromEnvRaw as AuthBaseUrlMode)
       ? (authBaseUrlModeFromEnvRaw as AuthBaseUrlMode)
       : null;
-  const publicUrlFromEnv = process.env.PAPERCLIP_PUBLIC_URL;
+  const publicUrlFromEnv = process.env.SPS_PUBLIC_URL ?? process.env.PAPERCLIP_PUBLIC_URL;
   const authPublicBaseUrlRaw =
+    process.env.SPS_AUTH_PUBLIC_BASE_URL ??
     process.env.PAPERCLIP_AUTH_PUBLIC_BASE_URL ??
     process.env.BETTER_AUTH_URL ??
     process.env.BETTER_AUTH_BASE_URL ??
@@ -208,12 +213,37 @@ export function loadConfig(): Config {
     authBaseUrlModeFromEnv ??
     fileConfig?.auth?.baseUrlMode ??
     (authPublicBaseUrl ? "explicit" : "auto");
-  const disableSignUpFromEnv = process.env.PAPERCLIP_AUTH_DISABLE_SIGN_UP;
+  const disableSignUpFromEnv = process.env.SPS_AUTH_DISABLE_SIGN_UP ?? process.env.PAPERCLIP_AUTH_DISABLE_SIGN_UP;
   const authDisableSignUp: boolean =
     disableSignUpFromEnv !== undefined
       ? disableSignUpFromEnv === "true"
       : (fileConfig?.auth?.disableSignUp ?? false);
-  const allowedHostnamesFromEnvRaw = process.env.PAPERCLIP_ALLOWED_HOSTNAMES;
+  const authGoogleClientId =
+    process.env.SPS_GOOGLE_CLIENT_ID?.trim() ||
+    process.env.PAPERCLIP_GOOGLE_CLIENT_ID?.trim() ||
+    process.env.GOOGLE_CLIENT_ID?.trim() ||
+    undefined;
+  const authGoogleClientSecret =
+    process.env.SPS_GOOGLE_CLIENT_SECRET?.trim() ||
+    process.env.PAPERCLIP_GOOGLE_CLIENT_SECRET?.trim() ||
+    process.env.GOOGLE_CLIENT_SECRET?.trim() ||
+    undefined;
+  const authGoogleHostedDomain =
+    process.env.SPS_GOOGLE_HOSTED_DOMAIN?.trim() ||
+    process.env.PAPERCLIP_GOOGLE_HOSTED_DOMAIN?.trim() ||
+    undefined;
+  const googleAuthConfigured = Boolean(authGoogleClientId && authGoogleClientSecret);
+  const googleOnlyFromEnv = process.env.SPS_AUTH_GOOGLE_ONLY ?? process.env.PAPERCLIP_AUTH_GOOGLE_ONLY;
+  const authGoogleOnly =
+    googleOnlyFromEnv !== undefined
+      ? googleOnlyFromEnv === "true"
+      : googleAuthConfigured;
+  if (authGoogleOnly && !googleAuthConfigured) {
+    throw new Error(
+      "SPS_AUTH_GOOGLE_ONLY=true requires SPS_GOOGLE_CLIENT_ID and SPS_GOOGLE_CLIENT_SECRET.",
+    );
+  }
+  const allowedHostnamesFromEnvRaw = process.env.SPS_ALLOWED_HOSTNAMES ?? process.env.PAPERCLIP_ALLOWED_HOSTNAMES;
   const allowedHostnamesFromEnv = allowedHostnamesFromEnvRaw
     ? allowedHostnamesFromEnvRaw
       .split(",")
@@ -291,11 +321,15 @@ export function loadConfig(): Config {
     bind: resolvedBind.bind,
     customBindHost: resolvedBind.customBindHost,
     host: resolvedBind.host,
-    port: Number(process.env.PORT) || fileConfig?.server.port || 3100,
+    port: Number(process.env.SPS_PORT ?? process.env.PORT) || fileConfig?.server.port || 3100,
     allowedHostnames,
     authBaseUrlMode,
     authPublicBaseUrl,
     authDisableSignUp,
+    authGoogleClientId,
+    authGoogleClientSecret,
+    authGoogleHostedDomain,
+    authGoogleOnly,
     databaseMode: fileDatabaseMode,
     databaseUrl: process.env.DATABASE_URL ?? fileDbUrl,
     databaseMigrationUrl: process.env.DATABASE_MIGRATION_URL,

@@ -182,11 +182,14 @@ export interface HostServices {
     get(params: WorkerToHostMethods["companies.get"][0]): Promise<WorkerToHostMethods["companies.get"][1]>;
   };
 
-  /** Provides `projects.list`, `projects.get`, `projects.listWorkspaces`, `projects.getPrimaryWorkspace`, `projects.getWorkspaceForIssue`. */
+  /** Provides project and generic Project Workspace operations. */
   projects: {
     list(params: WorkerToHostMethods["projects.list"][0]): Promise<WorkerToHostMethods["projects.list"][1]>;
     get(params: WorkerToHostMethods["projects.get"][0]): Promise<WorkerToHostMethods["projects.get"][1]>;
     listWorkspaces(params: WorkerToHostMethods["projects.listWorkspaces"][0]): Promise<WorkerToHostMethods["projects.listWorkspaces"][1]>;
+    createWorkspace(params: WorkerToHostMethods["projects.createWorkspace"][0]): Promise<WorkerToHostMethods["projects.createWorkspace"][1]>;
+    updateWorkspace(params: WorkerToHostMethods["projects.updateWorkspace"][0]): Promise<WorkerToHostMethods["projects.updateWorkspace"][1]>;
+    removeWorkspace(params: WorkerToHostMethods["projects.removeWorkspace"][0]): Promise<WorkerToHostMethods["projects.removeWorkspace"][1]>;
     getPrimaryWorkspace(params: WorkerToHostMethods["projects.getPrimaryWorkspace"][0]): Promise<WorkerToHostMethods["projects.getPrimaryWorkspace"][1]>;
     getWorkspaceForIssue(params: WorkerToHostMethods["projects.getWorkspaceForIssue"][0]): Promise<WorkerToHostMethods["projects.getWorkspaceForIssue"][1]>;
     getManaged(params: WorkerToHostMethods["projects.managed.get"][0]): Promise<WorkerToHostMethods["projects.managed.get"][1]>;
@@ -220,6 +223,7 @@ export interface HostServices {
     list(params: WorkerToHostMethods["issues.list"][0]): Promise<WorkerToHostMethods["issues.list"][1]>;
     get(params: WorkerToHostMethods["issues.get"][0]): Promise<WorkerToHostMethods["issues.get"][1]>;
     create(params: WorkerToHostMethods["issues.create"][0]): Promise<WorkerToHostMethods["issues.create"][1]>;
+    submitReport(params: WorkerToHostMethods["issues.submitReport"][0]): Promise<WorkerToHostMethods["issues.submitReport"][1]>;
     update(params: WorkerToHostMethods["issues.update"][0]): Promise<WorkerToHostMethods["issues.update"][1]>;
     getRelations(params: WorkerToHostMethods["issues.relations.get"][0]): Promise<WorkerToHostMethods["issues.relations.get"][1]>;
     setBlockedBy(params: WorkerToHostMethods["issues.relations.setBlockedBy"][0]): Promise<WorkerToHostMethods["issues.relations.setBlockedBy"][1]>;
@@ -407,6 +411,9 @@ const METHOD_CAPABILITY_MAP: Record<WorkerToHostMethodName, PluginCapability | n
   "projects.list": "projects.read",
   "projects.get": "projects.read",
   "projects.listWorkspaces": "project.workspaces.read",
+  "projects.createWorkspace": "project.workspaces.write",
+  "projects.updateWorkspace": "project.workspaces.write",
+  "projects.removeWorkspace": "project.workspaces.write",
   "projects.getPrimaryWorkspace": "project.workspaces.read",
   "projects.getWorkspaceForIssue": "project.workspaces.read",
   "executionWorkspaces.get": "execution.workspaces.read",
@@ -438,6 +445,7 @@ const METHOD_CAPABILITY_MAP: Record<WorkerToHostMethodName, PluginCapability | n
   "issues.summaries.getOrchestration": "issues.orchestration.read",
   "issues.listComments": "issue.comments.read",
   "issues.createComment": "issue.comments.create",
+  "issues.submitReport": "issues.report",
   "issues.createInteraction": "issue.interactions.create",
 
   // Issue Documents
@@ -743,6 +751,15 @@ export function createHostClientHandlers(
     "projects.listWorkspaces": gated("projects.listWorkspaces", async (params) => {
       return services.projects.listWorkspaces(params);
     }),
+    "projects.createWorkspace": gated("projects.createWorkspace", async (params) => {
+      return services.projects.createWorkspace(params);
+    }),
+    "projects.updateWorkspace": gated("projects.updateWorkspace", async (params) => {
+      return services.projects.updateWorkspace(params);
+    }),
+    "projects.removeWorkspace": gated("projects.removeWorkspace", async (params) => {
+      return services.projects.removeWorkspace(params);
+    }),
     "projects.getPrimaryWorkspace": gated("projects.getPrimaryWorkspace", async (params) => {
       return services.projects.getPrimaryWorkspace(params);
     }),
@@ -835,6 +852,9 @@ export function createHostClientHandlers(
     }),
     "issues.createComment": gated("issues.createComment", async (params) => {
       return services.issues.createComment(params);
+    }),
+    "issues.submitReport": gated("issues.submitReport", async (params) => {
+      return services.issues.submitReport(params);
     }),
     "issues.createInteraction": gated("issues.createInteraction", async (params) => {
       return services.issues.createInteraction(params);

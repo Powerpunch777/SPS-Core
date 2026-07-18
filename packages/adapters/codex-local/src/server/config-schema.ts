@@ -4,12 +4,22 @@ import {
   DEFAULT_ACP_ENGINE_NON_INTERACTIVE_PERMISSIONS,
   DEFAULT_ACP_ENGINE_WARM_HANDLE_IDLE_MS,
 } from "@paperclipai/adapter-utils/acpx-engine/constants";
+import { listLocalCodexAccountOptions } from "./codex-account.js";
 
 const acpVisible = { visibleWhen: { key: "engine", values: ["acp"] } };
 
-export function getConfigSchema(): AdapterConfigSchema {
+export function getConfigSchema(homeRoot?: string): AdapterConfigSchema {
+  const codexAccounts = listLocalCodexAccountOptions(homeRoot);
   return {
     fields: [
+      {
+        key: "codexAccount",
+        label: "Codex CLI account",
+        type: "select",
+        default: codexAccounts[0]?.value ?? ".codex",
+        options: codexAccounts,
+        hint: "Select a locally signed-in Codex profile. This changes credentials only; Agent instructions and Room history stay unchanged.",
+      },
       {
         key: "engine",
         label: "Execution engine",

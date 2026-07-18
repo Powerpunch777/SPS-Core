@@ -367,7 +367,34 @@ export async function terminateLocalService(
   opts?: { signal?: NodeJS.Signals; forceAfterMs?: number },
 ) {
   const signal = opts?.signal ?? "SIGTERM";
-  const targetProcessGroup = process.platform !== "win32" && record.processGroupId && record.processGroupId > 0;
+  if (process.platform === "win32") {
+    const pid = Number.isInteger(record.pid) && record.pid > 0 ? record.pid : null;
+    if (!pid) return;
+
+    // Node's process.kill() only targets the parent on Windows. Adapter CLIs
+    // commonly spawn their own child process, so cancellation must terminate
+    // the complete tree before the parent can exit and orphan descendants.
+    try {
+      await execFileAsync("taskkill.exe", ["/PID", String(pid), "/T"], { windowsHide: true });
+    } catch {
+      // The process may have exited between the liveness check and taskkill.
+    }
+
+    const deadline = Date.now() + (opts?.forceAfterMs ?? 2_000);
+    while (Date.now() < deadline && isPidAlive(pid)) {
+      await delay(100);
+    }
+    if (!isPidAlive(pid)) return;
+
+    try {
+      await execFileAsync("taskkill.exe", ["/PID", String(pid), "/T", "/F"], { windowsHide: true });
+    } catch {
+      // Ignore cleanup races and already-terminated process trees.
+    }
+    return;
+  }
+
+  const targetProcessGroup = Boolean(record.processGroupId && record.processGroupId > 0);
   try {
     if (targetProcessGroup) {
       process.kill(-record.processGroupId!, signal);

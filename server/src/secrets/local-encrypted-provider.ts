@@ -81,6 +81,7 @@ function loadOrCreateMasterKey(): Buffer {
 }
 
 function enforceKeyFilePermissionsBestEffort(keyPath: string) {
+  if (process.platform === "win32") return;
   try {
     const mode = statSync(keyPath).mode & 0o777;
     if ((mode & 0o077) !== 0) {
@@ -144,16 +145,19 @@ async function inspectLocalEncryptedHealth(): Promise<SecretProviderHealthCheck>
     };
   }
 
+  const supportsPosixPermissionCheck = process.platform !== "win32";
   let mode: number | null = null;
-  try {
-    mode = statSync(keyPath).mode & 0o777;
-  } catch (err) {
-    return {
-      provider: "local_encrypted",
-      status: "error",
-      message: `Could not stat secrets key file: ${err instanceof Error ? err.message : String(err)}`,
-      details: { keySource: "file", keyFilePath: keyPath },
-    };
+  if (supportsPosixPermissionCheck) {
+    try {
+      mode = statSync(keyPath).mode & 0o777;
+    } catch (err) {
+      return {
+        provider: "local_encrypted",
+        status: "error",
+        message: `Could not stat secrets key file: ${err instanceof Error ? err.message : String(err)}`,
+        details: { keySource: "file", keyFilePath: keyPath },
+      };
+    }
   }
 
   try {
@@ -176,7 +180,7 @@ async function inspectLocalEncryptedHealth(): Promise<SecretProviderHealthCheck>
   }
 
   const warnings =
-    mode !== null && (mode & 0o077) !== 0
+    supportsPosixPermissionCheck && mode !== null && (mode & 0o077) !== 0
       ? [`Secrets key file permissions are ${mode.toString(8)}; run chmod 600 ${keyPath}`]
       : [];
   return {
@@ -188,7 +192,11 @@ async function inspectLocalEncryptedHealth(): Promise<SecretProviderHealthCheck>
       "Back up the key file together with database backups.",
       "The database alone cannot restore local encrypted secret values.",
     ],
-    details: { keySource: "file", keyFilePath: keyPath },
+    details: {
+      keySource: "file",
+      keyFilePath: keyPath,
+      permissionCheck: supportsPosixPermissionCheck ? "posix_mode" : "windows_acl"
+    },
   };
 }
 

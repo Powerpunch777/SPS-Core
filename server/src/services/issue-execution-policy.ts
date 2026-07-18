@@ -5,6 +5,7 @@ import type {
   IssueExecutionMonitorPolicy,
   IssueExecutionMonitorState,
   IssueExecutionPolicy,
+  IssueExecutionFailurePolicy,
   IssueExecutionStage,
   IssueExecutionStagePrincipal,
   IssueExecutionState,
@@ -313,13 +314,20 @@ function nextAssigneeIds(input: {
 
 export function stripMonitorFromExecutionPolicy(policy: IssueExecutionPolicy | null): IssueExecutionPolicy | null {
   if (!policy) return null;
-  if (!policy.monitor) return policy;
-  if (policy.stages.length === 0) return null;
-  return {
+  const hasMonitor = !!policy.monitor;
+  const nextPolicy = hasMonitor ? {
     mode: policy.mode,
     commentRequired: policy.commentRequired,
     stages: policy.stages,
-  };
+    ...(policy.reviewPreset ? { reviewPreset: policy.reviewPreset } : {}),
+    ...(policy.authorizationPolicy ? { authorizationPolicy: policy.authorizationPolicy } : {}),
+    ...(policy.failure ? { failure: policy.failure } : {}),
+  } : policy;
+
+  if (nextPolicy.stages.length === 0 && !nextPolicy.reviewPreset && !nextPolicy.authorizationPolicy && !nextPolicy.failure) {
+    return null;
+  }
+  return nextPolicy;
 }
 
 export function setIssueExecutionPolicyMonitorScheduledBy(
@@ -389,8 +397,9 @@ export function normalizeIssueExecutionPolicy(input: unknown): IssueExecutionPol
 
   const reviewPreset = parsed.data.reviewPreset;
   const authorizationPolicy = parsed.data.authorizationPolicy;
+  const failure = parsed.data.failure;
 
-  if (stages.length === 0 && !monitor && !reviewPreset && !authorizationPolicy) return null;
+  if (stages.length === 0 && !monitor && !reviewPreset && !authorizationPolicy && !failure) return null;
 
   return {
     mode: parsed.data.mode ?? "normal",
@@ -399,6 +408,28 @@ export function normalizeIssueExecutionPolicy(input: unknown): IssueExecutionPol
     ...(monitor ? { monitor } : {}),
     ...(reviewPreset ? { reviewPreset } : {}),
     ...(authorizationPolicy ? { authorizationPolicy } : {}),
+    ...(failure ? { failure } : {}),
+  };
+}
+
+export function parseIssueExecutionFailurePolicy(policyInput: unknown): IssueExecutionFailurePolicy {
+  const defaults: IssueExecutionFailurePolicy = {
+    automaticRetry: true,
+    preserveAssignee: false,
+    wakeRecoveryOwner: true,
+  };
+  if (!policyInput || typeof policyInput !== "object" || Array.isArray(policyInput)) {
+    return defaults;
+  }
+  const failureInput = (policyInput as Record<string, unknown>).failure;
+  if (!failureInput || typeof failureInput !== "object" || Array.isArray(failureInput)) {
+    return defaults;
+  }
+  const failure = failureInput as Record<string, unknown>;
+  return {
+    automaticRetry: typeof failure.automaticRetry === "boolean" ? failure.automaticRetry : defaults.automaticRetry,
+    preserveAssignee: typeof failure.preserveAssignee === "boolean" ? failure.preserveAssignee : defaults.preserveAssignee,
+    wakeRecoveryOwner: typeof failure.wakeRecoveryOwner === "boolean" ? failure.wakeRecoveryOwner : defaults.wakeRecoveryOwner,
   };
 }
 

@@ -89,6 +89,29 @@ if (!embeddedPostgresSupport.supported) {
 }
 
 describeEmbeddedPostgres("applyPendingMigrations", () => {
+  it(
+    "uses timestamp lineage when only some published migration hashes match the source checkout",
+    async () => {
+      const connectionString = await createTempDatabase();
+
+      await applyPendingMigrations(connectionString);
+
+      const preservedHash = await migrationHash("0002_big_zaladane.sql");
+      const sql = postgres(connectionString, { max: 1, onnotice: () => {} });
+      try {
+        await sql.unsafe(
+          `UPDATE "drizzle"."__drizzle_migrations" SET hash = repeat('0', 64) WHERE hash <> '${preservedHash}'`,
+        );
+      } finally {
+        await sql.end();
+      }
+
+      const state = await inspectMigrations(connectionString);
+      expect(state.status).toBe("upToDate");
+    },
+    20_000,
+  );
+
   it("rejects unallowlisted migration backfills that bump updated_at on user-visible tables", async () => {
     const entries = await fs.promises.readdir(new URL("./migrations", import.meta.url), {
       withFileTypes: true,

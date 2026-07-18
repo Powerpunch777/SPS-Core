@@ -275,6 +275,59 @@ describe("plugin-worker-manager stderr failure context", () => {
     }
   });
 
+  it("gives scheduled Jobs an instance invocation scope for nested host calls", async () => {
+    const companiesGet = vi.fn(async (params: { companyId: string }) => ({ id: params.companyId }));
+    const scopedCompaniesGet = vi.fn();
+    const hostHandlers = createHostClientHandlers({
+      pluginId: "test.plugin",
+      capabilities: ["companies.read"],
+      services: {
+        companies: {
+          get: companiesGet,
+        },
+      } as unknown as HostServices,
+    });
+    const baseCompaniesGet = hostHandlers["companies.get"]!;
+    (hostHandlers as Record<string, unknown>)["companies.get"] = async (params: unknown, context?: unknown) => {
+      scopedCompaniesGet(params, context);
+      return baseCompaniesGet(params as never, context as never);
+    };
+    const handle = createPluginWorkerHandle("test.plugin", {
+      entrypointPath: INVOCATION_SCOPE_WORKER_ENTRYPOINT,
+      manifest: TEST_MANIFEST,
+      config: {},
+      instanceInfo: {
+        instanceId: "instance-1",
+        hostVersion: "1.0.0",
+      },
+      apiVersion: 1,
+      hostHandlers,
+    });
+
+    try {
+      await handle.start();
+
+      await expect(handle.call("runJob", {
+        job: {
+          jobKey: "scope-probe",
+          runId: "job-run-1",
+          trigger: "schedule",
+          scheduledAt: new Date().toISOString(),
+          requestedCompanyId: "company-b",
+          mode: "echo",
+        },
+      } as HostToWorkerMethods["runJob"][0])).resolves.toEqual({ id: "company-b" });
+
+      expect(companiesGet).toHaveBeenCalledWith({ companyId: "company-b" });
+      expect(scopedCompaniesGet).toHaveBeenCalledWith(
+        { companyId: "company-b" },
+        { invocationScope: {} },
+      );
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
   it("rejects performAction nested host calls that omit the invocation id", async () => {
     const handlers = createHostClientHandlers({
       pluginId: "test.plugin",

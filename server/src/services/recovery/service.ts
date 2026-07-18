@@ -43,7 +43,7 @@ import {
   buildIssueBlockersResolvedWakeIdempotencyKey,
   findExistingIssueBlockersResolvedWakeForAnyKey,
 } from "../issue-dependency-wakeups.js";
-import { parseIssueExecutionState } from "../issue-execution-policy.js";
+import { parseIssueExecutionState, parseIssueExecutionFailurePolicy } from "../issue-execution-policy.js";
 import { evaluateAgentInvokabilityFromDb } from "../agent-invokability.js";
 import { getRunLogStore } from "../run-log-store.js";
 import {
@@ -2533,7 +2533,6 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       ...(workspaceValidation ? { workspaceValidation } : {}),
     };
   }
-
   async function ensureSourceScopedStrandedRecoveryAction(input: {
     issue: typeof issues.$inferSelect;
     latestRun: LatestIssueRun;
@@ -2548,6 +2547,37 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       input.recoveryOwnerAgentId,
     );
     const now = new Date();
+
+    const failurePolicy = parseIssueExecutionFailurePolicy(input.issue.executionPolicy);
+    const wakePolicy = failurePolicy.automaticRetry === false
+      ? {
+        type: "record_only",
+        reason: "automatic_retry_disabled_by_policy",
+        ownerAgentId,
+      }
+      : failurePolicy.wakeRecoveryOwner === false
+      ? {
+        type: "record_only",
+        reason: "wake_recovery_owner_disabled_by_policy",
+        ownerAgentId,
+      }
+      : recoveryCause === "workspace_validation_failed" || recoveryCause === "configuration_incomplete"
+      ? {
+        type: "manual_repair_required",
+        reason: recoveryCause,
+        ownerAgentId,
+      }
+      : ownerAgentId
+      ? {
+        type: "wake_owner",
+        reason: "source_scoped_recovery_action",
+        ownerAgentId,
+      }
+      : {
+        type: "board_escalation",
+        reason: "no_invokable_recovery_owner",
+      };
+
     const action = await recoveryActionsSvc.upsertSourceScoped({
       companyId: input.issue.companyId,
       sourceIssueId: input.issue.id,
@@ -2580,22 +2610,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         : recoveryCause === "execution_review_participant_recovery"
           ? "Repair the failed review participant path, restore the source issue to in_review with a live reviewer, or record an intentional manual resolution."
         : "Restore a live execution path, fix the runtime/adapter failure, or record an intentional manual resolution.",
-      wakePolicy: recoveryCause === "workspace_validation_failed" || recoveryCause === "configuration_incomplete"
-        ? {
-          type: "manual_repair_required",
-          reason: recoveryCause,
-          ownerAgentId,
-        }
-        : ownerAgentId
-        ? {
-          type: "wake_owner",
-          reason: "source_scoped_recovery_action",
-          ownerAgentId,
-        }
-        : {
-          type: "board_escalation",
-          reason: "no_invokable_recovery_owner",
-        },
+      wakePolicy,
       monitorPolicy: null,
       maxAttempts: null,
       lastAttemptAt: now,
@@ -2610,9 +2625,18 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
     latestRun: LatestIssueRun;
     recoveryCause: StrandedRecoveryCause;
   }) {
+    if (parseIssueExecutionFailurePolicy(input.issue.executionPolicy).automaticRetry === false) return;
     if (input.recoveryCause === "workspace_validation_failed") return;
     if (input.recoveryCause === "configuration_incomplete") return;
     if (!input.action.ownerAgentId) return;
+    const wakePolicy = input.action.wakePolicy;
+    if (
+      wakePolicy &&
+      typeof wakePolicy === "object" &&
+      !Array.isArray(wakePolicy) &&
+      (wakePolicy as Record<string, unknown>).type === "record_only"
+    ) return;
+
     await deps.enqueueWakeup(input.action.ownerAgentId, {
       source: "assignment",
       triggerDetail: "system",
@@ -2828,10 +2852,15 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       successfulRunHandoffEvidence: input.successfulRunHandoffEvidence,
     });
     const blockerIds = await existingUnresolvedBlockerIssueIds(input.issue.companyId, input.issue.id);
+    const failurePolicy = parseIssueExecutionFailurePolicy(input.issue.executionPolicy);
+    const targetAssigneeAgentId = failurePolicy.preserveAssignee
+      ? input.issue.assigneeAgentId
+      : (recoveryAction.ownerAgentId ?? input.issue.assigneeAgentId);
+
     const updated = await issuesSvc.update(input.issue.id, {
       status: "blocked",
       blockedByIssueIds: blockerIds,
-      assigneeAgentId: recoveryAction.ownerAgentId ?? input.issue.assigneeAgentId,
+      assigneeAgentId: targetAssigneeAgentId,
     });
     if (!updated) return null;
 
@@ -2950,7 +2979,14 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       recoveryCause,
     });
 
-    if (recoveryAction.ownerAgentId && recoveryAction.ownerAgentId === input.issue.assigneeAgentId) {
+    const expectedAgentId = failurePolicy.preserveAssignee
+      ? input.issue.assigneeAgentId
+      : recoveryAction.ownerAgentId;
+
+    if (
+      expectedAgentId &&
+      recoveryAction.ownerAgentId === input.issue.assigneeAgentId
+    ) {
       const [currentIssue] = await db
         .select({
           status: issues.status,
@@ -2962,12 +2998,12 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       if (
         currentIssue &&
         (currentIssue.status !== "blocked" ||
-          currentIssue.assigneeAgentId !== recoveryAction.ownerAgentId)
+          currentIssue.assigneeAgentId !== expectedAgentId)
       ) {
         const reblocked = await issuesSvc.update(input.issue.id, {
           status: "blocked",
           blockedByIssueIds: blockerIds,
-          assigneeAgentId: recoveryAction.ownerAgentId,
+          assigneeAgentId: expectedAgentId,
         });
         if (reblocked) return reblocked;
       }
@@ -3063,6 +3099,30 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
           issue,
           previousStatus: issue.status as StrandedPreviousStatus,
           latestRun,
+        });
+        if (updated) {
+          result.escalated += 1;
+          result.issueIds.push(issue.id);
+        } else {
+          result.skipped += 1;
+        }
+        continue;
+      }
+
+      const failurePolicy = parseIssueExecutionFailurePolicy(issue.executionPolicy);
+      if (
+        issue.status !== "in_review" &&
+        failurePolicy.automaticRetry === false &&
+        isUnsuccessfulTerminalIssueRun(latestRun)
+      ) {
+        const failureSummary = summarizeRunFailureForIssueComment(latestRun);
+        const updated = await escalateStrandedAssignedIssue({
+          issue,
+          previousStatus: issue.status as "todo" | "in_progress",
+          latestRun,
+          comment:
+            "Automatic failure recovery is disabled for this issue. " +
+            `Moving it to \`blocked\` without another agent run.${failureSummary ?? ""}`,
         });
         if (updated) {
           result.escalated += 1;

@@ -49,6 +49,7 @@ import { llmRoutes } from "./routes/llms.js";
 import { authRoutes } from "./routes/auth.js";
 import { assetRoutes } from "./routes/assets.js";
 import { accessRoutes } from "./routes/access.js";
+import { spsNodeRoutes } from "./routes/sps-nodes.js";
 import { pluginRoutes } from "./routes/plugins.js";
 import { adapterRoutes } from "./routes/adapters.js";
 import { pluginUiStaticRoutes } from "./routes/plugin-ui-static.js";
@@ -68,6 +69,7 @@ import { setPluginEventBus } from "./services/activity-log.js";
 import { createPluginDevWatcher } from "./services/plugin-dev-watcher.js";
 import { createPluginHostServiceCleanup } from "./services/plugin-host-service-cleanup.js";
 import { pluginRegistryService } from "./services/plugin-registry.js";
+import { installConfiguredBundledPlugins, parseBundledPluginPaths } from "./services/bundled-plugin-bootstrap.js";
 import { createHostClientHandlers } from "@paperclipai/plugin-sdk";
 import type { BetterAuthSessionResult } from "./auth/better-auth.js";
 import { createCachedViteHtmlRenderer } from "./vite-html-renderer.js";
@@ -335,6 +337,7 @@ export async function createApp(
     ),
   );
   api.use(adapterRoutes());
+  api.use(spsNodeRoutes(db));
   api.use(
     accessRoutes(db, {
       deploymentMode: opts.deploymentMode,
@@ -360,6 +363,16 @@ export async function createApp(
     ];
     const uiDist = candidates.find((p) => fs.existsSync(path.join(p, "index.html")));
     if (uiDist) {
+      const sendBrandedStaticIndex = (_req: express.Request, res: express.Response) => {
+        res
+          .status(200)
+          .set("Content-Type", "text/html")
+          .set("Cache-Control", "no-cache")
+          .end(readBrandedStaticIndexHtml(uiDist));
+      };
+      // express.static would otherwise serve the raw index before runtime
+      // branding and Workplane mode metadata can be injected.
+      app.get(["/", "/index.html"], sendBrandedStaticIndex);
       // Hashed asset files (Vite emits them under /assets/<name>.<hash>.<ext>)
       // never change once built, so they can be cached aggressively.
       app.use(
@@ -551,7 +564,19 @@ export async function createApp(
       );
     }
   };
+  const configuredBundledPluginPaths = parseBundledPluginPaths(
+    process.env.SPS_BUNDLED_PLUGIN_PATHS ?? process.env.PAPERCLIP_BUNDLED_PLUGIN_PATHS,
+  );
+  const ensureConfiguredBundledPlugins = async (): Promise<void> => {
+    await installConfiguredBundledPlugins(configuredBundledPluginPaths, {
+      loader,
+      lifecycle,
+      logger,
+      pluginRegistry,
+    });
+  };
   void ensureBundledKubernetesPlugin()
+    .then(() => ensureConfiguredBundledPlugins())
     .then(() => loader.loadAll())
     .then((result) => {
     if (!result) return;

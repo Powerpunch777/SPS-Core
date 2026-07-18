@@ -28,6 +28,7 @@ import {
   companyMemberships,
   companySkills,
   documents,
+  routines,
 } from "@paperclipai/db";
 import { notFound, unprocessable } from "../errors.js";
 import { environmentService } from "./environments.js";
@@ -463,6 +464,10 @@ export function companyService(db: Db) {
         await tx.delete(assets).where(eq(assets.companyId, id));
         await tx.delete(goals).where(eq(goals.companyId, id));
         await tx.delete(projects).where(eq(projects.companyId, id));
+        // Routine assignees reference agents without an ON DELETE action.
+        // Delete routines before their company agents so a freshly provisioned
+        // built-in routine cannot make a company impossible to remove.
+        await tx.delete(routines).where(eq(routines.companyId, id));
         await tx.delete(agents).where(eq(agents.companyId, id));
         const rows = await tx
           .delete(companies)

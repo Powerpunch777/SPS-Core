@@ -54,6 +54,7 @@ import {
   restoreIssueDocumentRevisionSchema,
   respondIssueThreadInteractionSchema,
   submitIssueThreadInteractionVerdictsSchema,
+  submitIssueReportSchema,
   updateIssueWorkProductSchema,
   updateDocumentAnnotationThreadSchema,
   upsertIssueDocumentSchema,
@@ -117,6 +118,7 @@ import {
   workProductService,
 } from "../services/index.js";
 import { buildPlanReviewContext } from "../services/plan-review-context.js";
+import { configuredWorkplaneWorker } from "../services/workplane-agent-policy.js";
 import {
   TASK_WATCHDOG_ORIGIN_KIND,
   resolveTaskWatchdogMutationScope,
@@ -131,6 +133,7 @@ import {
   collectIssueWorkspaceCommandPaths,
 } from "./workspace-command-authz.js";
 import { shouldWakeAssigneeOnCheckout } from "./issues-checkout-wakeup.js";
+import { issueReportService } from "../services/issue-reports.js";
 import {
   isInlineAttachmentContentType,
   normalizeIssueAttachmentMaxBytes,
@@ -2473,6 +2476,7 @@ export function issueRoutes(
 ) {
   const router = Router();
   const svc = issueService(db);
+  const issueReportsSvc = issueReportService(db);
   const access = accessService(db);
   const heartbeat = heartbeatService(db, {
     pluginWorkerManager: opts.pluginWorkerManager,
@@ -3227,6 +3231,15 @@ export function issueRoutes(
     assignmentScope?: TaskAssignmentAuthorizationScope,
   ) {
     assertCompanyAccess(req, companyId);
+    if (req.actor.type === "agent" && req.actor.agentId) {
+      const actorAgent = await agentsSvc.getById(req.actor.agentId);
+      if (!actorAgent || actorAgent.companyId !== companyId) {
+        throw forbidden("Agent key cannot access another company");
+      }
+      if (configuredWorkplaneWorker(actorAgent)) {
+        throw forbidden("This Workplane Worker cannot create, assign, or reassign Tasks. A Lead must own Task delegation.");
+      }
+    }
     const decision = await access.decide({
       actor: req.actor,
       action: "tasks:assign",
@@ -6962,7 +6975,7 @@ export function issueRoutes(
       assigneeUserId: rawCreateBody.assigneeUserId ?? null,
     };
     await assertTaskBridgeCreateAllowed(req, companyId, createAssignmentScope);
-    if (rawCreateBody.assigneeAgentId || rawCreateBody.assigneeUserId) {
+    if (req.actor.type === "agent" || rawCreateBody.assigneeAgentId || rawCreateBody.assigneeUserId) {
       await assertCanAssignTasks(req, companyId, createAssignmentScope);
     }
     await assertIssueEnvironmentSelection(companyId, createBody.executionWorkspaceSettings?.environmentId);
@@ -7127,7 +7140,7 @@ export function issueRoutes(
       assigneeUserId: createBody.assigneeUserId ?? null,
     };
     await assertTaskBridgeCreateAllowed(req, parent.companyId, childAssignmentScope);
-    if (sanitizedBody.assigneeAgentId || sanitizedBody.assigneeUserId) {
+    if (req.actor.type === "agent" || sanitizedBody.assigneeAgentId || sanitizedBody.assigneeUserId) {
       await assertCanAssignTasks(req, parent.companyId, childAssignmentScope);
     }
     await assertIssueEnvironmentSelection(parent.companyId, createBody.executionWorkspaceSettings?.environmentId);
@@ -7303,7 +7316,7 @@ export function issueRoutes(
       requestedChildren.push(childBody);
       assertNoAgentHostWorkspaceCommandMutation(req, collectIssueWorkspaceCommandPaths(childBody));
       if (!(await assertCheapRecoveryIssueAssigneeProfileAllowed(req, res, sourceIssue, childBody))) return;
-      if (childBody.assigneeAgentId || childBody.assigneeUserId) {
+      if (req.actor.type === "agent" || childBody.assigneeAgentId || childBody.assigneeUserId) {
         await assertCanAssignTasks(req, sourceIssue.companyId, {
           projectId: childBody.projectId ?? sourceIssue.projectId ?? null,
           parentIssueId: sourceIssue.id,
@@ -9569,6 +9582,87 @@ export function issueRoutes(
       return;
     }
     res.json(bundle);
+  });
+
+  router.post("/issues/:id/reports", validate(submitIssueReportSchema), async (req, res) => {
+    const id = req.params.id as string;
+    const issue = await svc.getById(id);
+    if (!issue) {
+      res.status(404).json({ error: "Issue not found" });
+      return;
+    }
+    assertCompanyAccess(req, issue.companyId);
+    if (req.actor.type !== "agent") {
+      res.status(403).json({ error: "Only an active agent run can submit a Task report" });
+      return;
+    }
+    if (!(await assertAgentIssueCommentAllowed(req, res, issue))) return;
+    if (!(await assertAgentIssueMutationAllowed(req, res, issue))) return;
+    const runId = requireAgentRunId(req, res);
+    if (!runId) return;
+
+    const actor = getActorInfo(req);
+    if (!actor.agentId) {
+      res.status(403).json({ error: "Agent authentication required" });
+      return;
+    }
+
+    const result = await issueReportsSvc.submit({
+      companyId: issue.companyId,
+      issueId: issue.id,
+      kind: req.body.kind,
+      body: req.body.body,
+      actorAgentId: actor.agentId,
+      actorRunId: runId,
+    });
+
+    await issueReferencesSvc.syncComment(result.comment.id);
+    await externalObjectsSvc.syncCommentSafely(result.comment.id);
+    await heartbeat.reportRunActivity(runId).catch((err) =>
+      logger.warn({ err, runId }, "failed to record Task report run activity"));
+
+    // Emit normal issue events after the transaction commits. Idempotent
+    // retries intentionally emit again so a failed post-commit notification
+    // can be repaired without inserting another report.
+    await logActivity(db, {
+      companyId: issue.companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      runId,
+      action: "issue.comment_added",
+      entityType: "issue",
+      entityId: issue.id,
+      details: {
+        commentId: result.comment.id,
+        bodySnippet: result.comment.body.slice(0, 120),
+        identifier: result.issue.identifier,
+        issueTitle: result.issue.title,
+        reportKind: req.body.kind,
+        idempotent: result.idempotent,
+      },
+    });
+    await logActivity(db, {
+      companyId: issue.companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      runId,
+      action: "issue.updated",
+      entityType: "issue",
+      entityId: issue.id,
+      details: {
+        status: result.issue.status,
+        identifier: result.issue.identifier,
+        reportKind: req.body.kind,
+        commentId: result.comment.id,
+        idempotent: result.idempotent,
+        _previous: { status: "in_progress" },
+      },
+    });
+    await queueTaskWatchdogEvaluation(result.issue, runId);
+
+    res.status(result.idempotent ? 200 : 201).json(result);
   });
 
   router.post("/issues/:id/comments", validate(addIssueCommentSchema), async (req, res) => {
