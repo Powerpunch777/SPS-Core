@@ -210,6 +210,32 @@ export function spsNodeRoutes(db: Db) {
       .where(and(...predicates));
   }
 
+  async function revokeNodeExecutionAccess(
+    req: Request,
+    node: typeof spsNodes.$inferSelect,
+    input: { action: string; reason: string },
+  ) {
+    const now = new Date();
+    const updated = await db
+      .update(spsNodes)
+      .set({ status: "revoked", revokedAt: now, updatedAt: now })
+      .where(eq(spsNodes.id, node.id))
+      .returning()
+      .then((rows) => rows[0]!);
+    await db
+      .update(spsNodeAgentGrants)
+      .set({ revokedAt: now, updatedAt: now })
+      .where(and(eq(spsNodeAgentGrants.nodeId, node.id), isNull(spsNodeAgentGrants.revokedAt)));
+    await db.delete(spsAgentNodeBindings).where(eq(spsAgentNodeBindings.nodeId, node.id));
+    await failActiveNodeCommands({ nodeId: node.id, reason: input.reason });
+    await logNodeMutation(req, {
+      companyId: node.companyId,
+      action: input.action,
+      nodeId: node.id,
+    });
+    return updated;
+  }
+
   router.get("/companies/:companyId/sps-nodes", async (req, res) => {
     const companyId = req.params.companyId as string;
     await assertSpsNodeAdmin(req, companyId);
@@ -407,26 +433,19 @@ export function spsNodeRoutes(db: Db) {
   router.post("/sps-nodes/:nodeId/revoke", async (req, res) => {
     const node = await getNode(req.params.nodeId as string);
     await assertSpsNodeAdmin(req, node.companyId);
-    const now = new Date();
-    const updated = await db
-      .update(spsNodes)
-      .set({ status: "revoked", revokedAt: now, updatedAt: now })
-      .where(eq(spsNodes.id, node.id))
-      .returning()
-      .then((rows) => rows[0]!);
-    await db
-      .update(spsNodeAgentGrants)
-      .set({ revokedAt: now, updatedAt: now })
-      .where(and(eq(spsNodeAgentGrants.nodeId, node.id), isNull(spsNodeAgentGrants.revokedAt)));
-    await db.delete(spsAgentNodeBindings).where(eq(spsAgentNodeBindings.nodeId, node.id));
-    await failActiveNodeCommands({
-      nodeId: node.id,
+    const updated = await revokeNodeExecutionAccess(req, node, {
+      action: "sps_node.revoked",
       reason: "SPS Node access was revoked while this command was running.",
     });
-    await logNodeMutation(req, {
-      companyId: node.companyId,
-      action: "sps_node.revoked",
-      nodeId: node.id,
+    res.json(updated);
+  });
+
+  router.post("/sps-nodes/:nodeId/disconnect", async (req, res) => {
+    const node = await getNode(req.params.nodeId as string);
+    assertSpsNodeOwner(req, node);
+    const updated = await revokeNodeExecutionAccess(req, node, {
+      action: "sps_node.disconnected",
+      reason: "This SPS Desktop Node was disconnected by its computer owner.",
     });
     res.json(updated);
   });

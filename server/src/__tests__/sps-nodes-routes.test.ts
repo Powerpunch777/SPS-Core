@@ -362,6 +362,41 @@ describeEmbeddedPostgres("SPS Node routes", () => {
     expect(list.body[0].primaryAgentBindings).toEqual([]);
   });
 
+  it("lets a computer owner disconnect their own Node and immediately clears its execution access", async () => {
+    const fixture = await createCompanyFixture(db);
+    const ownerApp = await createApp(db, boardActor(fixture.company.id, fixture.ownerUserId, "owner"));
+    const computerApp = await createApp(db, boardActor(fixture.company.id, fixture.operatorUserId, "operator"));
+    const node = createNodePayload();
+    const registered = await request(computerApp)
+      .post(`/api/companies/${fixture.company.id}/sps-nodes`)
+      .send(node.payload);
+    expect(registered.status, JSON.stringify(registered.body)).toBe(201);
+    await request(computerApp)
+      .post(`/api/sps-nodes/${registered.body.id}/heartbeat`)
+      .send(createSignedHeartbeat(registered.body.id, node.privateKey));
+    await request(ownerApp).post(`/api/sps-nodes/${registered.body.id}/approve`).send({});
+    await request(ownerApp)
+      .put(`/api/sps-nodes/${registered.body.id}/agent-grants/${fixture.agent.id}`)
+      .send({});
+
+    const disconnected = await request(computerApp)
+      .post(`/api/sps-nodes/${registered.body.id}/disconnect`)
+      .send({});
+    expect(disconnected.status, JSON.stringify(disconnected.body)).toBe(200);
+    expect(disconnected.body.status).toBe("revoked");
+
+    const listed = await request(ownerApp).get(`/api/companies/${fixture.company.id}/sps-nodes`);
+    expect(listed.status).toBe(200);
+    expect(listed.body[0].agentGrants).toEqual([]);
+    expect(listed.body[0].primaryAgentBindings).toEqual([]);
+    const disconnectedActivity = await db
+      .select()
+      .from(activityLog)
+      .where(eq(activityLog.entityId, registered.body.id))
+      .then((rows) => rows.find((row) => row.action === "sps_node.disconnected") ?? null);
+    expect(disconnectedActivity).not.toBeNull();
+  });
+
   it("lets only the signed owner Node claim a command and return ordered output", async () => {
     const fixture = await createCompanyFixture(db);
     const app = await createApp(db, boardActor(fixture.company.id, fixture.ownerUserId, "owner"));
