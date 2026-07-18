@@ -21,11 +21,16 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
+import { resolveSpsNodeExecutionTarget } from "../services/sps-node-execution.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
 
 type Db = ReturnType<typeof createDb>;
+
+function wait(milliseconds: number) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
 
 function boardActor(companyId: string, userId: string, membershipRole: "owner" | "admin" | "operator") {
   return {
@@ -356,6 +361,101 @@ describeEmbeddedPostgres("SPS Node routes", () => {
       }));
     expect(complete.status, JSON.stringify(complete.body)).toBe(200);
     expect(complete.body.status).toBe("succeeded");
+  });
+
+  it("dispatches a bound Agent run through the approved Desktop Node and returns its output", async () => {
+    const fixture = await createCompanyFixture(db);
+    const app = await createApp(db, boardActor(fixture.company.id, fixture.ownerUserId, "owner"));
+    const node = createNodePayload();
+    const registered = await request(app)
+      .post(`/api/companies/${fixture.company.id}/sps-nodes`)
+      .send(node.payload);
+    expect(registered.status, JSON.stringify(registered.body)).toBe(201);
+    await request(app)
+      .post(`/api/sps-nodes/${registered.body.id}/heartbeat`)
+      .send(createSignedHeartbeat(registered.body.id, node.privateKey));
+    await request(app).post(`/api/sps-nodes/${registered.body.id}/approve`).send({});
+    await request(app)
+      .put(`/api/sps-nodes/${registered.body.id}/agent-grants/${fixture.agent.id}`)
+      .send({});
+    await request(app)
+      .put(`/api/agents/${fixture.agent.id}/sps-node-binding`)
+      .send({ nodeId: registered.body.id });
+
+    const target = await resolveSpsNodeExecutionTarget({
+      db,
+      companyId: fixture.company.id,
+      agentId: fixture.agent.id,
+      adapterType: "codex_local",
+      heartbeatRunId: "heartbeat-run-1",
+      projectId: null,
+    });
+    expect(target).toMatchObject({
+      transport: "sps_node",
+      nodeId: registered.body.id,
+      remoteCwd: `sps-agent://${fixture.agent.id}`,
+    });
+    const pendingResult = target!.runner.execute({
+      command: "codex",
+      args: ["exec", "--json"],
+      cwd: target!.remoteCwd,
+      env: { SPS_TEST: "1" },
+      stdin: "Summarize the assigned task.",
+      timeoutMs: 5_000,
+    });
+
+    let queued: typeof spsNodeCommands.$inferSelect | null = null;
+    for (let attempt = 0; attempt < 20 && !queued; attempt += 1) {
+      queued = await db
+        .select()
+        .from(spsNodeCommands)
+        .where(eq(spsNodeCommands.agentId, fixture.agent.id))
+        .then((rows) => rows[0] ?? null);
+      if (!queued) await wait(25);
+    }
+    expect(queued).not.toBeNull();
+    expect(queued).toMatchObject({
+      nodeId: registered.body.id,
+      heartbeatRunId: "heartbeat-run-1",
+      command: "codex",
+      args: ["exec", "--json"],
+      stdin: "Summarize the assigned task.",
+    });
+
+    const claimPath = `/sps-nodes/${registered.body.id}/commands/claim-next`;
+    const claimed = await request(app)
+      .post(`/api${claimPath}`)
+      .send(createSignedNodeRequest(registered.body.id, node.privateKey, claimPath, {}));
+    expect(claimed.status, JSON.stringify(claimed.body)).toBe(200);
+    expect(claimed.body.id).toBe(queued!.id);
+
+    const eventPath = `/sps-nodes/${registered.body.id}/commands/${queued!.id}/events`;
+    const event = await request(app)
+      .post(`/api${eventPath}`)
+      .send(createSignedNodeRequest(registered.body.id, node.privateKey, eventPath, {
+        sequence: 1,
+        stream: "stdout",
+        body: "Completed on Friend PC.\n",
+      }));
+    expect(event.status, JSON.stringify(event.body)).toBe(204);
+
+    const completePath = `/sps-nodes/${registered.body.id}/commands/${queued!.id}/complete`;
+    const complete = await request(app)
+      .post(`/api${completePath}`)
+      .send(createSignedNodeRequest(registered.body.id, node.privateKey, completePath, {
+        status: "succeeded",
+        exitCode: 0,
+        signal: null,
+        timedOut: false,
+        error: null,
+      }));
+    expect(complete.status, JSON.stringify(complete.body)).toBe(200);
+
+    await expect(pendingResult).resolves.toMatchObject({
+      exitCode: 0,
+      stdout: "Completed on Friend PC.\n",
+      stderr: "",
+    });
   });
 
   it("fails a queued command when its Node grant is revoked before claim", async () => {
