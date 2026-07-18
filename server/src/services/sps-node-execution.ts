@@ -13,6 +13,16 @@ const NODE_ONLINE_WINDOW_MS = 2 * 60 * 1000;
 const COMMAND_RESULT_GRACE_MS = 90 * 1000;
 const COMMAND_POLL_MS = 300;
 const MAX_CAPTURED_OUTPUT_BYTES = 2 * 1024 * 1024;
+const SPS_NODE_CAPABILITY_BY_ADAPTER = new Map<string, string>([
+  ["claude_local", "claude_cli"],
+  ["codex_local", "codex_cli"],
+  ["opencode_local", "opencode_cli"],
+  ["sps_agy_local", "agy_cli"],
+  ["gemini_local", "gemini_cli"],
+  ["pi_local", "pi_cli"],
+  ["sps_lm_studio_local", "lm_studio"],
+  ["sps_ollama_local", "ollama"],
+]);
 
 export class SpsNodeExecutionUnavailableError extends Error {
   constructor(message: string) {
@@ -25,16 +35,13 @@ function isNodeOnline(lastSeenAt: Date | null, now = Date.now()) {
   return lastSeenAt != null && now - lastSeenAt.getTime() <= NODE_ONLINE_WINDOW_MS;
 }
 
+export function isSpsNodeExecutionAdapterType(adapterType: string) {
+  return SPS_NODE_CAPABILITY_BY_ADAPTER.has(adapterType);
+}
+
 function supportedByNode(adapterType: string, capabilities: Array<{ kind: string }>) {
-  if (adapterType === "claude_local") return capabilities.some((item) => item.kind === "claude_cli");
-  if (adapterType === "codex_local") return capabilities.some((item) => item.kind === "codex_cli");
-  if (adapterType === "opencode_local") return capabilities.some((item) => item.kind === "opencode_cli");
-  if (adapterType === "sps_agy_local") return capabilities.some((item) => item.kind === "agy_cli");
-  if (adapterType === "gemini_local") return capabilities.some((item) => item.kind === "gemini_cli");
-  if (adapterType === "pi_local") return capabilities.some((item) => item.kind === "pi_cli");
-  if (adapterType === "sps_lm_studio_local") return capabilities.some((item) => item.kind === "lm_studio");
-  if (adapterType === "sps_ollama_local") return capabilities.some((item) => item.kind === "ollama");
-  return false;
+  const capabilityKind = SPS_NODE_CAPABILITY_BY_ADAPTER.get(adapterType);
+  return capabilityKind ? capabilities.some((item) => item.kind === capabilityKind) : false;
 }
 
 function appendExcerpt(current: string, chunk: string) {

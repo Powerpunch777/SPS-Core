@@ -150,7 +150,11 @@ import { buildPlanReviewContext } from "./plan-review-context.js";
 import { executionWorkspaceService, mergeExecutionWorkspaceConfig } from "./execution-workspaces.js";
 import { workspaceOperationService, type WorkspaceOperationRecorder } from "./workspace-operations.js";
 import { isProcessGroupAlive, terminateLocalService } from "./local-service-supervisor.js";
-import { resolveSpsNodeExecutionTarget } from "./sps-node-execution.js";
+import {
+  isSpsNodeExecutionAdapterType,
+  resolveSpsNodeExecutionTarget,
+  SpsNodeExecutionUnavailableError,
+} from "./sps-node-execution.js";
 import {
   HEARTBEAT_RUN_SCRATCH_MARKER,
   buildHeartbeatRunScratchEnv,
@@ -5005,6 +5009,23 @@ function isTruthyRuntimeEnvValue(value: string | undefined) {
   return value === "true" || value === "1" || value === "yes" || value === "on";
 }
 
+export function assertSpsNodeBindingRequiredForAdapter(input: {
+  requireSpsNodeExecution: boolean;
+  adapterType: string;
+  hasSpsNodeExecutionTarget: boolean;
+}) {
+  if (
+    !input.requireSpsNodeExecution ||
+    !isSpsNodeExecutionAdapterType(input.adapterType) ||
+    input.hasSpsNodeExecutionTarget
+  ) {
+    return;
+  }
+  throw new SpsNodeExecutionUnavailableError(
+    `This SPS Hub requires an approved primary SPS Desktop Node for ${input.adapterType}. Grant and bind a Node before waking this Agent.`,
+  );
+}
+
 export function resolveHeartbeatSchedulingSuppression(
   env: Record<string, string | undefined> = process.env,
   overrides: { allowWorktreeRunExecution?: boolean } = {},
@@ -5027,6 +5048,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     enabled: (await instanceSettings.getGeneral()).censorUsernameInLogs,
   });
   const runtimeEnv = options.runtimeEnv ?? process.env;
+  const requireSpsNodeExecution = isTruthyRuntimeEnvValue(runtimeEnv.SPS_REQUIRE_NODE_EXECUTION);
   const inWorktreeRuntime = isTruthyRuntimeEnvValue(runtimeEnv.PAPERCLIP_IN_WORKTREE);
   // Preview worktree instances suppress the run engine by default. Users can lift
   // that per-worktree via the `enableWorktreeRunExecution` experimental setting
@@ -12066,6 +12088,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       adapterType: agent.adapterType,
       heartbeatRunId: run.id,
       projectId: resolvedProjectId,
+    });
+    assertSpsNodeBindingRequiredForAdapter({
+      requireSpsNodeExecution,
+      adapterType: agent.adapterType,
+      hasSpsNodeExecutionTarget: Boolean(spsNodeExecutionTarget),
     });
     // A primary SPS Node binding is authoritative. The Hub still persists the
     // normal workspace/lease context for auditability, but the CLI command is
