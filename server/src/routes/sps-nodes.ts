@@ -460,6 +460,34 @@ export function spsNodeRoutes(db: Db) {
       })
       .returning()
       .then((rows) => rows[0]!);
+    const existingBinding = await db
+      .select({ id: spsAgentNodeBindings.id })
+      .from(spsAgentNodeBindings)
+      .where(and(
+        eq(spsAgentNodeBindings.companyId, agent.companyId),
+        eq(spsAgentNodeBindings.agentId, agent.id),
+      ))
+      .then((rows) => rows[0] ?? null);
+    if (!existingBinding) {
+      const automaticBinding = await db
+        .insert(spsAgentNodeBindings)
+        .values({
+          companyId: agent.companyId,
+          agentId: agent.id,
+          nodeId: node.id,
+          assignedByUserId: actorUserId(req) ?? "local-board",
+        })
+        .onConflictDoNothing()
+        .returning();
+      if (automaticBinding.length > 0) {
+        await logNodeMutation(req, {
+          companyId: node.companyId,
+          action: "sps_node.agent_primary_bound",
+          nodeId: node.id,
+          details: { agentId: agent.id, automatic: true },
+        });
+      }
+    }
     await logNodeMutation(req, {
       companyId: node.companyId,
       action: "sps_node.agent_granted",

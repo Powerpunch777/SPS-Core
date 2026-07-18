@@ -103,7 +103,11 @@ export function SpsNodes() {
     mutationFn: (input: { nodeId: string; agentId: string }) => spsNodesApi.grantAgent(input.nodeId, input.agentId),
     onSuccess: async () => {
       await refreshNodes();
-      pushToast({ title: "Agent access granted", tone: "success" });
+      pushToast({
+        title: "Agent access granted",
+        body: "The first approved Node for an Agent becomes its primary execution Node. Later grants keep the current primary until you change it.",
+        tone: "success",
+      });
     },
     onError: (error) => pushToast({ title: "Could not grant Agent access", body: errorMessage(error), tone: "error" }),
   });
@@ -239,7 +243,7 @@ export function SpsNodes() {
                   <div className="space-y-3 border-t border-border pt-5">
                     <div>
                       <h3 className="text-sm font-semibold">Agent execution access</h3>
-                      <p className="text-sm text-muted-foreground">Only granted Agents can use this computer. One granted Node can be their primary execution Node. Ollama and LM Studio each have an SPS local adapter; OpenCode can also use either provider when configured on this Node.</p>
+                      <p className="text-sm text-muted-foreground">Only granted Agents can use this computer. The first approved Node granted to an Agent becomes its primary execution Node. Later grants are available for reassignment and leave the current primary unchanged. Ollama and LM Studio each have an SPS local adapter; OpenCode can also use either provider when configured on this Node.</p>
                     </div>
 
                     {node.status === "active" ? (

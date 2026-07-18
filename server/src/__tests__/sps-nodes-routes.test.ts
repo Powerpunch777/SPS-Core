@@ -183,7 +183,7 @@ describeEmbeddedPostgres("SPS Node routes", () => {
     await tempDb?.cleanup();
   });
 
-  it("requires approval and an explicit Agent grant before a Node becomes primary", async () => {
+  it("requires approval and makes an Agent's first granted Node primary", async () => {
     const fixture = await createCompanyFixture(db);
     const app = await createApp(db, boardActor(fixture.company.id, fixture.ownerUserId, "owner"));
     const node = createNodePayload();
@@ -222,6 +222,11 @@ describeEmbeddedPostgres("SPS Node routes", () => {
       .put(`/api/sps-nodes/${registered.body.id}/agent-grants/${fixture.agent.id}`)
       .send({});
     expect(grant.status, JSON.stringify(grant.body)).toBe(200);
+
+    const firstList = await request(app).get(`/api/companies/${fixture.company.id}/sps-nodes`);
+    expect(firstList.status).toBe(200);
+    expect(firstList.body[0].primaryAgentBindings).toHaveLength(1);
+    expect(firstList.body[0].primaryAgentBindings[0].agentId).toBe(fixture.agent.id);
 
     const binding = await request(app)
       .put(`/api/agents/${fixture.agent.id}/sps-node-binding`)
@@ -294,6 +299,43 @@ describeEmbeddedPostgres("SPS Node routes", () => {
     const allowed = await request(ownerApp).get(`/api/companies/${fixture.company.id}/sps-nodes`);
     expect(allowed.status).toBe(200);
     expect(allowed.body).toHaveLength(1);
+  });
+
+  it("keeps an Agent's first primary Node when another Node is granted", async () => {
+    const fixture = await createCompanyFixture(db);
+    const app = await createApp(db, boardActor(fixture.company.id, fixture.ownerUserId, "owner"));
+    const first = createNodePayload();
+    const second = createNodePayload();
+
+    const firstRegistered = await request(app)
+      .post(`/api/companies/${fixture.company.id}/sps-nodes`)
+      .send(first.payload);
+    const secondRegistered = await request(app)
+      .post(`/api/companies/${fixture.company.id}/sps-nodes`)
+      .send(second.payload);
+    for (const [registered, node] of [
+      [firstRegistered, first],
+      [secondRegistered, second],
+    ] as const) {
+      await request(app)
+        .post(`/api/sps-nodes/${registered.body.id}/heartbeat`)
+        .send(createSignedHeartbeat(registered.body.id, node.privateKey));
+      await request(app).post(`/api/sps-nodes/${registered.body.id}/approve`).send({});
+    }
+
+    await request(app)
+      .put(`/api/sps-nodes/${firstRegistered.body.id}/agent-grants/${fixture.agent.id}`)
+      .send({});
+    await request(app)
+      .put(`/api/sps-nodes/${secondRegistered.body.id}/agent-grants/${fixture.agent.id}`)
+      .send({});
+
+    const listed = await request(app).get(`/api/companies/${fixture.company.id}/sps-nodes`);
+    expect(listed.status).toBe(200);
+    const firstNode = listed.body.find((node: { id: string }) => node.id === firstRegistered.body.id);
+    const secondNode = listed.body.find((node: { id: string }) => node.id === secondRegistered.body.id);
+    expect(firstNode.primaryAgentBindings).toHaveLength(1);
+    expect(secondNode.primaryAgentBindings).toEqual([]);
   });
 
   it("revoking a Node also clears its Agent grants and primary bindings", async () => {
