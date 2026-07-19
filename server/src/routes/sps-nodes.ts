@@ -22,6 +22,7 @@ import {
   spsNodeSignedRequestSchema,
   spsNodeCapabilityForAdapter,
   spsNodeSupportsAdapter,
+  isAgentStatusAssignableToWork,
 } from "@paperclipai/shared";
 import { badRequest, forbidden, notFound, unauthorized } from "../errors.js";
 import { validate } from "../middleware/validate.js";
@@ -82,6 +83,12 @@ export function spsNodeRoutes(db: Db) {
     }
     if (!spsNodeSupportsAdapter(node.capabilities, agent.adapterType)) {
       throw badRequest(`SPS Node \"${node.displayName}\" does not advertise the ${capabilityKind} runtime required by Agent \"${agent.name}\".`);
+    }
+  }
+
+  function assertAgentCanReceiveNodeAccess(agent: typeof agents.$inferSelect) {
+    if (!isAgentStatusAssignableToWork(agent.status)) {
+      throw badRequest(`Agent \"${agent.name}\" is ${agent.status} and cannot receive SPS Node execution access.`);
     }
   }
 
@@ -473,6 +480,7 @@ export function spsNodeRoutes(db: Db) {
     }
     const agent = await getAgent(req.params.agentId as string);
     if (agent.companyId !== node.companyId) throw forbidden("Agent belongs to another company");
+    assertAgentCanReceiveNodeAccess(agent);
     assertNodeSupportsAgentAdapter(node, agent);
 
     const now = new Date();
@@ -574,6 +582,7 @@ export function spsNodeRoutes(db: Db) {
       const node = await getNode(req.body.nodeId);
       if (node.companyId !== agent.companyId) throw forbidden("SPS Node belongs to another company");
       if (node.status !== "active") throw forbidden("SPS Node is not active");
+      assertAgentCanReceiveNodeAccess(agent);
       assertNodeSupportsAgentAdapter(node, agent);
 
       const grant = await db

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { spsNodeCapabilityForAdapter, type Agent } from "@paperclipai/shared";
+import { isAgentStatusAssignableToWork, spsNodeCapabilityForAdapter, type Agent } from "@paperclipai/shared";
 import {
   CheckCircle2,
   CirclePause,
@@ -142,7 +142,7 @@ export function SpsNodes() {
   });
 
   const activeAgents = useMemo(
-    () => (agentsQuery.data ?? []).filter((agent) => agent.status !== "terminated"),
+    () => (agentsQuery.data ?? []).filter((agent) => isAgentStatusAssignableToWork(agent.status)),
     [agentsQuery.data],
   );
 

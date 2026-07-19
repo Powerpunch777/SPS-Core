@@ -458,6 +458,25 @@ test.describe("Multi-user: authenticated mode", () => {
 
       const db = createDb(databaseUrl);
       try {
+        const pendingAgent = await db
+          .insert(agents)
+          .values({
+            companyId: company.id,
+            name: "Pending Node Worker",
+            role: "worker",
+            status: "pending_approval",
+            adapterType: "sps_agy_local",
+            adapterConfig: { command: "agy", model: "auto" },
+          })
+          .returning()
+          .then((rows) => rows[0]!);
+        const pendingGrant = await sessionJsonRequest(
+          page,
+          `${BASE}/api/sps-nodes/${registeredNode.id}/agent-grants/${pendingAgent.id}`,
+          { method: "PUT" },
+        );
+        expect(pendingGrant.status).toBe(400);
+
         const agent = await db
           .insert(agents)
           .values({
