@@ -88,21 +88,33 @@ function createBootstrapInvite() {
   ).trim();
 }
 
+async function createLocalTestAccount(page: Page, user: HumanUser) {
+  // Production SPS uses Google-only sign-in. The isolated authorization E2E
+  // enables Better Auth's local test endpoint so it can create distinct human
+  // sessions without driving a real Google account through the browser.
+  const signUpResult = await page.evaluate(async (credentials) => {
+    const response = await fetch("/api/auth/sign-up/email", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(credentials),
+    });
+    return { ok: response.ok, status: response.status };
+  }, user);
+  expect(signUpResult.ok, `test account sign-up returned ${signUpResult.status}`).toBe(true);
+}
+
 async function signUp(page: Page, user: HumanUser) {
   await page.goto(`${BASE}/auth`);
-  await expect(page.getByRole("heading", { name: "Sign in to Paperclip" })).toBeVisible();
-  await page.getByRole("button", { name: "Create one" }).click();
-  await expect(page.getByRole("heading", { name: "Create your Paperclip account" })).toBeVisible();
-  await page.getByLabel("Name").fill(user.name);
-  await page.getByLabel("Email").fill(user.email);
-  await page.getByLabel("Password").fill(user.password);
-  await page.getByRole("button", { name: "Create Account" }).click();
+  await expect(page.getByRole("heading", { name: "Continue to SPS" })).toBeVisible();
+  await createLocalTestAccount(page, user);
+
+  await page.goto(`${BASE}/`);
   await expect(page).not.toHaveURL(/\/auth/, { timeout: 20_000 });
 }
 
 async function acceptBootstrapInvite(page: Page, inviteUrl: string) {
   await page.goto(inviteUrl);
-  await expect(page.getByRole("heading", { name: "Set up Paperclip" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Set up SPS" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Accept bootstrap invite" })).toBeVisible();
   await page.getByRole("button", { name: "Accept invite" }).click();
   await expect(page.getByRole("heading", { name: "Bootstrap complete" })).toBeVisible({
@@ -123,9 +135,9 @@ async function createCompanyForSession(page: Page, nextCompanyName: string) {
 
 async function createAuthenticatedInvite(page: Page, companyPrefix: string) {
   await page.goto(`${BASE}/${companyPrefix}/company/settings/invites`);
-  await expect(page.getByRole("heading", { name: "Company Invites" })).toBeVisible({ timeout: 20_000 });
+  await expect(page.getByRole("heading", { name: "SPS invites" })).toBeVisible({ timeout: 20_000 });
   await page.getByRole("radio", { name: /Operator/ }).check();
-  await page.getByRole("button", { name: "Create invite" }).click();
+  await page.getByRole("button", { name: "Create SPS invite" }).click();
   const inviteField = page.getByRole("textbox", { name: "Latest invite URL" });
   await expect(inviteField).toBeVisible({ timeout: 20_000 });
   return (await inviteField.inputValue()).trim();
@@ -133,12 +145,11 @@ async function createAuthenticatedInvite(page: Page, companyPrefix: string) {
 
 async function signUpFromInvite(page: Page, inviteUrl: string, user: HumanUser) {
   await page.goto(inviteUrl);
-  await expect(page.getByRole("heading", { name: "Create your account" })).toBeVisible();
-  await page.getByLabel("Name").fill(user.name);
-  await page.getByLabel("Email").fill(user.email);
-  await page.getByLabel("Password").fill(user.password);
-  await page.getByRole("button", { name: "Create account and continue" }).click();
-  await expect(page).not.toHaveURL(/\/auth/, { timeout: 20_000 });
+  await expect(page.getByRole("heading", { name: "Continue with Google" })).toBeVisible();
+  await createLocalTestAccount(page, user);
+  await page.reload();
+  // A signed-in human invite is completed automatically after the identity
+  // returns from Google, then SPS navigates to the selected company.
   await expect(page.getByRole("button", { name: "Open account menu" })).toContainText(user.name, {
     timeout: 20_000,
   });
@@ -307,7 +318,7 @@ test.describe("Multi-user: authenticated mode", () => {
         invited.page.getByText("You do not have permission to manage company invites.")
       ).toBeVisible({ timeout: 20_000 });
       await expect(
-        invited.page.getByRole("button", { name: "Create invite" })
+        invited.page.getByRole("button", { name: "Create SPS invite" })
       ).toHaveCount(0);
 
       const forbiddenInviteRes = await sessionJsonRequest(

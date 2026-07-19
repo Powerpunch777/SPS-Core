@@ -557,7 +557,7 @@ export function InviteLandingPage() {
                   {showsAgentForm
                     ? "Review the invite details, then submit the agent information below to start the join request."
                     : requiresHumanAccount
-                      ? "Create your SPS account first. If you already have one, switch to sign in and continue the invite with the same email."
+                      ? "Sign in with the Google account you use for SPS, then return here to accept this invite."
                       : "Your account is ready. Review the invite details, then accept it to continue."}
                 </p>
               </div>
