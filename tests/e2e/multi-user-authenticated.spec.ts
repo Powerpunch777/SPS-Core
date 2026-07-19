@@ -158,8 +158,15 @@ async function createAuthenticatedInvite(page: Page, companyPrefix: string) {
   await page.getByRole("radio", { name: /Operator/ }).check();
   await page.getByRole("button", { name: "Create SPS invite" }).click();
   const inviteField = page.getByRole("textbox", { name: "Latest invite URL" });
+  const inviteCodeField = page.getByRole("textbox", { name: "SPS invitation code" });
   await expect(inviteField).toBeVisible({ timeout: 20_000 });
-  return (await inviteField.inputValue()).trim();
+  await expect(inviteCodeField).toBeVisible();
+  const inviteCode = (await inviteCodeField.inputValue()).trim();
+  expect(inviteCode).toMatch(/^SPS-(?:[A-Z0-9]{4}-){1,3}[A-Z0-9]{4}$/);
+  return {
+    inviteUrl: (await inviteField.inputValue()).trim(),
+    inviteCode,
+  };
 }
 
 async function signUpFromInvite(page: Page, inviteUrl: string, user: HumanUser) {
@@ -169,6 +176,19 @@ async function signUpFromInvite(page: Page, inviteUrl: string, user: HumanUser) 
   await page.reload();
   // A signed-in human invite is completed automatically after the identity
   // returns from Google, then SPS navigates to the selected company.
+  await expect(page.getByRole("button", { name: "Open account menu" })).toContainText(user.name, {
+    timeout: 20_000,
+  });
+}
+
+async function signUpFromInviteCode(page: Page, inviteCode: string, user: HumanUser) {
+  await page.goto(`${BASE}/join`);
+  await expect(page.getByRole("heading", { name: "Join SPS" })).toBeVisible();
+  await page.getByLabel("Invitation code").fill(inviteCode);
+  await page.getByRole("button", { name: "Continue to sign in" }).click();
+  await expect(page.getByRole("heading", { name: "Continue with Google" })).toBeVisible();
+  await createLocalTestAccount(page, user);
+  await page.reload();
   await expect(page.getByRole("button", { name: "Open account menu" })).toContainText(user.name, {
     timeout: 20_000,
   });
@@ -387,11 +407,11 @@ test.describe("Multi-user: authenticated mode", () => {
     await expect(accountMenuTrigger).toContainText(ownerUser.name);
     await accountMenuTrigger.click();
     await expect(page.getByText(ownerUser.email)).toBeVisible();
-    const inviteUrl = await createAuthenticatedInvite(page, companyPrefix);
+    const invite = await createAuthenticatedInvite(page, companyPrefix);
 
     const invited = await newPage(browser);
     try {
-      await signUpFromInvite(invited.page, inviteUrl, invitedUser);
+      await signUpFromInviteCode(invited.page, invite.inviteCode, invitedUser);
       await expect(invited.page).not.toHaveURL(/\/auth/, { timeout: 10_000 });
 
       const joinedMember = await waitForMember(page, company.id, invitedUser.email);
@@ -435,10 +455,10 @@ test.describe("Multi-user: authenticated mode", () => {
       email: `node-owner-${nodeRunId}@paperclip.local`,
       password: "paperclip-node-owner-password",
     };
-    const nodeInviteUrl = await createAuthenticatedInvite(page, companyPrefix);
+    const nodeInvite = await createAuthenticatedInvite(page, companyPrefix);
     const nodeOwnerSession = await newPage(browser);
     try {
-      await signUpFromInvite(nodeOwnerSession.page, nodeInviteUrl, nodeOwner);
+      await signUpFromInvite(nodeOwnerSession.page, nodeInvite.inviteUrl, nodeOwner);
       await waitForMember(page, company.id, nodeOwner.email);
       const boardApiToken = await authorizeDesktopNode(desktopNode, nodeOwnerSession.page, company.id);
       const identity = desktopNode.createNodeIdentity();
@@ -538,29 +558,19 @@ test.describe("Multi-user: authenticated mode", () => {
         expect(result.stdout).toContain("SPS Node E2E command output");
         expect(output.join("")).toContain("SPS Node E2E command output");
 
-        // A revoked computer must enroll with a fresh key. Its old successful
-        // heartbeat cannot be reused to restore local CLI execution.
-        const revokeFirstNode = await sessionJsonRequest(page, `${BASE}/api/sps-nodes/${registeredNode.id}/revoke`, {
-          method: "POST",
-        });
-        expect(revokeFirstNode.ok, `node revocation returned ${revokeFirstNode.status}`).toBe(true);
-        const staleNodeApproval = await sessionJsonRequest(page, `${BASE}/api/sps-nodes/${registeredNode.id}/approve`, {
-          method: "POST",
-        });
-        expect(staleNodeApproval.status).toBe(403);
-
         // A second invited member represents a separate collaborator computer.
         // Its Agent must remain bound to its own Node, even though this E2E
-        // process hosts both test transports.
+        // process hosts both test transports. The first Node stays active here
+        // so this also proves that two collaborator computers can run together.
         const secondNodeOwner: HumanUser = {
           name: "Second Node Owner",
           email: `second-node-owner-${nodeRunId}@paperclip.local`,
           password: "paperclip-second-node-owner-password",
         };
-        const secondNodeInviteUrl = await createAuthenticatedInvite(page, companyPrefix);
+        const secondNodeInvite = await createAuthenticatedInvite(page, companyPrefix);
         const secondNodeOwnerSession = await newPage(browser);
         try {
-          await signUpFromInvite(secondNodeOwnerSession.page, secondNodeInviteUrl, secondNodeOwner);
+          await signUpFromInvite(secondNodeOwnerSession.page, secondNodeInvite.inviteUrl, secondNodeOwner);
           await waitForMember(page, company.id, secondNodeOwner.email);
           const secondBoardApiToken = await authorizeDesktopNode(desktopNode, secondNodeOwnerSession.page, company.id);
           const secondIdentity = desktopNode.createNodeIdentity();
@@ -642,6 +652,19 @@ test.describe("Multi-user: authenticated mode", () => {
         } finally {
           await secondNodeOwnerSession.context.close();
         }
+
+        // A revoked computer must enroll with a fresh key. Its old successful
+        // heartbeat cannot be reused to restore local CLI execution. Do this
+        // after both Nodes have completed their work, not before the multi-node
+        // portion of the test.
+        const revokeFirstNode = await sessionJsonRequest(page, `${BASE}/api/sps-nodes/${registeredNode.id}/revoke`, {
+          method: "POST",
+        });
+        expect(revokeFirstNode.ok, `node revocation returned ${revokeFirstNode.status}`).toBe(true);
+        const staleNodeApproval = await sessionJsonRequest(page, `${BASE}/api/sps-nodes/${registeredNode.id}/approve`, {
+          method: "POST",
+        });
+        expect(staleNodeApproval.status).toBe(403);
       } finally {
         await db.$client.end({ timeout: 5 });
       }
