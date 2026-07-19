@@ -208,9 +208,18 @@ export async function createApp(
   );
 
   // Better Auth reads its POST body directly from the Node request stream.
-  // It must run before Express JSON parsing consumes that stream; SPS-owned
-  // session/profile routes still continue to the normal parsed API pipeline.
+  // Preserve that source text before Express JSON parsing consumes the stream.
+  // SPS-owned session/profile routes are excluded and continue to the normal
+  // parsed API pipeline below.
   if (opts.betterAuthHandler) {
+    app.use("/api/auth", express.text({
+      type: (incomingRequest) => {
+        const req = incomingRequest as express.Request;
+        return shouldDelegateToBetterAuth(req.originalUrl.split("?", 1)[0] ?? req.path);
+      },
+      limit: DEFAULT_JSON_BODY_LIMIT,
+      verify: captureRawBody,
+    }));
     app.all("/api/auth/{*authPath}", (req, res, next) => {
       if (!shouldDelegateToBetterAuth(req.path)) {
         next();
