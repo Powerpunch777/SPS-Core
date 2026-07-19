@@ -528,6 +528,99 @@ test.describe("Multi-user: authenticated mode", () => {
         expect(result.exitCode).toBe(0);
         expect(result.stdout).toContain("SPS Node E2E command output");
         expect(output.join("")).toContain("SPS Node E2E command output");
+
+        // A second invited member represents a separate collaborator computer.
+        // Its Agent must remain bound to its own Node, even though this E2E
+        // process hosts both test transports.
+        const secondNodeOwner: HumanUser = {
+          name: "Second Node Owner",
+          email: `second-node-owner-${nodeRunId}@paperclip.local`,
+          password: "paperclip-second-node-owner-password",
+        };
+        const secondNodeInviteUrl = await createAuthenticatedInvite(page, companyPrefix);
+        const secondNodeOwnerSession = await newPage(browser);
+        try {
+          await signUpFromInvite(secondNodeOwnerSession.page, secondNodeInviteUrl, secondNodeOwner);
+          await waitForMember(page, company.id, secondNodeOwner.email);
+          const secondBoardApiToken = await authorizeDesktopNode(desktopNode, secondNodeOwnerSession.page, company.id);
+          const secondIdentity = desktopNode.createNodeIdentity();
+          const secondRegisteredNode = await desktopNode.registerSpsNode({
+            hubUrl: BASE,
+            companyId: company.id,
+            identity: secondIdentity,
+            displayName: "SPS Second Node E2E",
+            platform: process.platform,
+            appVersion: "e2e",
+            capabilities: [{ kind: "agy_cli", label: "Agy CLI second test transport", version: "e2e" }],
+            accessToken: secondBoardApiToken,
+          });
+          await desktopNode.sendSpsNodeHeartbeat({
+            hubUrl: BASE,
+            nodeId: secondRegisteredNode.id,
+            identity: secondIdentity,
+            accessToken: secondBoardApiToken,
+          });
+          const secondApproval = await sessionJsonRequest(page, `${BASE}/api/sps-nodes/${secondRegisteredNode.id}/approve`, {
+            method: "POST",
+          });
+          expect(secondApproval.ok, `second node approval returned ${secondApproval.status}`).toBe(true);
+
+          const secondAgent = await db
+            .insert(agents)
+            .values({
+              companyId: company.id,
+              name: "Second Node Transport Worker",
+              role: "worker",
+              status: "idle",
+              adapterType: "sps_agy_local",
+              adapterConfig: { command: "agy", model: "auto" },
+            })
+            .returning()
+            .then((rows) => rows[0]!);
+          const secondGrant = await sessionJsonRequest(
+            page,
+            `${BASE}/api/sps-nodes/${secondRegisteredNode.id}/agent-grants/${secondAgent.id}`,
+            { method: "PUT" },
+          );
+          expect(secondGrant.ok, `second node grant returned ${secondGrant.status}`).toBe(true);
+
+          const secondTarget = await resolveSpsNodeExecutionTarget({
+            db,
+            companyId: company.id,
+            agentId: secondAgent.id,
+            adapterType: "sps_agy_local",
+            heartbeatRunId: null,
+            projectId: null,
+          });
+          expect(secondTarget?.nodeId).toBe(secondRegisteredNode.id);
+
+          const secondOutput: string[] = [];
+          const secondNodeExecution = waitForOneSpsNodeCommand({
+            hubUrl: BASE,
+            nodeId: secondRegisteredNode.id,
+            identity: secondIdentity,
+            accessToken: secondBoardApiToken,
+            workspace: process.cwd(),
+            client: desktopNode,
+          });
+          const secondResult = await secondTarget!.runner.execute({
+            command: process.execPath,
+            args: ["-e", "process.stdout.write('SPS Second Node E2E command output\\n')"],
+            cwd: process.cwd(),
+            env: {},
+            stdin: null,
+            timeoutMs: NODE_E2E_TIMEOUT_MS,
+            onLog: async (_stream, body) => { secondOutput.push(body); },
+          });
+          const secondExecuted = await secondNodeExecution;
+
+          expect(secondExecuted.exitCode).toBe(0);
+          expect(secondResult.exitCode).toBe(0);
+          expect(secondResult.stdout).toContain("SPS Second Node E2E command output");
+          expect(secondOutput.join("")).toContain("SPS Second Node E2E command output");
+        } finally {
+          await secondNodeOwnerSession.context.close();
+        }
       } finally {
         await db.$client.end({ timeout: 5 });
       }
