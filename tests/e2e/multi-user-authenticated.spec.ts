@@ -417,7 +417,9 @@ test.describe("Multi-user: authenticated mode", () => {
 
     const databaseUrl = process.env.DATABASE_URL;
     if (!databaseUrl) throw new Error("DATABASE_URL is required for SPS Node command E2E");
-    test.skip(!SPS_DESKTOP_NODE_MODULE_PATH, "SPS Desktop Node integration is enabled by the SPS product test harness.");
+    // The Core stays independently testable. The SPS product harness supplies
+    // its Desktop Node module and thereby enables this extra end-to-end leg.
+    if (!SPS_DESKTOP_NODE_MODULE_PATH) return;
     const desktopNode = await loadDesktopNodeClient();
     const nodeRunId = Date.now();
     const nodeOwner: HumanUser = {
