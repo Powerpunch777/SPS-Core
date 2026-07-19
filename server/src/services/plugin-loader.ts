@@ -121,6 +121,15 @@ const K8S_IN_CLUSTER_ENV_PASSTHROUGH = [
   "KUBERNETES_SERVICE_PORT_HTTPS",
 ];
 
+/**
+ * A bundled memory provider receives only its Owner Host loopback endpoint and
+ * per-vault token. The token never reaches unrelated plugin workers.
+ */
+const MEMORY_PROVIDER_ENV_PASSTHROUGH = [
+  "SPS_MEMORY_SIDECAR_URL",
+  "SPS_MEMORY_SIDECAR_TOKEN",
+];
+
 export function buildPluginWorkerEnv(input: {
   manifest: Pick<PaperclipPluginManifestV1, "capabilities">;
   instanceInfo: { deploymentMode?: string | null; deploymentExposure?: string | null };
@@ -133,12 +142,20 @@ export function buildPluginWorkerEnv(input: {
   };
   const canRegisterEnvironmentDrivers = Array.isArray(input.manifest.capabilities)
     && input.manifest.capabilities.includes("environment.drivers.register");
-  if (!canRegisterEnvironmentDrivers) return env;
-
-  for (const key of [...ADAPTER_ENV_PASSTHROUGH, ...K8S_IN_CLUSTER_ENV_PASSTHROUGH]) {
-    const value = processEnv[key];
-    if (value && value.trim().length > 0) {
-      env[key] = value;
+  const canRegisterMemoryProvider = Array.isArray(input.manifest.capabilities)
+    && input.manifest.capabilities.includes("memory.providers.register");
+  if (canRegisterEnvironmentDrivers) {
+    for (const key of [...ADAPTER_ENV_PASSTHROUGH, ...K8S_IN_CLUSTER_ENV_PASSTHROUGH]) {
+      const value = processEnv[key];
+      if (value && value.trim().length > 0) {
+        env[key] = value;
+      }
+    }
+  }
+  if (canRegisterMemoryProvider) {
+    for (const key of MEMORY_PROVIDER_ENV_PASSTHROUGH) {
+      const value = processEnv[key];
+      if (value && value.trim().length > 0) env[key] = value;
     }
   }
   return env;

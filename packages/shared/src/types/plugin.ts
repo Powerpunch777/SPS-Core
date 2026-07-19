@@ -16,6 +16,8 @@ import type {
   PluginDatabaseMigrationStatus,
   PluginDatabaseNamespaceMode,
   PluginDatabaseNamespaceStatus,
+  PluginMemoryLifecycleEvent,
+  PluginMemoryScope,
   AgentAdapterType,
   AgentRole,
   AgentStatus,
@@ -558,6 +560,28 @@ export interface PluginObjectReferenceProviderDeclaration {
   webhookEndpointKeys?: string[];
 }
 
+/**
+ * Declares a memory provider that the host can select for a company. Memory
+ * content remains provider-owned, while Core owns scope validation, lifecycle
+ * dispatch, audit, backup coordination, and the selected-provider policy.
+ */
+export interface PluginMemoryProviderDeclaration {
+  /** Stable provider key, unique among installed providers. */
+  providerKey: string;
+  /** Human-readable provider name for the operator-facing settings UI. */
+  displayName: string;
+  /** Memory boundaries this provider can preserve and recall. */
+  scopes: PluginMemoryScope[];
+  /** Core lifecycle notifications the provider wants to receive. */
+  lifecycleEvents?: PluginMemoryLifecycleEvent[];
+  /** Optional registered agent tool used to recall approved memory. */
+  recallToolName?: string;
+  /** Optional registered agent tool used to propose new memory candidates. */
+  proposeToolName?: string;
+  /** Marks the provider as the first-party default for new local companies. */
+  defaultForNewCompanies?: boolean;
+}
+
 // ---------------------------------------------------------------------------
 // Plugin Manifest V1
 // ---------------------------------------------------------------------------
@@ -626,6 +650,8 @@ export interface PaperclipPluginManifestV1 {
   localFolders?: PluginLocalFolderDeclaration[];
   /** External object reference providers this plugin contributes. */
   objectReferences?: PluginObjectReferenceProviderDeclaration[];
+  /** Memory provider this plugin contributes. Requires `memory.providers.register`. */
+  memoryProvider?: PluginMemoryProviderDeclaration;
   /**
    * Legacy top-level launcher declarations.
    * Prefer `ui.launchers` for new manifests.

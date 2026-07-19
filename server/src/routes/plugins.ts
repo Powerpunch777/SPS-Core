@@ -47,6 +47,7 @@ import {
   PERMISSION_KEYS,
 } from "@paperclipai/shared";
 import { pluginRegistryService } from "../services/plugin-registry.js";
+import { listReadyMemoryProviders } from "../services/memory-providers.js";
 import { pluginLifecycleManager } from "../services/plugin-lifecycle.js";
 import {
   getPluginUiContributionMetadata,
@@ -869,6 +870,17 @@ export function pluginRoutes(
   router.get("/plugins/examples", async (req, res) => {
     assertBoardOrgAccess(req);
     res.json(await listBundledPlugins());
+  });
+
+  /**
+   * GET /api/plugins/memory-providers
+   *
+   * Lists ready memory providers by their Core-declared scope and lifecycle
+   * contract. It deliberately excludes provider settings and credentials.
+   */
+  router.get("/plugins/memory-providers", async (req, res) => {
+    assertBoardOrgAccess(req);
+    res.json(listReadyMemoryProviders(await registry.listByStatus("ready")));
   });
 
   // IMPORTANT: Static routes must come before parameterized routes

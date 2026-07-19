@@ -202,6 +202,25 @@ describe("buildPluginWorkerEnv", () => {
       PAPERCLIP_DEPLOYMENT_EXPOSURE: "public",
     });
   });
+
+  it("passes only the local memory sidecar credentials to memory providers", () => {
+    const env = buildPluginWorkerEnv({
+      manifest: { capabilities: ["memory.providers.register"] },
+      instanceInfo,
+      processEnv: {
+        SPS_MEMORY_SIDECAR_URL: "http://127.0.0.1:31880",
+        SPS_MEMORY_SIDECAR_TOKEN: "vault-local-token",
+        OPENAI_API_KEY: "must-not-leak",
+      },
+    });
+
+    expect(env).toEqual({
+      PAPERCLIP_DEPLOYMENT_MODE: "authenticated",
+      PAPERCLIP_DEPLOYMENT_EXPOSURE: "public",
+      SPS_MEMORY_SIDECAR_URL: "http://127.0.0.1:31880",
+      SPS_MEMORY_SIDECAR_TOKEN: "vault-local-token",
+    });
+  });
 });
 
 describeEmbeddedPostgres("plugin database namespaces", () => {

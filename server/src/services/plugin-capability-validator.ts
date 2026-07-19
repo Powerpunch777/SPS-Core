@@ -203,6 +203,7 @@ const FEATURE_CAPABILITIES: Record<string, PluginCapability> = {
   projects: "projects.managed",
   routines: "routines.managed",
   objectReferences: "external.objects.detect",
+  memoryProvider: "memory.providers.register",
 };
 
 // ---------------------------------------------------------------------------
@@ -473,6 +474,10 @@ export function pluginCapabilityValidator(): PluginCapabilityValidator {
             allMissing.push(requiredCap);
           }
         }
+      }
+
+      if (manifest.memoryProvider && !declared.has("memory.providers.register")) {
+        allMissing.push("memory.providers.register");
       }
 
       // Check UI slots → required capabilities

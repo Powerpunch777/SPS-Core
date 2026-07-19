@@ -990,6 +990,8 @@ export const PLUGIN_CAPABILITIES = [
   "external.objects.read",
   "external.objects.write",
   "external.objects.refresh",
+  // Memory Providers
+  "memory.providers.register",
   // Plugin State
   "plugin.state.read",
   "plugin.state.write",
@@ -1015,6 +1017,37 @@ export const PLUGIN_CAPABILITIES = [
   "ui.action.register",
 ] as const;
 export type PluginCapability = (typeof PLUGIN_CAPABILITIES)[number];
+
+/**
+ * Stable memory boundaries that a provider may expose. The host owns access
+ * control for these scopes; a provider only declares which boundaries it can
+ * safely store and recall.
+ */
+export const PLUGIN_MEMORY_SCOPES = [
+  "company",
+  "project",
+  "agent",
+  "room",
+  "task",
+  "artifact",
+  "user",
+] as const;
+export type PluginMemoryScope = (typeof PLUGIN_MEMORY_SCOPES)[number];
+
+/**
+ * Core lifecycle notifications a memory provider may opt into. These are
+ * declarations, not permission to read arbitrary records or content.
+ */
+export const PLUGIN_MEMORY_LIFECYCLE_EVENTS = [
+  "project.created",
+  "room.checkpoint",
+  "room.compacted",
+  "task.completed",
+  "task.blocked",
+  "task.reopened",
+  "artifact.published",
+] as const;
+export type PluginMemoryLifecycleEvent = (typeof PLUGIN_MEMORY_LIFECYCLE_EVENTS)[number];
 
 export const PLUGIN_DATABASE_NAMESPACE_MODES = ["schema"] as const;
 export type PluginDatabaseNamespaceMode = (typeof PLUGIN_DATABASE_NAMESPACE_MODES)[number];

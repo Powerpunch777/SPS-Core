@@ -71,6 +71,62 @@ describe("plugin manifest validators", () => {
     });
   });
 
+  it("accepts a scoped memory provider that exposes declared agent tools", () => {
+    const parsed = pluginManifestV1Schema.parse({
+      id: "sps.default-memory",
+      apiVersion: 1,
+      version: "1.0.0",
+      displayName: "SPS Default Memory",
+      description: "Local first-party memory provider.",
+      author: "SPS",
+      categories: ["automation"],
+      capabilities: ["memory.providers.register", "agent.tools.register"],
+      entrypoints: { worker: "./dist/worker.js" },
+      tools: [
+        {
+          name: "memory-search",
+          displayName: "Memory Search",
+          description: "Recall approved memory.",
+          parametersSchema: { type: "object" },
+        },
+      ],
+      memoryProvider: {
+        providerKey: "sps-default",
+        displayName: "SPS Default Memory",
+        scopes: ["company", "project", "agent", "room", "task", "artifact", "user"],
+        lifecycleEvents: ["room.checkpoint", "room.compacted", "task.completed"],
+        recallToolName: "memory-search",
+        defaultForNewCompanies: true,
+      },
+    });
+
+    expect(parsed.memoryProvider?.providerKey).toBe("sps-default");
+  });
+
+  it("rejects a memory provider that names an undeclared recall tool", () => {
+    const parsed = pluginManifestV1Schema.safeParse({
+      id: "sps.invalid-memory",
+      apiVersion: 1,
+      version: "1.0.0",
+      displayName: "Invalid Memory",
+      description: "Invalid memory provider fixture.",
+      author: "SPS",
+      categories: ["automation"],
+      capabilities: ["memory.providers.register", "agent.tools.register"],
+      entrypoints: { worker: "./dist/worker.js" },
+      memoryProvider: {
+        providerKey: "invalid",
+        displayName: "Invalid Memory",
+        scopes: ["project"],
+        recallToolName: "memory-search",
+      },
+    });
+
+    expect(parsed.success).toBe(false);
+    if (parsed.success) return;
+    expect(parsed.error.issues.some((issue) => issue.message.includes("declared tool"))).toBe(true);
+  });
+
   it("rejects template config bindings that replace provider identity", () => {
     const parsed = pluginManifestV1Schema.safeParse({
       id: "paperclip.bad-template-provider",

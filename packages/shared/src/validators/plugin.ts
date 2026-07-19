@@ -16,6 +16,8 @@ import {
   PLUGIN_API_ROUTE_AUTH_MODES,
   PLUGIN_API_ROUTE_CHECKOUT_POLICIES,
   PLUGIN_API_ROUTE_METHODS,
+  PLUGIN_MEMORY_SCOPES,
+  PLUGIN_MEMORY_LIFECYCLE_EVENTS,
   ISSUE_PRIORITIES,
   ROUTINE_CATCH_UP_POLICIES,
   ROUTINE_CONCURRENCY_POLICIES,
@@ -661,6 +663,39 @@ export type PluginObjectReferenceProviderDeclarationInput = z.infer<
   typeof pluginObjectReferenceProviderDeclarationSchema
 >;
 
+export const pluginMemoryProviderDeclarationSchema = z.object({
+  providerKey: z.string().min(1).max(100).regex(
+    /^[a-z0-9][a-z0-9._-]*$/,
+    "Memory provider key must start with a lowercase alphanumeric and contain only lowercase letters, digits, dots, hyphens, or underscores",
+  ),
+  displayName: z.string().min(1).max(100),
+  scopes: z.array(z.enum(PLUGIN_MEMORY_SCOPES)).min(1),
+  lifecycleEvents: z.array(z.enum(PLUGIN_MEMORY_LIFECYCLE_EVENTS)).optional(),
+  recallToolName: z.string().min(1).max(100).optional(),
+  proposeToolName: z.string().min(1).max(100).optional(),
+  defaultForNewCompanies: z.boolean().optional(),
+}).superRefine((value, ctx) => {
+  const duplicateScopes = value.scopes.filter((scope, index) => value.scopes.indexOf(scope) !== index);
+  if (duplicateScopes.length > 0) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: `Duplicate memory scopes: ${[...new Set(duplicateScopes)].join(", ")}`,
+      path: ["scopes"],
+    });
+  }
+  const lifecycleEvents = value.lifecycleEvents ?? [];
+  const duplicateEvents = lifecycleEvents.filter((event, index) => lifecycleEvents.indexOf(event) !== index);
+  if (duplicateEvents.length > 0) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: `Duplicate memory lifecycle events: ${[...new Set(duplicateEvents)].join(", ")}`,
+      path: ["lifecycleEvents"],
+    });
+  }
+});
+
+export type PluginMemoryProviderDeclarationInput = z.infer<typeof pluginMemoryProviderDeclarationSchema>;
+
 // ---------------------------------------------------------------------------
 // Plugin Manifest V1 schema
 // ---------------------------------------------------------------------------
@@ -741,6 +776,7 @@ export const pluginManifestV1Schema = z.object({
   skills: z.array(pluginManagedSkillDeclarationSchema).optional(),
   localFolders: z.array(pluginLocalFolderDeclarationSchema).optional(),
   objectReferences: z.array(pluginObjectReferenceProviderDeclarationSchema).optional(),
+  memoryProvider: pluginMemoryProviderDeclarationSchema.optional(),
   launchers: z.array(pluginLauncherDeclarationSchema).optional(),
   ui: z.object({
     slots: z.array(pluginUiSlotDeclarationSchema).min(1).optional(),
@@ -903,6 +939,39 @@ export const pluginManifestV1Schema = z.object({
           });
         }
       }
+    }
+  }
+
+  if (manifest.memoryProvider) {
+    if (!manifest.capabilities.includes("memory.providers.register")) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Capability 'memory.providers.register' is required when memoryProvider is declared",
+        path: ["capabilities"],
+      });
+    }
+
+    const declaredToolNames = new Set((manifest.tools ?? []).map((tool) => tool.name));
+    for (const field of ["recallToolName", "proposeToolName"] as const) {
+      const toolName = manifest.memoryProvider[field];
+      if (toolName && !declaredToolNames.has(toolName)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `memoryProvider.${field} must reference a declared tool`,
+          path: ["memoryProvider", field],
+        });
+      }
+    }
+
+    if (
+      (manifest.memoryProvider.recallToolName || manifest.memoryProvider.proposeToolName)
+      && !manifest.capabilities.includes("agent.tools.register")
+    ) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Capability 'agent.tools.register' is required when memoryProvider declares agent tools",
+        path: ["capabilities"],
+      });
     }
   }
 
