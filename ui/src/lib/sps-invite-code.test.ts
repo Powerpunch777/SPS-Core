@@ -22,8 +22,13 @@ describe("SPS invite codes", () => {
   it("builds a desktop deep link and a safe invite URL", () => {
     expect(buildSpsDesktopJoinUri("https://hub.example/invite/sps_invite_ab12cd34ef56gh78", "sps_invite_ab12cd34ef56gh78"))
       .toBe("sps://join?hub=https%3A%2F%2Fhub.example&code=SPS-AB12-CD34-EF56-GH78");
-    expect(buildSpsInviteUrl("hub.example:3100", "sps_invite_ab12cd34ef56gh78"))
-      .toBe("http://hub.example:3100/invite/sps_invite_ab12cd34ef56gh78");
+    expect(buildSpsInviteUrl("hub.example", "sps_invite_ab12cd34ef56gh78"))
+      .toBe("https://hub.example/invite/sps_invite_ab12cd34ef56gh78");
+    expect(buildSpsInviteUrl("http://127.0.0.1:3100", "sps_invite_ab12cd34ef56gh78"))
+      .toBe("http://127.0.0.1:3100/invite/sps_invite_ab12cd34ef56gh78");
+    expect(buildSpsInviteUrl("http://[::1]:3100", "sps_invite_ab12cd34ef56gh78"))
+      .toBe("http://[::1]:3100/invite/sps_invite_ab12cd34ef56gh78");
+    expect(buildSpsInviteUrl("http://hub.example", "sps_invite_ab12cd34ef56gh78")).toBeNull();
     expect(buildSpsInviteUrl("file:///not-a-hub", "sps_invite_ab12cd34")).toBeNull();
   });
 });

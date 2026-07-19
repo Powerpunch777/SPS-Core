@@ -3,6 +3,11 @@ const SPS_INVITE_TOKEN_PREFIX = "sps_invite_";
 const INVITE_SUFFIX_PATTERN = /^[a-z0-9]{8}(?:[a-z0-9]{8})?$/;
 const INVITE_CODE_INPUT_PATTERN = /^(?:[a-z0-9]{8}|[a-z0-9]{16}|[a-z0-9]{4}(?:[\s_-][a-z0-9]{4}){1,3})$/i;
 
+function isLoopbackHost(hostname: string): boolean {
+  const normalized = hostname.trim().toLowerCase();
+  return normalized === "localhost" || normalized === "127.0.0.1" || normalized === "::1" || normalized === "[::1]";
+}
+
 function inviteSuffixFromToken(token: string): string | null {
   const normalized = token.trim().toLowerCase();
   const prefix = normalized.startsWith(SPS_INVITE_TOKEN_PREFIX)
@@ -51,9 +56,10 @@ export function buildSpsInviteUrl(hubInput: string, token: string): string | nul
   try {
     const source = /^[a-z][a-z\d+.-]*:\/\//i.test(normalizedHub)
       ? normalizedHub
-      : `http://${normalizedHub}`;
+      : `https://${normalizedHub}`;
     const hub = new URL(source);
     if (hub.protocol !== "http:" && hub.protocol !== "https:") return null;
+    if (hub.protocol === "http:" && !isLoopbackHost(hub.hostname)) return null;
     hub.pathname = `/invite/${encodeURIComponent(token)}`;
     hub.search = "";
     hub.hash = "";

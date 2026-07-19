@@ -24,7 +24,7 @@ export function SpsJoinPage() {
 
     const inviteUrl = buildSpsInviteUrl(hubUrl, token);
     if (!inviteUrl) {
-      setError("Enter a valid Hub address using http:// or https://.");
+      setError("Enter a public HTTPS Hub address. HTTP is allowed only for localhost development.");
       return;
     }
 
@@ -55,7 +55,7 @@ export function SpsJoinPage() {
             <input
               value={hubUrl}
               onChange={(event) => setHubUrl(event.target.value)}
-              placeholder="http://192.168.0.10:3100"
+              placeholder="https://app.example.com"
               className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus:border-ring"
               autoComplete="url"
             />
