@@ -3,12 +3,15 @@ import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const logActivityMock = vi.fn();
+const canUserMock = vi.fn();
+const getMembershipMock = vi.fn();
 
 function registerModuleMocks() {
   vi.doMock("../services/index.js", () => ({
     accessService: () => ({
       isInstanceAdmin: vi.fn(),
-      canUser: vi.fn(),
+      canUser: canUserMock,
+      getMembership: getMembershipMock,
       hasPermission: vi.fn(),
     }),
     agentService: () => ({
@@ -76,7 +79,7 @@ function createDbStub() {
   };
 }
 
-async function createApp() {
+async function createApp(actorOverrides: Record<string, unknown> = {}) {
   const [{ accessRoutes }, { errorHandler }] = await Promise.all([
     import("../routes/access.js"),
     import("../middleware/index.js"),
@@ -89,6 +92,8 @@ async function createApp() {
       source: "local_implicit",
       userId: null,
       companyIds: ["company-1"],
+      isInstanceAdmin: true,
+      ...actorOverrides,
     };
     next();
   });
@@ -115,6 +120,8 @@ describe("POST /companies/:companyId/invites", () => {
     registerModuleMocks();
     vi.clearAllMocks();
     logActivityMock.mockReset();
+    canUserMock.mockReset();
+    getMembershipMock.mockReset();
   });
 
   it("returns an absolute invite URL using the request base URL", async () => {
@@ -135,5 +142,38 @@ describe("POST /companies/:companyId/invites", () => {
     expect(res.body.inviteUrl).toMatch(
       /^https:\/\/paperclip\.example\/invite\/sps_invite_[a-z0-9]{16}$/,
     );
+  });
+
+  it("does not let a company admin invite a new owner", async () => {
+    canUserMock.mockResolvedValue(true);
+    getMembershipMock.mockResolvedValue({ status: "active", membershipRole: "admin" });
+    const app = await createApp({
+      source: "board_key",
+      userId: "admin-user",
+      isInstanceAdmin: false,
+    });
+
+    const res = await request(app)
+      .post("/api/companies/company-1/invites")
+      .send({ allowedJoinTypes: "human", humanRole: "owner" });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toContain("Only a company owner");
+  });
+
+  it("allows a company owner to invite another owner", async () => {
+    canUserMock.mockResolvedValue(true);
+    getMembershipMock.mockResolvedValue({ status: "active", membershipRole: "owner" });
+    const app = await createApp({
+      source: "board_key",
+      userId: "owner-user",
+      isInstanceAdmin: false,
+    });
+
+    const res = await request(app)
+      .post("/api/companies/company-1/invites")
+      .send({ allowedJoinTypes: "human", humanRole: "owner" });
+
+    expect(res.status).toBe(201);
   });
 });

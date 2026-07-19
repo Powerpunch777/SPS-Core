@@ -2363,6 +2363,11 @@ export function buildHostServices(
           : null;
         const allowedJoinTypes = params.allowedJoinTypes ?? "both";
         const humanRole = allowedJoinTypes === "agent" ? null : params.humanRole ?? "operator";
+        // A plugin runs without the requesting human's company role. It may
+        // prepare ordinary invitations, but it must never mint company owners.
+        if (humanRole === "owner") {
+          throw new Error("Plugins cannot create owner invitations. A company owner must create this invitation directly.");
+        }
         const insertValues = {
           companyId,
           inviteType: "company_join" as const,

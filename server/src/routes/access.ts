@@ -1293,6 +1293,22 @@ async function resolveActorHumanRole(
   return normalizeHumanRole(membership.membershipRole, "operator");
 }
 
+async function assertCanCreateHumanInviteRole(
+  req: Request,
+  access: ReturnType<typeof accessService>,
+  companyId: string,
+  invitedRole: HumanCompanyMembershipRole | null,
+) {
+  // Inviting an owner is an authority transfer, not a regular user invitation.
+  // Keep this check beside membership-role enforcement so API and UI callers
+  // cannot turn a broad users:invite grant into an owner escalation.
+  if (invitedRole !== "owner") return;
+  const actorRole = await resolveActorHumanRole(req, access, companyId);
+  if (actorRole !== "owner") {
+    throw forbidden("Only a company owner can invite another owner.");
+  }
+}
+
 async function getProtectedMemberReason(
   req: Request,
   access: ReturnType<typeof accessService>,
@@ -3044,6 +3060,12 @@ export function accessRoutes(
       input.allowedJoinTypes === "agent"
         ? null
         : input.humanRole ?? "operator";
+    await assertCanCreateHumanInviteRole(
+      input.req,
+      access,
+      input.companyId,
+      effectiveHumanRole,
+    );
     const insertValues = {
       companyId: input.companyId,
       inviteType: "company_join" as const,

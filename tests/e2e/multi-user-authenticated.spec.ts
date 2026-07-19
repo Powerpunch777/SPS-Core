@@ -327,6 +327,7 @@ async function waitForOneSpsNodeCommand(input: {
   accessToken: string;
   workspace: string;
   client: DesktopNodeClient;
+  testOutput: string;
 }) {
   const deadline = Date.now() + NODE_E2E_TIMEOUT_MS;
   while (Date.now() < deadline) {
@@ -347,6 +348,13 @@ async function waitForOneSpsNodeCommand(input: {
           defaultWorkspacePath: input.workspace,
           projectWorkspaces: {},
         },
+        // The E2E process simulates the approved local Agy runtime without
+        // requiring a real Agy login. Production Nodes always resolve the
+        // approved CLI directly.
+        resolveInvocation: async () => ({
+          executable: process.execPath,
+          args: ["-e", `process.stdout.write(${JSON.stringify(input.testOutput)})`],
+        }),
       });
     }
     await pause(75);
@@ -512,10 +520,11 @@ test.describe("Multi-user: authenticated mode", () => {
           accessToken: boardApiToken,
           workspace: process.cwd(),
           client: desktopNode,
+          testOutput: "SPS Node E2E command output\n",
         });
         const result = await target!.runner.execute({
-          command: process.execPath,
-          args: ["-e", "process.stdout.write('SPS Node E2E command output\\n')"],
+          command: "agy",
+          args: ["--sps-node-e2e"],
           cwd: process.cwd(),
           env: {},
           stdin: null,
@@ -528,6 +537,17 @@ test.describe("Multi-user: authenticated mode", () => {
         expect(result.exitCode).toBe(0);
         expect(result.stdout).toContain("SPS Node E2E command output");
         expect(output.join("")).toContain("SPS Node E2E command output");
+
+        // A revoked computer must enroll with a fresh key. Its old successful
+        // heartbeat cannot be reused to restore local CLI execution.
+        const revokeFirstNode = await sessionJsonRequest(page, `${BASE}/api/sps-nodes/${registeredNode.id}/revoke`, {
+          method: "POST",
+        });
+        expect(revokeFirstNode.ok, `node revocation returned ${revokeFirstNode.status}`).toBe(true);
+        const staleNodeApproval = await sessionJsonRequest(page, `${BASE}/api/sps-nodes/${registeredNode.id}/approve`, {
+          method: "POST",
+        });
+        expect(staleNodeApproval.status).toBe(403);
 
         // A second invited member represents a separate collaborator computer.
         // Its Agent must remain bound to its own Node, even though this E2E
@@ -602,10 +622,11 @@ test.describe("Multi-user: authenticated mode", () => {
             accessToken: secondBoardApiToken,
             workspace: process.cwd(),
             client: desktopNode,
+            testOutput: "SPS Second Node E2E command output\n",
           });
           const secondResult = await secondTarget!.runner.execute({
-            command: process.execPath,
-            args: ["-e", "process.stdout.write('SPS Second Node E2E command output\\n')"],
+            command: "agy",
+            args: ["--sps-node-e2e"],
             cwd: process.cwd(),
             env: {},
             stdin: null,

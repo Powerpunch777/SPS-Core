@@ -240,7 +240,17 @@ export function spsNodeRoutes(db: Db) {
     const now = new Date();
     const updated = await db
       .update(spsNodes)
-      .set({ status: "revoked", revokedAt: now, updatedAt: now })
+      .set({
+        status: "revoked",
+        revokedAt: now,
+        // A revoked Node must re-enroll with a newly generated local key.
+        // Otherwise the historical heartbeat proof could be reused to regain
+        // execution access by calling approve again.
+        keyVerifiedAt: null,
+        approvedAt: null,
+        approvedByUserId: null,
+        updatedAt: now,
+      })
       .where(eq(spsNodes.id, node.id))
       .returning()
       .then((rows) => rows[0]!);
@@ -716,13 +726,28 @@ export function spsNodeRoutes(db: Db) {
         continue;
       }
 
+      const agent = await getAgent(candidate.agentId);
+      const runtimeKind = agent ? spsNodeCapabilityForAdapter(agent.adapterType) : null;
+      if (!agent || agent.companyId !== node.companyId || !runtimeKind) {
+        await db
+          .update(spsNodeCommands)
+          .set({
+            status: "failed",
+            error: "SPS Node command could not be matched to an approved Agent runtime.",
+            finishedAt: now,
+            updatedAt: now,
+          })
+          .where(and(eq(spsNodeCommands.id, candidate.id), eq(spsNodeCommands.status, "queued")));
+        continue;
+      }
+
       const claimed = await db
         .update(spsNodeCommands)
         .set({ status: "claimed", claimedAt: now, startedAt: now, updatedAt: now })
         .where(and(eq(spsNodeCommands.id, candidate.id), eq(spsNodeCommands.status, "queued")))
         .returning()
         .then((rows) => rows[0] ?? null);
-      if (claimed) return res.json(claimed);
+      if (claimed) return res.json({ ...claimed, runtimeKind });
     }
   });
 
