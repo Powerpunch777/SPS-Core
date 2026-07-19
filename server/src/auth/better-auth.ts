@@ -116,6 +116,11 @@ function headersFromExpressRequest(req: Request): Headers {
   return headersFromNodeHeaders(req.headers);
 }
 
+function isLoopbackHostname(hostname: string): boolean {
+  const normalized = hostname.trim().toLowerCase().replace(/^\[|\]$/g, "");
+  return normalized === "localhost" || normalized === "127.0.0.1" || normalized === "::1";
+}
+
 export function deriveAuthTrustedOrigins(config: Config, opts?: { listenPort?: number }): string[] {
   const baseUrl = config.authBaseUrlMode === "explicit" ? config.authPublicBaseUrl : undefined;
   const trustedOrigins = new Set<string>();
@@ -133,11 +138,12 @@ export function deriveAuthTrustedOrigins(config: Config, opts?: { listenPort?: n
     for (const hostname of config.allowedHostnames) {
       const trimmed = hostname.trim().toLowerCase();
       if (!trimmed) continue;
+      const allowPlainHttp = config.deploymentExposure !== "public" || isLoopbackHostname(trimmed);
       trustedOrigins.add(`https://${trimmed}`);
-      trustedOrigins.add(`http://${trimmed}`);
+      if (allowPlainHttp) trustedOrigins.add(`http://${trimmed}`);
       if (needsPortVariants) {
         trustedOrigins.add(`https://${trimmed}:${port}`);
-        trustedOrigins.add(`http://${trimmed}:${port}`);
+        if (allowPlainHttp) trustedOrigins.add(`http://${trimmed}:${port}`);
       }
     }
   }

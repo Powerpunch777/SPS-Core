@@ -167,6 +167,24 @@ describe("Better Auth cookie scoping", () => {
     ]));
   });
 
+  it("does not trust remote HTTP origins in a public authenticated deployment", () => {
+    const trustedOrigins = deriveAuthTrustedOrigins({
+      deploymentMode: "authenticated",
+      deploymentExposure: "public",
+      authBaseUrlMode: "auto",
+      authPublicBaseUrl: undefined,
+      allowedHostnames: ["board.example.test"],
+      port: 3101,
+    } as Parameters<typeof deriveAuthTrustedOrigins>[0]);
+
+    expect(trustedOrigins).toEqual(expect.arrayContaining([
+      "https://board.example.test",
+      "https://board.example.test:3101",
+    ]));
+    expect(trustedOrigins).not.toContain("http://board.example.test");
+    expect(trustedOrigins).not.toContain("http://board.example.test:3101");
+  });
+
   it("prefers an explicit resolved listen port over the configured port", () => {
     const trustedOrigins = deriveAuthTrustedOrigins({
       deploymentMode: "authenticated",
