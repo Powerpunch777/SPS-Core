@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { resolveViteHmrHost, resolveViteHmrPort, shouldDelegateToBetterAuth } from "../app.ts";
+import { resolveViteHmrHost, resolveViteHmrPort } from "../app.ts";
 
 describe("resolveViteHmrPort", () => {
   it("uses serverPort + 10000 when the result stays in range", () => {
@@ -27,17 +27,5 @@ describe("resolveViteHmrHost", () => {
   it("keeps concrete bind hosts", () => {
     expect(resolveViteHmrHost("127.0.0.1")).toBe("127.0.0.1");
     expect(resolveViteHmrHost("paperclip-dev")).toBe("paperclip-dev");
-  });
-});
-
-describe("shouldDelegateToBetterAuth", () => {
-  it("keeps SPS session and profile endpoints in the parsed API pipeline", () => {
-    expect(shouldDelegateToBetterAuth("/api/auth/get-session")).toBe(false);
-    expect(shouldDelegateToBetterAuth("/api/auth/profile/")).toBe(false);
-  });
-
-  it("sends OAuth routes to Better Auth before Express consumes their bodies", () => {
-    expect(shouldDelegateToBetterAuth("/api/auth/sign-in/social")).toBe(true);
-    expect(shouldDelegateToBetterAuth("/api/auth/callback/google")).toBe(true);
   });
 });

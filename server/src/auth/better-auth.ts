@@ -34,6 +34,29 @@ type BetterAuthSessionResolver = {
   api?: BetterAuthGetSessionApi;
 };
 
+type RequestWithRawBody = Request & {
+  rawBody?: Buffer;
+  body?: unknown;
+};
+
+function withPreservedRawBody(req: Request): Request {
+  const rawBody = (req as RequestWithRawBody).rawBody;
+  if (!rawBody || rawBody.length === 0 || req.method === "GET" || req.method === "HEAD") {
+    return req;
+  }
+
+  // better-call prefers a readable request stream even after Express has
+  // parsed it. Supply the captured source body as its documented parsed-body
+  // fallback so OAuth requests are serialized exactly once.
+  const request = Object.create(req) as RequestWithRawBody;
+  request.body = rawBody.toString("utf8");
+  Object.defineProperties(request, {
+    readable: { value: false },
+    readableEnded: { value: true },
+  });
+  return request;
+}
+
 type BetterAuthInstance = BetterAuthHandlerTarget & BetterAuthSessionResolver;
 
 const AUTH_COOKIE_PREFIX_FALLBACK = "default";
@@ -182,7 +205,7 @@ export function createBetterAuthInstance(db: Db, config: Config, trustedOrigins:
 export function createBetterAuthHandler(auth: BetterAuthHandlerTarget): RequestHandler {
   const handler = toNodeHandler(auth);
   return (req, res, next) => {
-    void Promise.resolve(handler(req, res)).catch(next);
+    void Promise.resolve(handler(withPreservedRawBody(req), res)).catch(next);
   };
 }
 

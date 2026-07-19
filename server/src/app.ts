@@ -97,16 +97,6 @@ const VITE_DEV_STATIC_PATHS = new Set([
   "/site.webmanifest",
   "/sw.js",
 ]);
-const SPS_OWNED_AUTH_PATHS = new Set([
-  "/api/auth/get-session",
-  "/api/auth/profile",
-]);
-
-export function shouldDelegateToBetterAuth(pathname: string) {
-  const normalizedPath = pathname.replace(/\/+$/, "") || "/";
-  return !SPS_OWNED_AUTH_PATHS.has(normalizedPath);
-}
-
 export function isDatabaseConnectionUnavailableError(err: unknown): boolean {
   const error = err as { code?: unknown; message?: unknown; cause?: unknown };
   if (error?.code === "ECONNREFUSED") return true;
@@ -184,6 +174,15 @@ export async function createApp(
   // Default is unset → Express trusts nothing, which is the only safe choice
   // when the server may be reachable without a known reverse proxy in front.
   applyTrustProxy(app, parseTrustProxyEnv(process.env.TRUST_PROXY));
+  app.use(COMPANY_IMPORT_API_PATH, express.json({
+    limit: PORTABLE_JSON_BODY_LIMIT,
+    verify: captureRawBody,
+  }));
+  app.use(express.json({
+    limit: DEFAULT_JSON_BODY_LIMIT,
+    verify: captureRawBody,
+  }));
+  app.use("/api", apiCompression());
   app.use(httpLogger);
   const privateHostnameGateEnabled = shouldEnablePrivateHostnameGuard({
     deploymentMode: opts.deploymentMode,
@@ -206,39 +205,10 @@ export async function createApp(
       resolveSession: opts.resolveSession,
     }),
   );
-
-  // Better Auth reads its POST body directly from the Node request stream.
-  // Preserve that source text before Express JSON parsing consumes the stream.
-  // SPS-owned session/profile routes are excluded and continue to the normal
-  // parsed API pipeline below.
-  if (opts.betterAuthHandler) {
-    app.use("/api/auth", express.text({
-      type: (incomingRequest) => {
-        const req = incomingRequest as express.Request;
-        return shouldDelegateToBetterAuth(req.originalUrl.split("?", 1)[0] ?? req.path);
-      },
-      limit: DEFAULT_JSON_BODY_LIMIT,
-      verify: captureRawBody,
-    }));
-    app.all("/api/auth/{*authPath}", (req, res, next) => {
-      if (!shouldDelegateToBetterAuth(req.path)) {
-        next();
-        return;
-      }
-      void Promise.resolve(opts.betterAuthHandler!(req, res, next)).catch(next);
-    });
-  }
-
-  app.use(COMPANY_IMPORT_API_PATH, express.json({
-    limit: PORTABLE_JSON_BODY_LIMIT,
-    verify: captureRawBody,
-  }));
-  app.use(express.json({
-    limit: DEFAULT_JSON_BODY_LIMIT,
-    verify: captureRawBody,
-  }));
-  app.use("/api", apiCompression());
   app.use("/api/auth", authRoutes(db));
+  if (opts.betterAuthHandler) {
+    app.all("/api/auth/{*authPath}", opts.betterAuthHandler);
+  }
   app.use(llmRoutes(db));
 
   const hostServicesDisposers = new Map<string, () => void>();
