@@ -105,7 +105,12 @@ export function errorHandler(
 
   const rootError = err instanceof Error ? err : new Error(String(err));
   logger.error(
-    { err: rootError, method: req.method, url: req.originalUrl },
+    {
+      errorName: rootError.name,
+      errorMessage: rootError.message,
+      method: req.method,
+      url: req.originalUrl,
+    },
     "unhandled request error",
   );
   attachErrorContext(
