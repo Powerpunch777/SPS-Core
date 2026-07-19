@@ -54,7 +54,7 @@ import {
   resolveSharedCodexHomeDir,
   seedManagedCodexHome,
 } from "./codex-home.js";
-import { resolveSelectedCodexHome } from "./codex-account.js";
+import { normalizeCodexAccountDirectory, resolveSelectedCodexHome } from "./codex-account.js";
 import { prepareCodexRuntimeConfig } from "./runtime-config.js";
 import { resolveCodexDesiredSkillNames } from "./skills.js";
 import { buildCodexExecArgs } from "./codex-args.js";
@@ -397,6 +397,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const effectiveWorkspaceCwd = useConfiguredInsteadOfAgentHome ? "" : workspaceCwd;
   const cwd = effectiveWorkspaceCwd || configuredCwd || process.cwd();
   const envConfig = parseObject(config.env);
+  const spsNodeCodexAccount = useSpsNodeCredentials
+    ? normalizeCodexAccountDirectory(config.codexAccount)
+    : null;
   const selectedCodexHome = useSpsNodeCredentials ? null : resolveSelectedCodexHome(config.codexAccount);
   if (selectedCodexHome) {
     try {
@@ -563,6 +566,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       typeof envConfig.PAPERCLIP_API_KEY === "string" && envConfig.PAPERCLIP_API_KEY.trim().length > 0;
     const env: Record<string, string> = { ...buildPaperclipEnv(agent) };
     env.PAPERCLIP_RUN_ID = runId;
+    if (spsNodeCodexAccount) {
+      // This is a profile directory name, not a path or credential. The
+      // receiving SPS Desktop Node resolves it inside its own home directory.
+      env.PAPERCLIP_CODEX_ACCOUNT = spsNodeCodexAccount;
+    }
     const wakeTaskId =
       (typeof context.taskId === "string" && context.taskId.trim().length > 0 && context.taskId.trim()) ||
       (typeof context.issueId === "string" && context.issueId.trim().length > 0 && context.issueId.trim()) ||

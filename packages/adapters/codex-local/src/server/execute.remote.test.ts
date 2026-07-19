@@ -419,4 +419,68 @@ describe("codex remote execution", () => {
     expect(call?.[3].env.CODEX_HOME).toBe(`${managedRemoteWorkspace}/.paperclip-runtime/codex/home`);
     expect(call?.[3].remoteExecution?.remoteCwd).toBe(managedRemoteWorkspace);
   });
+
+  it("forwards only the selected Codex profile name to an SPS Desktop Node", async () => {
+    const receivedEnvironments: Record<string, string>[] = [];
+    await execute({
+      runId: "run-sps-node-profile",
+      agent: {
+        id: "agent-1",
+        companyId: "company-1",
+        name: "CodexWorker",
+        adapterType: "codex_local",
+        adapterConfig: {},
+      },
+      runtime: {
+        sessionId: null,
+        sessionParams: null,
+        sessionDisplayId: null,
+        taskKey: null,
+      },
+      config: {
+        command: "codex",
+        engine: "cli",
+        codexAccount: ".codex-plus-b",
+        env: {
+          CODEX_HOME: "C:\\hub-only\\codex-home",
+          OPENAI_API_KEY: "hub-only-secret",
+        },
+      },
+      context: {
+        paperclipWorkspace: {
+          cwd: process.cwd(),
+          source: "project_primary",
+        },
+      },
+      executionTarget: {
+        kind: "remote",
+        transport: "sps_node",
+        nodeId: "node-1",
+        nodeLabel: "Friend PC",
+        projectId: "project-1",
+        remoteCwd: process.cwd(),
+        runner: {
+          execute: async (input) => {
+            receivedEnvironments.push(input.env);
+            return {
+              exitCode: 0,
+              signal: null,
+              timedOut: false,
+              stdout: "",
+              stderr: "",
+              pid: null,
+              processGroupId: null,
+              startedAt: new Date().toISOString(),
+            };
+          },
+        },
+      },
+      onLog: async () => {},
+    });
+
+    expect(receivedEnvironments).toHaveLength(1);
+    expect(receivedEnvironments[0]?.PAPERCLIP_CODEX_ACCOUNT).toBe(".codex-plus-b");
+    expect(receivedEnvironments[0]?.CODEX_HOME).toBeUndefined();
+    expect(receivedEnvironments[0]?.OPENAI_API_KEY).toBeUndefined();
+  });
 });

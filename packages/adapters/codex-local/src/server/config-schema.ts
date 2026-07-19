@@ -15,10 +15,10 @@ export function getConfigSchema(homeRoot?: string): AdapterConfigSchema {
       {
         key: "codexAccount",
         label: "Codex CLI account",
-        type: "select",
+        type: "combobox",
         default: codexAccounts[0]?.value ?? ".codex",
         options: codexAccounts,
-        hint: "Select a locally signed-in Codex profile. This changes credentials only; Agent instructions and Room history stay unchanged.",
+        hint: "Select or enter a .codex profile. For an SPS Desktop Node, the profile must be signed in on that Node; credentials stay on that computer.",
       },
       {
         key: "engine",

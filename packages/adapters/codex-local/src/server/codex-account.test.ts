@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { getConfigSchema } from "./config-schema.js";
 import {
   listLocalCodexAccountOptions,
+  normalizeCodexAccountDirectory,
   resolveSelectedCodexHome,
 } from "./codex-account.js";
 
@@ -36,12 +37,14 @@ describe("Codex account configuration", () => {
       { value: ".codex-plus-b", label: "Plus B Codex account" },
     ]);
     const accountField = getConfigSchema(root).fields.find((field) => field.key === "codexAccount");
-    expect(accountField?.type).toBe("select");
+    expect(accountField?.type).toBe("combobox");
     expect(accountField?.options).toHaveLength(2);
   });
 
   it("resolves approved profile directory names and rejects path traversal", async () => {
     const root = await makeTempRoot();
+    expect(normalizeCodexAccountDirectory(" .codex-plus-b ")).toBe(".codex-plus-b");
+    expect(normalizeCodexAccountDirectory("")).toBeNull();
     expect(resolveSelectedCodexHome(".codex-plus-b", root)).toBe(path.join(root, ".codex-plus-b"));
     expect(resolveSelectedCodexHome("", root)).toBeNull();
     expect(() => resolveSelectedCodexHome("../other", root)).toThrow("profile directory name");

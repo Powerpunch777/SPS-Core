@@ -23,6 +23,15 @@ export function resolveCodexAccountHomeRoot(env: NodeJS.ProcessEnv = process.env
   return env.USERPROFILE?.trim() || env.HOME?.trim() || os.homedir();
 }
 
+export function normalizeCodexAccountDirectory(value: unknown): string | null {
+  if (typeof value !== "string" || value.trim().length === 0) return null;
+  const directoryName = value.trim();
+  if (!CODEX_ACCOUNT_DIRECTORY.test(directoryName)) {
+    throw new Error("codexAccount must be a local .codex or .codex-* profile directory name");
+  }
+  return directoryName;
+}
+
 export function listLocalCodexAccountOptions(homeRoot = resolveCodexAccountHomeRoot()): LocalCodexAccountOption[] {
   try {
     const options = fs
@@ -49,10 +58,7 @@ export function resolveSelectedCodexHome(
   value: unknown,
   homeRoot = resolveCodexAccountHomeRoot(),
 ): string | null {
-  if (typeof value !== "string" || value.trim().length === 0) return null;
-  const directoryName = value.trim();
-  if (!CODEX_ACCOUNT_DIRECTORY.test(directoryName)) {
-    throw new Error("codexAccount must be a local .codex or .codex-* profile directory name");
-  }
+  const directoryName = normalizeCodexAccountDirectory(value);
+  if (!directoryName) return null;
   return path.join(homeRoot, directoryName);
 }
