@@ -1,7 +1,10 @@
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { test, expect, type Browser, type Page } from "@playwright/test";
+import { agents, createDb } from "../../packages/db/src/index.ts";
+import { resolveSpsNodeExecutionTarget } from "../../server/src/services/sps-node-execution";
 
 const BASE = process.env.PAPERCLIP_E2E_BASE_URL ?? "http://127.0.0.1:3105";
 const DATA_DIR = process.env.PAPERCLIP_E2E_DATA_DIR ?? process.env.PAPERCLIP_HOME;
@@ -10,6 +13,8 @@ const BOOTSTRAP_SCRIPT_PATH = path.resolve(process.cwd(), "packages/db/scripts/c
 const TSX_CLI_PATH = path.resolve(process.cwd(), "cli/node_modules/tsx/dist/cli.mjs");
 const OWNER_PASSWORD = "paperclip-owner-password";
 const INVITED_PASSWORD = "paperclip-invited-password";
+const NODE_E2E_TIMEOUT_MS = 45_000;
+const SPS_DESKTOP_NODE_MODULE_PATH = process.env.SPS_DESKTOP_NODE_MODULE?.trim();
 
 type HumanUser = {
   name: string;
@@ -35,6 +40,20 @@ type SessionJsonResponse<T> = {
   status: number;
   text: string;
   json: T | null;
+};
+
+type NodeIdentity = {
+  publicKeyPem: string;
+  privateKeyPem: string;
+};
+
+type DesktopNodeClient = {
+  createNodeIdentity: () => NodeIdentity;
+  startSpsDesktopAuth: (input: Record<string, unknown>) => Promise<{ id: string; token: string; boardApiToken: string }>;
+  registerSpsNode: (input: Record<string, unknown>) => Promise<{ id: string }>;
+  sendSpsNodeHeartbeat: (input: Record<string, unknown>) => Promise<unknown>;
+  claimSpsNodeCommand: (input: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
+  executeSpsNodeCommand: (input: Record<string, unknown>) => Promise<{ exitCode: number | null }>;
 };
 
 const runId = Date.now();
@@ -276,6 +295,65 @@ async function newPage(browser: Browser) {
   return { context, page };
 }
 
+async function loadDesktopNodeClient(): Promise<DesktopNodeClient> {
+  if (!SPS_DESKTOP_NODE_MODULE_PATH) {
+    throw new Error("SPS_DESKTOP_NODE_MODULE is required for the SPS Desktop Node integration test");
+  }
+  return await import(pathToFileURL(SPS_DESKTOP_NODE_MODULE_PATH).href) as DesktopNodeClient;
+}
+
+function pause(milliseconds: number) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function authorizeDesktopNode(client: DesktopNodeClient, page: Page, companyId: string) {
+  const challenge = await client.startSpsDesktopAuth({
+    hubUrl: BASE,
+    companyId,
+    clientName: "SPS Node E2E",
+  });
+  const approval = await sessionJsonRequest(page, `${BASE}/api/cli-auth/challenges/${challenge.id}/approve`, {
+    method: "POST",
+    data: { token: challenge.token },
+  });
+  expect(approval.ok, `desktop authorization returned ${approval.status}`).toBe(true);
+  return challenge.boardApiToken as string;
+}
+
+async function waitForOneSpsNodeCommand(input: {
+  hubUrl: string;
+  nodeId: string;
+  identity: NodeIdentity;
+  accessToken: string;
+  workspace: string;
+  client: DesktopNodeClient;
+}) {
+  const deadline = Date.now() + NODE_E2E_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    const command = await input.client.claimSpsNodeCommand({
+      hubUrl: input.hubUrl,
+      nodeId: input.nodeId,
+      identity: input.identity,
+      accessToken: input.accessToken,
+    });
+    if (command) {
+      return input.client.executeSpsNodeCommand({
+        command,
+        hubUrl: input.hubUrl,
+        nodeId: input.nodeId,
+        identity: input.identity,
+        accessToken: input.accessToken,
+        profile: {
+          defaultWorkspacePath: input.workspace,
+          projectWorkspaces: {},
+        },
+      });
+    }
+    await pause(75);
+  }
+  throw new Error("SPS Desktop Node did not receive a queued command before the E2E deadline.");
+}
+
 test.describe("Multi-user: authenticated mode", () => {
   test("authenticated humans can bootstrap, invite, join, and respect viewer restrictions", async ({
     browser,
@@ -335,6 +413,105 @@ test.describe("Multi-user: authenticated mode", () => {
       expect(forbiddenInviteRes.status).toBe(403);
     } finally {
       await invited.context.close();
+    }
+
+    const databaseUrl = process.env.DATABASE_URL;
+    if (!databaseUrl) throw new Error("DATABASE_URL is required for SPS Node command E2E");
+    test.skip(!SPS_DESKTOP_NODE_MODULE_PATH, "SPS Desktop Node integration is enabled by the SPS product test harness.");
+    const desktopNode = await loadDesktopNodeClient();
+    const nodeRunId = Date.now();
+    const nodeOwner: HumanUser = {
+      name: "Node Owner",
+      email: `node-owner-${nodeRunId}@paperclip.local`,
+      password: "paperclip-node-owner-password",
+    };
+    const nodeInviteUrl = await createAuthenticatedInvite(page, companyPrefix);
+    const nodeOwnerSession = await newPage(browser);
+    try {
+      await signUpFromInvite(nodeOwnerSession.page, nodeInviteUrl, nodeOwner);
+      await waitForMember(page, company.id, nodeOwner.email);
+      const boardApiToken = await authorizeDesktopNode(desktopNode, nodeOwnerSession.page, company.id);
+      const identity = desktopNode.createNodeIdentity();
+      const registeredNode = await desktopNode.registerSpsNode({
+        hubUrl: BASE,
+        companyId: company.id,
+        identity,
+        displayName: "SPS Node E2E",
+        platform: process.platform,
+        appVersion: "e2e",
+        capabilities: [{ kind: "agy_cli", label: "Agy CLI test transport", version: "e2e" }],
+        accessToken: boardApiToken,
+      });
+      await desktopNode.sendSpsNodeHeartbeat({
+        hubUrl: BASE,
+        nodeId: registeredNode.id,
+        identity,
+        accessToken: boardApiToken,
+      });
+
+      const approved = await sessionJsonRequest(page, `${BASE}/api/sps-nodes/${registeredNode.id}/approve`, {
+        method: "POST",
+      });
+      expect(approved.ok, `node approval returned ${approved.status}`).toBe(true);
+
+      const db = createDb(databaseUrl);
+      try {
+        const agent = await db
+          .insert(agents)
+          .values({
+            companyId: company.id,
+            name: "Node Transport Worker",
+            role: "worker",
+            status: "idle",
+            adapterType: "sps_agy_local",
+            adapterConfig: { command: "agy", model: "auto" },
+          })
+          .returning()
+          .then((rows) => rows[0]!);
+        const grant = await sessionJsonRequest(page, `${BASE}/api/sps-nodes/${registeredNode.id}/agent-grants/${agent.id}`, {
+          method: "PUT",
+        });
+        expect(grant.ok, `node grant returned ${grant.status}`).toBe(true);
+
+        const target = await resolveSpsNodeExecutionTarget({
+          db,
+          companyId: company.id,
+          agentId: agent.id,
+          adapterType: "sps_agy_local",
+          heartbeatRunId: null,
+          projectId: null,
+        });
+        expect(target).not.toBeNull();
+
+        const output: string[] = [];
+        const nodeExecution = waitForOneSpsNodeCommand({
+          hubUrl: BASE,
+          nodeId: registeredNode.id,
+          identity,
+          accessToken: boardApiToken,
+          workspace: process.cwd(),
+          client: desktopNode,
+        });
+        const result = await target!.runner.execute({
+          command: process.execPath,
+          args: ["-e", "process.stdout.write('SPS Node E2E command output\\n')"],
+          cwd: process.cwd(),
+          env: {},
+          stdin: null,
+          timeoutMs: NODE_E2E_TIMEOUT_MS,
+          onLog: async (_stream, body) => { output.push(body); },
+        });
+        const executed = await nodeExecution;
+
+        expect(executed.exitCode).toBe(0);
+        expect(result.exitCode).toBe(0);
+        expect(result.stdout).toContain("SPS Node E2E command output");
+        expect(output.join("")).toContain("SPS Node E2E command output");
+      } finally {
+        await db.$client.end({ timeout: 5 });
+      }
+    } finally {
+      await nodeOwnerSession.context.close();
     }
   });
 });
