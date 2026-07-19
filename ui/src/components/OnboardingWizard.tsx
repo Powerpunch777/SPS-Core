@@ -467,6 +467,19 @@ export function OnboardingWizard() {
     }
   }
 
+  function handleConfigureLeadLater() {
+    if (!createdCompanyId) {
+      setError(INCOMPLETE_ONBOARDING_STATE_MESSAGE);
+      return;
+    }
+
+    const prefix = createdCompanyPrefix;
+    setSelectedCompanyId(createdCompanyId);
+    reset();
+    closeOnboarding();
+    navigate(prefix ? `/${prefix}/dashboard` : "/dashboard");
+  }
+
   function buildAdapterConfig(): Record<string, unknown> {
     const adapter = getUIAdapter(adapterType);
     const config = adapter.buildAdapterConfig({
@@ -1683,18 +1696,28 @@ export function OnboardingWizard() {
                     </Button>
                   )}
                   {step === 4 && (
-                    <Button
-                      size="sm"
-                      disabled={!agentName.trim() || loading || adapterEnvLoading}
-                      onClick={handleGiveHeartbeat}
-                    >
-                      {loading ? (
-                        <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />
-                      ) : (
-                        <ArrowRight className="h-3.5 w-3.5 mr-1" />
-                      )}
-                      {loading ? "Bringing to life..." : "Give it a heartbeat"}
-                    </Button>
+                    <>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        disabled={loading}
+                        onClick={handleConfigureLeadLater}
+                      >
+                        Configure later
+                      </Button>
+                      <Button
+                        size="sm"
+                        disabled={!agentName.trim() || loading || adapterEnvLoading}
+                        onClick={handleGiveHeartbeat}
+                      >
+                        {loading ? (
+                          <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" />
+                        ) : (
+                          <ArrowRight className="h-3.5 w-3.5 mr-1" />
+                        )}
+                        {loading ? "Bringing to life..." : "Give it a heartbeat"}
+                      </Button>
+                    </>
                   )}
                   {step === 5 && (
                     <Button
