@@ -397,9 +397,9 @@ async function waitForOneSpsNodeCommand(input: {
           defaultWorkspacePath: input.workspace,
           projectWorkspaces: {},
         },
-        // The E2E process simulates the approved local Agy runtime without
-        // requiring a real Agy login. Production Nodes always resolve the
-        // approved CLI directly.
+        // The E2E process simulates the approved local runtime without
+        // requiring a real CLI login or downloaded local model. Production
+        // Nodes always resolve the approved runtime directly.
         resolveInvocation: async () => ({
           executable: process.execPath,
           args: ["-e", `process.stdout.write(${JSON.stringify(input.testOutput)})`],
@@ -604,7 +604,12 @@ test.describe("Multi-user: authenticated mode", () => {
             displayName: "SPS Second Node E2E",
             platform: process.platform,
             appVersion: "e2e",
-            capabilities: [{ kind: "agy_cli", label: "Agy CLI second test transport", version: "e2e" }],
+            capabilities: [{
+              kind: "ollama",
+              label: "Ollama local model",
+              version: "e2e",
+              models: ["qwen2.5-coder:7b"],
+            }],
             accessToken: secondBoardApiToken,
           });
           await desktopNode.sendSpsNodeHeartbeat({
@@ -622,8 +627,8 @@ test.describe("Multi-user: authenticated mode", () => {
               name: "Second Node Transport Worker",
               role: "worker",
               status: "idle",
-              adapterType: "sps_agy_local",
-              adapterConfig: { command: "agy", model: "auto" },
+              adapterType: "sps_ollama_local",
+              adapterConfig: { command: "ollama", model: "qwen2.5-coder:7b" },
             })
             .returning()
             .then((rows) => rows[0]!);
@@ -638,7 +643,7 @@ test.describe("Multi-user: authenticated mode", () => {
             db,
             companyId: company.id,
             agentId: secondAgent.id,
-            adapterType: "sps_agy_local",
+            adapterType: "sps_ollama_local",
             heartbeatRunId: null,
             projectId: null,
           });
@@ -652,14 +657,14 @@ test.describe("Multi-user: authenticated mode", () => {
             accessToken: secondBoardApiToken,
             workspace: process.cwd(),
             client: desktopNode,
-            testOutput: "SPS Second Node E2E command output\n",
+            testOutput: "SPS Second Node local model output\n",
           });
           const secondResult = await secondTarget!.runner.execute({
-            command: "agy",
-            args: ["--sps-node-e2e"],
+            command: "ollama",
+            args: ["run", "qwen2.5-coder:7b"],
             cwd: process.cwd(),
             env: {},
-            stdin: null,
+            stdin: "Summarize the assigned task using the local model.",
             timeoutMs: NODE_E2E_TIMEOUT_MS,
             onLog: async (_stream, body) => { secondOutput.push(body); },
           });
@@ -667,8 +672,8 @@ test.describe("Multi-user: authenticated mode", () => {
 
           expect(secondExecuted.exitCode).toBe(0);
           expect(secondResult.exitCode).toBe(0);
-          expect(secondResult.stdout).toContain("SPS Second Node E2E command output");
-          expect(secondOutput.join("")).toContain("SPS Second Node E2E command output");
+          expect(secondResult.stdout).toContain("SPS Second Node local model output");
+          expect(secondOutput.join("")).toContain("SPS Second Node local model output");
         } finally {
           await secondNodeOwnerSession.context.close();
         }
