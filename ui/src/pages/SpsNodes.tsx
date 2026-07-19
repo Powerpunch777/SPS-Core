@@ -176,13 +176,13 @@ export function SpsNodes() {
         </p>
         <div className="flex items-start gap-2 rounded-lg border border-border bg-muted/30 px-4 py-3 text-sm text-muted-foreground">
           <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0" />
-          <span>Hub stores only a Node&apos;s public capabilities. CLI credentials, API keys, project files, and local paths remain on the Node computer.</span>
+          <span>The SPS team Host stores only a Node&apos;s public capabilities. CLI credentials, API keys, project files, and local paths remain on the Node computer.</span>
         </div>
       </header>
 
       {nodes.length === 0 ? (
         <section className="rounded-lg border border-dashed border-border px-5 py-8 text-sm text-muted-foreground">
-          No computers are registered yet. Sign in to SPS Desktop on the computer you want to connect, choose this SPS Hub, and complete the invitation flow.
+          No computers are registered yet. Open the SPS Desktop invitation link on the computer you want to connect, then complete the sign-in flow.
         </section>
       ) : (
         <div className="space-y-4">

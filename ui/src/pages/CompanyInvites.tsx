@@ -331,7 +331,7 @@ export function CompanyInvites() {
                 ) : null}
               </div>
               <div className="text-sm text-muted-foreground">
-                Share the code in chat, or use the desktop link on a computer with SPS Desktop installed.
+                Share the Desktop link whenever possible. It gives SPS Desktop both the private team address and this one-time invitation. The short code is for a computer that already knows the team address.
               </div>
             </div>
             {latestInviteCode ? (
@@ -373,7 +373,7 @@ export function CompanyInvites() {
                   Scan on another device
                 </div>
                 <p className="text-sm text-muted-foreground">
-                  The QR code opens the one-time browser invite. On a computer with SPS Desktop installed, use the desktop link or invitation code instead.
+                  The QR code opens the one-time browser invite. On a computer with SPS Desktop installed, use the Desktop link so the team address is filled in automatically.
                 </p>
               </div>
             </div>

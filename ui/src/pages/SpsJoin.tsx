@@ -24,7 +24,7 @@ export function SpsJoinPage() {
 
     const inviteUrl = buildSpsInviteUrl(hubUrl, token);
     if (!inviteUrl) {
-      setError("Enter a public HTTPS Hub address. HTTP is allowed only for localhost development.");
+      setError("Enter a private HTTPS SPS team address. HTTP is allowed only for local development.");
       return;
     }
 
@@ -51,11 +51,11 @@ export function SpsJoinPage() {
 
         <form className="space-y-5" onSubmit={submit}>
           <label className="block space-y-2">
-            <span className="text-sm font-medium">SPS Hub address</span>
+            <span className="text-sm font-medium">SPS team address</span>
             <input
               value={hubUrl}
               onChange={(event) => setHubUrl(event.target.value)}
-              placeholder="https://app.example.com"
+              placeholder="https://owner-pc.example.ts.net"
               className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus:border-ring"
               autoComplete="url"
             />
@@ -78,7 +78,7 @@ export function SpsJoinPage() {
         </form>
 
         <p className="mt-5 text-xs leading-5 text-muted-foreground">
-          You will sign in or create an SPS account on the Hub before this invitation is accepted.
+          You will sign in or create an SPS account on your team Host before this invitation is accepted.
         </p>
       </section>
     </main>
