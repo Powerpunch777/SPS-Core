@@ -194,6 +194,35 @@ async function signUpFromInviteCode(page: Page, inviteCode: string, user: HumanU
   });
 }
 
+async function approveNodeFromOwnerUi(page: Page, companyPrefix: string, displayName: string) {
+  await page.goto(`${BASE}/${companyPrefix}/company/settings/nodes`);
+  await expect(page.getByRole("heading", { name: "SPS Nodes" })).toBeVisible({ timeout: 20_000 });
+  const nodeSection = page.locator("section").filter({
+    has: page.getByRole("heading", { name: displayName, exact: true }),
+  });
+  await expect(nodeSection).toBeVisible({ timeout: 20_000 });
+  await nodeSection.getByRole("button", { name: "Approve", exact: true }).click();
+  await expect(nodeSection.getByText("Active", { exact: true })).toBeVisible({ timeout: 20_000 });
+}
+
+async function grantNodeAccessFromOwnerUi(
+  page: Page,
+  companyPrefix: string,
+  nodeDisplayName: string,
+  agentName: string,
+) {
+  await page.goto(`${BASE}/${companyPrefix}/company/settings/nodes`);
+  await expect(page.getByRole("heading", { name: "SPS Nodes" })).toBeVisible({ timeout: 20_000 });
+  const nodeSection = page.locator("section").filter({
+    has: page.getByRole("heading", { name: nodeDisplayName, exact: true }),
+  });
+  await expect(nodeSection).toBeVisible({ timeout: 20_000 });
+  await nodeSection.getByRole("combobox").click();
+  await page.getByRole("option", { name: agentName }).click();
+  await nodeSection.getByRole("button", { name: "Grant access", exact: true }).click();
+  await expect(nodeSection.getByText(agentName, { exact: true })).toBeVisible({ timeout: 20_000 });
+}
+
 async function sessionJsonRequest<T>(
   page: Page,
   url: string,
@@ -479,10 +508,7 @@ test.describe("Multi-user: authenticated mode", () => {
         accessToken: boardApiToken,
       });
 
-      const approved = await sessionJsonRequest(page, `${BASE}/api/sps-nodes/${registeredNode.id}/approve`, {
-        method: "POST",
-      });
-      expect(approved.ok, `node approval returned ${approved.status}`).toBe(true);
+      await approveNodeFromOwnerUi(page, companyPrefix, "SPS Node E2E");
 
       const db = createDb(databaseUrl);
       try {
@@ -517,10 +543,7 @@ test.describe("Multi-user: authenticated mode", () => {
           })
           .returning()
           .then((rows) => rows[0]!);
-        const grant = await sessionJsonRequest(page, `${BASE}/api/sps-nodes/${registeredNode.id}/agent-grants/${agent.id}`, {
-          method: "PUT",
-        });
-        expect(grant.ok, `node grant returned ${grant.status}`).toBe(true);
+        await grantNodeAccessFromOwnerUi(page, companyPrefix, "SPS Node E2E", agent.name);
 
         const target = await resolveSpsNodeExecutionTarget({
           db,
@@ -590,10 +613,7 @@ test.describe("Multi-user: authenticated mode", () => {
             identity: secondIdentity,
             accessToken: secondBoardApiToken,
           });
-          const secondApproval = await sessionJsonRequest(page, `${BASE}/api/sps-nodes/${secondRegisteredNode.id}/approve`, {
-            method: "POST",
-          });
-          expect(secondApproval.ok, `second node approval returned ${secondApproval.status}`).toBe(true);
+          await approveNodeFromOwnerUi(page, companyPrefix, "SPS Second Node E2E");
 
           const secondAgent = await db
             .insert(agents)
@@ -607,12 +627,12 @@ test.describe("Multi-user: authenticated mode", () => {
             })
             .returning()
             .then((rows) => rows[0]!);
-          const secondGrant = await sessionJsonRequest(
+          await grantNodeAccessFromOwnerUi(
             page,
-            `${BASE}/api/sps-nodes/${secondRegisteredNode.id}/agent-grants/${secondAgent.id}`,
-            { method: "PUT" },
+            companyPrefix,
+            "SPS Second Node E2E",
+            secondAgent.name,
           );
-          expect(secondGrant.ok, `second node grant returned ${secondGrant.status}`).toBe(true);
 
           const secondTarget = await resolveSpsNodeExecutionTarget({
             db,
