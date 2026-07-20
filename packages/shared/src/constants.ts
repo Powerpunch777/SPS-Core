@@ -1261,6 +1261,7 @@ export const PLUGIN_STATE_SCOPE_KINDS = [
   "project_workspace",
   "agent",
   "issue",
+  "thread",
   "goal",
   "run",
 ] as const;

@@ -54,6 +54,43 @@ export { createTestHarness, createEnvironmentTestHarness, createFakeEnvironmentD
 export { createPluginBundlerPresets } from "./bundlers.js";
 export { startPluginDevServer, getUiBuildSnapshot } from "./dev-server.js";
 export { startWorkerRpcHost, runWorker } from "./worker-rpc-host.js";
+export { createPluginPlatformClient } from "./platform-client.js";
+// Product-neutral vocabulary for workplane, memory, and backend extensions.
+// Runtime host methods remain backwards compatible while SPS moves plugins to
+// these stable names.
+export {
+  AGENT_PLATFORM_CONTRACT_VERSION,
+  agentPlatformScopeSchema,
+  agentPlatformThreadStatusSchema,
+  agentPlatformRunStatusSchema,
+  agentPlatformBackendKindSchema,
+  agentPlatformStoreKindSchema,
+  agentPlatformStoreHealthSchema,
+  agentPlatformExtensionKindSchema,
+  agentPlatformThreadSchema,
+  agentPlatformRunSchema,
+  agentPlatformBackendSchema,
+  agentPlatformStoreSchema,
+  agentPlatformExtensionSchema,
+  normalizeAgentPlatformScope,
+  isAgentPlatformContractCompatible,
+} from "@paperclipai/shared";
+export type {
+  AgentPlatformScope,
+  AgentPlatformThreadStatus,
+  AgentPlatformRunStatus,
+  AgentPlatformBackendKind,
+  AgentPlatformWorkItemStatus,
+  AgentPlatformStoreKind,
+  AgentPlatformStoreHealth,
+  AgentPlatformExtensionKind,
+  AgentPlatformThread,
+  AgentPlatformRun,
+  AgentPlatformBackend,
+  AgentPlatformWorkItem,
+  AgentPlatformStore,
+  AgentPlatformExtension,
+} from "@paperclipai/shared";
 export {
   createHostClientHandlers,
   getRequiredCapability,
@@ -264,6 +301,13 @@ export type {
   PluginAuthorizationDecisionResult,
   PluginAuthorizationAuditEntry,
   PluginAgentSessionsClient,
+  PluginPlatformClient,
+  PluginPlatformThreadClient,
+  PluginPlatformStoreClient,
+  PluginPlatformBackendClient,
+  PluginPlatformThreadCreateInput,
+  PluginPlatformThreadSendInput,
+  PluginPlatformStateInput,
   AgentSession,
   AgentSessionEvent,
   AgentSessionSendResult,

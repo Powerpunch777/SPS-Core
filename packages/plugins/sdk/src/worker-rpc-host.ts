@@ -70,6 +70,7 @@ import type {
   AgentSessionEvent,
   AgentSessionContext,
 } from "./types.js";
+import { createPluginPlatformClient } from "./platform-client.js";
 import type {
   JsonRpcId,
   JsonRpcNotification,
@@ -419,7 +420,7 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
   // -----------------------------------------------------------------------
 
   function buildContext(): PluginContext {
-    return {
+    const context = {
       get manifest() {
         if (!manifest) throw new Error("Plugin context accessed before initialization");
         return manifest;
@@ -1312,6 +1313,11 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
           notifyHost("log", { level: "debug", message, meta });
         },
       },
+    } as Omit<PluginContext, "platform">;
+
+    return {
+      ...context,
+      platform: createPluginPlatformClient(context),
     };
   }
 

@@ -25,6 +25,7 @@ import { plugins } from "./plugins.js";
  * - `project_workspace` — one value per project workspace
  * - `agent` — one value per agent
  * - `issue` — one value per issue
+ * - `thread` — one value per durable agent or group conversation
  * - `goal` — one value per goal
  * - `run` — one value per agent run
  *

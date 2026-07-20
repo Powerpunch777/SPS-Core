@@ -28,6 +28,7 @@ import type {
   RoutineStatus,
   IssueSurfaceVisibility,
 } from "../constants.js";
+import type { AgentPlatformExtensionKind } from "../agent-platform-contract.js";
 import type { Agent } from "./agent.js";
 import type { CompanySkill } from "./company-skill.js";
 import type { Project } from "./project.js";
@@ -582,6 +583,19 @@ export interface PluginMemoryProviderDeclaration {
   defaultForNewCompanies?: boolean;
 }
 
+/**
+ * Optional product-neutral extension identity. It lets the host discover
+ * workplanes and providers without inferring behavior from a plugin name.
+ */
+export interface PluginAgentPlatformDeclaration {
+  /** Major-versioned Core contract implemented by this plugin. */
+  contractVersion: string;
+  /** The behavior the plugin contributes to the Agent Platform. */
+  kind: AgentPlatformExtensionKind;
+  /** Stable profile key for selectable workplane templates. */
+  profileKey?: string;
+}
+
 // ---------------------------------------------------------------------------
 // Plugin Manifest V1
 // ---------------------------------------------------------------------------
@@ -652,6 +666,8 @@ export interface PaperclipPluginManifestV1 {
   objectReferences?: PluginObjectReferenceProviderDeclaration[];
   /** Memory provider this plugin contributes. Requires `memory.providers.register`. */
   memoryProvider?: PluginMemoryProviderDeclaration;
+  /** Product-neutral Agent Platform extension metadata. */
+  agentPlatform?: PluginAgentPlatformDeclaration;
   /**
    * Legacy top-level launcher declarations.
    * Prefer `ui.launchers` for new manifests.

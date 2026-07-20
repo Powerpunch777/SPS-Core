@@ -28,6 +28,10 @@ import {
 } from "../constants.js";
 import { routineVariableSchema } from "./routine.js";
 import { externalObjectProviderKeySchema, externalObjectTypeSchema } from "./external-object.js";
+import {
+  agentPlatformExtensionKindSchema,
+  isAgentPlatformContractCompatible,
+} from "../agent-platform-contract.js";
 
 // ---------------------------------------------------------------------------
 // JSON Schema placeholder – a permissive validator for JSON Schema objects
@@ -696,6 +700,35 @@ export const pluginMemoryProviderDeclarationSchema = z.object({
 
 export type PluginMemoryProviderDeclarationInput = z.infer<typeof pluginMemoryProviderDeclarationSchema>;
 
+export const pluginAgentPlatformDeclarationSchema = z.object({
+  contractVersion: z.string().min(1).regex(
+    /^\d+\.\d+(?:\.\d+)?$/,
+    "Agent Platform contractVersion must use a numeric version such as 1.0",
+  ),
+  kind: agentPlatformExtensionKindSchema,
+  profileKey: z.string().min(1).max(100).regex(
+    /^[a-z0-9][a-z0-9._-]*$/,
+    "Agent Platform profileKey must start with a lowercase alphanumeric and contain only lowercase letters, digits, dots, hyphens, or underscores",
+  ).optional(),
+}).superRefine((value, ctx) => {
+  if (!isAgentPlatformContractCompatible(value.contractVersion)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: `Agent Platform contractVersion '${value.contractVersion}' is not compatible with this Core`,
+      path: ["contractVersion"],
+    });
+  }
+  if (value.kind === "workplane" && !value.profileKey) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Agent Platform workplane extensions require a profileKey",
+      path: ["profileKey"],
+    });
+  }
+});
+
+export type PluginAgentPlatformDeclarationInput = z.infer<typeof pluginAgentPlatformDeclarationSchema>;
+
 // ---------------------------------------------------------------------------
 // Plugin Manifest V1 schema
 // ---------------------------------------------------------------------------
@@ -777,6 +810,7 @@ export const pluginManifestV1Schema = z.object({
   localFolders: z.array(pluginLocalFolderDeclarationSchema).optional(),
   objectReferences: z.array(pluginObjectReferenceProviderDeclarationSchema).optional(),
   memoryProvider: pluginMemoryProviderDeclarationSchema.optional(),
+  agentPlatform: pluginAgentPlatformDeclarationSchema.optional(),
   launchers: z.array(pluginLauncherDeclarationSchema).optional(),
   ui: z.object({
     slots: z.array(pluginUiSlotDeclarationSchema).min(1).optional(),

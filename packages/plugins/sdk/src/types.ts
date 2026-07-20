@@ -40,6 +40,10 @@ import type {
   RoutineRun,
   Agent,
   AgentSessionContext,
+  AgentPlatformScope,
+  AgentPlatformThread,
+  AgentPlatformRun,
+  AgentPlatformBackend,
   IssueExecutionPolicy,
   Goal,
   HumanCompanyMembershipRole,
@@ -1569,6 +1573,7 @@ export interface AgentSession {
   companyId: string;
   status: "active" | "closed";
   createdAt: string;
+  updatedAt: string;
   context?: AgentSessionContext;
   lastRunId: string | null;
   lastError: string | null;
@@ -1626,6 +1631,62 @@ export interface PluginAgentSessionsClient {
 
   /** Close a session, releasing resources. Requires `agent.sessions.close`. */
   close(sessionId: string, companyId: string): Promise<void>;
+}
+
+// ---------------------------------------------------------------------------
+// Product-neutral Agent Platform facade
+// ---------------------------------------------------------------------------
+
+export interface PluginPlatformThreadCreateInput {
+  scope: AgentPlatformScope;
+  agentId: string;
+  /** A plugin-owned stable key. Omit to let the Core create one. */
+  threadKey?: string;
+  reason?: string;
+}
+
+export interface PluginPlatformThreadSendInput {
+  threadId: string;
+  organizationId: string;
+  prompt: string;
+  reason?: string;
+  onEvent?: (event: AgentSessionEvent) => void;
+}
+
+export interface PluginPlatformStateInput {
+  scope: AgentPlatformScope;
+  stateKey: string;
+  namespace?: string;
+}
+
+export interface PluginPlatformThreadClient {
+  create(input: PluginPlatformThreadCreateInput): Promise<AgentPlatformThread>;
+  list(input: { agentId: string; organizationId: string }): Promise<AgentPlatformThread[]>;
+  send(input: PluginPlatformThreadSendInput): Promise<AgentPlatformRun>;
+  close(input: { threadId: string; organizationId: string }): Promise<void>;
+}
+
+export interface PluginPlatformStoreClient {
+  getState(input: PluginPlatformStateInput): Promise<unknown>;
+  setState(input: PluginPlatformStateInput, value: unknown): Promise<void>;
+  deleteState(input: PluginPlatformStateInput): Promise<void>;
+}
+
+export interface PluginPlatformBackendClient {
+  describeAgent(input: { agentId: string; organizationId: string }): Promise<AgentPlatformBackend>;
+}
+
+/**
+ * Stable generic facade over the current Core compatibility services.
+ *
+ * The facade is additive. Existing `issues`, `agents.sessions`, and `state`
+ * clients remain supported while a workplane migrates to neutral terminology.
+ */
+export interface PluginPlatformClient {
+  readonly contractVersion: string;
+  readonly threads: PluginPlatformThreadClient;
+  readonly stores: PluginPlatformStoreClient;
+  readonly backends: PluginPlatformBackendClient;
 }
 
 /**
@@ -1963,6 +2024,9 @@ export interface PluginContext {
 
   /** Read and manage agents. Requires `agents.read` for reads; `agents.pause` / `agents.resume` / `agents.invoke` for write ops. */
   agents: PluginAgentsClient;
+
+  /** Product-neutral Core facade for Threads, Runs, Stores, and Backends. */
+  platform: PluginPlatformClient;
 
   /** Read and mutate goals. Requires `goals.read` for reads; `goals.create` / `goals.update` for write ops. */
   goals: PluginGoalsClient;

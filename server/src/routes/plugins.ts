@@ -48,6 +48,7 @@ import {
 } from "@paperclipai/shared";
 import { pluginRegistryService } from "../services/plugin-registry.js";
 import { listReadyMemoryProviders } from "../services/memory-providers.js";
+import { listReadyAgentPlatformExtensions } from "../services/agent-platform-extensions.js";
 import { pluginLifecycleManager } from "../services/plugin-lifecycle.js";
 import {
   getPluginUiContributionMetadata,
@@ -881,6 +882,18 @@ export function pluginRoutes(
   router.get("/plugins/memory-providers", async (req, res) => {
     assertBoardOrgAccess(req);
     res.json(listReadyMemoryProviders(await registry.listByStatus("ready")));
+  });
+
+  /**
+   * GET /api/plugins/agent-platform/extensions
+   *
+   * Lists ready, contract-compatible workplanes and platform providers. The
+   * response is safe for a profile picker: no secrets, configuration, or
+   * provider-owned content is included.
+   */
+  router.get("/plugins/agent-platform/extensions", async (req, res) => {
+    assertBoardOrgAccess(req);
+    res.json(listReadyAgentPlatformExtensions(await registry.listByStatus("ready")));
   });
 
   // IMPORTANT: Static routes must come before parameterized routes

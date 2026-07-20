@@ -71,6 +71,7 @@ import type {
   PluginPerformActionActorContext,
   PluginPerformActionContext,
 } from "./protocol.js";
+import { createPluginPlatformClient } from "./platform-client.js";
 
 export interface TestHarnessOptions {
   /** Plugin manifest used to seed capability checks and metadata. */
@@ -2219,6 +2220,7 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
             companyId: cid,
             status: "active",
             createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
             context: opts?.context,
             lastRunId: null,
             lastError: null,
@@ -2256,6 +2258,7 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
         },
       },
     },
+    platform: undefined as never,
     goals: {
       async list(input) {
         requireCapability(manifest, capabilitySet, "goals.read");
@@ -2511,6 +2514,8 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
       },
     },
   };
+
+  ctx.platform = createPluginPlatformClient(ctx);
 
   const harness: TestHarness = {
     ctx,
