@@ -167,6 +167,54 @@ describeEmbeddedPostgres("SPS Node execution target", () => {
     expect(observedLogs).toEqual([{ stream: "stdout", body: "hello from friend node\n" }]);
   });
 
+  it("fails the Hub execution when a Node reports a failed command", async () => {
+    const fixture = await createFixture();
+    const target = await resolveSpsNodeExecutionTarget({
+      db,
+      companyId: fixture.company.id,
+      agentId: fixture.agent.id,
+      adapterType: "codex_local",
+      heartbeatRunId: null,
+      projectId: null,
+    });
+    const observedLogs: Array<{ stream: string; body: string }> = [];
+    const pendingResult = target!.runner.execute({
+      command: "codex",
+      args: ["exec", "--json"],
+      cwd: "C:/not-sent-to-node",
+      env: {},
+      stdin: "prompt",
+      timeoutMs: 5_000,
+      onLog: async (stream, body) => { observedLogs.push({ stream, body }); },
+    });
+
+    let queued: typeof spsNodeCommands.$inferSelect | null = null;
+    for (let attempt = 0; attempt < 20 && !queued; attempt += 1) {
+      queued = await db
+        .select()
+        .from(spsNodeCommands)
+        .where(and(eq(spsNodeCommands.companyId, fixture.company.id), eq(spsNodeCommands.agentId, fixture.agent.id)))
+        .then((rows) => rows[0] ?? null);
+      if (!queued) await wait(25);
+    }
+    expect(queued).not.toBeNull();
+    await db
+      .update(spsNodeCommands)
+      .set({
+        status: "failed",
+        error: "Selected Codex profile is not signed in on this SPS Desktop Node.",
+        finishedAt: new Date(),
+        updatedAt: new Date(),
+      })
+      .where(eq(spsNodeCommands.id, queued!.id));
+
+    await expect(pendingResult).rejects.toThrow(/Selected Codex profile is not signed in/);
+    expect(observedLogs).toEqual([{
+      stream: "stderr",
+      body: "Selected Codex profile is not signed in on this SPS Desktop Node.\n",
+    }]);
+  });
+
   it("refuses a primary Node that lacks the required local runtime", async () => {
     const fixture = await createFixture();
     await expect(resolveSpsNodeExecutionTarget({

@@ -154,7 +154,12 @@ export async function resolveSpsNodeExecutionTarget(input: {
           if (!current) {
             throw new Error("SPS Node command disappeared before it reported a result.");
           }
-          if (current.status === "succeeded" || current.status === "failed") {
+          if (current.status === "failed") {
+            const detail = current.error?.trim() || "SPS Desktop Node command failed without an error detail.";
+            await commandInput.onLog?.("stderr", `${detail}\n`);
+            throw new Error(detail);
+          }
+          if (current.status === "succeeded") {
             return {
               exitCode: current.exitCode,
               signal: current.signal,
