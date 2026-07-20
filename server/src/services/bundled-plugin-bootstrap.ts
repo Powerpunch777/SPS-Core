@@ -1,8 +1,14 @@
 import fs from "node:fs";
 import path from "node:path";
 
-type PluginManifest = { id: string };
-type ExistingPlugin = { id: string; pluginKey: string; status: string } | null;
+type PluginManifest = { id: string; version?: string };
+type ExistingPlugin = {
+  id: string;
+  pluginKey: string;
+  packagePath?: string | null;
+  status: string;
+  version?: string | null;
+} | null;
 
 type BundledPluginBootstrapDependencies = {
   loader: {
@@ -19,6 +25,7 @@ type BundledPluginBootstrapDependencies = {
   };
   pluginRegistry: {
     getByKey: (pluginKey: string) => Promise<ExistingPlugin>;
+    uninstall: (pluginId: string, removeData?: boolean) => Promise<unknown>;
   };
 };
 
@@ -33,8 +40,11 @@ export function parseBundledPluginPaths(raw: string | undefined, delimiter = pat
 }
 
 /**
- * Loads only administrator-provided, image-bundled plugins. Individual plugin
- * failures are logged and never prevent the authenticated Hub from starting.
+ * Loads only administrator-provided, image-bundled plugins. A bundle is kept
+ * when its version and path are unchanged; otherwise it is soft-reinstalled
+ * before loading so Desktop updates can refresh the bundled code without
+ * deleting plugin-owned state. Individual plugin failures never prevent the
+ * authenticated Hub from starting.
  */
 export async function installConfiguredBundledPlugins(
   pluginPaths: readonly string[],
@@ -54,11 +64,29 @@ export async function installConfiguredBundledPlugins(
       }
       const existing = await dependencies.pluginRegistry.getByKey(manifest.id);
       if (existing) {
+        const existingPath = existing.packagePath ? path.resolve(existing.packagePath) : null;
+        const hasSameBundle = existing.status === "ready"
+          && existing.version === manifest.version
+          && existingPath === pluginPath;
+        if (hasSameBundle) {
+          dependencies.logger.info(
+            { pluginId: existing.id, pluginKey: existing.pluginKey, status: existing.status },
+            "configured bundled plugin already matches the active bundle; skipping refresh",
+          );
+          continue;
+        }
         dependencies.logger.info(
-          { pluginId: existing.id, pluginKey: existing.pluginKey, status: existing.status },
-          "configured bundled plugin already installed; skipping auto-install",
+          {
+            pluginId: existing.id,
+            pluginKey: existing.pluginKey,
+            previousPath: existing.packagePath ?? null,
+            previousVersion: existing.version ?? null,
+            nextPath: pluginPath,
+            nextVersion: manifest.version ?? null,
+          },
+          "configured bundled plugin changed; refreshing bundle without removing plugin data",
         );
-        continue;
+        await dependencies.pluginRegistry.uninstall(existing.id, false);
       }
       const discovered = await dependencies.loader.installPlugin({ localPath: pluginPath });
       if (!discovered.manifest?.id) {

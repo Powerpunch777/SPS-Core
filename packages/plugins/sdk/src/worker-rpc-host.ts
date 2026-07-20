@@ -1315,10 +1315,16 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
       },
     } as Omit<PluginContext, "platform">;
 
-    return {
-      ...context,
-      platform: createPluginPlatformClient(context),
-    };
+    // Preserve lazy getters such as `manifest`. Object spread would eagerly
+    // read them before the host sends `initialize`, which prevents Workers
+    // that do not touch the manifest during startup from ever booting.
+    Object.defineProperty(context, "platform", {
+      configurable: false,
+      enumerable: true,
+      value: createPluginPlatformClient(context),
+      writable: false,
+    });
+    return context as PluginContext;
   }
 
   const ctx = buildContext();

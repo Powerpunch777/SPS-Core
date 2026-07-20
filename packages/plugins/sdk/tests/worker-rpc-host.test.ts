@@ -72,6 +72,22 @@ describe("isWorkerEntrypoint", () => {
 });
 
 describe("worker performAction context", () => {
+  it("starts before initialize without eagerly reading the manifest", () => {
+    const hostToWorker = new PassThrough();
+    const workerToHost = new PassThrough();
+    const plugin = definePlugin({});
+
+    const worker = startWorkerRpcHost({
+      plugin,
+      stdin: hostToWorker,
+      stdout: workerToHost,
+    });
+
+    worker.stop();
+    hostToWorker.destroy();
+    workerToHost.destroy();
+  });
+
   it("does not derive context companyId from caller params without host actor context", async () => {
     const hostToWorker = new PassThrough();
     const workerToHost = new PassThrough();
