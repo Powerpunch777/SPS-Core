@@ -21,8 +21,8 @@ import { SidebarServerInfo } from "./SidebarServerInfo";
 import { Badge } from "@/components/ui/badge";
 
 const PROFILE_SETTINGS_PATH = "/company/settings/instance/profile";
-const DOCS_URL = "https://docs.paperclip.ing/";
-const FEEDBACK_URL = "https://paperclip.ing/feedback";
+const DOCS_URL = "https://redongames.com/";
+const FEEDBACK_URL = "https://github.com/Powerpunch777/SPS/issues";
 
 interface SidebarAccountMenuProps {
   deploymentMode?: DeploymentMode;
@@ -46,6 +46,13 @@ function deriveInitials(name: string) {
     return `${parts[0]?.[0] ?? ""}${parts[parts.length - 1]?.[0] ?? ""}`.toUpperCase();
   }
   return name.slice(0, 2).toUpperCase();
+}
+
+function displaySpsAccountName(name: string | null | undefined) {
+  const normalized = name?.trim();
+  // `Board` is the upstream local-session seed name, not a person's identity.
+  // Keep that storage compatibility while presenting the SPS ownership model.
+  return normalized && normalized !== "Board" ? normalized : "Owner";
 }
 
 function deriveUserSlug(name: string | null | undefined, email: string | null | undefined, id: string | null | undefined) {
@@ -127,9 +134,9 @@ export function SidebarAccountMenu({
     },
   });
 
-  const displayName = session?.user.name?.trim() || "Board";
+  const displayName = displaySpsAccountName(session?.user.name);
   const secondaryLabel =
-    session?.user.email?.trim() || (deploymentMode === "authenticated" ? "Signed in" : "Local workspace board");
+    session?.user.email?.trim() || (deploymentMode === "authenticated" ? "Signed in" : "Local workspace owner");
   const accountBadge = deploymentMode === "authenticated" ? "Account" : "Local";
   const initials = deriveInitials(displayName);
   const profileHref = `/u/${deriveUserSlug(session?.user.name, session?.user.email, session?.user.id)}`;
@@ -179,7 +186,7 @@ export function SidebarAccountMenu({
                 </div>
                 <p className="truncate text-sm text-muted-foreground">{secondaryLabel}</p>
                 {version ? (
-                  <p className="mt-1 text-xs text-muted-foreground">Paperclip v{version}</p>
+                  <p className="mt-1 text-xs text-muted-foreground">SPS v{version}</p>
                 ) : null}
               </div>
             </div>
@@ -200,16 +207,16 @@ export function SidebarAccountMenu({
                 onClick={closeNavigationChrome}
               />
               <MenuAction
-                label="Documentation"
-                description="Open Paperclip docs in a new tab."
+                label="SPS Guide"
+                description="Open SPS help in a new tab."
                 icon={BookOpen}
                 href={DOCS_URL}
                 external
                 onClick={() => setOpen(false)}
               />
               <MenuAction
-                label="Feedback"
-                description="Share feedback or report an issue."
+                label="Report an issue"
+                description="Open the SPS issue tracker."
                 icon={Megaphone}
                 href={FEEDBACK_URL}
                 external

@@ -92,6 +92,6 @@ export function formatUserLabel(
       : (userLabels as Record<string, string>)[userId];
     if (typeof label === "string" && label.trim()) return label;
   }
-  if (userId === "local-board") return "Board";
+  if (userId === "local-board") return "Owner";
   return userId.slice(0, 5);
 }

@@ -242,3 +242,14 @@ describe("Skill Studio routes", () => {
     expect(createIndexes[1]).toBeLessThan(detailIndexes[1]!);
   });
 });
+
+describe("Plugin page routes", () => {
+  it("registers plugin roots as well as plugin child paths", () => {
+    const rootRoute = 'path=":pluginRoutePath"';
+    const childRoute = 'path=":pluginRoutePath/*"';
+
+    expect(appSource).toContain(rootRoute);
+    expect(appSource).toContain(childRoute);
+    expect(appSource.indexOf(rootRoute)).toBeLessThan(appSource.indexOf(childRoute));
+  });
+});

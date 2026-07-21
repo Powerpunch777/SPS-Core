@@ -12,7 +12,7 @@ type CompanyUserRecord = Pick<CompanyMember, "principalId" | "status" | "user">
   | CompanyUserDirectoryEntry;
 
 function fallbackUserLabel(userId: string): string {
-  if (userId === "local-board") return "Board";
+  if (userId === "local-board") return "Owner";
   return userId.slice(0, 5);
 }
 

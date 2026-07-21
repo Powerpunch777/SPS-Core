@@ -1180,6 +1180,11 @@ export function pluginLoader(
       );
     } else {
       // npm install
+      if (process.env.SPS_DESKTOP_PLUGIN_RUNTIME === "local-folder-only") {
+        throw new Error(
+          "SPS Desktop cannot install npm plugins because npm is unavailable on this computer. Install Node.js and restart SPS Desktop, or install a local-folder plugin instead.",
+        );
+      }
       const spec = version ? `${packageName}@${version}` : packageName!;
 
       log.info(

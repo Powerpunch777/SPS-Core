@@ -236,6 +236,11 @@ function boardRoutes() {
       <Route path="u/:userSlug" element={<UserProfile />} />
       <Route path="design-guide" element={<DesignGuide />} />
       <Route path="instance/settings/adapters" element={<AdapterManager />} />
+      {/* A page contribution can be its own route root (for example
+          /SPS/agent-rooms) or own child paths. React Router does not treat
+          the trailing splat as an empty segment in every base-path mode, so
+          both forms must be registered explicitly. */}
+      <Route path=":pluginRoutePath" element={<PluginPage />} />
       <Route path=":pluginRoutePath/*" element={<PluginPage />} />
       <Route path="*" element={<NotFoundPage scope="board" />} />
     </>
