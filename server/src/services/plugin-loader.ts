@@ -58,6 +58,20 @@ export const STANDALONE_BUNDLED_PLUGIN_ROOT = path.join(BUNDLED_LOCAL_PLUGIN_ROO
 export const LOCAL_PLUGIN_AUTOBUILD_TIMEOUT_MS = 120_000;
 const STANDALONE_BUNDLED_PLUGIN_SDK_PACKAGE = "@paperclipai/plugin-sdk";
 
+function npmInvocation(args: string[]) {
+  const nodeCommand = process.env.SPS_PLUGIN_NODE_COMMAND?.trim();
+  const npmCli = process.env.SPS_PLUGIN_NPM_CLI?.trim();
+  if (nodeCommand && npmCli && path.isAbsolute(nodeCommand) && path.isAbsolute(npmCli)) {
+    return { file: nodeCommand, args: [npmCli, ...args] };
+  }
+  return { file: "npm", args };
+}
+
+async function runNpm(args: string[], options: { timeout: number }) {
+  const invocation = npmInvocation(args);
+  return await execFileAsync(invocation.file, invocation.args, options);
+}
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -1196,8 +1210,7 @@ export function pluginLoader(
         // Use execFile (not exec) to avoid shell injection from package name/version.
         // --ignore-scripts prevents preinstall/install/postinstall hooks from
         // executing arbitrary code on the host before manifest validation.
-        await execFileAsync(
-          "npm",
+        await runNpm(
           ["install", spec, "--prefix", targetInstallDir, "--save", "--ignore-scripts"],
           { timeout: 120_000 }, // 2 minute timeout for npm install
         );
@@ -1838,8 +1851,7 @@ export function pluginLoader(
       const packageJsonPath = path.join(localPluginDir, "package.json");
       if (existsSync(packageJsonPath)) {
         try {
-          await execFileAsync(
-            "npm",
+          await runNpm(
             ["uninstall", plugin.packageName, "--prefix", localPluginDir, "--ignore-scripts"],
             { timeout: 120_000 },
           );
