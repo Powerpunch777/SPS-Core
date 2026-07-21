@@ -40,6 +40,22 @@ interface MenuActionProps {
   external?: boolean;
 }
 
+interface SpsDesktopAccount {
+  signedIn: boolean;
+  name: string | null;
+  email: string | null;
+  picture: string | null;
+}
+
+interface SpsDesktopWorkspaceBridge {
+  getDesktopAccount: () => Promise<SpsDesktopAccount>;
+  signOutDesktopAccount: () => Promise<unknown>;
+}
+
+function getSpsDesktopWorkspaceBridge(): SpsDesktopWorkspaceBridge | undefined {
+  return (window as Window & { spsDesktopWorkspace?: SpsDesktopWorkspaceBridge }).spsDesktopWorkspace;
+}
+
 function deriveInitials(name: string) {
   const parts = name.trim().split(/\s+/).filter(Boolean);
   if (parts.length >= 2) {
@@ -125,6 +141,14 @@ export function SidebarAccountMenu({
     queryFn: () => authApi.getSession(),
     retry: false,
   });
+  const desktopBridge = getSpsDesktopWorkspaceBridge();
+  const { data: desktopAccount } = useQuery({
+    queryKey: ["sps", "desktop", "account"],
+    queryFn: () => desktopBridge!.getDesktopAccount(),
+    enabled: Boolean(desktopBridge),
+    retry: false,
+    staleTime: Infinity,
+  });
 
   const signOutMutation = useMutation({
     mutationFn: () => authApi.signOut(),
@@ -133,13 +157,25 @@ export function SidebarAccountMenu({
       await queryClient.invalidateQueries({ queryKey: queryKeys.auth.session });
     },
   });
+  const desktopSignOutMutation = useMutation({
+    mutationFn: async () => {
+      if (!desktopBridge) throw new Error("SPS Desktop account controls are unavailable.");
+      await desktopBridge.signOutDesktopAccount();
+    },
+    onSuccess: () => setOpen(false),
+  });
 
-  const displayName = displaySpsAccountName(session?.user.name);
+  const desktopSignedIn = desktopAccount?.signedIn === true;
+  const displayName = desktopSignedIn
+    ? displaySpsAccountName(desktopAccount.name)
+    : displaySpsAccountName(session?.user.name);
   const secondaryLabel =
-    session?.user.email?.trim() || (deploymentMode === "authenticated" ? "Signed in" : "Local workspace owner");
-  const accountBadge = deploymentMode === "authenticated" ? "Account" : "Local";
+    (desktopSignedIn ? desktopAccount.email?.trim() : session?.user.email?.trim())
+    || (deploymentMode === "authenticated" ? "Signed in" : "Local workspace owner");
+  const accountBadge = desktopSignedIn ? "Desktop" : deploymentMode === "authenticated" ? "Account" : "Local";
   const initials = deriveInitials(displayName);
   const profileHref = `/u/${deriveUserSlug(session?.user.name, session?.user.email, session?.user.id)}`;
+  const profileImage = desktopSignedIn ? desktopAccount.picture : session?.user.image;
 
   function closeNavigationChrome() {
     setOpen(false);
@@ -156,7 +192,7 @@ export function SidebarAccountMenu({
             aria-label="Open account menu"
           >
             <Avatar size="sm">
-              {session?.user.image ? <AvatarImage src={session.user.image} alt={displayName} /> : null}
+              {profileImage ? <AvatarImage src={profileImage} alt={displayName} /> : null}
               <AvatarFallback>{initials}</AvatarFallback>
             </Avatar>
             <span className={cn("min-w-0 flex-1 truncate", rail && SIDEBAR_RAIL_HIDDEN_LABEL)}>{displayName}</span>
@@ -173,7 +209,7 @@ export function SidebarAccountMenu({
             <div className="flex items-start gap-3">
               <div className="rounded-2xl border-4 border-popover bg-popover p-0.5 shadow-sm">
                 <Avatar size="lg">
-                  {session?.user.image ? <AvatarImage src={session.user.image} alt={displayName} /> : null}
+                  {profileImage ? <AvatarImage src={profileImage} alt={displayName} /> : null}
                   <AvatarFallback>{initials}</AvatarFallback>
                 </Avatar>
               </div>
@@ -223,7 +259,29 @@ export function SidebarAccountMenu({
                 onClick={() => setOpen(false)}
               />
               <ThemeToggle variant="menu-action" onAfterToggle={() => setOpen(false)} />
-              {deploymentMode === "authenticated" ? (
+              {desktopSignedIn ? (
+                <button
+                  type="button"
+                  className={cn(
+                    "flex w-full items-start gap-3 rounded-xl px-3 py-3 text-left transition-colors hover:bg-destructive/10",
+                    desktopSignOutMutation.isPending && "cursor-not-allowed opacity-60",
+                  )}
+                  onClick={() => desktopSignOutMutation.mutate()}
+                  disabled={desktopSignOutMutation.isPending}
+                >
+                  <span className="mt-0.5 rounded-lg border border-border bg-background/70 p-2 text-muted-foreground">
+                    <LogOut className="size-4" />
+                  </span>
+                  <span className="min-w-0 flex-1">
+                    <span className="block text-sm font-medium text-foreground">
+                      {desktopSignOutMutation.isPending ? "로그아웃 중..." : "SPS Desktop 로그아웃"}
+                    </span>
+                    <span className="block text-xs text-muted-foreground">
+                      이 컴퓨터의 Google 계정 연결을 종료합니다.
+                    </span>
+                  </span>
+                </button>
+              ) : deploymentMode === "authenticated" ? (
                 <button
                   type="button"
                   className={cn(

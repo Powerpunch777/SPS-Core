@@ -125,23 +125,23 @@ describe("SidebarAccountMenu", () => {
 
     expect(document.body.textContent).toContain("Edit profile");
     expect(document.body.textContent).not.toContain("Instance settings");
-    expect(document.body.textContent).toContain("Documentation");
-    expect(document.body.textContent).toContain("Feedback");
+    expect(document.body.textContent).toContain("SPS Guide");
+    expect(document.body.textContent).toContain("Report an issue");
 
     // Feedback link opens in a new tab pointing at the feedback URL
-    const feedbackAnchor = document.body.querySelector('a[href="https://paperclip.ing/feedback"]') as HTMLAnchorElement | null;
+    const feedbackAnchor = document.body.querySelector('a[href="https://github.com/Powerpunch777/SPS/issues"]') as HTMLAnchorElement | null;
     expect(feedbackAnchor).not.toBeNull();
     expect(feedbackAnchor?.getAttribute("target")).toBe("_blank");
 
-    // Feedback appears after Documentation and before the theme toggle
+    // Reporting appears after the guide and before the theme toggle.
     const menuText = document.body.querySelector('[data-slot="popover-content"]')?.textContent ?? "";
-    const docsPos = menuText.indexOf("Documentation");
-    const feedbackPos = menuText.indexOf("Feedback");
+    const docsPos = menuText.indexOf("SPS Guide");
+    const feedbackPos = menuText.indexOf("Report an issue");
     const themePos = menuText.indexOf("Switch to");
     expect(docsPos).toBeLessThan(feedbackPos);
     expect(feedbackPos).toBeLessThan(themePos);
 
-    expect(document.body.textContent).toContain("Paperclip v1.2.3");
+    expect(document.body.textContent).toContain("SPS v1.2.3");
     expect(document.body.textContent).toContain("jane@example.com");
     expect(document.body.querySelector('[data-slot="popover-content"]')?.className)
       .toContain("w-(--sz-277px)");
@@ -150,5 +150,46 @@ describe("SidebarAccountMenu", () => {
     await act(async () => {
       root.unmount();
     });
+  });
+
+  it("shows the local SPS Desktop Google identity and signs out through its narrow bridge", async () => {
+    const workspaceBridge = {
+      getDesktopAccount: vi.fn().mockResolvedValue({
+        signedIn: true,
+        name: "SPS Owner",
+        email: "owner@example.com",
+        picture: null,
+      }),
+      signOutDesktopAccount: vi.fn().mockResolvedValue(undefined),
+    };
+    Object.assign(window, { spsDesktopWorkspace: workspaceBridge });
+    const root = createRoot(container);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+
+    await act(async () => {
+      root.render(
+        <QueryClientProvider client={queryClient}>
+          <SidebarAccountMenu deploymentMode="local_trusted" />
+        </QueryClientProvider>,
+      );
+    });
+    await flushReact();
+    await flushReact();
+
+    expect(container.textContent).toContain("SPS Owner");
+    const trigger = container.querySelector('button[aria-label="Open account menu"]');
+    await act(async () => trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    await flushReact();
+    expect(document.body.textContent).toContain("owner@example.com");
+    expect(document.body.textContent).toContain("SPS Desktop 로그아웃");
+
+    const signOut = [...document.body.querySelectorAll("button")]
+      .find((button) => button.textContent?.includes("SPS Desktop 로그아웃"));
+    await act(async () => signOut?.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    await flushReact();
+    expect(workspaceBridge.signOutDesktopAccount).toHaveBeenCalledOnce();
+
+    delete (window as Window & { spsDesktopWorkspace?: unknown }).spsDesktopWorkspace;
+    await act(async () => root.unmount());
   });
 });
