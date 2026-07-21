@@ -206,7 +206,7 @@ export function SidebarSection({
   // (PAP-10676). The divider is vertically centered within that same row.
   if (rail) {
     return (
-      <div>
+      <div data-sidebar-section={label}>
         <div className="px-3 py-1.5 pointer-coarse:py-1">
           <div className="flex min-h-6 items-center">
             <span className="sr-only">{label}</span>
@@ -220,7 +220,11 @@ export function SidebarSection({
 
   if (collapsible) {
     return (
-      <Collapsible open={collapsible.open} onOpenChange={collapsible.onOpenChange}>
+      <Collapsible
+        open={collapsible.open}
+        onOpenChange={collapsible.onOpenChange}
+        data-sidebar-section={label}
+      >
         <SidebarSectionHeader
           label={label}
           collapsible={collapsible}
@@ -233,7 +237,7 @@ export function SidebarSection({
   }
 
   return (
-    <div>
+    <div data-sidebar-section={label}>
       <SidebarSectionHeader label={label} menu={menu} headerAction={headerAction} />
       {content}
     </div>

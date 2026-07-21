@@ -156,7 +156,33 @@ describe("Sidebar", () => {
   afterEach(() => {
     container.remove();
     document.body.innerHTML = "";
+    document.head.querySelector('meta[name="sps-basic-mode"]')?.remove();
     vi.clearAllMocks();
+  });
+
+  it("keeps the SPS basic workspace focused on tasks, projects, agents, and server settings", async () => {
+    const mode = document.createElement("meta");
+    mode.name = "sps-basic-mode";
+    mode.content = "true";
+    document.head.appendChild(mode);
+    mockInstanceSettingsApi.getExperimental.mockResolvedValue({ enableIsolatedWorkspaces: true });
+    const root = await renderSidebar();
+
+    const labels = [...container.querySelectorAll("nav a")].map((anchor) => anchor.textContent?.trim());
+    expect(labels).toContain("Tasks");
+    expect(labels).toContain("Projects");
+    expect(labels).toContain("Server Settings");
+    expect(labels).not.toContain("Routines");
+    expect(labels).not.toContain("Artifacts");
+    expect(labels).not.toContain("Skills");
+    expect(labels).not.toContain("Timeline");
+    expect(labels).not.toContain("Costs");
+    expect(container.textContent).not.toContain("Plugin slot outlet");
+    expect(container.textContent).not.toContain("Plugin launcher outlet");
+
+    flushSync(() => {
+      root.unmount();
+    });
   });
 
   it("links the top search icon to the search page without showing Search in Work nav", async () => {
@@ -278,9 +304,11 @@ describe("Sidebar", () => {
     expect(workText).toContain("Workspaces");
     expect(workText.indexOf("Workspaces")).toBeLessThan(workText.indexOf("Plugin slot outlet"));
 
-    const primaryNavText = container.querySelector("nav > div:first-child")?.textContent ?? "";
-    expect(primaryNavText).toContain("Inbox");
-    expect(primaryNavText).not.toContain("Plugin slot outlet");
+    const inboxLink = [...container.querySelectorAll("nav a")].find(
+      (anchor) => anchor.textContent?.trim() === "Inbox",
+    );
+    expect(inboxLink?.getAttribute("href")).toBe("/inbox");
+    expect(inboxLink?.closest("[data-sidebar-section]"))?.toBeNull();
 
     flushSync(() => {
       root.unmount();
@@ -323,9 +351,8 @@ describe("Sidebar", () => {
     expect(navText).toContain("Skills");
     expect(navText.indexOf("Artifacts")).toBeLessThan(navText.indexOf("Skills"));
 
-    const sections = [...container.querySelectorAll("nav > div")];
-    const workSection = sections.find((section) => section.textContent?.startsWith("Work"));
-    const companySection = sections.find((section) => section.textContent?.startsWith("Company"));
+    const workSection = container.querySelector('[data-sidebar-section="Work"]');
+    const companySection = container.querySelector('[data-sidebar-section="Company"]');
     expect(workSection?.textContent).toContain("Skills");
     expect(companySection?.textContent).not.toContain("Skills");
 
@@ -382,9 +409,8 @@ describe("Sidebar", () => {
     mockInstanceSettingsApi.getExperimental.mockResolvedValue({ enableIsolatedWorkspaces: false });
     const root = await renderSidebar();
 
-    const sections = [...container.querySelectorAll("nav > div")];
-    const workSection = sections.find((section) => section.textContent?.startsWith("Work"));
-    const companySection = sections.find((section) => section.textContent?.startsWith("Company"));
+    const workSection = container.querySelector('[data-sidebar-section="Work"]');
+    const companySection = container.querySelector('[data-sidebar-section="Company"]');
     expect(workSection?.textContent).not.toContain("Timeline");
     expect(companySection?.textContent).toContain("Timeline");
 

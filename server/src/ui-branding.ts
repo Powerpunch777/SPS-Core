@@ -155,6 +155,10 @@ export function isWorkplaneModeEnabled(env: NodeJS.ProcessEnv = process.env): bo
   return isTruthyEnvValue(env.PAPERCLIP_WORKPLANE_MODE);
 }
 
+export function isSpsBasicModeEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return isTruthyEnvValue(env.SPS_BASIC_MODE);
+}
+
 export function getWorktreeUiBranding(env: NodeJS.ProcessEnv = process.env): WorktreeUiBranding {
   if (!isWorktreeUiBrandingEnabled(env)) {
     return {
@@ -212,6 +216,12 @@ export function renderWorkplaneModeMeta(env: NodeJS.ProcessEnv = process.env): s
     : "";
 }
 
+export function renderSpsBasicModeMeta(env: NodeJS.ProcessEnv = process.env): string {
+  return isSpsBasicModeEnabled(env)
+    ? '<meta name="sps-basic-mode" content="true" />'
+    : "";
+}
+
 function replaceMarkedBlock(html: string, startMarker: string, endMarker: string, content: string): string {
   const start = html.indexOf(startMarker);
   const end = html.indexOf(endMarker);
@@ -231,7 +241,7 @@ function replaceMarkedBlock(html: string, startMarker: string, endMarker: string
 export function applyUiBranding(html: string, env: NodeJS.ProcessEnv = process.env): string {
   const branding = getWorktreeUiBranding(env);
   const withFavicon = replaceMarkedBlock(html, FAVICON_BLOCK_START, FAVICON_BLOCK_END, renderFaviconLinks(branding));
-  const runtimeMeta = [renderRuntimeBrandingMeta(branding), renderWorkplaneModeMeta(env)]
+  const runtimeMeta = [renderRuntimeBrandingMeta(branding), renderWorkplaneModeMeta(env), renderSpsBasicModeMeta(env)]
     .filter(Boolean)
     .join("\n");
   return replaceMarkedBlock(

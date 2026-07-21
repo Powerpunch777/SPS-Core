@@ -48,9 +48,11 @@ import { PluginLauncherOutlet } from "@/plugins/launchers";
 import { SidebarCompanyMenu } from "./SidebarCompanyMenu";
 import { ProductBrand } from "./ProductBrand";
 import { isWorkplaneModeEnabled } from "../lib/workplane-mode";
+import { isSpsBasicModeEnabled } from "../lib/sps-basic-mode";
 
 export function Sidebar() {
   const workplaneMode = isWorkplaneModeEnabled();
+  const basicMode = isSpsBasicModeEnabled();
   const { openNewIssue } = useDialogActions();
   // Every labeled section is collapsible (session-scoped, default open) —
   // one policy across static nav groups and the data-driven sections.
@@ -81,14 +83,14 @@ export function Sidebar() {
   });
   usePublishSharedQueryData(sharedLiveRuns, liveRuns, liveRunsUpdatedAt);
   const liveRunCount = liveRuns?.length ?? 0;
-  const showWorkspacesLink = experimentalSettings?.enableIsolatedWorkspaces === true;
-  const showPipelines = experimentalSettings?.enablePipelines === true;
-  const goalsLinkPending = experimentalSettings === undefined;
-  const showGoalsLink = experimentalSettings?.enableGoalsSidebarLink === true;
+  const showWorkspacesLink = !basicMode && experimentalSettings?.enableIsolatedWorkspaces === true;
+  const showPipelines = !basicMode && experimentalSettings?.enablePipelines === true;
+  const goalsLinkPending = !basicMode && experimentalSettings === undefined;
+  const showGoalsLink = !basicMode && experimentalSettings?.enableGoalsSidebarLink === true;
   // Decisions (attention home) is an experimental surface (PAP-13481): the nav
   // item is hidden entirely until the flag is enabled (same no-flash pattern as
   // showWorkspacesLink — it defaults hidden, so no placeholder is needed).
-  const showDecisions = experimentalSettings?.enableDecisions === true;
+  const showDecisions = !basicMode && experimentalSettings?.enableDecisions === true;
   const { data: attentionFeed } = useQuery({
     queryKey: queryKeys.attention(selectedCompanyId!),
     queryFn: () => attentionApi.list(selectedCompanyId!),
@@ -96,7 +98,7 @@ export function Sidebar() {
     refetchInterval: 60_000,
   });
   const attentionCount = attentionBadgeCount(attentionFeed);
-  const showCases = experimentalSettings?.enableCases === true;
+  const showCases = !basicMode && experimentalSettings?.enableCases === true;
   // Streamlined left navigation (top-level Projects link + starred children) is
   // now the standard product sidebar (PAP-12472). The former experimental
   // opt-out was retired; classic per-project collapsible mode is no longer
@@ -106,7 +108,7 @@ export function Sidebar() {
   // Conference Room Chat flag (PAP-136/PAP-137): the Conference Room nav item
   // is a new surface, hidden entirely while the flag is off (same no-flash
   // pattern as showWorkspacesLink above).
-  const conferenceRoomChatEnabled = experimentalSettings?.enableConferenceRoomChat === true;
+  const conferenceRoomChatEnabled = !basicMode && experimentalSettings?.enableConferenceRoomChat === true;
 
   const pluginContext = {
     companyId: selectedCompanyId,
@@ -229,7 +231,7 @@ export function Sidebar() {
           {showCases ? (
             <SidebarNavItem to="/cases" label="Cases" icon={Layers} textBadge="beta" />
           ) : null}
-          <SidebarNavItem to="/routines" label="Routines" icon={Repeat} />
+          {!basicMode ? <SidebarNavItem to="/routines" label="Routines" icon={Repeat} /> : null}
           {showPipelines ? (
             <SidebarNavItem to="/pipelines" label="Pipelines" icon={GitBranch} />
           ) : null}
@@ -242,8 +244,8 @@ export function Sidebar() {
               aria-hidden="true"
             />
           ) : null}
-          <SidebarNavItem to="/artifacts" label="Artifacts" icon={Package} />
-          <SidebarNavItem to="/skills" label="Skills" icon={Boxes} />
+          {!basicMode ? <SidebarNavItem to="/artifacts" label="Artifacts" icon={Package} /> : null}
+          {!basicMode ? <SidebarNavItem to="/skills" label="Skills" icon={Boxes} /> : null}
           {showWorkspacesLink ? (
             <SidebarNavItem to="/workspaces" label="Workspaces" icon={GitBranch} />
           ) : null}
@@ -253,19 +255,23 @@ export function Sidebar() {
               <SidebarStarredProjects />
             </>
           ) : null}
-          <PluginSlotOutlet
-            slotTypes={["sidebar"]}
-            context={pluginContext}
-            className="flex flex-col gap-0.5"
-            itemClassName="text-(length:--text-compact) font-medium"
-            missingBehavior="placeholder"
-          />
-          <PluginLauncherOutlet
-            placementZones={["sidebar"]}
-            context={pluginContext}
-            className="flex flex-col gap-0.5"
-            itemClassName="text-(length:--text-compact) font-medium"
-          />
+          {!basicMode ? (
+            <>
+              <PluginSlotOutlet
+                slotTypes={["sidebar"]}
+                context={pluginContext}
+                className="flex flex-col gap-0.5"
+                itemClassName="text-(length:--text-compact) font-medium"
+                missingBehavior="placeholder"
+              />
+              <PluginLauncherOutlet
+                placementZones={["sidebar"]}
+                context={pluginContext}
+                className="flex flex-col gap-0.5"
+                itemClassName="text-(length:--text-compact) font-medium"
+              />
+            </>
+          ) : null}
         </SidebarSection>
 
         {/* Classic mode restores the per-project collapsible below Work. */}
@@ -273,21 +279,23 @@ export function Sidebar() {
 
         <SidebarAgents streamlined={streamlined} />
 
-        <SidebarSection label={workplaneMode ? "System" : "Company"} collapsible={{ open: companyOpen, onOpenChange: setCompanyOpen }}>
-          {!workplaneMode ? <SidebarNavItem to="/org" label="Org" icon={Network} /> : null}
-          <SidebarNavItem to="/timeline" label="Timeline" icon={GanttChartSquare} />
-          <SidebarNavItem to="/costs" label="Costs" icon={DollarSign} />
-          <SidebarNavItem to="/activity" label="Activity" icon={History} />
-          <SidebarNavItem to="/company/settings" label="Settings" icon={Settings} />
+        <SidebarSection label={basicMode ? "Server" : workplaneMode ? "System" : "Company"} collapsible={{ open: companyOpen, onOpenChange: setCompanyOpen }}>
+          {!basicMode && !workplaneMode ? <SidebarNavItem to="/org" label="Org" icon={Network} /> : null}
+          {!basicMode ? <SidebarNavItem to="/timeline" label="Timeline" icon={GanttChartSquare} /> : null}
+          {!basicMode ? <SidebarNavItem to="/costs" label="Costs" icon={DollarSign} /> : null}
+          {!basicMode ? <SidebarNavItem to="/activity" label="Activity" icon={History} /> : null}
+          <SidebarNavItem to="/company/settings" label={basicMode ? "Server Settings" : "Settings"} icon={Settings} />
         </SidebarSection>
 
-        <PluginSlotOutlet
-          slotTypes={["sidebarPanel"]}
-          context={pluginContext}
-          className="flex flex-col gap-3"
-          itemClassName="rounded-lg border border-border p-3"
-          missingBehavior="placeholder"
-        />
+        {!basicMode ? (
+          <PluginSlotOutlet
+            slotTypes={["sidebarPanel"]}
+            context={pluginContext}
+            className="flex flex-col gap-3"
+            itemClassName="rounded-lg border border-border p-3"
+            missingBehavior="placeholder"
+          />
+        ) : null}
       </nav>
     </aside>
   );

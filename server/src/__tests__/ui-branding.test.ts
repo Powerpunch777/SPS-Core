@@ -2,10 +2,12 @@ import { describe, expect, it } from "vitest";
 import {
   applyUiBranding,
   getWorktreeUiBranding,
+  isSpsBasicModeEnabled,
   isWorkplaneModeEnabled,
   isWorktreeUiBrandingEnabled,
   renderFaviconLinks,
   renderRuntimeBrandingMeta,
+  renderSpsBasicModeMeta,
   renderWorkplaneModeMeta,
 } from "../ui-branding.js";
 
@@ -38,6 +40,16 @@ describe("ui branding", () => {
     const branded = applyUiBranding(TEMPLATE, { PAPERCLIP_WORKPLANE_MODE: "true" });
     expect(branded).toContain('<meta name="sps-workplane-mode" content="true" />');
     expect(branded).toContain('href="/favicon.svg"');
+  });
+
+  it("marks the SPS Desktop basic workspace without changing the generic Core default", () => {
+    expect(isSpsBasicModeEnabled({ SPS_BASIC_MODE: "true" })).toBe(true);
+    expect(isSpsBasicModeEnabled({ SPS_BASIC_MODE: "false" })).toBe(false);
+    expect(renderSpsBasicModeMeta({ SPS_BASIC_MODE: "1" })).toContain('name="sps-basic-mode"');
+
+    const branded = applyUiBranding(TEMPLATE, { SPS_BASIC_MODE: "true" });
+    expect(branded).toContain('<meta name="sps-basic-mode" content="true" />');
+    expect(applyUiBranding(TEMPLATE, {})).not.toContain('name="sps-basic-mode"');
   });
 
   it("resolves name, color, and text color for worktree branding", () => {
