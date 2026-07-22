@@ -876,6 +876,15 @@ The host enforces capabilities in the SDK layer and refuses calls outside the gr
 - `agent.tools.register`
 - `agent.tools.dynamic.register`
 
+### Memory Lifecycle
+
+- `memory.lifecycle.publish`
+
+This capability allows a trusted workflow plugin to publish a structured,
+content-free lifecycle reference through the Core-selected memory provider. It
+does not grant direct access to provider storage, memory contents, retention,
+or recall.
+
 ### UI
 
 - `instance.settings.register`
@@ -941,6 +950,12 @@ Minimum event set:
 - `budget.incident.resolved`
 - `cost_event.created`
 - `activity.logged`
+- `room.checkpoint`
+- `room.compacted`
+- `task.completed`
+- `task.blocked`
+- `task.reopened`
+- `artifact.published`
 
 Each event must include:
 
@@ -981,6 +996,21 @@ Rules:
 - Plugin events are not core domain events — they do not appear in the core activity log unless the emitting plugin explicitly logs them.
 - Plugin events follow the same at-least-once delivery semantics as core events.
 - The host must not allow plugins to emit events in the core namespace (events without the `plugin.` prefix).
+
+### 16.3 Memory Lifecycle Publication
+
+A plugin with `memory.lifecycle.publish` may call
+`ctx.memory.publishLifecycle(input)`. The host accepts only the declared
+memory lifecycle event types and identifier fields such as `companyId`,
+`roomId`, `taskId`, `artifactId`, and an idempotency key. It must reject
+transcript text, summaries, prompts, secrets, and provider-specific payloads.
+
+The host validates the caller's capability and company scope, selects the
+company's configured provider, and records an idempotent delivery attempt. A
+provider owns retention, recall, and candidate review. A Workplane must not
+call provider storage directly. Background work that completes after an action
+scope ends must use a host-scheduled reconciliation job rather than retaining
+an expired action context.
 
 ## 17. Scheduled Jobs
 

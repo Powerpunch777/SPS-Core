@@ -328,6 +328,14 @@ export const queryKeys = {
     config: (pluginId: string) => ["plugins", pluginId, "config"] as const,
     localFolders: (pluginId: string, companyId: string) =>
       ["plugins", pluginId, "companies", companyId, "local-folders"] as const,
+    toolGrants: (pluginId: string, companyId: string) =>
+      ["plugins", pluginId, "companies", companyId, "tool-grants"] as const,
+    toolAudit: (pluginId: string, companyId: string) =>
+      ["plugins", pluginId, "companies", companyId, "tool-audit"] as const,
+    memoryProvider: (companyId: string) =>
+      ["plugins", "companies", companyId, "memory-provider"] as const,
+    memoryDeliveries: (companyId: string) =>
+      ["plugins", "companies", companyId, "memory-provider", "deliveries"] as const,
     dashboard: (pluginId: string) => ["plugins", pluginId, "dashboard"] as const,
     logs: (pluginId: string) => ["plugins", pluginId, "logs"] as const,
   },

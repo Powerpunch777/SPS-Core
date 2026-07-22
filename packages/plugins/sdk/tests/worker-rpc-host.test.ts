@@ -171,6 +171,91 @@ describe("worker performAction context", () => {
   });
 });
 
+describe("worker event delivery", () => {
+  it("reports handler failures after all matching handlers have run", async () => {
+    const hostToWorker = new PassThrough();
+    const workerToHost = new PassThrough();
+    const hostReadline = createInterface({ input: workerToHost });
+    const pending = new Map<string, (response: JsonRpcResponse) => void>();
+    let nextRequestId = 1;
+    let handled = 0;
+    const plugin = definePlugin({
+      async setup(ctx) {
+        ctx.events.on("task.completed", async () => {
+          handled += 1;
+          throw new Error("provider write failed");
+        });
+        ctx.events.on("task.completed", async () => {
+          handled += 1;
+        });
+      },
+    });
+    const worker = startWorkerRpcHost({ plugin, stdin: hostToWorker, stdout: workerToHost });
+
+    function callWorker(method: string, params: unknown) {
+      const id = `host-event-${nextRequestId++}`;
+      const result = new Promise<unknown>((resolve, reject) => {
+        pending.set(id, (response) => {
+          if ("error" in response && response.error) {
+            reject(new Error(response.error.message));
+            return;
+          }
+          resolve((response as { result?: unknown }).result);
+        });
+      });
+      hostToWorker.write(serializeMessage(createRequest(method, params, id)));
+      return result;
+    }
+
+    hostReadline.on("line", (line) => {
+      const message = parseMessage(line);
+      if (isJsonRpcResponse(message)) {
+        pending.get(String(message.id))?.(message);
+        pending.delete(String(message.id));
+        return;
+      }
+      if (isJsonRpcRequest(message) && message.method === "events.subscribe") {
+        hostToWorker.write(serializeMessage(createSuccessResponse(message.id, null)));
+      }
+    });
+
+    try {
+      await callWorker("initialize", {
+        manifest: {
+          id: "sps.test-memory-events",
+          apiVersion: 1,
+          version: "1.0.0",
+          displayName: "Memory Event Test",
+          description: "Test plugin",
+          author: "SPS",
+          categories: ["automation"],
+          capabilities: ["events.subscribe"],
+          entrypoints: {},
+        },
+        config: {},
+        databaseNamespace: null,
+      });
+
+      await expect(callWorker("onEvent", {
+        event: {
+          eventId: "event-1",
+          eventType: "task.completed",
+          companyId: "company-1",
+          occurredAt: "2026-07-22T00:00:00.000Z",
+          actorType: "system",
+          payload: {},
+        },
+      })).rejects.toThrow(/event handler/);
+      expect(handled).toBe(2);
+    } finally {
+      worker.stop();
+      hostReadline.close();
+      hostToWorker.destroy();
+      workerToHost.destroy();
+    }
+  });
+});
+
 describe("worker invocation scope propagation", () => {
   it("keeps overlapping company scopes local to each getData invocation", async () => {
     const hostToWorker = new PassThrough();

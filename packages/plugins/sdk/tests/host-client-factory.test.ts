@@ -9,6 +9,39 @@ import {
 import { PLUGIN_RPC_ERROR_CODES } from "../src/protocol.js";
 
 describe("createHostClientHandlers invocation company scope", () => {
+  it("gates Core memory lifecycle publication and preserves the invocation company", async () => {
+    const publishLifecycle = vi.fn(async () => {});
+    const services = { memory: { publishLifecycle } } as unknown as HostServices;
+    const params = {
+      companyId: "company-a",
+      eventType: "room.checkpoint" as const,
+      idempotencyKey: "room-a:checkpoint:1",
+      roomId: "room-a",
+    };
+
+    const denied = createHostClientHandlers({
+      pluginId: "sps.room-chat",
+      capabilities: [],
+      services,
+    });
+    await expect(denied["memory.publishLifecycle"](params)).rejects.toBeInstanceOf(CapabilityDeniedError);
+    expect(publishLifecycle).not.toHaveBeenCalled();
+
+    const allowed = createHostClientHandlers({
+      pluginId: "sps.room-chat",
+      capabilities: ["memory.lifecycle.publish"],
+      services,
+    });
+    await expect(allowed["memory.publishLifecycle"](params, {
+      invocationScope: { companyId: "company-a" },
+    })).resolves.toBeUndefined();
+    expect(publishLifecycle).toHaveBeenCalledWith(params);
+
+    await expect(allowed["memory.publishLifecycle"]({ ...params, companyId: "company-b" }, {
+      invocationScope: { companyId: "company-a" },
+    })).rejects.toBeInstanceOf(InvocationScopeDeniedError);
+  });
+
   it("rejects company-scoped host calls outside the current invocation company", async () => {
     const projectsList = vi.fn(async () => []);
     const services = {

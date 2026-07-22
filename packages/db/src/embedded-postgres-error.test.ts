@@ -17,6 +17,34 @@ describe("formatEmbeddedPostgresError", () => {
     expect(error.message).toContain("could not create shared memory segment");
   });
 
+  it("adds a Windows-safe permission hint when local files are blocked", () => {
+    const error = formatEmbeddedPostgresError("Postgres init script exited with code 1.", {
+      fallbackMessage: "Failed to initialize embedded PostgreSQL cluster",
+      recentLogs: ["spawn EPERM", "Access is denied"],
+    });
+
+    expect(error.message).toContain("Controlled Folder Access");
+    expect(error.message).toContain("writable");
+  });
+
+  it("adds a repair hint when the embedded executable is missing", () => {
+    const error = formatEmbeddedPostgresError("Postgres init script exited with code 1.", {
+      fallbackMessage: "Failed to initialize embedded PostgreSQL cluster",
+      recentLogs: ["ENOENT: cannot find the file specified"],
+    });
+
+    expect(error.message).toContain("Repair the SPS installation");
+  });
+
+  it("adds a port hint when an existing local database has the port", () => {
+    const error = formatEmbeddedPostgresError("Postgres init script exited with code 1.", {
+      fallbackMessage: "Failed to initialize embedded PostgreSQL cluster",
+      recentLogs: ["FATAL: address already in use"],
+    });
+
+    expect(error.message).toContain("local port");
+  });
+
   it("keeps only recent non-empty log lines in the collector", () => {
     const buffer = createEmbeddedPostgresLogBuffer(2);
     buffer.append("line one\n\n");

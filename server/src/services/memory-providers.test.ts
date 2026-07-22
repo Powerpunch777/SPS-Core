@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { PluginRecord } from "@paperclipai/shared";
-import { listReadyMemoryProviders } from "./memory-providers.js";
+import {
+  isCoreManagedMemoryLifecycleSubscription,
+  isDeclaredMemoryProviderTool,
+  listReadyMemoryProviders,
+} from "./memory-providers.js";
 
 function plugin(overrides: Partial<PluginRecord> = {}): PluginRecord {
   return {
@@ -53,5 +57,29 @@ describe("listReadyMemoryProviders", () => {
         defaultForNewCompanies: true,
       }),
     ]);
+  });
+
+  it("reserves declared memory lifecycle subscriptions for the Core selector", () => {
+    const manifest = plugin().manifestJson;
+    expect(isCoreManagedMemoryLifecycleSubscription(manifest, "room.checkpoint")).toBe(true);
+    expect(isCoreManagedMemoryLifecycleSubscription(manifest, "task.completed")).toBe(false);
+  });
+
+  it("gates only the tools declared by the memory provider", () => {
+    const [provider] = listReadyMemoryProviders([plugin({
+      manifestJson: {
+        ...plugin().manifestJson,
+        tools: [
+          { name: "recall", displayName: "Recall", description: "Recall", parametersSchema: {} },
+          { name: "unrelated", displayName: "Other", description: "Other", parametersSchema: {} },
+        ],
+        memoryProvider: {
+          ...plugin().manifestJson.memoryProvider!,
+          recallToolName: "recall",
+        },
+      },
+    })]);
+    expect(isDeclaredMemoryProviderTool(provider!, "recall")).toBe(true);
+    expect(isDeclaredMemoryProviderTool(provider!, "unrelated")).toBe(false);
   });
 });

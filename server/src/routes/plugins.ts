@@ -48,6 +48,8 @@ import {
 } from "@paperclipai/shared";
 import { pluginRegistryService } from "../services/plugin-registry.js";
 import { listReadyMemoryProviders } from "../services/memory-providers.js";
+import type { CompanyMemoryProviderRuntime } from "../services/memory-provider-runtime.js";
+import { createPluginToolAccessService, pluginRequiresExplicitToolGrant } from "../services/plugin-tool-access.js";
 import { listReadyAgentPlatformExtensions } from "../services/agent-platform-extensions.js";
 import { pluginLifecycleManager } from "../services/plugin-lifecycle.js";
 import {
@@ -426,6 +428,11 @@ export interface PluginRouteBridgeDeps {
   streamBus?: PluginStreamBus;
 }
 
+/** Optional Core-owned memory provider control-plane routes. */
+export interface PluginRouteMemoryDeps {
+  runtime: CompanyMemoryProviderRuntime;
+}
+
 interface PluginScopedApiRequest {
   routeKey: string;
   method: string;
@@ -511,6 +518,7 @@ export function pluginRoutes(
   webhookDeps?: PluginRouteWebhookDeps,
   toolDeps?: PluginRouteToolDeps,
   bridgeDeps?: PluginRouteBridgeDeps,
+  memoryDeps?: PluginRouteMemoryDeps,
 ) {
   const router = Router();
   const registry = pluginRegistryService(db);
@@ -520,6 +528,7 @@ export function pluginRoutes(
   });
   const issuesSvc = issueService(db);
   const accessSvc = accessService(db);
+  const toolAccess = createPluginToolAccessService(db);
 
   function matchScopedApiRoute(route: PluginApiRouteDeclaration, method: string, requestPath: string) {
     if (route.method !== method) return null;
@@ -831,6 +840,26 @@ export function pluginRoutes(
     return null;
   }
 
+  function assertAgentToolRunIdentity(req: Request, runContext: ToolRunContext): void {
+    if (req.actor.type !== "agent") return;
+    if (!req.actor.agentId || req.actor.agentId !== runContext.agentId) {
+      throw forbidden('An Agent token can only execute tools for its own Agent identity.');
+    }
+    if (req.actor.runId && req.actor.runId !== runContext.runId) {
+      throw forbidden('An Agent token can only execute tools for its own run.');
+    }
+  }
+
+  async function assertPluginCompanyAdministrator(req: Request, companyId: string): Promise<void> {
+    assertBoard(req);
+    assertCompanyAccess(req, companyId);
+    if (req.actor.source === "local_implicit" || req.actor.isInstanceAdmin) return;
+    const userId = req.actor.userId;
+    if (!userId || !await accessSvc.hasPermission(companyId, "user", userId, "agents:configure")) {
+      throw forbidden("Company Agent configuration permission is required for this plugin setting.");
+    }
+  }
+
   /**
    * GET /api/plugins
    *
@@ -882,6 +911,121 @@ export function pluginRoutes(
   router.get("/plugins/memory-providers", async (req, res) => {
     assertBoardOrgAccess(req);
     res.json(listReadyMemoryProviders(await registry.listByStatus("ready")));
+  });
+
+  router.get("/plugins/companies/:companyId/memory-provider", async (req, res) => {
+    const { companyId } = req.params;
+    await assertPluginCompanyAdministrator(req, companyId);
+    if (!memoryDeps) {
+      res.status(501).json({ error: "Memory provider control is not enabled" });
+      return;
+    }
+    const [providers, selection] = await Promise.all([
+      memoryDeps.runtime.listProviders(),
+      memoryDeps.runtime.getSelection(companyId),
+    ]);
+    res.json({ providers, selection });
+  });
+
+  router.put("/plugins/companies/:companyId/memory-provider", async (req, res) => {
+    const { companyId } = req.params;
+    await assertPluginCompanyAdministrator(req, companyId);
+    if (!memoryDeps) {
+      res.status(501).json({ error: "Memory provider control is not enabled" });
+      return;
+    }
+    const providerKey = (req.body as { providerKey?: unknown } | undefined)?.providerKey;
+    if (providerKey !== null && (typeof providerKey !== "string" || providerKey.trim().length === 0)) {
+      res.status(400).json({ error: '"providerKey" must be a provider key or null to disable memory.' });
+      return;
+    }
+    try {
+      const selection = await memoryDeps.runtime.selectProvider({
+        companyId,
+        providerKey: typeof providerKey === "string" ? providerKey.trim() : null,
+        configuredByUserId: req.actor.userId ?? null,
+      });
+      res.json({ selection });
+    } catch (error) {
+      res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  router.get("/plugins/companies/:companyId/memory-provider/deliveries", async (req, res) => {
+    const { companyId } = req.params;
+    await assertPluginCompanyAdministrator(req, companyId);
+    if (!memoryDeps) {
+      res.status(501).json({ error: "Memory provider control is not enabled" });
+      return;
+    }
+    const rawLimit = Number(req.query.limit ?? 50);
+    const deliveries = await memoryDeps.runtime.listDeliveries(companyId, Number.isFinite(rawLimit) ? rawLimit : 50);
+    res.json({ deliveries });
+  });
+
+  router.get("/plugins/:pluginId/companies/:companyId/tool-grants", async (req, res) => {
+    const { pluginId, companyId } = req.params;
+    await assertPluginCompanyAdministrator(req, companyId);
+    const plugin = await resolvePlugin(registry, pluginId);
+    if (!plugin) {
+      res.status(404).json({ error: "Plugin not found" });
+      return;
+    }
+    res.json({
+      policy: plugin.manifestJson.agentToolAccess ?? "company_default",
+      grants: pluginRequiresExplicitToolGrant(plugin)
+        ? await toolAccess.listGrants(companyId, plugin.id)
+        : [],
+    });
+  });
+
+  router.put("/plugins/:pluginId/companies/:companyId/tool-grants/:agentId", async (req, res) => {
+    const { pluginId, companyId, agentId } = req.params;
+    await assertPluginCompanyAdministrator(req, companyId);
+    const plugin = await resolvePlugin(registry, pluginId);
+    if (!plugin) {
+      res.status(404).json({ error: "Plugin not found" });
+      return;
+    }
+    if (!pluginRequiresExplicitToolGrant(plugin)) {
+      res.status(409).json({ error: "This plugin uses company-default tool access and does not need per-agent grants." });
+      return;
+    }
+    const enabled = (req.body as { enabled?: unknown } | undefined)?.enabled;
+    if (typeof enabled !== "boolean") {
+      res.status(400).json({ error: '"enabled" must be a boolean.' });
+      return;
+    }
+    try {
+      const grant = await toolAccess.setGrant({
+        companyId,
+        pluginId: plugin.id,
+        agentId,
+        grantedByUserId: req.actor.userId ?? "local-board",
+        enabled,
+      });
+      res.json({ grant });
+    } catch (error) {
+      res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  router.get("/plugins/:pluginId/companies/:companyId/tool-audit", async (req, res) => {
+    const { pluginId, companyId } = req.params;
+    await assertPluginCompanyAdministrator(req, companyId);
+    const plugin = await resolvePlugin(registry, pluginId);
+    if (!plugin) {
+      res.status(404).json({ error: "Plugin not found" });
+      return;
+    }
+    const rawLimit = Number(req.query.limit ?? 50);
+    res.json({
+      audit: await toolAccess.listAudit({
+        companyId,
+        pluginId: plugin.id,
+        limit: Number.isFinite(rawLimit) ? rawLimit : 50,
+      }),
+    });
   });
 
   /**
@@ -990,7 +1134,32 @@ export function pluginRoutes(
     const pluginId = req.query.pluginId as string | undefined;
     const filter = pluginId ? { pluginId } : undefined;
     const tools = toolDeps.toolDispatcher.listToolsForAgent(filter);
-    res.json(tools);
+    if (req.actor.type !== "agent") {
+      // Board users inspect the complete tool inventory. Agent credentials are
+      // filtered below so their prompt never advertises denied tools.
+      res.json(tools);
+      return;
+    }
+
+    const agentId = req.actor.agentId;
+    const companyId = req.actor.companyId;
+    if (!agentId || !companyId) {
+      res.status(403).json({ error: "Agent credentials must include an Agent and company scope." });
+      return;
+    }
+
+    const authorized = await Promise.all(tools.map(async (descriptor) => {
+      const registeredTool = toolDeps.toolDispatcher.getTool(descriptor.name);
+      if (!registeredTool) return false;
+      if (memoryDeps && !await memoryDeps.runtime.isSelectedProviderTool({
+        companyId,
+        pluginDbId: registeredTool.pluginDbId,
+        toolName: registeredTool.name,
+      })) return false;
+      const plugin = await registry.getById(registeredTool.pluginDbId);
+      return !plugin || toolAccess.isAllowed({ companyId, plugin, agentId });
+    }));
+    res.json(tools.filter((_tool, index) => authorized[index]));
   });
 
   /**
@@ -1047,6 +1216,7 @@ export function pluginRoutes(
       return;
     }
 
+    assertAgentToolRunIdentity(req, runContext);
     assertCompanyAccess(req, runContext.companyId);
     const scopeError = await validateToolRunContextScope(runContext);
     if (scopeError) {
@@ -1060,6 +1230,45 @@ export function pluginRoutes(
       res.status(404).json({ error: `Tool "${tool}" not found` });
       return;
     }
+    const toolPlugin = await registry.getById(registeredTool.pluginDbId);
+    if (memoryDeps && !await memoryDeps.runtime.isSelectedProviderTool({
+      companyId: runContext.companyId,
+      pluginDbId: registeredTool.pluginDbId,
+      toolName: registeredTool.name,
+    })) {
+      if (toolPlugin) {
+        await toolAccess.record({
+          companyId: runContext.companyId,
+          pluginId: registeredTool.pluginDbId,
+          agentId: runContext.agentId,
+          runId: runContext.runId,
+          projectId: runContext.projectId,
+          toolName: registeredTool.namespacedName,
+          status: "denied",
+          errorCode: "MEMORY_PROVIDER_NOT_SELECTED",
+        });
+      }
+      res.status(403).json({ error: "This memory provider is not selected for the current company." });
+      return;
+    }
+    if (toolPlugin && !await toolAccess.isAllowed({
+      companyId: runContext.companyId,
+      plugin: toolPlugin,
+      agentId: runContext.agentId,
+    })) {
+      await toolAccess.record({
+        companyId: runContext.companyId,
+        pluginId: registeredTool.pluginDbId,
+        agentId: runContext.agentId,
+        runId: runContext.runId,
+        projectId: runContext.projectId,
+        toolName: registeredTool.namespacedName,
+        status: "denied",
+        errorCode: "EXPLICIT_GRANT_REQUIRED",
+      });
+      res.status(403).json({ error: "This Agent does not have access to this plugin tool." });
+      return;
+    }
 
     try {
       const result = await toolDeps.toolDispatcher.executeTool(
@@ -1067,9 +1276,28 @@ export function pluginRoutes(
         parameters ?? {},
         runContext,
       );
+      await toolAccess.record({
+        companyId: runContext.companyId,
+        pluginId: registeredTool.pluginDbId,
+        agentId: runContext.agentId,
+        runId: runContext.runId,
+        projectId: runContext.projectId,
+        toolName: registeredTool.namespacedName,
+        status: "succeeded",
+      });
       res.json(result);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      await toolAccess.record({
+        companyId: runContext.companyId,
+        pluginId: registeredTool.pluginDbId,
+        agentId: runContext.agentId,
+        runId: runContext.runId,
+        projectId: runContext.projectId,
+        toolName: registeredTool.namespacedName,
+        status: "failed",
+        errorCode: "PLUGIN_TOOL_EXECUTION_FAILED",
+      });
 
       // Distinguish between "worker not running" (502) and other errors (500)
       if (message.includes("not running") || message.includes("worker")) {
@@ -1462,7 +1690,6 @@ export function pluginRoutes(
       res.status(400).json({ error: '"key" is required and must be a string' });
       return;
     }
-
     const companyId = assertPluginBridgeScope(req, body.companyId);
     const requestedPermissions = requestedPluginActionPermissions(body.params);
 

@@ -94,6 +94,16 @@ async function createApp(
 }
 
 function createSelectQueueDb(rows: Array<Array<Record<string, unknown>>>) {
+  const valuesResult = {
+    onConflictDoUpdate: vi.fn(() => ({
+      returning: vi.fn(() => Promise.resolve([])),
+    })),
+    then: <TResult1 = Array<Record<string, unknown>>, TResult2 = never>(
+      onfulfilled?: ((value: Array<Record<string, unknown>>) => TResult1 | PromiseLike<TResult1>) | null,
+      onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,
+    ) => Promise.resolve([] as Array<Record<string, unknown>>).then(onfulfilled, onrejected),
+  };
+
   return {
     select: vi.fn(() => ({
       from: vi.fn(() => ({
@@ -101,6 +111,9 @@ function createSelectQueueDb(rows: Array<Array<Record<string, unknown>>>) {
           limit: vi.fn(() => Promise.resolve(rows.shift() ?? [])),
         })),
       })),
+    })),
+    insert: vi.fn(() => ({
+      values: vi.fn(() => valuesResult),
     })),
   };
 }
@@ -171,6 +184,26 @@ describe.sequential("plugin install and upgrade authz", () => {
     expect(byPackageName.get("@paperclipai/plugin-authoring-smoke-example")?.experimental).toBe(false);
     expect(typeof byPackageName.get("@paperclipai/plugin-workspace-diff")?.hasBuiltEntrypoints).toBe("boolean");
   }, 20_000);
+
+  it("requires Agent configuration permission before exposing company memory controls", async () => {
+    const { app } = await createApp(boardActor());
+
+    const res = await request(app)
+      .get(`/api/plugins/companies/${companyA}/memory-provider`);
+
+    expect(res.status).toBe(403);
+    expect(mockAccess.hasPermission).toHaveBeenCalledWith(companyA, "user", "user-1", "agents:configure");
+  });
+
+  it("allows an instance admin through the memory-control authorization gate", async () => {
+    const { app } = await createApp(boardActor({ isInstanceAdmin: true }));
+
+    const res = await request(app)
+      .get(`/api/plugins/companies/${companyA}/memory-provider`);
+
+    expect(res.status).toBe(501);
+    expect(mockAccess.hasPermission).not.toHaveBeenCalled();
+  });
 
   it("rejects plugin installation for non-admin board users", async () => {
     const { app, loader } = await createApp({
@@ -989,6 +1022,38 @@ describe.sequential("plugin tool and bridge authz", () => {
     expect(listToolsForAgent).toHaveBeenCalled();
   });
 
+  it("hides explicitly granted plugin tools from an Agent without a grant", async () => {
+    mockRegistry.getById.mockResolvedValueOnce({
+      id: pluginId,
+      manifestJson: { agentToolAccess: "explicit_grant" },
+    });
+    const listToolsForAgent = vi.fn(() => [{
+      name: "paperclip.example:remote-search",
+      displayName: "Remote search",
+      description: "Search a remote MCP server.",
+      parametersSchema: {},
+      pluginId: "paperclip.example",
+    }]);
+    const { app } = await createApp(agentActor(), {}, {
+      db: createSelectQueueDb([[]]),
+      toolDeps: {
+        toolDispatcher: {
+          listToolsForAgent,
+          getTool: vi.fn(() => ({
+            namespacedName: "paperclip.example:remote-search",
+            pluginDbId: pluginId,
+          })),
+          executeTool: vi.fn(),
+        },
+      },
+    });
+
+    const res = await request(app).get("/api/plugins/tools");
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual([]);
+  });
+
   it("allows agent JWT to execute a tool within its company scope", async () => {
     const executeTool = vi.fn().mockResolvedValue({ content: "ok" });
     const { app } = await createApp(
@@ -1084,6 +1149,66 @@ describe.sequential("plugin tool and bridge authz", () => {
       });
 
     expect(res.status).toBe(403);
+    expect(executeTool).not.toHaveBeenCalled();
+  });
+
+  it("rejects an Agent token that attempts to execute a tool as another Agent", async () => {
+    const otherAgent = "77777777-7777-4777-8777-777777777777";
+    const executeTool = vi.fn();
+    const { app } = await createApp(
+      agentActor(),
+      {},
+      {
+        toolDeps: {
+          toolDispatcher: {
+            listToolsForAgent: vi.fn(),
+            getTool: vi.fn(() => ({ name: "paperclip.example:search", pluginDbId: pluginId })),
+            executeTool,
+          },
+        },
+      },
+    );
+
+    const res = await request(app)
+      .post("/api/plugins/tools/execute")
+      .send({
+        tool: "paperclip.example:search",
+        parameters: {},
+        runContext: { agentId: otherAgent, runId: runA, companyId: companyA, projectId: projectA },
+      });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toContain("own Agent identity");
+    expect(executeTool).not.toHaveBeenCalled();
+  });
+
+  it("rejects an Agent token that attempts to execute a tool under another run", async () => {
+    const otherRun = "88888888-8888-4888-8888-888888888888";
+    const executeTool = vi.fn();
+    const { app } = await createApp(
+      agentActor(),
+      {},
+      {
+        toolDeps: {
+          toolDispatcher: {
+            listToolsForAgent: vi.fn(),
+            getTool: vi.fn(() => ({ name: "paperclip.example:search", pluginDbId: pluginId })),
+            executeTool,
+          },
+        },
+      },
+    );
+
+    const res = await request(app)
+      .post("/api/plugins/tools/execute")
+      .send({
+        tool: "paperclip.example:search",
+        parameters: {},
+        runContext: { agentId: agentA, runId: otherRun, companyId: companyA, projectId: projectA },
+      });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toContain("own run");
     expect(executeTool).not.toHaveBeenCalled();
   });
 });

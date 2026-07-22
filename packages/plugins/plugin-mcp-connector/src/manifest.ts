@@ -14,6 +14,7 @@ const manifest: PaperclipPluginManifestV1 = {
     "http.outbound",
     "secrets.read-ref",
   ],
+  agentToolAccess: "explicit_grant",
   instanceConfigSchema: {
     type: "object",
     properties: {

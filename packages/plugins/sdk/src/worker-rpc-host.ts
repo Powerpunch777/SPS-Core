@@ -514,6 +514,12 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
         },
       },
 
+      memory: {
+        async publishLifecycle(input) {
+          await callHost("memory.publishLifecycle", input);
+        },
+      },
+
       jobs: {
         register(key: string, fn: (job: PluginJobContext) => Promise<void>): void {
           jobHandlers.set(key, fn);
@@ -1578,6 +1584,7 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
 
   async function handleOnEvent(params: OnEventParams): Promise<void> {
     const event = params.event;
+    const handlerErrors: unknown[] = [];
 
     for (const registration of eventHandlers) {
       // Check event type match
@@ -1597,6 +1604,7 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
       try {
         await registration.fn(event);
       } catch (err) {
+        handlerErrors.push(err);
         // Log error but continue processing other handlers so one failing
         // handler doesn't prevent the rest from running.
         notifyHost("log", {
@@ -1607,6 +1615,13 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
           meta: { eventType: event.eventType, stack: err instanceof Error ? err.stack : undefined },
         });
       }
+    }
+
+    if (handlerErrors.length > 0) {
+      throw new AggregateError(
+        handlerErrors,
+        `${handlerErrors.length} event handler(s) failed for "${event.eventType}"`,
+      );
     }
   }
 

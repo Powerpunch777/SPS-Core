@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const VALID_TEMPLATES = ["default", "connector", "workspace", "environment"] as const;
+const VALID_TEMPLATES = ["default", "connector", "workspace", "workplane", "environment"] as const;
 type PluginTemplate = (typeof VALID_TEMPLATES)[number];
 const VALID_CATEGORIES = new Set(["connector", "workspace", "automation", "ui", "environment"] as const);
 
@@ -142,7 +142,13 @@ export function scaffoldPluginProject(options: ScaffoldPluginOptions): string {
   const displayName = options.displayName ?? makeDisplayName(options.pluginName);
   const description = options.description ?? "A Paperclip plugin";
   const author = options.author ?? "Plugin Author";
-  const category = options.category ?? (template === "workspace" ? "workspace" : template === "environment" ? "environment" : "connector");
+  const category = options.category ?? (
+    template === "workspace" || template === "workplane"
+      ? "workspace"
+      : template === "environment"
+        ? "environment"
+        : "connector"
+  );
   const manifestId = packageToManifestId(options.pluginName);
   const localSdkPath = path.resolve(options.sdkPath ?? getLocalSdkPackagePath());
   const localSharedPath = getLocalSharedPackagePath(localSdkPath);
@@ -528,6 +534,14 @@ describe("environment plugin scaffold", () => {
 `,
     );
   } else {
+    const workplaneDeclaration = template === "workplane"
+      ? `,
+  agentPlatform: {
+    contractVersion: "1.0",
+    kind: "workplane",
+    profileKey: ${quote(`${manifestId}-profile`)}
+  },`
+      : "";
     writeFile(
       path.join(outputDir, "src", "manifest.ts"),
       `import type { PaperclipPluginManifestV1 } from "@paperclipai/plugin-sdk";
@@ -559,7 +573,7 @@ const manifest: PaperclipPluginManifestV1 = {
         exportName: "DashboardWidget"
       }
     ]
-  }
+  }${workplaneDeclaration}
 };
 
 export default manifest;
@@ -691,6 +705,16 @@ paperclipai plugin install ${shellQuote(toPosixPath(outputDir))}
 
 - \`pnpm build\` uses esbuild presets from \`@paperclipai/plugin-sdk/bundlers\`.
 - \`pnpm build:rollup\` uses rollup presets from the same SDK.
+${template === "workplane"
+  ? `
+## Workplane Contract
+
+This template declares a product-neutral \`agentPlatform\` workplane profile.
+Keep domain rules, screens, and room/task mappings inside this plugin. The Core
+only owns the neutral Agent Platform contract, extension discovery, policy, and
+lifecycle boundaries. Do not make the Core import this plugin by id.
+`
+  : ""}
 `,
   );
 

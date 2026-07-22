@@ -122,6 +122,8 @@ export {
 export { plugins } from "./plugins.js";
 export { pluginConfig } from "./plugin_config.js";
 export { pluginCompanySettings } from "./plugin_company_settings.js";
+export { companyMemorySettings, companyMemoryLifecycleDeliveries } from "./company_memory_settings.js";
+export { pluginToolGrants, pluginToolAuditEvents } from "./plugin_tool_access.js";
 export { pluginManagedResources } from "./plugin_managed_resources.js";
 export { pluginState } from "./plugin_state.js";
 export { pluginEntities } from "./plugin_entities.js";

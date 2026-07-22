@@ -562,9 +562,16 @@ export interface PluginObjectReferenceProviderDeclaration {
 }
 
 /**
+ * Company-default tools are available to any in-scope agent. Explicit-grant
+ * tools require an operator to grant each agent access through the Core.
+ */
+export type PluginAgentToolAccessPolicy = "company_default" | "explicit_grant";
+
+/**
  * Declares a memory provider that the host can select for a company. Memory
- * content remains provider-owned, while Core owns scope validation, lifecycle
- * dispatch, audit, backup coordination, and the selected-provider policy.
+ * content, retention, recall, and scope enforcement remain provider-owned.
+ * Core owns company selection, lifecycle dispatch, tool authorization, and
+ * payload-free delivery metadata.
  */
 export interface PluginMemoryProviderDeclaration {
   /** Stable provider key, unique among installed providers. */
@@ -579,7 +586,7 @@ export interface PluginMemoryProviderDeclaration {
   recallToolName?: string;
   /** Optional registered agent tool used to propose new memory candidates. */
   proposeToolName?: string;
-  /** Marks the provider as the first-party default for new local companies. */
+  /** Marks the provider as the default pinned on a company's first lifecycle delivery. */
   defaultForNewCompanies?: boolean;
 }
 
@@ -646,6 +653,8 @@ export interface PaperclipPluginManifestV1 {
   webhooks?: PluginWebhookDeclaration[];
   /** Agent tools this plugin contributes. Requires `agent.tools.register` capability. */
   tools?: PluginToolDeclaration[];
+  /** Access policy shared by all static and dynamic tools from this plugin. */
+  agentToolAccess?: PluginAgentToolAccessPolicy;
   /** Restricted plugin-owned database namespace declaration. */
   database?: PluginDatabaseDeclaration;
   /** Scoped JSON API routes mounted under `/api/plugins/:pluginId/api/*`. */

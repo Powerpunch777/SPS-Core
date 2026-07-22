@@ -147,6 +147,11 @@ export interface HostServices {
     subscribe(params: WorkerToHostMethods["events.subscribe"][0]): Promise<void>;
   };
 
+  /** Publishes structured lifecycle references through the selected memory provider. */
+  memory?: {
+    publishLifecycle(params: WorkerToHostMethods["memory.publishLifecycle"][0]): Promise<void>;
+  };
+
   /** Provides `http.fetch`. */
   http: {
     fetch(params: WorkerToHostMethods["http.fetch"][0]): Promise<WorkerToHostMethods["http.fetch"][1]>;
@@ -392,6 +397,7 @@ const METHOD_CAPABILITY_MAP: Record<WorkerToHostMethodName, PluginCapability | n
   // Events
   "events.emit": "events.emit",
   "events.subscribe": "events.subscribe",
+  "memory.publishLifecycle": "memory.lifecycle.publish",
 
   // HTTP
   "http.fetch": "http.outbound",
@@ -711,6 +717,13 @@ export function createHostClientHandlers(
     }),
     "events.subscribe": gated("events.subscribe", async (params) => {
       return services.events.subscribe(params);
+    }),
+
+    "memory.publishLifecycle": gated("memory.publishLifecycle", async (params) => {
+      if (!services.memory) {
+        throw new Error("This SPS host does not support Core-managed memory lifecycle publication");
+      }
+      return services.memory.publishLifecycle(params);
     }),
 
     // HTTP

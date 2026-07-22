@@ -75,6 +75,7 @@ import type {
   PluginAuthorizationDecisionResult,
   PluginAuthorizationPolicyRecord,
   PluginAuthorizationPolicySummary,
+  PluginMemoryLifecyclePublishInput,
 } from "./types.js";
 import type {
   PluginHealthDiagnostics,
@@ -1077,6 +1078,12 @@ export interface WorkerToHostMethods {
   ];
   "events.subscribe": [
     params: { eventPattern: string; filter?: Record<string, unknown> | null },
+    result: void,
+  ];
+
+  // Core-managed memory lifecycle publication
+  "memory.publishLifecycle": [
+    params: PluginMemoryLifecyclePublishInput,
     result: void,
   ];
 

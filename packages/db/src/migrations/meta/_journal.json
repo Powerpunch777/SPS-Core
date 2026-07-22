@@ -1058,6 +1058,13 @@
       "when": 1784681798488,
       "tag": "0152_fast_bullseye",
       "breakpoints": true
+    },
+    {
+      "idx": 153,
+      "version": "7",
+      "when": 1784743200000,
+      "tag": "0153_company_memory_provider_runtime",
+      "breakpoints": true
     }
   ]
 }

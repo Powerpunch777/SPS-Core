@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Db } from "@paperclipai/db";
 import { activityLog } from "@paperclipai/db";
-import { PLUGIN_EVENT_TYPES, type PluginEventType } from "@paperclipai/shared";
+import { PLUGIN_EVENT_TYPES, type PluginEventType, type PluginMemoryLifecycleEvent } from "@paperclipai/shared";
 import type { PluginEvent } from "@paperclipai/plugin-sdk";
 import { publishLiveEvent } from "./live-events.js";
 import { redactCurrentUserValue } from "../log-redaction.js";
@@ -39,6 +39,69 @@ export function setPluginEventBus(bus: PluginEventBus): void {
 function eventTypeForActivityAction(action: string): PluginEventType | null {
   if (PLUGIN_EVENT_SET.has(action)) return action as PluginEventType;
   return ACTIVITY_ACTION_TO_PLUGIN_EVENT[action.replaceAll(".", "_")] ?? null;
+}
+
+function recordValue(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function stringValue(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+/**
+ * Maps native Task and work-product audit records to the small, content-free
+ * memory lifecycle vocabulary. The generic activity event still flows as
+ * before; this additional event is only consumed by selected memory providers.
+ */
+export function memoryLifecycleEventForActivity(
+  input: LogActivityInput,
+  details: Record<string, unknown> | null,
+): PluginEvent | null {
+  let eventType: PluginMemoryLifecycleEvent | null = null;
+  let entityType = "task";
+  let entityId = input.entityId;
+  const payload: Record<string, unknown> = {
+    taskId: input.entityId,
+    agentId: input.agentId ?? null,
+    runId: input.runId ?? null,
+  };
+
+  if (input.action === "issue.updated" && input.entityType === "issue") {
+    const status = stringValue(details?.status);
+    const previousStatus = stringValue(recordValue(details?._previous)?.status);
+    if (!status || !previousStatus || status === previousStatus) return null;
+    payload.previousStatus = previousStatus;
+    payload.status = status;
+    if (status === "done") eventType = "task.completed";
+    else if (status === "blocked") eventType = "task.blocked";
+    else if (["done", "blocked", "cancelled"].includes(previousStatus)
+      && ["backlog", "todo", "in_progress", "in_review"].includes(status)) {
+      eventType = "task.reopened";
+    }
+  } else if (input.action === "issue.work_product_created" && input.entityType === "issue") {
+    const workProductId = stringValue(details?.workProductId);
+    if (details?.type !== "artifact" || !workProductId) return null;
+    eventType = "artifact.published";
+    entityType = "artifact";
+    entityId = workProductId;
+    payload.artifactId = workProductId;
+  }
+
+  if (!eventType) return null;
+  return {
+    eventId: randomUUID(),
+    eventType,
+    occurredAt: new Date().toISOString(),
+    actorId: input.actorId,
+    actorType: input.actorType,
+    entityId,
+    entityType,
+    companyId: input.companyId,
+    payload,
+  };
 }
 
 export function publishPluginDomainEvent(event: PluginEvent): void {
@@ -116,4 +179,7 @@ export async function logActivity(db: Db, input: LogActivityInput) {
     };
     publishPluginDomainEvent(event);
   }
+
+  const memoryLifecycleEvent = memoryLifecycleEventForActivity(input, redactedDetails);
+  if (memoryLifecycleEvent) publishPluginDomainEvent(memoryLifecycleEvent);
 }

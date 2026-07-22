@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Puzzle, ArrowLeft, ShieldAlert, ActivitySquare, CheckCircle, XCircle, Loader2, Clock, Cpu, Webhook, CalendarClock, AlertTriangle, FolderOpen, Save } from "lucide-react";
+import { Puzzle, ArrowLeft, ShieldAlert, ShieldCheck, ActivitySquare, CheckCircle, XCircle, Loader2, Clock, Cpu, Webhook, CalendarClock, AlertTriangle, FolderOpen, Save } from "lucide-react";
 import type { PluginLocalFolderDeclaration } from "@paperclipai/shared";
 import { useCompany } from "@/context/CompanyContext";
 import { useBreadcrumbs } from "@/context/BreadcrumbContext";
 import { Link, Navigate, useParams } from "@/lib/router";
 import { PluginSlotMount, usePluginSlots } from "@/plugins/slots";
 import { pluginsApi, type PluginLocalFolderStatus } from "@/api/plugins";
+import { agentsApi } from "@/api/agents";
 import { queryKeys } from "@/lib/queryKeys";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -21,6 +22,7 @@ import {
 import { Separator } from "@/components/ui/separator";
 import { Tabs, TabsContent } from "@/components/ui/tabs";
 import { PageTabBar } from "@/components/PageTabBar";
+import { ToggleSwitch } from "@/components/ui/toggle-switch";
 import {
   JsonSchemaForm,
   validateJsonSchemaForm,
@@ -148,6 +150,8 @@ export function PluginSettings() {
   const environmentDrivers = plugin.manifestJson.environmentDrivers ?? [];
   const localFolderDeclarations = plugin.manifestJson.localFolders ?? [];
   const hasLocalFolders = localFolderDeclarations.length > 0;
+  const hasExplicitAgentToolAccess = plugin.manifestJson.agentToolAccess === "explicit_grant";
+  const hasMemoryProvider = !!plugin.manifestJson.memoryProvider;
   const environmentDriverNames = environmentDrivers
     .map((driver) => driver.displayName?.trim() || driver.driverKey)
     .filter((name, index, values) => values.indexOf(name) === index);
@@ -229,6 +233,19 @@ export function PluginSettings() {
                   declarations={localFolderDeclarations}
                 />
               ) : null}
+              {hasExplicitAgentToolAccess ? (
+                <PluginToolAccessSettings
+                  pluginId={pluginId!}
+                  companyId={selectedCompanyId}
+                />
+              ) : null}
+              {hasMemoryProvider ? (
+                <PluginMemoryProviderSettings
+                  pluginId={pluginId!}
+                  providerKey={plugin.manifestJson.memoryProvider!.providerKey}
+                  companyId={selectedCompanyId}
+                />
+              ) : null}
               {hasCustomSettingsPage ? (
                 <div className="space-y-3">
                   {pluginSlots.map((slot) => (
@@ -265,7 +282,7 @@ export function PluginSettings() {
                     </Link>
                   </div>
                 </div>
-              ) : !hasLocalFolders ? (
+              ) : !hasLocalFolders && !hasExplicitAgentToolAccess && !hasMemoryProvider ? (
                 <p className="text-sm text-muted-foreground">
                   This plugin does not require any settings.
                 </p>
@@ -573,6 +590,270 @@ export function PluginSettings() {
 // ---------------------------------------------------------------------------
 // PluginLocalFoldersSettings — host-managed company-scoped folders
 // ---------------------------------------------------------------------------
+
+function PluginToolAccessSettings({ pluginId, companyId }: { pluginId: string; companyId: string | null }) {
+  const queryClient = useQueryClient();
+  const { data: access, isLoading: accessLoading, error: accessError } = useQuery({
+    queryKey: companyId
+      ? queryKeys.plugins.toolGrants(pluginId, companyId)
+      : ["plugins", pluginId, "companies", "none", "tool-grants"],
+    queryFn: () => pluginsApi.getToolGrants(pluginId, companyId!),
+    enabled: !!companyId,
+  });
+  const { data: auditData } = useQuery({
+    queryKey: companyId
+      ? queryKeys.plugins.toolAudit(pluginId, companyId)
+      : ["plugins", pluginId, "companies", "none", "tool-audit"],
+    queryFn: () => pluginsApi.listToolAudit(pluginId, companyId!, 12),
+    enabled: !!companyId,
+    refetchInterval: 30_000,
+  });
+  const { data: agents = [], isLoading: agentsLoading, error: agentsError } = useQuery({
+    queryKey: companyId ? queryKeys.agents.list(companyId) : ["agents", "none"],
+    queryFn: () => agentsApi.list(companyId!),
+    enabled: !!companyId,
+  });
+  const updateGrant = useMutation({
+    mutationFn: ({ agentId, enabled }: { agentId: string; enabled: boolean }) =>
+      pluginsApi.setToolGrant(pluginId, companyId!, agentId, enabled),
+    onSuccess: () => {
+      if (!companyId) return;
+      queryClient.invalidateQueries({ queryKey: queryKeys.plugins.toolGrants(pluginId, companyId) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.plugins.toolAudit(pluginId, companyId) });
+    },
+  });
+
+  if (!companyId) {
+    return (
+      <div className="rounded-md border border-border/60 bg-muted/20 px-4 py-3 text-sm text-muted-foreground">
+        Select a company to manage Agent tool access.
+      </div>
+    );
+  }
+
+  const grantedAgentIds = new Set(
+    (access?.grants ?? []).filter((grant) => grant.revokedAt === null).map((grant) => grant.agentId),
+  );
+  const activeAgents = agents.filter((agent) => agent.status !== "terminated");
+  const loadError = accessError ?? agentsError;
+
+  return (
+    <div className="space-y-4 rounded-md border border-border/70 bg-background px-4 py-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="space-y-1">
+          <h3 className="flex items-center gap-2 text-sm font-medium">
+            <ShieldCheck className="h-4 w-4 text-muted-foreground" />
+            Agent tool access
+          </h3>
+          <p className="max-w-3xl text-sm leading-5 text-muted-foreground">
+            This plugin requires an explicit grant. Only enabled Agents can invoke its tools; every outcome is recorded without tool parameters.
+          </p>
+        </div>
+        <Badge variant="outline">Explicit grant</Badge>
+      </div>
+
+      {loadError ? (
+        <div className="rounded-md border border-destructive/20 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+          {(loadError as Error).message || "Failed to load Agent access settings."}
+        </div>
+      ) : null}
+
+      {accessLoading || agentsLoading ? (
+        <div className="flex items-center gap-2 py-3 text-sm text-muted-foreground">
+          <Loader2 className="h-4 w-4 animate-spin" />
+          Loading Agent grants...
+        </div>
+      ) : activeAgents.length === 0 ? (
+        <p className="text-sm text-muted-foreground">No active Agents are available in this company.</p>
+      ) : (
+        <div className="divide-y divide-border/60 rounded-md border border-border/60">
+          {activeAgents.map((agent) => {
+            const granted = grantedAgentIds.has(agent.id);
+            const pending = updateGrant.isPending && updateGrant.variables?.agentId === agent.id;
+            return (
+              <div key={agent.id} className="flex items-center justify-between gap-4 px-3 py-2.5">
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-medium">{agent.name}</p>
+                  <p className="truncate text-xs text-muted-foreground">{agent.title || agent.role}</p>
+                </div>
+                <div className="flex shrink-0 items-center gap-2">
+                  <span className="text-xs text-muted-foreground">{granted ? "Allowed" : "Blocked"}</span>
+                  <ToggleSwitch
+                    checked={granted}
+                    disabled={pending || updateGrant.isPending}
+                    onCheckedChange={(enabled) => updateGrant.mutate({ agentId: agent.id, enabled })}
+                    aria-label={`${granted ? "Revoke" : "Grant"} ${agent.name} tool access`}
+                  />
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {updateGrant.error ? (
+        <p className="text-sm text-destructive">{(updateGrant.error as Error).message || "Failed to update Agent access."}</p>
+      ) : null}
+
+      <div className="space-y-2 border-t border-border/60 pt-4">
+        <h4 className="text-sm font-medium">Recent tool audit</h4>
+        {(auditData?.audit ?? []).length === 0 ? (
+          <p className="text-sm text-muted-foreground">No tool calls have been recorded for this company.</p>
+        ) : (
+          <div className="space-y-1.5">
+            {auditData!.audit.map((entry) => {
+              const agent = agents.find((candidate) => candidate.id === entry.agentId);
+              const variant = entry.status === "succeeded" ? "default" : entry.status === "denied" ? "secondary" : "destructive";
+              return (
+                <div key={entry.id} className="flex flex-wrap items-center justify-between gap-2 rounded-md bg-muted/40 px-3 py-2 text-xs">
+                  <div className="min-w-0">
+                    <span className="font-medium">{agent?.name ?? entry.agentId}</span>
+                    <span className="mx-1.5 text-muted-foreground">used</span>
+                    <span className="font-mono">{entry.toolName}</span>
+                    {entry.error ? <span className="ml-1.5 text-destructive">{entry.error}</span> : null}
+                  </div>
+                  <div className="flex items-center gap-2 text-muted-foreground">
+                    <Badge variant={variant}>{entry.status}</Badge>
+                    <span>{new Date(entry.createdAt).toLocaleString()}</span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function PluginMemoryProviderSettings({
+  pluginId,
+  providerKey,
+  companyId,
+}: {
+  pluginId: string;
+  providerKey: string;
+  companyId: string | null;
+}) {
+  const queryClient = useQueryClient();
+  const { data, isLoading, error } = useQuery({
+    queryKey: companyId
+      ? queryKeys.plugins.memoryProvider(companyId)
+      : ["plugins", "companies", "none", "memory-provider"],
+    queryFn: () => pluginsApi.getMemoryProvider(companyId!),
+    enabled: !!companyId,
+  });
+  const { data: deliveriesData } = useQuery({
+    queryKey: companyId
+      ? queryKeys.plugins.memoryDeliveries(companyId)
+      : ["plugins", "companies", "none", "memory-provider", "deliveries"],
+    queryFn: () => pluginsApi.listMemoryDeliveries(companyId!, 12),
+    enabled: !!companyId,
+    refetchInterval: 30_000,
+  });
+  const setProvider = useMutation({
+    mutationFn: (nextProviderKey: string | null) => pluginsApi.setMemoryProvider(companyId!, nextProviderKey),
+    onSuccess: () => {
+      if (!companyId) return;
+      queryClient.invalidateQueries({ queryKey: queryKeys.plugins.memoryProvider(companyId) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.plugins.memoryDeliveries(companyId) });
+    },
+  });
+
+  if (!companyId) {
+    return (
+      <div className="rounded-md border border-border/60 bg-muted/20 px-4 py-3 text-sm text-muted-foreground">
+        Select a company to configure its memory provider.
+      </div>
+    );
+  }
+
+  const selection = data?.selection;
+  const selectedHere = selection?.status === "enabled" && selection.provider?.pluginId === pluginId;
+  const provider = data?.providers.find((candidate) => candidate.pluginId === pluginId);
+  const deliveries = (deliveriesData?.deliveries ?? []).filter((delivery) => delivery.providerPluginId === pluginId);
+
+  return (
+    <div className="space-y-4 rounded-md border border-border/70 bg-background px-4 py-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="space-y-1">
+          <h3 className="text-sm font-medium">Company memory provider</h3>
+          <p className="max-w-3xl text-sm leading-5 text-muted-foreground">
+            The Core selects one lifecycle-memory provider per company. Memory content stays in the selected provider; this view stores only operational metadata.
+          </p>
+        </div>
+        <Badge variant={selectedHere ? "default" : "outline"}>{selectedHere ? "Active" : "Available"}</Badge>
+      </div>
+
+      {error ? (
+        <div className="rounded-md border border-destructive/20 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+          {(error as Error).message || "Failed to load memory provider settings."}
+        </div>
+      ) : null}
+
+      {isLoading ? (
+        <div className="flex items-center gap-2 py-2 text-sm text-muted-foreground">
+          <Loader2 className="h-4 w-4 animate-spin" />
+          Loading memory provider...
+        </div>
+      ) : (
+        <>
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-md bg-muted/40 px-3 py-3 text-sm">
+            <div className="min-w-0">
+              <p className="font-medium">{provider?.displayName ?? providerKey}</p>
+              <p className="text-xs text-muted-foreground">
+                {selectedHere
+                  ? `Selected for this company (${selection?.source ?? "configured"}).`
+                  : selection?.status === "disabled"
+                    ? "Company memory is currently disabled."
+                    : selection?.source === "unavailable"
+                      ? `Configured provider ${selection.configuredProviderKey ?? "unknown"} is unavailable. Select a ready provider to resume memory.`
+                    : `Current provider: ${selection?.provider?.displayName ?? "none"}.`}
+              </p>
+            </div>
+            <Button
+              size="sm"
+              variant={selectedHere ? "outline" : "default"}
+              disabled={setProvider.isPending || !provider}
+              onClick={() => setProvider.mutate(selectedHere ? null : providerKey)}
+            >
+              {setProvider.isPending ? "Saving..." : selectedHere ? "Disable memory" : "Use this provider"}
+            </Button>
+          </div>
+
+          {selection?.lastError ? (
+            <p className="text-sm text-destructive">Latest lifecycle delivery failed: {selection.lastError}</p>
+          ) : null}
+          {setProvider.error ? (
+            <p className="text-sm text-destructive">{(setProvider.error as Error).message || "Failed to change the memory provider."}</p>
+          ) : null}
+
+          <div className="space-y-2 border-t border-border/60 pt-4">
+            <h4 className="text-sm font-medium">Recent lifecycle delivery</h4>
+            {deliveries.length === 0 ? (
+              <p className="text-sm text-muted-foreground">No lifecycle events have been delivered to this provider yet.</p>
+            ) : (
+              <div className="space-y-1.5">
+                {deliveries.map((delivery) => (
+                  <div key={delivery.id} className="flex flex-wrap items-center justify-between gap-2 rounded-md bg-muted/40 px-3 py-2 text-xs">
+                    <div className="min-w-0">
+                      <span className="font-mono">{delivery.eventType}</span>
+                      {delivery.error ? <span className="ml-1.5 text-destructive">{delivery.error}</span> : null}
+                    </div>
+                    <div className="flex items-center gap-2 text-muted-foreground">
+                      <Badge variant={delivery.status === "delivered" ? "default" : delivery.status === "failed" ? "destructive" : "secondary"}>{delivery.status}</Badge>
+                      <span>{new Date(delivery.createdAt).toLocaleString()}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
 
 interface PluginLocalFoldersSettingsProps {
   pluginId: string;

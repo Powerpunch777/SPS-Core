@@ -191,6 +191,61 @@ export interface PluginLocalFolderSaveInput {
   requiredFiles?: string[];
 }
 
+export type PluginAgentToolAccessPolicy = "company_default" | "explicit_grant";
+
+export interface PluginToolGrant {
+  id: string;
+  agentId: string;
+  grantedByUserId: string;
+  revokedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PluginToolAuditEvent {
+  id: string;
+  agentId: string;
+  runId: string | null;
+  projectId: string | null;
+  toolName: string;
+  status: "succeeded" | "failed" | "denied";
+  error: string | null;
+  createdAt: string;
+}
+
+export interface PluginMemoryProviderDescriptor {
+  pluginId: string;
+  pluginKey: string;
+  providerKey: string;
+  displayName: string;
+  scopes: string[];
+  lifecycleEvents: string[];
+  recallToolName: string | null;
+  proposeToolName: string | null;
+  defaultForNewCompanies: boolean;
+}
+
+export interface CompanyMemoryProviderSelection {
+  provider: PluginMemoryProviderDescriptor | null;
+  status: "enabled" | "disabled";
+  source: "configured" | "default" | "disabled" | "unconfigured" | "unavailable";
+  configuredProviderKey: string | null;
+  configuredByUserId: string | null;
+  lastDeliveryAt: string | null;
+  lastError: string | null;
+}
+
+export interface MemoryLifecycleDelivery {
+  id: string;
+  providerPluginId: string;
+  eventId: string;
+  eventType: string;
+  status: "pending" | "delivered" | "failed" | "skipped";
+  error: string | null;
+  deliveredAt: string | null;
+  createdAt: string;
+}
+
 /**
  * Plugin management API client.
  *
@@ -428,6 +483,44 @@ export const pluginsApi = {
     api.put<PluginLocalFolderStatus>(
       `/plugins/${pluginId}/companies/${companyId}/local-folders/${encodeURIComponent(folderKey)}`,
       input,
+    ),
+
+  /** List Agent grants for a plugin that opts into explicit tool access. */
+  getToolGrants: (pluginId: string, companyId: string) =>
+    api.get<{ policy: PluginAgentToolAccessPolicy; grants: PluginToolGrant[] }>(
+      `/plugins/${pluginId}/companies/${companyId}/tool-grants`,
+    ),
+
+  /** Grant or revoke a single Agent's ability to invoke this plugin's tools. */
+  setToolGrant: (pluginId: string, companyId: string, agentId: string, enabled: boolean) =>
+    api.put<{ grant: PluginToolGrant }>(
+      `/plugins/${pluginId}/companies/${companyId}/tool-grants/${agentId}`,
+      { enabled },
+    ),
+
+  /** Read the payload-free execution audit for this plugin and company. */
+  listToolAudit: (pluginId: string, companyId: string, limit = 50) =>
+    api.get<{ audit: PluginToolAuditEvent[] }>(
+      `/plugins/${pluginId}/companies/${companyId}/tool-audit?limit=${encodeURIComponent(String(limit))}`,
+    ),
+
+  /** Read the ready memory providers and the current company selection. */
+  getMemoryProvider: (companyId: string) =>
+    api.get<{ providers: PluginMemoryProviderDescriptor[]; selection: CompanyMemoryProviderSelection }>(
+      `/plugins/companies/${companyId}/memory-provider`,
+    ),
+
+  /** Select a provider key, or pass null to disable lifecycle memory for this company. */
+  setMemoryProvider: (companyId: string, providerKey: string | null) =>
+    api.put<{ selection: CompanyMemoryProviderSelection }>(
+      `/plugins/companies/${companyId}/memory-provider`,
+      { providerKey },
+    ),
+
+  /** Read the metadata-only lifecycle delivery history for the selected company. */
+  listMemoryDeliveries: (companyId: string, limit = 50) =>
+    api.get<{ deliveries: MemoryLifecycleDelivery[] }>(
+      `/plugins/companies/${companyId}/memory-provider/deliveries?limit=${encodeURIComponent(String(limit))}`,
     ),
 
   // ===========================================================================

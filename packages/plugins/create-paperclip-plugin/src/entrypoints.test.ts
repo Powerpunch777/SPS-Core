@@ -71,4 +71,22 @@ describe("create-paperclip-plugin entrypoints", () => {
       },
     });
   });
+
+  it("scaffolds a product-neutral workplane extension", async () => {
+    const { scaffoldPluginProject } = await import("./index.js");
+    const outputRoot = makeTempDir();
+    const outputDir = path.join(outputRoot, "demo-workplane");
+
+    scaffoldPluginProject({
+      pluginName: "demo-workplane",
+      outputDir,
+      template: "workplane",
+      sdkPath: path.resolve("packages/plugins/sdk"),
+    });
+
+    const manifest = fs.readFileSync(path.join(outputDir, "src", "manifest.ts"), "utf8");
+    expect(manifest).toContain('kind: "workplane"');
+    expect(manifest).toContain('profileKey: "demo-workplane-profile"');
+    expect(manifest).toContain('categories: ["workspace"]');
+  });
 });

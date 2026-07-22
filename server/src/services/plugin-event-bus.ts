@@ -39,6 +39,8 @@ interface Subscription {
   handler: (event: PluginEvent) => Promise<void>;
 }
 
+type HostEventObserver = (event: PluginEvent) => Promise<void> | void;
+
 // ---------------------------------------------------------------------------
 // Pattern matching helpers
 // ---------------------------------------------------------------------------
@@ -149,6 +151,7 @@ function passesFilter(event: PluginEvent, filter: EventFilter | null): boolean {
 export function createPluginEventBus(): PluginEventBus {
   // Subscription registry: pluginKey → list of subscriptions
   const registry = new Map<string, Subscription[]>();
+  const hostObservers = new Set<HostEventObserver>();
 
   /**
    * Retrieve or create the subscription list for a plugin.
@@ -191,6 +194,14 @@ export function createPluginEventBus(): PluginEventBus {
           }),
         );
       }
+    }
+
+    for (const observer of hostObservers) {
+      promises.push(
+        Promise.resolve().then(() => observer(event)).catch((error: unknown) => {
+          errors.push({ pluginId: "core.observer", error });
+        }),
+      );
     }
 
     await Promise.all(promises);
@@ -289,6 +300,10 @@ export function createPluginEventBus(): PluginEventBus {
     emit,
     forPlugin,
     clearPlugin,
+    observe(observer: HostEventObserver): () => void {
+      hostObservers.add(observer);
+      return () => hostObservers.delete(observer);
+    },
     /** Expose subscription count for a plugin (useful for tests and diagnostics). */
     subscriptionCount(pluginId?: string): number {
       if (pluginId !== undefined) {
@@ -328,6 +343,8 @@ export interface PluginEventBus {
    * message queue). All registered subscriptions across all plugins are checked.
    */
   emit(event: PluginEvent): Promise<PluginEventBusEmitResult>;
+  /** Reserved for Core orchestration. Plugins use `forPlugin(...).subscribe()`. */
+  observe(observer: HostEventObserver): () => void;
 
   /**
    * Get a scoped handle for a specific plugin worker.

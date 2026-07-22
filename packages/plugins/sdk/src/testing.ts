@@ -858,6 +858,11 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
         await harness.emit(`plugin.${manifest.id}.${name}`, payload, { companyId });
       },
     },
+    memory: {
+      async publishLifecycle() {
+        requireCapability(manifest, capabilitySet, "memory.lifecycle.publish");
+      },
+    },
     jobs: {
       register(key, fn) {
         requireCapability(manifest, capabilitySet, "jobs.schedule");

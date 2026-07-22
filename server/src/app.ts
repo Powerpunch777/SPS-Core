@@ -65,6 +65,7 @@ import { pluginLifecycleManager } from "./services/plugin-lifecycle.js";
 import { createPluginJobCoordinator } from "./services/plugin-job-coordinator.js";
 import { buildHostServices, flushPluginLogBuffer } from "./services/plugin-host-services.js";
 import { createPluginEventBus } from "./services/plugin-event-bus.js";
+import { createCompanyMemoryProviderRuntime } from "./services/memory-provider-runtime.js";
 import { setPluginEventBus } from "./services/activity-log.js";
 import { createPluginDevWatcher } from "./services/plugin-dev-watcher.js";
 import { createPluginHostServiceCleanup } from "./services/plugin-host-service-cleanup.js";
@@ -269,6 +270,8 @@ export async function createApp(
   setPluginEventBus(eventBus);
   const jobStore = pluginJobStore(db);
   const lifecycle = pluginLifecycleManager(db, { workerManager });
+  const memoryProviderRuntime = createCompanyMemoryProviderRuntime({ db, workerManager });
+  eventBus.observe((event) => memoryProviderRuntime.handleEvent(event));
   const scheduler = createPluginJobScheduler({
     db,
     jobStore,
@@ -334,6 +337,7 @@ export async function createApp(
       { workerManager },
       { toolDispatcher },
       { workerManager },
+      { runtime: memoryProviderRuntime },
     ),
   );
   api.use(adapterRoutes());

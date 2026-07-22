@@ -1008,6 +1008,8 @@ export const PLUGIN_CAPABILITIES = [
   // Agent Tools
   "agent.tools.register",
   "agent.tools.dynamic.register",
+  // Memory lifecycle publication (Workplanes and trusted workflow plugins)
+  "memory.lifecycle.publish",
   // UI
   "instance.settings.register",
   "ui.sidebar.register",
@@ -1344,6 +1346,7 @@ export const PLUGIN_EVENT_TYPES = [
   "budget.incident.resolved",
   "cost_event.created",
   "activity.logged",
+  ...PLUGIN_MEMORY_LIFECYCLE_EVENTS,
 ] as const;
 export type PluginEventType = (typeof PLUGIN_EVENT_TYPES)[number];
 

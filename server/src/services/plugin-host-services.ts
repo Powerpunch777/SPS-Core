@@ -28,7 +28,7 @@ import type {
   PluginExecutionWorkspaceMetadata,
 } from "@paperclipai/plugin-sdk";
 import type { CreateIssueThreadInteraction, InviteJoinType, IssueDocumentSummary, PermissionKey, PluginToolDeclaration, PrincipalType, ProjectWorkspace } from "@paperclipai/shared";
-import { pluginOperationIssueOriginKind } from "@paperclipai/shared";
+import { PLUGIN_MEMORY_LIFECYCLE_EVENTS, pluginOperationIssueOriginKind } from "@paperclipai/shared";
 import { badRequest } from "../errors.js";
 import { companyService } from "./companies.js";
 import { agentService } from "./agents.js";
@@ -78,6 +78,7 @@ import { getTelemetryClient } from "../telemetry.js";
 import { accessService } from "./access.js";
 import { authorizationService, type AuthorizationActor } from "./authorization.js";
 import { sanitizeRecord } from "../redaction.js";
+import { isCoreManagedMemoryLifecycleSubscription } from "./memory-providers.js";
 
 // ---------------------------------------------------------------------------
 // SSRF protection for plugin HTTP fetch
@@ -92,6 +93,9 @@ const DNS_LOOKUP_TIMEOUT_MS = 5_000;
 /** Only these protocols are allowed for plugin HTTP requests. */
 const ALLOWED_PROTOCOLS = new Set(["http:", "https:"]);
 const TELEMETRY_EVENT_NAME_REGEX = /^[a-z0-9][a-z0-9_-]*$/;
+const MEMORY_LIFECYCLE_EVENTS = new Set<string>(PLUGIN_MEMORY_LIFECYCLE_EVENTS);
+const MEMORY_LIFECYCLE_ENTITY_TYPES = new Set(["project", "room", "task", "artifact"]);
+const MAX_MEMORY_LIFECYCLE_REFERENCE_LENGTH = 200;
 
 /**
  * Check if an IP address is in a private/reserved range (RFC 1918, loopback,
@@ -576,6 +580,16 @@ export function buildHostServices(
   const ensureCompanyId = (companyId?: string) => {
     if (!companyId) throw new Error("companyId is required for this operation");
     return companyId;
+  };
+
+  const optionalLifecycleReference = (value: unknown, field: string): string | null => {
+    if (value == null) return null;
+    if (typeof value !== "string") throw new Error(`${field} must be a string when provided`);
+    const normalized = value.trim();
+    if (!normalized || normalized.length > MAX_MEMORY_LIFECYCLE_REFERENCE_LENGTH) {
+      throw new Error(`${field} must be a non-empty value no longer than ${MAX_MEMORY_LIFECYCLE_REFERENCE_LENGTH} characters`);
+    }
+    return normalized;
   };
 
   const parseWindowValue = (value: unknown): number | null => {
@@ -1242,6 +1256,12 @@ export function buildHostServices(
         await scopedBus.emit(params.name, params.companyId, params.payload);
       },
       async subscribe(params: { eventPattern: string; filter?: Record<string, unknown> | null }) {
+        if (isCoreManagedMemoryLifecycleSubscription(options.manifest, params.eventPattern)) {
+          // The handler remains registered inside the worker. Core dispatches
+          // this lifecycle event only when the provider is selected for the
+          // event's company, and records the delivery exactly once.
+          return;
+        }
         const handler = async (event: import("@paperclipai/plugin-sdk").PluginEvent) => {
           if (notifyWorker) {
             notifyWorker("onEvent", { event });
@@ -1252,6 +1272,58 @@ export function buildHostServices(
         } else {
           scopedBus.subscribe(params.eventPattern as any, handler);
         }
+      },
+    },
+
+    memory: {
+      async publishLifecycle(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        if (!MEMORY_LIFECYCLE_EVENTS.has(params.eventType)) {
+          throw new Error(`Unsupported memory lifecycle event "${params.eventType}"`);
+        }
+        const idempotencyKey = optionalLifecycleReference(params.idempotencyKey, "idempotencyKey");
+        if (!idempotencyKey) throw new Error("idempotencyKey is required");
+        if (params.entityType && !MEMORY_LIFECYCLE_ENTITY_TYPES.has(params.entityType)) {
+          throw new Error(`Unsupported memory lifecycle entity type "${params.entityType}"`);
+        }
+
+        const projectId = optionalLifecycleReference(params.projectId, "projectId");
+        const agentId = optionalLifecycleReference(params.agentId, "agentId");
+        const roomId = optionalLifecycleReference(params.roomId, "roomId");
+        const taskId = optionalLifecycleReference(params.taskId, "taskId");
+        const artifactId = optionalLifecycleReference(params.artifactId, "artifactId");
+        const userId = optionalLifecycleReference(params.userId, "userId");
+        const runId = optionalLifecycleReference(params.runId, "runId");
+        const entityId = optionalLifecycleReference(params.entityId, "entityId")
+          ?? roomId
+          ?? taskId
+          ?? artifactId
+          ?? projectId;
+        const eventId = `memory:${createHash("sha256")
+          .update([pluginId, companyId, params.eventType, idempotencyKey].join("\u0000"))
+          .digest("hex")}`;
+
+        await eventBus.emit({
+          eventId,
+          eventType: params.eventType,
+          occurredAt: new Date().toISOString(),
+          actorId: pluginKey,
+          actorType: "plugin",
+          entityId: entityId ?? undefined,
+          entityType: params.entityType ?? "memory",
+          companyId,
+          payload: {
+            projectId,
+            agentId,
+            roomId,
+            taskId,
+            artifactId,
+            userId,
+            runId,
+            lifecyclePublisherPluginId: pluginId,
+          },
+        });
       },
     },
 

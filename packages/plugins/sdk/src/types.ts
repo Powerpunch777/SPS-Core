@@ -14,6 +14,7 @@ import type {
   PluginStateScopeKind,
   PluginEventType,
   PluginToolDeclaration,
+  PluginMemoryLifecycleEvent,
   PluginLauncherDeclaration,
   Company,
   Project,
@@ -64,6 +65,7 @@ export type {
   PluginJobDeclaration,
   PluginWebhookDeclaration,
   PluginToolDeclaration,
+  PluginMemoryLifecycleEvent,
   PluginEnvironmentDriverDeclaration,
   PluginEnvironmentTemplateConfigBinding,
   PluginManagedAgentDeclaration,
@@ -1055,6 +1057,35 @@ export interface PluginToolsClient {
 }
 
 /**
+ * Structured lifecycle input accepted by the Core memory control plane.
+ *
+ * This deliberately carries references only. Memory content, retention, and
+ * recall strategy remain owned by the selected provider.
+ */
+export interface PluginMemoryLifecyclePublishInput {
+  eventType: PluginMemoryLifecycleEvent;
+  companyId: string;
+  idempotencyKey: string;
+  entityType?: "project" | "room" | "task" | "artifact";
+  entityId?: string | null;
+  projectId?: string | null;
+  agentId?: string | null;
+  roomId?: string | null;
+  taskId?: string | null;
+  artifactId?: string | null;
+  userId?: string | null;
+  runId?: string | null;
+}
+
+/**
+ * Publishes a workflow lifecycle reference through the Core-selected memory
+ * provider. Requires the `memory.lifecycle.publish` capability.
+ */
+export interface PluginMemoryClient {
+  publishLifecycle(input: PluginMemoryLifecyclePublishInput): Promise<void>;
+}
+
+/**
  * `ctx.logger` — structured logging from the plugin worker.
  *
  * Log output is captured by the host, stored, and surfaced in the plugin
@@ -1996,6 +2027,9 @@ export interface PluginContext {
 
   /** Subscribe to and emit domain events. Requires `events.subscribe` / `events.emit`. */
   events: PluginEventsClient;
+
+  /** Publish structured lifecycle references to the selected memory provider. */
+  memory: PluginMemoryClient;
 
   /** Register handlers for scheduled jobs. Requires `jobs.schedule`. */
   jobs: PluginJobsClient;

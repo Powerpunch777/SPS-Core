@@ -1,4 +1,9 @@
-import type { PluginMemoryLifecycleEvent, PluginMemoryScope, PluginRecord } from "@paperclipai/shared";
+import type {
+  PaperclipPluginManifestV1,
+  PluginMemoryLifecycleEvent,
+  PluginMemoryScope,
+  PluginRecord,
+} from "@paperclipai/shared";
 
 /**
  * Operator-safe view of a ready plugin memory provider. Provider content and
@@ -15,6 +20,27 @@ export interface MemoryProviderDescriptor {
   recallToolName: string | null;
   proposeToolName: string | null;
   defaultForNewCompanies: boolean;
+}
+
+/**
+ * Memory lifecycle events are selected and audited by Core. The worker still
+ * registers its local handler through `ctx.events.on`, but the generic event
+ * bus must not create a second, unscoped delivery for the same declaration.
+ */
+export function isCoreManagedMemoryLifecycleSubscription(
+  manifest: PaperclipPluginManifestV1 | undefined,
+  eventPattern: string,
+): boolean {
+  return manifest?.memoryProvider?.lifecycleEvents?.includes(
+    eventPattern as PluginMemoryLifecycleEvent,
+  ) === true;
+}
+
+export function isDeclaredMemoryProviderTool(
+  provider: MemoryProviderDescriptor,
+  toolName: string,
+): boolean {
+  return provider.recallToolName === toolName || provider.proposeToolName === toolName;
 }
 
 export function listReadyMemoryProviders(plugins: PluginRecord[]): MemoryProviderDescriptor[] {

@@ -61,4 +61,38 @@ describe("pluginsApi local folders", () => {
       },
     );
   });
+
+  it("uses the company-scoped explicit grant endpoints", async () => {
+    await pluginsApi.getToolGrants("plugin-1", "company-1");
+    await pluginsApi.setToolGrant("plugin-1", "company-1", "agent-1", true);
+    await pluginsApi.listToolAudit("plugin-1", "company-1", 12);
+
+    expect(mockApi.get).toHaveBeenCalledWith(
+      "/plugins/plugin-1/companies/company-1/tool-grants",
+    );
+    expect(mockApi.put).toHaveBeenCalledWith(
+      "/plugins/plugin-1/companies/company-1/tool-grants/agent-1",
+      { enabled: true },
+    );
+    expect(mockApi.get).toHaveBeenCalledWith(
+      "/plugins/plugin-1/companies/company-1/tool-audit?limit=12",
+    );
+  });
+
+  it("uses the company-scoped memory provider endpoints", async () => {
+    await pluginsApi.getMemoryProvider("company-1");
+    await pluginsApi.setMemoryProvider("company-1", "sps-default");
+    await pluginsApi.listMemoryDeliveries("company-1", 12);
+
+    expect(mockApi.get).toHaveBeenCalledWith(
+      "/plugins/companies/company-1/memory-provider",
+    );
+    expect(mockApi.put).toHaveBeenCalledWith(
+      "/plugins/companies/company-1/memory-provider",
+      { providerKey: "sps-default" },
+    );
+    expect(mockApi.get).toHaveBeenCalledWith(
+      "/plugins/companies/company-1/memory-provider/deliveries?limit=12",
+    );
+  });
 });
