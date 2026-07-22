@@ -32,6 +32,14 @@ function detectEmbeddedPostgresHint(recentLogs: string[]): string | null {
     );
   }
 
+  if (/invalid byte sequence for encoding ["']?utf-?8/.test(haystack)) {
+    return (
+      "Embedded PostgreSQL could not parse a Windows Unicode path while bootstrapping its native runtime. " +
+      "SPS automatically uses an NTFS short-path workaround when Windows provides one. " +
+      "If that workaround is unavailable, install SPS under an ASCII-only path or configure an external DATABASE_URL, then retry."
+    );
+  }
+
   if (/\b(eperm|eacces)\b|permission denied|access is denied|operation not permitted/.test(haystack)) {
     return (
       "Embedded PostgreSQL could not access or execute one of its local files. " +

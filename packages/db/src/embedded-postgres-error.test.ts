@@ -27,6 +27,16 @@ describe("formatEmbeddedPostgresError", () => {
     expect(error.message).toContain("writable");
   });
 
+  it("explains Unicode source-path failures without mislabeling them as permissions", () => {
+    const error = formatEmbeddedPostgresError("Postgres init script exited with code 1.", {
+      fallbackMessage: "Failed to initialize embedded PostgreSQL cluster",
+      recentLogs: ['FATAL: invalid byte sequence for encoding "UTF8": 0xb1'],
+    });
+
+    expect(error.message).toContain("Unicode path");
+    expect(error.message).toContain("NTFS short-path workaround");
+  });
+
   it("adds a repair hint when the embedded executable is missing", () => {
     const error = formatEmbeddedPostgresError("Postgres init script exited with code 1.", {
       fallbackMessage: "Failed to initialize embedded PostgreSQL cluster",

@@ -2,7 +2,11 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { ensureLinuxSharedLibraryAliases } from "./embedded-postgres-native.js";
+import {
+  ensureLinuxSharedLibraryAliases,
+  resolveWindowsNativeRuntimePath,
+  resolveWindowsShortPath,
+} from "./embedded-postgres-native.js";
 
 describe("embedded Postgres native runtime", () => {
   const tempDirs: string[] = [];
@@ -39,5 +43,10 @@ describe("embedded Postgres native runtime", () => {
 
     expect(second).toEqual([]);
     expect(fs.readlinkSync(path.join(tempDir, "libicuuc.so.60"))).toBe("libicuuc.so.60.2");
+  });
+
+  it("does not invoke the Windows short-path bridge for an ASCII path", () => {
+    expect(resolveWindowsShortPath("C:\\SPS\\runtime\\bin")).toBeNull();
+    expect(resolveWindowsNativeRuntimePath("C:\\SPS\\runtime\\bin")).toBeNull();
   });
 });

@@ -1,4 +1,5 @@
 import { promises as fs } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
 import path from "node:path";
 
@@ -48,6 +49,113 @@ function prependPathEnv(name: string, value: string): void {
   process.env[name] = [value, ...parts].join(path.delimiter);
 }
 
+function isAsciiPath(value: string): boolean {
+  return /^[\x00-\x7f]+$/.test(value);
+}
+
+const WINDOWS_SUBST_CANDIDATES = ["S", "T", "U", "V", "W", "X", "Y", "Z"];
+const createdWindowsSubstDrives = new Set<string>();
+let windowsSubstCleanupRegistered = false;
+
+/**
+ * PostgreSQL's Windows bootstrap scripts can still parse the binary/share path
+ * with the active ANSI code page. A source checkout under a Korean or other
+ * Unicode folder then fails even when the database directory itself is ASCII.
+ * Use an NTFS short path when it is available; packaged SPS installs normally
+ * already use an ASCII Program Files path and do not need this branch.
+ */
+export function resolveWindowsShortPath(value: string): string | null {
+  if (process.platform !== "win32" || isAsciiPath(value)) return null;
+
+  try {
+    const command = `for %I in ("${value.replaceAll('"', '""')}") do @echo %~sI`;
+    const output = execFileSync(process.env.ComSpec ?? "cmd.exe", ["/d", "/s", "/c", command], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      windowsHide: true,
+    }).trim();
+    return output && isAsciiPath(output) ? output : null;
+  } catch {
+    return null;
+  }
+}
+
+function findWindowsUnicodePathRoot(value: string): string | null {
+  const parsed = path.parse(value);
+  const segments = value.slice(parsed.root.length).split(/[\\/]+/).filter(Boolean);
+  let current = parsed.root;
+  let unicodeRoot: string | null = null;
+
+  for (const segment of segments) {
+    current = path.join(current, segment);
+    if (!isAsciiPath(segment)) unicodeRoot = current;
+  }
+
+  return unicodeRoot;
+}
+
+function registerWindowsSubstCleanup(): void {
+  if (windowsSubstCleanupRegistered) return;
+  windowsSubstCleanupRegistered = true;
+
+  process.once("exit", () => {
+    for (const drive of createdWindowsSubstDrives) {
+      try {
+        execFileSync("subst.exe", [drive, "/d"], { stdio: "ignore", windowsHide: true });
+      } catch {
+        // The mapping is process-local convenience state. Windows will also
+        // clear it at sign-out, so cleanup failures do not affect data.
+      }
+    }
+  });
+}
+
+function getWindowsSubstDrives(): Set<string> {
+  try {
+    const output = execFileSync("subst.exe", [], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      windowsHide: true,
+    });
+    return new Set([...output.matchAll(/^([A-Z]):\\:/gim)].map((match) => `${match[1]!.toUpperCase()}:`));
+  } catch {
+    return new Set();
+  }
+}
+
+/**
+ * NTFS 8.3 aliases can be disabled on a volume, leaving a Unicode segment in
+ * an otherwise short path. In that case, expose the smallest Unicode ancestor
+ * through an unused ASCII drive letter for the lifetime of the SPS process.
+ */
+function resolveWindowsSubstPath(value: string): string | null {
+  if (process.platform !== "win32") return null;
+
+  const unicodeRoot = findWindowsUnicodePathRoot(value);
+  if (!unicodeRoot) return null;
+
+  const usedDrives = getWindowsSubstDrives();
+  const drive = WINDOWS_SUBST_CANDIDATES.find((candidate) => !usedDrives.has(`${candidate}:`));
+  if (!drive) return null;
+
+  try {
+    execFileSync("subst.exe", [`${drive}:`, unicodeRoot], { stdio: "ignore", windowsHide: true });
+    const relative = path.relative(unicodeRoot, value);
+    const mappedPath = relative ? `${drive}:\\${relative}` : `${drive}:\\`;
+    if (!isAsciiPath(mappedPath)) return null;
+
+    createdWindowsSubstDrives.add(`${drive}:`);
+    registerWindowsSubstCleanup();
+    return mappedPath;
+  } catch {
+    return null;
+  }
+}
+
+export function resolveWindowsNativeRuntimePath(value: string): string | null {
+  return resolveWindowsShortPath(value) ?? resolveWindowsSubstPath(value);
+}
+
 export async function ensureLinuxSharedLibraryAliases(libDir: string): Promise<string[]> {
   const entries = await fs.readdir(libDir, { withFileTypes: true });
   const created: string[] = [];
@@ -72,9 +180,21 @@ export async function ensureLinuxSharedLibraryAliases(libDir: string): Promise<s
 }
 
 export async function prepareEmbeddedPostgresNativeRuntime(): Promise<void> {
-  const nativePackageName = resolveNativePackageName();
   const packageRoot = resolveEmbeddedPostgresPackageRoot();
-  if (!nativePackageName || !packageRoot) return;
+  if (!packageRoot) return;
+
+  if (process.platform === "win32") {
+    const nativeRoot = path.resolve(packageRoot, "..", "@embedded-postgres", "windows-x64", "native");
+    const binDir = path.join(nativeRoot, "bin");
+    const runtimeBinDir = resolveWindowsNativeRuntimePath(binDir);
+    if (runtimeBinDir) {
+      process.env.SPS_EMBEDDED_POSTGRES_BINARY_DIR = runtimeBinDir;
+    }
+    return;
+  }
+
+  const nativePackageName = resolveNativePackageName();
+  if (!nativePackageName) return;
 
   const nativeRoot = path.resolve(packageRoot, "..", "@embedded-postgres", nativePackageName);
   const libDir = path.join(nativeRoot, "native", "lib");
