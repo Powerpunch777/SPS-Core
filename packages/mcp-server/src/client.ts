@@ -1,6 +1,6 @@
-import type { PaperclipMcpConfig } from "./config.js";
+import type { SpsMcpConfig } from "./config.js";
 
-export class PaperclipApiError extends Error {
+export class SpsApiError extends Error {
   readonly status: number;
   readonly method: string;
   readonly path: string;
@@ -14,7 +14,7 @@ export class PaperclipApiError extends Error {
     message: string;
   }) {
     super(input.message);
-    this.name = "PaperclipApiError";
+    this.name = "SpsApiError";
     this.status = input.status;
     this.method = input.method;
     this.path = input.path;
@@ -48,8 +48,8 @@ async function parseResponseBody(response: Response): Promise<unknown> {
   }
 }
 
-export class PaperclipApiClient {
-  constructor(private readonly config: PaperclipMcpConfig) {}
+export class SpsApiClient {
+  constructor(private readonly config: SpsMcpConfig) {}
 
   get defaults() {
     return {
@@ -62,7 +62,7 @@ export class PaperclipApiClient {
   resolveCompanyId(companyId?: string | null): string {
     const resolved = companyId?.trim() || this.config.companyId;
     if (!resolved) {
-      throw new Error("companyId is required because PAPERCLIP_COMPANY_ID is not set");
+      throw new Error("companyId is required because SPS_COMPANY_ID is not set and no value was supplied");
     }
     return resolved;
   }
@@ -70,7 +70,7 @@ export class PaperclipApiClient {
   resolveAgentId(agentId?: string | null): string {
     const resolved = agentId?.trim() || this.config.agentId;
     if (!resolved) {
-      throw new Error("agentId is required because PAPERCLIP_AGENT_ID is not set");
+      throw new Error("agentId is required because SPS_AGENT_ID is not set and no value was supplied");
     }
     return resolved;
   }
@@ -89,6 +89,7 @@ export class PaperclipApiClient {
       headers["Content-Type"] = "application/json";
     }
     if ((options.includeRunId ?? isWriteMethod(method)) && this.config.runId) {
+      // The Core REST contract still accepts this historical header name.
       headers["X-Paperclip-Run-Id"] = this.config.runId;
     }
 
@@ -100,7 +101,7 @@ export class PaperclipApiClient {
     const parsedBody = await parseResponseBody(response);
 
     if (!response.ok) {
-      throw new PaperclipApiError({
+      throw new SpsApiError({
         status: response.status,
         method: method.toUpperCase(),
         path,
@@ -112,3 +113,9 @@ export class PaperclipApiClient {
     return parsedBody as T;
   }
 }
+
+/** @deprecated Use SpsApiError. */
+export const PaperclipApiError = SpsApiError;
+
+/** @deprecated Use SpsApiClient. */
+export const PaperclipApiClient = SpsApiClient;

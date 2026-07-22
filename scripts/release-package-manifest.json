@@ -101,7 +101,7 @@
   },
   {
     "dir": "packages/mcp-server",
-    "name": "@paperclipai/mcp-server",
+    "name": "@sps/mcp-server",
     "publishFromCi": true
   },
   {

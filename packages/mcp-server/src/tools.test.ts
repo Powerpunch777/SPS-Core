@@ -1,9 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { PaperclipApiClient } from "./client.js";
+import { SpsApiClient } from "./client.js";
 import { createToolDefinitions } from "./tools.js";
 
 function makeClient() {
-  return new PaperclipApiClient({
+  return new SpsApiClient({
     apiUrl: "http://localhost:3100/api",
     apiKey: "token-123",
     companyId: "11111111-1111-1111-1111-111111111111",
@@ -13,7 +13,8 @@ function makeClient() {
 }
 
 function getTool(name: string) {
-  const tool = createToolDefinitions(makeClient()).find((candidate) => candidate.name === name);
+  const canonicalName = name.replace(/^paperclip/, "sps");
+  const tool = createToolDefinitions(makeClient()).find((candidate) => candidate.name === canonicalName);
   if (!tool) throw new Error(`Missing tool ${name}`);
   return tool;
 }
@@ -25,9 +26,17 @@ function mockJsonResponse(body: unknown, status = 200) {
   });
 }
 
-describe("paperclip MCP tools", () => {
+describe("SPS MCP tools", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+  });
+
+  it("uses SPS names by default and offers legacy names only when requested", () => {
+    const defaultNames = createToolDefinitions(makeClient()).map((tool) => tool.name);
+    const legacyNames = createToolDefinitions(makeClient(), { legacyToolNames: true }).map((tool) => tool.name);
+    expect(defaultNames).toContain("spsCreateIssue");
+    expect(defaultNames).not.toContain("paperclipCreateIssue");
+    expect(legacyNames).toContain("paperclipCreateIssue");
   });
 
   it("adds auth headers and run id to mutating requests", async () => {

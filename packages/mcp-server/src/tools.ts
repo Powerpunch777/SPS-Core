@@ -13,7 +13,7 @@ import {
   upsertIssueDocumentSchema,
   linkIssueApprovalSchema,
 } from "@paperclipai/shared";
-import { PaperclipApiClient } from "./client.js";
+import { SpsApiClient } from "./client.js";
 import { formatErrorResponse, formatTextResponse } from "./format.js";
 
 export interface ToolDefinition {
@@ -23,6 +23,15 @@ export interface ToolDefinition {
   execute: (input: Record<string, unknown>) => Promise<{
     content: Array<{ type: "text"; text: string }>;
   }>;
+}
+
+export interface CreateToolDefinitionsOptions {
+  legacyToolNames?: boolean;
+}
+
+function spsToolName(name: string, legacyToolNames: boolean): string {
+  if (legacyToolNames || !name.startsWith("paperclip")) return name;
+  return `sps${name.slice("paperclip".length)}`;
 }
 
 function makeTool<TSchema extends z.ZodRawShape>(
@@ -224,7 +233,7 @@ function selectRuntimeService(
     ?? null;
 }
 
-async function getIssueWorkspaceRuntime(client: PaperclipApiClient, issueId: string) {
+async function getIssueWorkspaceRuntime(client: SpsApiClient, issueId: string) {
   const context = await client.requestJson("GET", `/issues/${encodeURIComponent(issueId)}/heartbeat-context`);
   const workspace = readCurrentExecutionWorkspace(context);
   return {
@@ -234,11 +243,14 @@ async function getIssueWorkspaceRuntime(client: PaperclipApiClient, issueId: str
   };
 }
 
-export function createToolDefinitions(client: PaperclipApiClient): ToolDefinition[] {
-  return [
+export function createToolDefinitions(
+  client: SpsApiClient,
+  options: CreateToolDefinitionsOptions = {},
+): ToolDefinition[] {
+  const definitions = [
     makeTool(
       "paperclipMe",
-      "Get the current authenticated Paperclip actor details",
+      "Get the current authenticated SPS actor details",
       z.object({}),
       async () => client.requestJson("GET", "/agents/me"),
     ),
@@ -619,7 +631,7 @@ export function createToolDefinitions(client: PaperclipApiClient): ToolDefinitio
     ),
     makeTool(
       "paperclipApiRequest",
-      "Make a JSON request to an existing Paperclip /api endpoint for unsupported operations",
+      "Make a JSON request to an existing SPS /api endpoint for unsupported operations",
       apiRequestSchema,
       async ({ method, path, jsonBody }) => {
         if (!path.startsWith("/") || path.includes("..")) {
@@ -631,4 +643,8 @@ export function createToolDefinitions(client: PaperclipApiClient): ToolDefinitio
       },
     ),
   ];
+  return definitions.map((tool) => ({
+    ...tool,
+    name: spsToolName(tool.name, options.legacyToolNames ?? false),
+  }));
 }
