@@ -11,6 +11,11 @@ const PAPERCLIP_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "paperclip-e2e-home
 const PAPERCLIP_CONFIG = path.join(PAPERCLIP_HOME, "instances", "playwright-e2e", "config.json");
 const PAPERCLIP_AGENT_JWT_SECRET = process.env.PAPERCLIP_AGENT_JWT_SECRET ?? "playwright-e2e-agent-jwt-secret";
 const PLAYWRIGHT_CHANNEL = process.env.PAPERCLIP_PLAYWRIGHT_CHANNEL;
+// The workspace pins pnpm 9.x. Explicitly use it here because Playwright's
+// web server otherwise resolves whatever global pnpm happens to be installed.
+const PNPM_COMMAND = process.platform === "win32"
+  ? "npx.cmd --yes pnpm@9.15.4"
+  : "npx --yes pnpm@9.15.4";
 
 process.env.PAPERCLIP_HOME = PAPERCLIP_HOME;
 process.env.PAPERCLIP_CONFIG = PAPERCLIP_CONFIG;
@@ -47,7 +52,7 @@ export default defineConfig({
   // The webServer directive bootstraps a throwaway instance and then starts it.
   // `onboard --yes --run` works in a non-interactive temp PAPERCLIP_HOME.
   webServer: {
-    command: `pnpm paperclipai onboard --yes --run`,
+    command: `${PNPM_COMMAND} paperclipai onboard --yes --run`,
     url: `${BASE_URL}/api/health`,
     // Always boot a dedicated throwaway instance for e2e so browser tests
     // never attach to the developer's active Paperclip home/server.

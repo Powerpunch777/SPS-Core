@@ -1,3 +1,5 @@
+import { getWorkplaneRuntimeProfile } from "./services/workplane-profile.js";
+
 const FAVICON_BLOCK_START = "<!-- SPS_FAVICON_START -->";
 const FAVICON_BLOCK_END = "<!-- SPS_FAVICON_END -->";
 const RUNTIME_BRANDING_BLOCK_START = "<!-- SPS_RUNTIME_BRANDING_START -->";
@@ -152,7 +154,7 @@ export function isWorktreeUiBrandingEnabled(env: NodeJS.ProcessEnv = process.env
 }
 
 export function isWorkplaneModeEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  return isTruthyEnvValue(env.PAPERCLIP_WORKPLANE_MODE);
+  return getWorkplaneRuntimeProfile(env).enabled;
 }
 
 export function isSpsBasicModeEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
@@ -211,9 +213,20 @@ export function renderRuntimeBrandingMeta(branding: WorktreeUiBranding): string 
 }
 
 export function renderWorkplaneModeMeta(env: NodeJS.ProcessEnv = process.env): string {
-  return isWorkplaneModeEnabled(env)
-    ? '<meta name="sps-workplane-mode" content="true" />'
-    : "";
+  const profile = getWorkplaneRuntimeProfile(env);
+  if (!profile.enabled) return "";
+  const tags = ['<meta name="sps-workplane-mode" content="true" />'];
+  if (profile.roomOriginPrefixes.length > 0) {
+    tags.push(
+      `<meta name="sps-workplane-room-origin-prefixes" content="${escapeHtmlAttribute(JSON.stringify(profile.roomOriginPrefixes))}" />`,
+    );
+  }
+  if (profile.defaultProjectTab) {
+    tags.push(
+      `<meta name="sps-workplane-default-project-tab" content="${escapeHtmlAttribute(profile.defaultProjectTab)}" />`,
+    );
+  }
+  return tags.join("\n");
 }
 
 export function renderSpsBasicModeMeta(env: NodeJS.ProcessEnv = process.env): string {

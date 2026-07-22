@@ -1,4 +1,4 @@
-import { defineConfig } from "vitest/config";
+import { configDefaults, defineConfig } from "vitest/config";
 
 export default defineConfig({
   test: {
@@ -13,5 +13,8 @@ export default defineConfig({
       hooks: "list",
     },
     setupFiles: ["./src/__tests__/setup-supertest.ts"],
+    // `server/dist` can remain after a local build. It contains copied test
+    // files, which must never run alongside the TypeScript source suite.
+    exclude: [...configDefaults.exclude, "dist/**"],
   },
 });

@@ -31,14 +31,24 @@ describe("ui branding", () => {
   });
 
   it("surfaces workplane mode independently from worktree branding", () => {
-    expect(isWorkplaneModeEnabled({ PAPERCLIP_WORKPLANE_MODE: "true" })).toBe(true);
-    expect(isWorkplaneModeEnabled({ PAPERCLIP_WORKPLANE_MODE: "false" })).toBe(false);
-    expect(renderWorkplaneModeMeta({ PAPERCLIP_WORKPLANE_MODE: "1" })).toContain(
+    expect(isWorkplaneModeEnabled({ SPS_WORKPLANE_MODE: "true" })).toBe(true);
+    expect(isWorkplaneModeEnabled({ SPS_WORKPLANE_MODE: "false" })).toBe(false);
+    expect(renderWorkplaneModeMeta({
+      SPS_WORKPLANE_MODE: "1",
+      SPS_WORKPLANE_ROOM_ORIGIN_PREFIXES: "plugin:example.rooms:agent-room",
+      SPS_WORKPLANE_DEFAULT_PROJECT_TAB: "plugin:example.rooms:project-workplane",
+    })).toContain(
       'name="sps-workplane-mode"',
     );
 
-    const branded = applyUiBranding(TEMPLATE, { PAPERCLIP_WORKPLANE_MODE: "true" });
+    const branded = applyUiBranding(TEMPLATE, {
+      SPS_WORKPLANE_MODE: "true",
+      SPS_WORKPLANE_ROOM_ORIGIN_PREFIXES: "plugin:example.rooms:agent-room",
+      SPS_WORKPLANE_DEFAULT_PROJECT_TAB: "plugin:example.rooms:project-workplane",
+    });
     expect(branded).toContain('<meta name="sps-workplane-mode" content="true" />');
+    expect(branded).toContain('name="sps-workplane-room-origin-prefixes"');
+    expect(branded).toContain('name="sps-workplane-default-project-tab"');
     expect(branded).toContain('href="/favicon.svg"');
   });
 

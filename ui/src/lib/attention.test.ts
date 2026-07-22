@@ -259,12 +259,19 @@ describe("sortAttentionItems", () => {
 });
 
 describe("attentionDateBucket", () => {
-  const now = new Date("2026-07-10T12:00:00Z").getTime();
+  const now = new Date(2026, 6, 10, 12, 0, 0).getTime();
 
-  it("buckets by rolling calendar-day windows relative to now", () => {
-    expect(attentionDateBucket("2026-07-10T09:00:00Z", now)).toBe("today");
-    expect(attentionDateBucket("2026-07-09T23:00:00Z", now)).toBe("yesterday");
-    expect(attentionDateBucket("2026-07-06T09:00:00Z", now)).toBe("this_week");
+  function localTimestamp(daysAgo: number, hour: number) {
+    const date = new Date(now);
+    date.setDate(date.getDate() - daysAgo);
+    date.setHours(hour, 0, 0, 0);
+    return date.toISOString();
+  }
+
+  it("buckets by local calendar-day windows relative to now", () => {
+    expect(attentionDateBucket(localTimestamp(0, 9), now)).toBe("today");
+    expect(attentionDateBucket(localTimestamp(1, 12), now)).toBe("yesterday");
+    expect(attentionDateBucket(localTimestamp(4, 9), now)).toBe("this_week");
     expect(attentionDateBucket("2026-06-01T09:00:00Z", now)).toBe("earlier");
   });
 

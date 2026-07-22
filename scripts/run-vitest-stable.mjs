@@ -62,6 +62,18 @@ const serializedServerVitestArgs = [
   "--maxWorkers=1",
 ];
 
+function resolvePnpmInvocation() {
+  const npmExecPath = process.env.npm_execpath;
+  if (npmExecPath && /(?:^|[\\/])pnpm(?:\.c?js)?$/i.test(npmExecPath)) {
+    return { command: process.execPath, prefixArgs: [npmExecPath] };
+  }
+
+  return {
+    command: process.platform === "win32" ? "npx.cmd" : "npx",
+    prefixArgs: ["--yes", "pnpm@9.15.4"],
+  };
+}
+
 function walk(dir) {
   const entries = readdirSync(dir);
   const files = [];
@@ -259,10 +271,12 @@ function runVitest(args, label) {
   };
   mkdirSync(env.PAPERCLIP_HOME, { recursive: true });
   mkdirSync(env.TMPDIR, { recursive: true });
-  const result = spawnSync("pnpm", ["exec", "vitest", "run", ...args], {
+  const pnpm = resolvePnpmInvocation();
+  const result = spawnSync(pnpm.command, [...pnpm.prefixArgs, "exec", "vitest", "run", ...args], {
     cwd: repoRoot,
     env,
     stdio: "inherit",
+    shell: process.platform === "win32",
   });
   if (result.error) {
     console.error(`[test:run] Failed to start Vitest: ${result.error.message}`);

@@ -30,8 +30,8 @@ import { buildProjectWorkspaceSummaries } from "../lib/project-workspaces-tab";
 import { collectLiveIssueIds } from "../lib/liveIssueIds";
 import {
   filterWorkplaneTaskIssues,
+  getWorkplaneUiProfile,
   isWorkplaneModeEnabled,
-  WORKPLANE_PROJECT_TAB,
 } from "../lib/workplane-mode";
 import { projectRouteRef } from "../lib/utils";
 import { PROJECT_ICONS } from "../lib/project-icons";
@@ -374,6 +374,7 @@ function ProjectPluginOperationsList({
 
 export function ProjectDetail() {
   const workplaneMode = isWorkplaneModeEnabled();
+  const workplaneProfile = getWorkplaneUiProfile();
   const { companyPrefix, projectId, filter } = useParams<{
     companyPrefix?: string;
     projectId: string;
@@ -700,8 +701,12 @@ export function ProjectDetail() {
     if (workplaneMode && (isLoading || !resolvedCompanyId || pluginDetailSlotsLoading)) {
       return <PageSkeleton variant="detail" />;
     }
-    if (workplaneMode && pluginTabItems.some((item) => item.value === WORKPLANE_PROJECT_TAB)) {
-      return <Navigate to={`/projects/${canonicalProjectRef}?tab=${encodeURIComponent(WORKPLANE_PROJECT_TAB)}`} replace />;
+    if (
+      workplaneMode
+      && workplaneProfile.defaultProjectTab
+      && pluginTabItems.some((item) => item.value === workplaneProfile.defaultProjectTab)
+    ) {
+      return <Navigate to={`/projects/${canonicalProjectRef}?tab=${encodeURIComponent(workplaneProfile.defaultProjectTab)}`} replace />;
     }
     let cachedTab: string | null = null;
     if (project?.id) {

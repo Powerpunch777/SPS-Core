@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, like, not, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   projects,
@@ -32,6 +32,7 @@ import { listCurrentRuntimeServicesForProjectWorkspaces } from "./workspace-runt
 import { parseProjectExecutionWorkspacePolicy } from "./execution-workspace-policy.js";
 import { mergeProjectWorkspaceRuntimeConfig, readProjectWorkspaceRuntimeConfig } from "./project-workspace-runtime-config.js";
 import { resolveManagedProjectWorkspaceDir } from "../home-paths.js";
+import { getWorkplaneRuntimeProfile } from "./workplane-profile.js";
 
 type ProjectRow = typeof projects.$inferSelect;
 type ProjectWorkspaceRow = typeof projectWorkspaces.$inferSelect;
@@ -360,15 +361,18 @@ async function attachListMetrics(
   if (rows.length === 0) return rows;
 
   const projectIds = rows.map((r) => r.id);
-  const workplaneTaskVisibility = process.env.PAPERCLIP_WORKPLANE_MODE === "true"
-    ? sql<boolean>`NOT (
-        COALESCE(${issues.originKind}, '') LIKE 'plugin:local.room-chat:operation:agent-room%'
-        OR COALESCE(${issues.originKind}, '') IN (
-          'plugin:local.room-chat:agent-room-provisioning',
-          'plugin:local.room-chat:project-room-provisioning'
-        )
-      )`
-    : undefined;
+  const workplaneProfile = getWorkplaneRuntimeProfile();
+  const roomOriginChecks = workplaneProfile.enabled
+    ? workplaneProfile.roomOriginPrefixes.map((prefix) => like(
+      sql<string>`COALESCE(${issues.originKind}, '')`,
+      `${prefix}%`,
+    ))
+    : [];
+  const workplaneTaskVisibility = roomOriginChecks.length === 1
+    ? not(roomOriginChecks[0]!)
+    : roomOriginChecks.length > 1
+      ? not(or(...roomOriginChecks)!)
+      : undefined;
 
   const [taskCountRows, budgetRows] = await Promise.all([
     db

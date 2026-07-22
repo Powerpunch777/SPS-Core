@@ -178,14 +178,18 @@ describe("SidebarAccountMenu", () => {
 
     expect(container.textContent).toContain("SPS Owner");
     const trigger = container.querySelector('button[aria-label="Open account menu"]');
-    await act(async () => trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    await act(async () => {
+      trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
     await flushReact();
     expect(document.body.textContent).toContain("owner@example.com");
     expect(document.body.textContent).toContain("SPS Desktop 로그아웃");
 
     const signOut = [...document.body.querySelectorAll("button")]
       .find((button) => button.textContent?.includes("SPS Desktop 로그아웃"));
-    await act(async () => signOut?.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    await act(async () => {
+      signOut?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
     await flushReact();
     expect(workspaceBridge.signOutDesktopAccount).toHaveBeenCalledOnce();
 
