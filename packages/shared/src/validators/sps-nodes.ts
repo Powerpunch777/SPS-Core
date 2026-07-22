@@ -44,12 +44,50 @@ export const spsNodeCapabilitySchema = z.object({
   models: z.array(z.string().trim().min(1).max(160)).max(100).optional(),
 });
 
+export const spsNodeRunnerAvailabilityStatusSchema = z.enum([
+  "available",
+  "busy",
+  "quota_limited",
+  "auth_required",
+  "offline",
+  "unknown",
+]);
+
+export const spsNodeRunnerCredentialStatusSchema = z.enum(["ready", "auth_required", "unknown"]);
+export const spsNodeRunnerAvailabilitySourceSchema = z.enum(["node_probe", "adapter", "manual"]);
+
+// These fields are intentionally operational summaries only. The Hub must
+// never receive a CLI token, API key, cookie, home directory, or account ID.
+export const spsNodeRunnerAvailabilitySchema = z.object({
+  status: spsNodeRunnerAvailabilityStatusSchema,
+  observedAt: z.string().datetime({ offset: true }),
+  source: spsNodeRunnerAvailabilitySourceSchema,
+  confidence: z.number().int().min(0).max(100).optional().nullable(),
+  retryAfter: z.string().datetime({ offset: true }).optional().nullable(),
+  detail: z.string().trim().min(1).max(500).optional().nullable(),
+});
+
+export const spsNodeRunnerProfileSchema = spsNodeCapabilitySchema.extend({
+  runnerKey: z.string().trim().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,119}$/),
+  profileLabel: z.string().trim().min(1).max(120).optional().nullable(),
+  credentialStatus: spsNodeRunnerCredentialStatusSchema.optional(),
+  availability: spsNodeRunnerAvailabilitySchema.optional(),
+});
+
+const uniqueRunnerKeys = (profiles: ReadonlyArray<{ runnerKey: string }>) =>
+  new Set(profiles.map((profile) => profile.runnerKey)).size === profiles.length;
+
 export const createSpsNodeSchema = z.object({
   displayName: z.string().trim().min(1).max(120),
   publicKey: z.string().trim().min(32).max(8192),
   platform: z.string().trim().min(1).max(120),
   appVersion: z.string().trim().max(120).optional().nullable(),
   capabilities: z.array(spsNodeCapabilitySchema).max(32).default([]),
+  runners: z.array(spsNodeRunnerProfileSchema).max(64).optional(),
+}).superRefine((value, context) => {
+  if (value.runners && !uniqueRunnerKeys(value.runners)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["runners"], message: "Runner keys must be unique per Node" });
+  }
 });
 
 export const updateSpsNodeStatusSchema = z.object({
@@ -90,6 +128,18 @@ export const spsNodeCommandCompleteSchema = z.object({
   error: z.string().trim().max(16_000).nullable().optional(),
 });
 
+export const reportSpsNodeRunnerAvailabilitySchema = z.object({
+  runners: z.array(z.object({
+    runnerKey: z.string().trim().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,119}$/),
+    credentialStatus: spsNodeRunnerCredentialStatusSchema.optional(),
+    availability: spsNodeRunnerAvailabilitySchema,
+  })).min(1).max(64),
+}).superRefine((value, context) => {
+  if (!uniqueRunnerKeys(value.runners)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["runners"], message: "Runner keys must be unique per Node" });
+  }
+});
+
 export function spsNodeSignedRequestMessage(input: {
   nodeId: string;
   method: string;
@@ -110,6 +160,11 @@ export function spsNodeSignedRequestMessage(input: {
 }
 
 export type SpsNodeCapability = z.infer<typeof spsNodeCapabilitySchema>;
+export type SpsNodeRunnerAvailabilityStatus = z.infer<typeof spsNodeRunnerAvailabilityStatusSchema>;
+export type SpsNodeRunnerCredentialStatus = z.infer<typeof spsNodeRunnerCredentialStatusSchema>;
+export type SpsNodeRunnerAvailabilitySource = z.infer<typeof spsNodeRunnerAvailabilitySourceSchema>;
+export type SpsNodeRunnerAvailability = z.infer<typeof spsNodeRunnerAvailabilitySchema>;
+export type SpsNodeRunnerProfile = z.infer<typeof spsNodeRunnerProfileSchema>;
 export type CreateSpsNode = z.infer<typeof createSpsNodeSchema>;
 export type UpdateSpsNodeStatus = z.infer<typeof updateSpsNodeStatusSchema>;
 export type BindSpsAgentNode = z.infer<typeof bindSpsAgentNodeSchema>;
@@ -117,3 +172,4 @@ export type SpsNodeHeartbeat = z.infer<typeof spsNodeHeartbeatSchema>;
 export type SpsNodeSignedRequest = z.infer<typeof spsNodeSignedRequestSchema>;
 export type SpsNodeCommandEvent = z.infer<typeof spsNodeCommandEventSchema>;
 export type SpsNodeCommandComplete = z.infer<typeof spsNodeCommandCompleteSchema>;
+export type ReportSpsNodeRunnerAvailability = z.infer<typeof reportSpsNodeRunnerAvailabilitySchema>;

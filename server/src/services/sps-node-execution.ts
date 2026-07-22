@@ -3,8 +3,10 @@ import type { Db } from "@paperclipai/db";
 import {
   spsAgentNodeBindings,
   spsNodeAgentGrants,
+  spsNodeAgentRunnerGrants,
   spsNodeCommandEvents,
   spsNodeCommands,
+  spsNodeRunnerProfiles,
   spsNodes,
 } from "@paperclipai/db";
 import { spsNodeCapabilityForAdapter, spsNodeSupportsAdapter } from "@paperclipai/shared";
@@ -31,6 +33,32 @@ export function isSpsNodeExecutionAdapterType(adapterType: string) {
 
 function supportedByNode(adapterType: string, capabilities: Array<{ kind: string }>) {
   return spsNodeSupportsAdapter(capabilities, adapterType);
+}
+
+function runnerCanAcceptCommand(status: string, credentialStatus: string) {
+  return credentialStatus !== "auth_required" && (status === "available" || status === "unknown");
+}
+
+function runnerUnavailableMessage(input: {
+  nodeLabel: string;
+  runnerLabel: string;
+  status: string;
+  retryAfter: Date | null;
+}) {
+  if (input.status === "quota_limited") {
+    const retryHint = input.retryAfter ? ` Retry after ${input.retryAfter.toISOString()}.` : "";
+    return `Runner \"${input.runnerLabel}\" on SPS Desktop Node \"${input.nodeLabel}\" is quota limited.${retryHint}`;
+  }
+  if (input.status === "auth_required") {
+    return `Runner \"${input.runnerLabel}\" on SPS Desktop Node \"${input.nodeLabel}\" requires a local sign-in.`;
+  }
+  if (input.status === "busy") {
+    return `Runner \"${input.runnerLabel}\" on SPS Desktop Node \"${input.nodeLabel}\" is busy.`;
+  }
+  if (input.status === "offline") {
+    return `Runner \"${input.runnerLabel}\" on SPS Desktop Node \"${input.nodeLabel}\" is offline.`;
+  }
+  return `No available Runner Profile on SPS Desktop Node \"${input.nodeLabel}\" can execute this Agent.`;
 }
 
 function appendExcerpt(current: string, chunk: string) {
@@ -60,7 +88,7 @@ export async function resolveSpsNodeExecutionTarget(input: {
     .then((rows) => rows[0] ?? null);
   if (!binding) return null;
 
-  const [node, grant] = await Promise.all([
+  const [node, grant, runnerProfiles, runnerGrants] = await Promise.all([
     input.db
       .select()
       .from(spsNodes)
@@ -76,6 +104,22 @@ export async function resolveSpsNodeExecutionTarget(input: {
         isNull(spsNodeAgentGrants.revokedAt),
       ))
       .then((rows) => rows[0] ?? null),
+    input.db
+      .select()
+      .from(spsNodeRunnerProfiles)
+      .where(and(
+        eq(spsNodeRunnerProfiles.companyId, input.companyId),
+        eq(spsNodeRunnerProfiles.nodeId, binding.nodeId),
+      )),
+    input.db
+      .select({ runnerProfileId: spsNodeAgentRunnerGrants.runnerProfileId })
+      .from(spsNodeAgentRunnerGrants)
+      .where(and(
+        eq(spsNodeAgentRunnerGrants.companyId, input.companyId),
+        eq(spsNodeAgentRunnerGrants.nodeId, binding.nodeId),
+        eq(spsNodeAgentRunnerGrants.agentId, input.agentId),
+        isNull(spsNodeAgentRunnerGrants.revokedAt),
+      )),
   ]);
 
   if (!node || !grant || node.status !== "active" || !node.keyVerifiedAt) {
@@ -88,6 +132,34 @@ export async function resolveSpsNodeExecutionTarget(input: {
     throw new SpsNodeExecutionUnavailableError(
       `SPS Desktop Node "${node.displayName}" does not advertise a runtime for adapter "${input.adapterType}".`,
     );
+  }
+
+  const requiredRunnerKind = spsNodeCapabilityForAdapter(input.adapterType);
+  const compatibleProfiles = requiredRunnerKind
+    ? runnerProfiles.filter((profile) => profile.kind === requiredRunnerKind)
+    : [];
+  const grantedRunnerIds = new Set(runnerGrants.map((grant) => grant.runnerProfileId));
+  const permittedProfiles = compatibleProfiles.filter((profile) => grantedRunnerIds.has(profile.id));
+  if (compatibleProfiles.length > 0 && permittedProfiles.length === 0) {
+    throw new SpsNodeExecutionUnavailableError(
+      `SPS Desktop Node "${node.displayName}" has no approved ${requiredRunnerKind} Runner Profile for this Agent. Grant a compatible Runner Profile before waking the Agent.`,
+    );
+  }
+  const selectedRunner = permittedProfiles
+    .filter((profile) => runnerCanAcceptCommand(profile.availabilityStatus, profile.credentialStatus))
+    .sort((left, right) => {
+      const leftRank = left.availabilityStatus === "available" ? 0 : 1;
+      const rightRank = right.availabilityStatus === "available" ? 0 : 1;
+      return leftRank - rightRank || left.createdAt.getTime() - right.createdAt.getTime();
+    })[0] ?? null;
+  if (compatibleProfiles.length > 0 && !selectedRunner) {
+    const blockedRunner = permittedProfiles[0]!;
+    throw new SpsNodeExecutionUnavailableError(runnerUnavailableMessage({
+      nodeLabel: node.displayName,
+      runnerLabel: blockedRunner.label,
+      status: blockedRunner.credentialStatus === "auth_required" ? "auth_required" : blockedRunner.availabilityStatus,
+      retryAfter: blockedRunner.retryAfter,
+    }));
   }
 
   const remoteCwd = input.projectId
@@ -108,6 +180,7 @@ export async function resolveSpsNodeExecutionTarget(input: {
             companyId: input.companyId,
             nodeId: node.id,
             agentId: input.agentId,
+            runnerProfileId: selectedRunner?.id ?? null,
             heartbeatRunId: input.heartbeatRunId,
             projectId: input.projectId,
             command: commandInput.command,

@@ -91,7 +91,9 @@ export { heartbeatRunWatchdogDecisions } from "./heartbeat_run_watchdog_decision
 export {
   spsNodes,
   spsNodeHeartbeats,
+  spsNodeRunnerProfiles,
   spsNodeAgentGrants,
+  spsNodeAgentRunnerGrants,
   spsAgentNodeBindings,
   spsNodeCommands,
   spsNodeCommandEvents,

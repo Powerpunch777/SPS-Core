@@ -29,6 +29,41 @@ export type SpsNodeAgentGrant = {
   agent: { id: string; name: string; title: string | null } | null;
 };
 
+export type SpsNodeRunnerAgentGrant = {
+  id: string;
+  companyId: string;
+  nodeId: string;
+  runnerProfileId: string;
+  agentId: string;
+  grantedByUserId: string;
+  revokedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  agent: { id: string; name: string; title: string | null } | null;
+};
+
+export type SpsNodeRunnerProfile = {
+  id: string;
+  companyId: string;
+  nodeId: string;
+  runnerKey: string;
+  kind: SpsNodeCapability["kind"];
+  label: string;
+  version: string | null;
+  models: string[];
+  profileLabel: string | null;
+  credentialStatus: "ready" | "auth_required" | "unknown";
+  availabilityStatus: "available" | "busy" | "quota_limited" | "auth_required" | "offline" | "unknown";
+  availabilityDetail: string | null;
+  availabilitySource: "node_probe" | "adapter" | "manual";
+  availabilityConfidence: number | null;
+  availabilityObservedAt: string | null;
+  retryAfter: string | null;
+  createdAt: string;
+  updatedAt: string;
+  agentGrants: SpsNodeRunnerAgentGrant[];
+};
+
 export type SpsAgentNodeBinding = {
   id: string;
   companyId: string;
@@ -58,6 +93,7 @@ export type SpsNode = {
   updatedAt: string;
   agentGrants: SpsNodeAgentGrant[];
   primaryAgentBindings: SpsAgentNodeBinding[];
+  runners: SpsNodeRunnerProfile[];
 };
 
 export const spsNodesApi = {
@@ -68,6 +104,10 @@ export const spsNodesApi = {
     api.put<SpsNodeAgentGrant>(`/sps-nodes/${nodeId}/agent-grants/${agentId}`, {}),
   revokeAgent: (nodeId: string, agentId: string) =>
     api.delete<void>(`/sps-nodes/${nodeId}/agent-grants/${agentId}`),
+  grantAgentRunner: (nodeId: string, runnerProfileId: string, agentId: string) =>
+    api.put<SpsNodeRunnerAgentGrant>(`/sps-nodes/${nodeId}/runners/${runnerProfileId}/agent-grants/${agentId}`, {}),
+  revokeAgentRunner: (nodeId: string, runnerProfileId: string, agentId: string) =>
+    api.delete<void>(`/sps-nodes/${nodeId}/runners/${runnerProfileId}/agent-grants/${agentId}`),
   bindPrimary: (agentId: string, nodeId: string) =>
     api.put<SpsAgentNodeBinding>(`/agents/${agentId}/sps-node-binding`, { nodeId }),
   clearPrimary: (agentId: string) => api.delete<void>(`/agents/${agentId}/sps-node-binding`),

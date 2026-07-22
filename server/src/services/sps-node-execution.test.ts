@@ -7,8 +7,10 @@ import {
   createDb,
   spsAgentNodeBindings,
   spsNodeAgentGrants,
+  spsNodeAgentRunnerGrants,
   spsNodeCommandEvents,
   spsNodeCommands,
+  spsNodeRunnerProfiles,
   spsNodes,
 } from "@paperclipai/db";
 import {
@@ -47,8 +49,10 @@ describeEmbeddedPostgres("SPS Node execution target", () => {
   afterEach(async () => {
     await db.delete(spsNodeCommandEvents);
     await db.delete(spsNodeCommands);
+    await db.delete(spsNodeAgentRunnerGrants);
     await db.delete(spsAgentNodeBindings);
     await db.delete(spsNodeAgentGrants);
+    await db.delete(spsNodeRunnerProfiles);
     await db.delete(spsNodes);
     await db.delete(agents);
     await db.delete(companies);
@@ -225,6 +229,61 @@ describeEmbeddedPostgres("SPS Node execution target", () => {
       heartbeatRunId: null,
       projectId: null,
     })).rejects.toBeInstanceOf(SpsNodeExecutionUnavailableError);
+  });
+
+  it("does not dispatch to a Runner Profile that requires a local sign-in", async () => {
+    const fixture = await createFixture();
+    const runner = await db.insert(spsNodeRunnerProfiles).values({
+      companyId: fixture.company.id,
+      nodeId: fixture.node.id,
+      runnerKey: "codex_cli:personal",
+      kind: "codex_cli",
+      label: "Codex CLI",
+      profileLabel: "Personal",
+      credentialStatus: "auth_required",
+      availabilityStatus: "auth_required",
+      availabilitySource: "adapter",
+      availabilityObservedAt: new Date(),
+    }).returning().then((rows) => rows[0]!);
+    await db.insert(spsNodeAgentRunnerGrants).values({
+      companyId: fixture.company.id,
+      nodeId: fixture.node.id,
+      runnerProfileId: runner.id,
+      agentId: fixture.agent.id,
+      grantedByUserId: "owner-user",
+    });
+
+    await expect(resolveSpsNodeExecutionTarget({
+      db,
+      companyId: fixture.company.id,
+      agentId: fixture.agent.id,
+      adapterType: "codex_local",
+      heartbeatRunId: null,
+      projectId: null,
+    })).rejects.toThrow(/requires a local sign-in/);
+  });
+
+  it("requires an explicit Runner Profile grant once a Node advertises profiles", async () => {
+    const fixture = await createFixture();
+    await db.insert(spsNodeRunnerProfiles).values({
+      companyId: fixture.company.id,
+      nodeId: fixture.node.id,
+      runnerKey: "codex_cli:personal",
+      kind: "codex_cli",
+      label: "Codex CLI",
+      availabilityStatus: "available",
+      availabilitySource: "node_probe",
+      availabilityObservedAt: new Date(),
+    });
+
+    await expect(resolveSpsNodeExecutionTarget({
+      db,
+      companyId: fixture.company.id,
+      agentId: fixture.agent.id,
+      adapterType: "codex_local",
+      heartbeatRunId: null,
+      projectId: null,
+    })).rejects.toThrow(/no approved codex_cli Runner Profile/);
   });
 
   it.each(REMOTE_CLI_RUNTIME_CASES)("accepts the advertised runtime for %s", async (adapterType, capabilityKind, label) => {

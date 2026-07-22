@@ -35,6 +35,15 @@ function nodeStatusBadge(status: SpsNode["status"]) {
   return <Badge variant="destructive">Revoked</Badge>;
 }
 
+function runnerAvailabilityBadge(status: SpsNode["runners"][number]["availabilityStatus"]) {
+  if (status === "available") return <Badge className="bg-emerald-600 text-white hover:bg-emerald-600">Available</Badge>;
+  if (status === "busy") return <Badge className="bg-amber-600 text-white hover:bg-amber-600">Busy</Badge>;
+  if (status === "quota_limited") return <Badge variant="destructive">Quota limited</Badge>;
+  if (status === "auth_required") return <Badge variant="destructive">Sign-in required</Badge>;
+  if (status === "offline") return <Badge variant="outline">Offline</Badge>;
+  return <Badge variant="outline">Status unknown</Badge>;
+}
+
 function agentLabel(agent: Pick<Agent, "name" | "title" | "role">) {
   return agent.title?.trim() || `${agent.name} (${agent.role})`;
 }
@@ -172,7 +181,7 @@ export function SpsNodes() {
           <h1 className="text-lg font-semibold">SPS Nodes</h1>
         </div>
         <p className="max-w-3xl text-sm text-muted-foreground">
-          Approve computers registered by SPS Desktop, then grant each Agent access to the CLI or local AI available on that computer.
+          Approve computers registered by SPS Desktop, then grant each Agent access to the CLI or local AI available on that computer. Runner Profiles show safe readiness and quota evidence without exposing local credentials.
         </p>
         <div className="flex items-start gap-2 rounded-lg border border-border bg-muted/30 px-4 py-3 text-sm text-muted-foreground">
           <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0" />
@@ -247,10 +256,39 @@ export function SpsNodes() {
                     </div>
                   </div>
 
+                  <div className="space-y-2 border-t border-border pt-5">
+                    <div className="flex items-center gap-2 text-sm font-medium"><ShieldCheck className="h-4 w-4 text-muted-foreground" />Runner profiles</div>
+                    {node.runners.length > 0 ? (
+                      <div className="divide-y divide-border rounded-md border border-border">
+                        {node.runners.map((runner) => (
+                          <div key={runner.id} className="flex flex-wrap items-center justify-between gap-3 px-3 py-3">
+                            <div className="min-w-0">
+                              <div className="flex flex-wrap items-center gap-2 text-sm font-medium">
+                                <span>{runner.label}</span>
+                                {runner.profileLabel ? <Badge variant="outline">{runner.profileLabel}</Badge> : null}
+                                {runner.credentialStatus === "ready" ? <Badge variant="outline" className="border-emerald-500/50 text-emerald-700">Local sign-in ready</Badge> : null}
+                              </div>
+                              <p className="text-xs text-muted-foreground">
+                                {runner.availabilityObservedAt
+                                  ? `Reported ${new Date(runner.availabilityObservedAt).toLocaleString()} via ${runner.availabilitySource}`
+                                  : "This Node has not reported Runner availability yet."}
+                                {runner.retryAfter ? ` - Retry after ${new Date(runner.retryAfter).toLocaleString()}` : ""}
+                              </p>
+                              {runner.availabilityDetail ? <p className="mt-1 text-xs text-muted-foreground">{runner.availabilityDetail}</p> : null}
+                            </div>
+                            {runnerAvailabilityBadge(runner.availabilityStatus)}
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="text-sm text-muted-foreground">No Runner Profiles have been reported yet. Reconnect SPS Desktop to publish safe runtime metadata.</p>
+                    )}
+                  </div>
+
                   <div className="space-y-3 border-t border-border pt-5">
                     <div>
                       <h3 className="text-sm font-semibold">Agent execution access</h3>
-                      <p className="text-sm text-muted-foreground">Only granted Agents can use this computer. The picker lists only Agents whose adapter has been discovered on this Node. The first approved Node granted to an Agent becomes its primary execution Node. Later grants are available for reassignment and leave the current primary unchanged. Ollama and LM Studio each have an SPS local adapter; OpenCode can also use either provider when configured on this Node.</p>
+                      <p className="text-sm text-muted-foreground">Only granted Agents can use this computer. The picker lists only Agents whose adapter has been discovered on this Node. A new Agent grant includes currently compatible Runner Profiles; later policy can narrow that access to a selected local profile. The first approved Node granted to an Agent becomes its primary execution Node. Later grants are available for reassignment and leave the current primary unchanged.</p>
                     </div>
 
                     {node.status === "active" ? (

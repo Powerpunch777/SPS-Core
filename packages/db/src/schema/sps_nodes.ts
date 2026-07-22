@@ -31,6 +31,41 @@ export type SpsNodeCapability = {
   models?: string[];
 };
 
+/**
+ * A public, safe-to-share summary of a runtime account on an SPS Node. This
+ * deliberately never contains a token, API key, cookie, home directory, or
+ * provider account identifier.
+ */
+export type SpsNodeRunnerAvailabilityStatus =
+  | "available"
+  | "busy"
+  | "quota_limited"
+  | "auth_required"
+  | "offline"
+  | "unknown";
+
+export type SpsNodeRunnerCredentialStatus = "ready" | "auth_required" | "unknown";
+
+export type SpsNodeRunnerAvailabilitySource = "node_probe" | "adapter" | "manual";
+
+export type SpsNodeRunnerProfile = {
+  runnerKey: string;
+  kind: SpsNodeCapability["kind"];
+  label: string;
+  version?: string | null;
+  models?: string[];
+  profileLabel?: string | null;
+  credentialStatus?: SpsNodeRunnerCredentialStatus;
+  availability?: {
+    status: SpsNodeRunnerAvailabilityStatus;
+    observedAt: string;
+    source: SpsNodeRunnerAvailabilitySource;
+    confidence?: number | null;
+    retryAfter?: string | null;
+    detail?: string | null;
+  };
+};
+
 export const spsNodes = pgTable(
   "sps_nodes",
   {
@@ -77,6 +112,46 @@ export const spsNodeHeartbeats = pgTable(
   }),
 );
 
+/**
+ * A runner is the Node-local execution profile an Agent can be allowed to use.
+ * Secrets remain in the Node's OS-backed storage; the Hub retains only this
+ * operational metadata and the most recently reported availability snapshot.
+ */
+export const spsNodeRunnerProfiles = pgTable(
+  "sps_node_runner_profiles",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    nodeId: uuid("node_id").notNull().references(() => spsNodes.id, { onDelete: "cascade" }),
+    runnerKey: text("runner_key").notNull(),
+    kind: text("kind").notNull(),
+    label: text("label").notNull(),
+    version: text("version"),
+    models: jsonb("models").$type<string[]>().notNull().default([]),
+    profileLabel: text("profile_label"),
+    credentialStatus: text("credential_status").notNull().default("unknown"),
+    availabilityStatus: text("availability_status").notNull().default("unknown"),
+    availabilityDetail: text("availability_detail"),
+    availabilitySource: text("availability_source").notNull().default("node_probe"),
+    availabilityConfidence: integer("availability_confidence"),
+    availabilityObservedAt: timestamp("availability_observed_at", { withTimezone: true }),
+    retryAfter: timestamp("retry_after", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    nodeRunnerKeyUniqueIdx: uniqueIndex("sps_node_runner_profiles_node_runner_key_unique_idx").on(
+      table.nodeId,
+      table.runnerKey,
+    ),
+    companyNodeIdx: index("sps_node_runner_profiles_company_node_idx").on(table.companyId, table.nodeId),
+    nodeAvailabilityIdx: index("sps_node_runner_profiles_node_availability_idx").on(
+      table.nodeId,
+      table.availabilityStatus,
+    ),
+  }),
+);
+
 export const spsNodeAgentGrants = pgTable(
   "sps_node_agent_grants",
   {
@@ -96,6 +171,41 @@ export const spsNodeAgentGrants = pgTable(
     ),
     companyNodeIdx: index("sps_node_agent_grants_company_node_idx").on(table.companyId, table.nodeId),
     companyAgentIdx: index("sps_node_agent_grants_company_agent_idx").on(table.companyId, table.agentId),
+  }),
+);
+
+/**
+ * An execution grant beneath a Node-level Agent grant. Once a Node advertises
+ * Runner Profiles, an Agent must have this exact grant for the selected local
+ * profile. Node-level grants remain the coarse machine boundary and preserve
+ * compatibility for commands created before Runner Profiles existed.
+ */
+export const spsNodeAgentRunnerGrants = pgTable(
+  "sps_node_agent_runner_grants",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    nodeId: uuid("node_id").notNull().references(() => spsNodes.id, { onDelete: "cascade" }),
+    runnerProfileId: uuid("runner_profile_id")
+      .notNull()
+      .references(() => spsNodeRunnerProfiles.id, { onDelete: "cascade" }),
+    agentId: uuid("agent_id").notNull().references(() => agents.id, { onDelete: "cascade" }),
+    grantedByUserId: text("granted_by_user_id").notNull(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    nodeRunnerAgentUniqueIdx: uniqueIndex("sps_node_agent_runner_grants_node_runner_agent_unique_idx").on(
+      table.nodeId,
+      table.runnerProfileId,
+      table.agentId,
+    ),
+    companyNodeAgentIdx: index("sps_node_agent_runner_grants_company_node_agent_idx").on(
+      table.companyId,
+      table.nodeId,
+      table.agentId,
+    ),
   }),
 );
 
@@ -128,6 +238,7 @@ export const spsNodeCommands = pgTable(
     companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
     nodeId: uuid("node_id").notNull().references(() => spsNodes.id, { onDelete: "cascade" }),
     agentId: uuid("agent_id").notNull().references(() => agents.id, { onDelete: "cascade" }),
+    runnerProfileId: uuid("runner_profile_id").references(() => spsNodeRunnerProfiles.id, { onDelete: "set null" }),
     heartbeatRunId: uuid("heartbeat_run_id").references(() => heartbeatRuns.id, { onDelete: "set null" }),
     projectId: uuid("project_id").references(() => projects.id, { onDelete: "set null" }),
     status: text("status").notNull().default("queued"),
@@ -159,6 +270,7 @@ export const spsNodeCommands = pgTable(
       table.agentId,
       table.createdAt,
     ),
+    runnerCreatedIdx: index("sps_node_commands_runner_created_idx").on(table.runnerProfileId, table.createdAt),
     heartbeatRunIdx: index("sps_node_commands_heartbeat_run_idx").on(table.heartbeatRunId),
   }),
 );

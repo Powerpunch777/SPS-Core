@@ -8,12 +8,15 @@ import {
   spsNodeCommandEvents,
   spsNodeCommands,
   spsNodeAgentGrants,
+  spsNodeAgentRunnerGrants,
   spsNodeHeartbeats,
+  spsNodeRunnerProfiles,
   spsNodes,
 } from "@paperclipai/db";
 import {
   bindSpsAgentNodeSchema,
   createSpsNodeSchema,
+  reportSpsNodeRunnerAvailabilitySchema,
   spsNodeHeartbeatMessage,
   spsNodeHeartbeatSchema,
   spsNodeCommandCompleteSchema,
@@ -23,6 +26,7 @@ import {
   spsNodeCapabilityForAdapter,
   spsNodeSupportsAdapter,
   isAgentStatusAssignableToWork,
+  type SpsNodeRunnerProfile,
 } from "@paperclipai/shared";
 import { badRequest, forbidden, notFound, unauthorized } from "../errors.js";
 import { validate } from "../middleware/validate.js";
@@ -186,12 +190,156 @@ export function spsNodeRoutes(db: Db) {
     });
   }
 
+  function fallbackRunnerProfiles(capabilities: typeof spsNodes.$inferSelect["capabilities"]): SpsNodeRunnerProfile[] {
+    return capabilities.map((capability) => ({
+      runnerKey: `${capability.kind}:default`,
+      kind: capability.kind,
+      label: capability.label,
+      version: capability.version ?? null,
+      ...(capability.models?.length ? { models: capability.models } : {}),
+    }));
+  }
+
+  async function reconcileNodeRunnerProfiles(
+    node: typeof spsNodes.$inferSelect,
+    runners: ReadonlyArray<SpsNodeRunnerProfile>,
+  ) {
+    const now = new Date();
+    const seenRunnerKeys = new Set<string>();
+    const profiles = [];
+    for (const runner of runners) {
+      if (seenRunnerKeys.has(runner.runnerKey)) continue;
+      seenRunnerKeys.add(runner.runnerKey);
+      const availability = runner.availability;
+      const observedAt = availability?.observedAt ? new Date(availability.observedAt) : now;
+      const retryAfter = availability?.retryAfter ? new Date(availability.retryAfter) : null;
+      const profile = await db
+        .insert(spsNodeRunnerProfiles)
+        .values({
+          companyId: node.companyId,
+          nodeId: node.id,
+          runnerKey: runner.runnerKey,
+          kind: runner.kind,
+          label: runner.label,
+          version: runner.version ?? null,
+          models: runner.models ?? [],
+          profileLabel: runner.profileLabel ?? null,
+          credentialStatus: runner.credentialStatus ?? "unknown",
+          availabilityStatus: availability?.status ?? "unknown",
+          availabilityDetail: availability?.detail ?? null,
+          availabilitySource: availability?.source ?? "node_probe",
+          availabilityConfidence: availability?.confidence ?? null,
+          availabilityObservedAt: observedAt,
+          retryAfter,
+          updatedAt: now,
+        })
+        .onConflictDoUpdate({
+          target: [spsNodeRunnerProfiles.nodeId, spsNodeRunnerProfiles.runnerKey],
+          set: {
+            kind: runner.kind,
+            label: runner.label,
+            version: runner.version ?? null,
+            models: runner.models ?? [],
+            profileLabel: runner.profileLabel ?? null,
+            credentialStatus: runner.credentialStatus ?? "unknown",
+            availabilityStatus: availability?.status ?? "unknown",
+            availabilityDetail: availability?.detail ?? null,
+            availabilitySource: availability?.source ?? "node_probe",
+            availabilityConfidence: availability?.confidence ?? null,
+            availabilityObservedAt: observedAt,
+            retryAfter,
+            updatedAt: now,
+          },
+        })
+        .returning()
+        .then((rows) => rows[0]!);
+      profiles.push(profile);
+    }
+    return profiles;
+  }
+
+  async function grantCompatibleRunners(input: {
+    node: typeof spsNodes.$inferSelect;
+    agent: typeof agents.$inferSelect;
+    grantedByUserId: string;
+    restoreRevoked?: boolean;
+  }) {
+    const requiredKind = spsNodeCapabilityForAdapter(input.agent.adapterType);
+    if (!requiredKind) return [];
+    const now = new Date();
+    const compatibleProfiles = await db
+      .select()
+      .from(spsNodeRunnerProfiles)
+      .where(and(
+        eq(spsNodeRunnerProfiles.companyId, input.node.companyId),
+        eq(spsNodeRunnerProfiles.nodeId, input.node.id),
+        eq(spsNodeRunnerProfiles.kind, requiredKind),
+      ));
+    return await Promise.all(compatibleProfiles.map(async (runner) => {
+      const existing = await db
+        .select()
+        .from(spsNodeAgentRunnerGrants)
+        .where(and(
+          eq(spsNodeAgentRunnerGrants.nodeId, input.node.id),
+          eq(spsNodeAgentRunnerGrants.runnerProfileId, runner.id),
+          eq(spsNodeAgentRunnerGrants.agentId, input.agent.id),
+        ))
+        .then((rows) => rows[0] ?? null);
+      if (existing?.revokedAt && input.restoreRevoked === false) return existing;
+      if (existing) {
+        return await db
+          .update(spsNodeAgentRunnerGrants)
+          .set({
+            companyId: input.node.companyId,
+            grantedByUserId: input.grantedByUserId,
+            revokedAt: null,
+            updatedAt: now,
+          })
+          .where(eq(spsNodeAgentRunnerGrants.id, existing.id))
+          .returning()
+          .then((rows) => rows[0]!);
+      }
+      return await db
+        .insert(spsNodeAgentRunnerGrants)
+        .values({
+          companyId: input.node.companyId,
+          nodeId: input.node.id,
+          runnerProfileId: runner.id,
+          agentId: input.agent.id,
+          grantedByUserId: input.grantedByUserId,
+        })
+        .returning()
+        .then((rows) => rows[0]!);
+    }));
+  }
+
+  async function syncExistingNodeAgentRunnerGrants(
+    node: typeof spsNodes.$inferSelect,
+    grantedByUserId: string,
+  ) {
+    const activeGrants = await db
+      .select({ agent: agents })
+      .from(spsNodeAgentGrants)
+      .innerJoin(agents, eq(agents.id, spsNodeAgentGrants.agentId))
+      .where(and(
+        eq(spsNodeAgentGrants.companyId, node.companyId),
+        eq(spsNodeAgentGrants.nodeId, node.id),
+        isNull(spsNodeAgentGrants.revokedAt),
+      ));
+    return await Promise.all(activeGrants.map(async ({ agent }) => await grantCompatibleRunners({
+      node,
+      agent,
+      grantedByUserId,
+      restoreRevoked: false,
+    })));
+  }
+
   async function commandHasCurrentAuthority(
     node: typeof spsNodes.$inferSelect,
     command: typeof spsNodeCommands.$inferSelect,
   ) {
     if (node.status !== "active" || !node.keyVerifiedAt) return false;
-    const [grant, binding] = await Promise.all([
+    const [grant, binding, runnerGrants] = await Promise.all([
       db
         .select({ id: spsNodeAgentGrants.id })
         .from(spsNodeAgentGrants)
@@ -211,8 +359,35 @@ export function spsNodeRoutes(db: Db) {
           eq(spsAgentNodeBindings.agentId, command.agentId),
         ))
         .then((rows) => rows[0] ?? null),
+      command.runnerProfileId
+        ? db
+          .select({ runnerProfileId: spsNodeAgentRunnerGrants.runnerProfileId })
+          .from(spsNodeAgentRunnerGrants)
+          .where(and(
+            eq(spsNodeAgentRunnerGrants.companyId, node.companyId),
+            eq(spsNodeAgentRunnerGrants.nodeId, node.id),
+            eq(spsNodeAgentRunnerGrants.agentId, command.agentId),
+            isNull(spsNodeAgentRunnerGrants.revokedAt),
+          ))
+        : Promise.resolve([]),
     ]);
-    return Boolean(grant && binding);
+    if (!grant || !binding) return false;
+    // Commands created before Runner Profiles were introduced remain valid.
+    // Every command that names a profile must retain that exact grant.
+    return !command.runnerProfileId
+      || runnerGrants.some((runnerGrant) => runnerGrant.runnerProfileId === command.runnerProfileId);
+  }
+
+  async function commandRunnerCanStart(command: typeof spsNodeCommands.$inferSelect) {
+    if (!command.runnerProfileId) return true;
+    const runner = await db
+      .select()
+      .from(spsNodeRunnerProfiles)
+      .where(eq(spsNodeRunnerProfiles.id, command.runnerProfileId))
+      .then((rows) => rows[0] ?? null);
+    return runner !== null
+      && runner.credentialStatus !== "auth_required"
+      && (runner.availabilityStatus === "available" || runner.availabilityStatus === "unknown");
   }
 
   async function failActiveNodeCommands(input: {
@@ -258,6 +433,10 @@ export function spsNodeRoutes(db: Db) {
       .update(spsNodeAgentGrants)
       .set({ revokedAt: now, updatedAt: now })
       .where(and(eq(spsNodeAgentGrants.nodeId, node.id), isNull(spsNodeAgentGrants.revokedAt)));
+    await db
+      .update(spsNodeAgentRunnerGrants)
+      .set({ revokedAt: now, updatedAt: now })
+      .where(and(eq(spsNodeAgentRunnerGrants.nodeId, node.id), isNull(spsNodeAgentRunnerGrants.revokedAt)));
     await db.delete(spsAgentNodeBindings).where(eq(spsAgentNodeBindings.nodeId, node.id));
     await failActiveNodeCommands({ nodeId: node.id, reason: input.reason });
     await logNodeMutation(req, {
@@ -272,7 +451,7 @@ export function spsNodeRoutes(db: Db) {
     const companyId = req.params.companyId as string;
     await assertSpsNodeAdmin(req, companyId);
 
-    const [nodes, grants, bindings, companyAgents] = await Promise.all([
+    const [nodes, grants, runnerGrants, bindings, runners, companyAgents] = await Promise.all([
       db
         .select()
         .from(spsNodes)
@@ -284,8 +463,17 @@ export function spsNodeRoutes(db: Db) {
         .where(and(eq(spsNodeAgentGrants.companyId, companyId), isNull(spsNodeAgentGrants.revokedAt))),
       db
         .select()
+        .from(spsNodeAgentRunnerGrants)
+        .where(and(eq(spsNodeAgentRunnerGrants.companyId, companyId), isNull(spsNodeAgentRunnerGrants.revokedAt))),
+      db
+        .select()
         .from(spsAgentNodeBindings)
         .where(eq(spsAgentNodeBindings.companyId, companyId)),
+      db
+        .select()
+        .from(spsNodeRunnerProfiles)
+        .where(eq(spsNodeRunnerProfiles.companyId, companyId))
+        .orderBy(spsNodeRunnerProfiles.createdAt),
       db
         .select({ id: agents.id, name: agents.name, title: agents.title })
         .from(agents)
@@ -307,6 +495,17 @@ export function spsNodeRoutes(db: Db) {
           ...binding,
           agent: agentById.get(binding.agentId) ?? null,
         })),
+      runners: runners
+        .filter((runner) => runner.nodeId === node.id)
+        .map((runner) => ({
+          ...runner,
+          agentGrants: runnerGrants
+            .filter((grant) => grant.runnerProfileId === runner.id)
+            .map((grant) => ({
+              ...grant,
+              agent: agentById.get(grant.agentId) ?? null,
+            })),
+        })),
     })));
   });
 
@@ -319,6 +518,14 @@ export function spsNodeRoutes(db: Db) {
       assertCompanyAccess(req, companyId);
       const userId = actorUserId(req);
       if (!userId) throw unauthorized("Board authentication required");
+      const registrationCapabilities = req.body.capabilities.length > 0
+        ? req.body.capabilities
+        : (req.body.runners ?? []).map((runner: SpsNodeRunnerProfile) => ({
+          kind: runner.kind,
+          label: runner.label,
+          version: runner.version ?? null,
+          ...(runner.models?.length ? { models: runner.models } : {}),
+        }));
 
       const now = new Date();
       const existing = await db
@@ -338,7 +545,7 @@ export function spsNodeRoutes(db: Db) {
             displayName: req.body.displayName,
             platform: req.body.platform,
             appVersion: req.body.appVersion ?? null,
-            capabilities: req.body.capabilities,
+            capabilities: registrationCapabilities,
             lastSeenAt: now,
             updatedAt: now,
           })
@@ -354,19 +561,29 @@ export function spsNodeRoutes(db: Db) {
             publicKey: req.body.publicKey,
             platform: req.body.platform,
             appVersion: req.body.appVersion ?? null,
-            capabilities: req.body.capabilities,
+            capabilities: registrationCapabilities,
             lastSeenAt: now,
           })
           .returning()
           .then((rows) => rows[0]!);
 
+      const runners = await reconcileNodeRunnerProfiles(
+        node,
+        req.body.runners ?? fallbackRunnerProfiles(registrationCapabilities),
+      );
+      await syncExistingNodeAgentRunnerGrants(node, userId);
+
       await logNodeMutation(req, {
         companyId,
         action: existing ? "sps_node.updated" : "sps_node.registered",
         nodeId: node.id,
-        details: { status: node.status, capabilityKinds: node.capabilities.map((item) => item.kind) },
+        details: {
+          status: node.status,
+          capabilityKinds: node.capabilities.map((item) => item.kind),
+          runnerCount: runners.length,
+        },
       });
-      res.status(existing ? 200 : 201).json(node);
+      res.status(existing ? 200 : 201).json({ ...node, runners });
     },
   );
 
@@ -434,6 +651,62 @@ export function spsNodeRoutes(db: Db) {
       res.json(updated);
     },
   );
+
+  router.post("/sps-nodes/:nodeId/runners/availability", async (req, res) => {
+    const node = await getNode(req.params.nodeId as string);
+    const report = reportSpsNodeRunnerAvailabilitySchema.parse(req.body ?? {});
+    await assertSignedNodeRequest(req, node);
+    const runnerKeys = report.runners.map((runner) => runner.runnerKey);
+    const profiles = await db
+      .select()
+      .from(spsNodeRunnerProfiles)
+      .where(and(
+        eq(spsNodeRunnerProfiles.nodeId, node.id),
+        inArray(spsNodeRunnerProfiles.runnerKey, runnerKeys),
+      ));
+    const profileByKey = new Map(profiles.map((profile) => [profile.runnerKey, profile]));
+    const missingRunnerKey = runnerKeys.find((runnerKey) => !profileByKey.has(runnerKey));
+    if (missingRunnerKey) {
+      throw badRequest(`SPS Node runner \"${missingRunnerKey}\" is not registered on this Node.`);
+    }
+
+    const now = new Date();
+    const updated = await db.transaction(async (tx) => await Promise.all(report.runners.map(async (runner) => {
+      const profile = profileByKey.get(runner.runnerKey)!;
+      return await tx
+        .update(spsNodeRunnerProfiles)
+        .set({
+          credentialStatus: runner.credentialStatus ?? profile.credentialStatus,
+          availabilityStatus: runner.availability.status,
+          availabilityDetail: runner.availability.detail ?? null,
+          availabilitySource: runner.availability.source,
+          availabilityConfidence: runner.availability.confidence ?? null,
+          availabilityObservedAt: new Date(runner.availability.observedAt),
+          retryAfter: runner.availability.retryAfter ? new Date(runner.availability.retryAfter) : null,
+          updatedAt: now,
+        })
+        .where(eq(spsNodeRunnerProfiles.id, profile.id))
+        .returning()
+        .then((rows) => rows[0]!);
+    })));
+    await db
+      .update(spsNodes)
+      .set({ lastSeenAt: now, updatedAt: now })
+      .where(eq(spsNodes.id, node.id));
+    await logNodeMutation(req, {
+      companyId: node.companyId,
+      action: "sps_node.runner_availability_reported",
+      nodeId: node.id,
+      details: {
+        runners: updated.map((runner) => ({
+          runnerKey: runner.runnerKey,
+          status: runner.availabilityStatus,
+          source: runner.availabilitySource,
+        })),
+      },
+    });
+    res.json(updated);
+  });
 
   router.post("/sps-nodes/:nodeId/approve", async (req, res) => {
     const node = await getNode(req.params.nodeId as string);
@@ -513,6 +786,11 @@ export function spsNodeRoutes(db: Db) {
       })
       .returning()
       .then((rows) => rows[0]!);
+    const runnerGrants = await grantCompatibleRunners({
+      node,
+      agent,
+      grantedByUserId: actorUserId(req) ?? "local-board",
+    });
     const existingBinding = await db
       .select({ id: spsAgentNodeBindings.id })
       .from(spsAgentNodeBindings)
@@ -545,7 +823,7 @@ export function spsNodeRoutes(db: Db) {
       companyId: node.companyId,
       action: "sps_node.agent_granted",
       nodeId: node.id,
-      details: { agentId: agent.id },
+      details: { agentId: agent.id, runnerGrantCount: runnerGrants.length },
     });
     res.json(grant);
   });
@@ -565,6 +843,14 @@ export function spsNodeRoutes(db: Db) {
         eq(spsNodeAgentGrants.agentId, agent.id),
         isNull(spsNodeAgentGrants.revokedAt),
       ));
+    await db
+      .update(spsNodeAgentRunnerGrants)
+      .set({ revokedAt: now, updatedAt: now })
+      .where(and(
+        eq(spsNodeAgentRunnerGrants.nodeId, node.id),
+        eq(spsNodeAgentRunnerGrants.agentId, agent.id),
+        isNull(spsNodeAgentRunnerGrants.revokedAt),
+      ));
     await db.delete(spsAgentNodeBindings).where(and(
       eq(spsAgentNodeBindings.nodeId, node.id),
       eq(spsAgentNodeBindings.agentId, agent.id),
@@ -579,6 +865,103 @@ export function spsNodeRoutes(db: Db) {
       action: "sps_node.agent_revoked",
       nodeId: node.id,
       details: { agentId: agent.id },
+    });
+    res.status(204).end();
+  });
+
+  router.put("/sps-nodes/:nodeId/runners/:runnerProfileId/agent-grants/:agentId", async (req, res) => {
+    const node = await getNode(req.params.nodeId as string);
+    await assertSpsNodeAdmin(req, node.companyId);
+    const [agent, runner] = await Promise.all([
+      getAgent(req.params.agentId as string),
+      db
+        .select()
+        .from(spsNodeRunnerProfiles)
+        .where(and(
+          eq(spsNodeRunnerProfiles.id, req.params.runnerProfileId as string),
+          eq(spsNodeRunnerProfiles.nodeId, node.id),
+        ))
+        .then((rows) => rows[0] ?? null),
+    ]);
+    if (agent.companyId !== node.companyId) throw forbidden("Agent belongs to another company");
+    if (!runner || runner.companyId !== node.companyId) throw notFound("SPS Node Runner Profile not found");
+    const requiredKind = spsNodeCapabilityForAdapter(agent.adapterType);
+    if (!requiredKind || runner.kind !== requiredKind) {
+      throw badRequest(`Runner \"${runner.label}\" cannot execute Agent \"${agent.name}\".`);
+    }
+    const nodeGrant = await db
+      .select({ id: spsNodeAgentGrants.id })
+      .from(spsNodeAgentGrants)
+      .where(and(
+        eq(spsNodeAgentGrants.nodeId, node.id),
+        eq(spsNodeAgentGrants.agentId, agent.id),
+        isNull(spsNodeAgentGrants.revokedAt),
+      ))
+      .then((rows) => rows[0] ?? null);
+    if (!nodeGrant) throw forbidden("Grant this SPS Node to the Agent before granting a Runner Profile");
+    const now = new Date();
+    const grant = await db
+      .insert(spsNodeAgentRunnerGrants)
+      .values({
+        companyId: node.companyId,
+        nodeId: node.id,
+        runnerProfileId: runner.id,
+        agentId: agent.id,
+        grantedByUserId: actorUserId(req) ?? "local-board",
+      })
+      .onConflictDoUpdate({
+        target: [
+          spsNodeAgentRunnerGrants.nodeId,
+          spsNodeAgentRunnerGrants.runnerProfileId,
+          spsNodeAgentRunnerGrants.agentId,
+        ],
+        set: {
+          companyId: node.companyId,
+          grantedByUserId: actorUserId(req) ?? "local-board",
+          revokedAt: null,
+          updatedAt: now,
+        },
+      })
+      .returning()
+      .then((rows) => rows[0]!);
+    await logNodeMutation(req, {
+      companyId: node.companyId,
+      action: "sps_node.agent_runner_granted",
+      nodeId: node.id,
+      details: { agentId: agent.id, runnerProfileId: runner.id },
+    });
+    res.json(grant);
+  });
+
+  router.delete("/sps-nodes/:nodeId/runners/:runnerProfileId/agent-grants/:agentId", async (req, res) => {
+    const node = await getNode(req.params.nodeId as string);
+    await assertSpsNodeAdmin(req, node.companyId);
+    const runner = await db
+      .select()
+      .from(spsNodeRunnerProfiles)
+      .where(and(
+        eq(spsNodeRunnerProfiles.id, req.params.runnerProfileId as string),
+        eq(spsNodeRunnerProfiles.nodeId, node.id),
+      ))
+      .then((rows) => rows[0] ?? null);
+    if (!runner) throw notFound("SPS Node Runner Profile not found");
+    const agent = await getAgent(req.params.agentId as string);
+    if (agent.companyId !== node.companyId) throw forbidden("Agent belongs to another company");
+    const now = new Date();
+    await db
+      .update(spsNodeAgentRunnerGrants)
+      .set({ revokedAt: now, updatedAt: now })
+      .where(and(
+        eq(spsNodeAgentRunnerGrants.nodeId, node.id),
+        eq(spsNodeAgentRunnerGrants.runnerProfileId, runner.id),
+        eq(spsNodeAgentRunnerGrants.agentId, agent.id),
+        isNull(spsNodeAgentRunnerGrants.revokedAt),
+      ));
+    await logNodeMutation(req, {
+      companyId: node.companyId,
+      action: "sps_node.agent_runner_revoked",
+      nodeId: node.id,
+      details: { agentId: agent.id, runnerProfileId: runner.id },
     });
     res.status(204).end();
   });
@@ -719,6 +1102,19 @@ export function spsNodeRoutes(db: Db) {
           .set({
             status: "failed",
             error: "SPS Node access was revoked or reassigned before this command was claimed.",
+            finishedAt: now,
+            updatedAt: now,
+          })
+          .where(and(eq(spsNodeCommands.id, candidate.id), eq(spsNodeCommands.status, "queued")));
+        continue;
+      }
+
+      if (!await commandRunnerCanStart(candidate)) {
+        await db
+          .update(spsNodeCommands)
+          .set({
+            status: "failed",
+            error: "The selected SPS Node Runner Profile is unavailable, requires a local sign-in, or no longer exists.",
             finishedAt: now,
             updatedAt: now,
           })

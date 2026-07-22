@@ -659,6 +659,11 @@ export {
 
 export {
   spsNodeCapabilitySchema,
+  spsNodeRunnerAvailabilityStatusSchema,
+  spsNodeRunnerCredentialStatusSchema,
+  spsNodeRunnerAvailabilitySourceSchema,
+  spsNodeRunnerAvailabilitySchema,
+  spsNodeRunnerProfileSchema,
   SPS_NODE_CAPABILITY_BY_ADAPTER,
   spsNodeCapabilityForAdapter,
   spsNodeSupportsAdapter,
@@ -670,8 +675,14 @@ export {
   spsNodeSignedRequestSchema,
   spsNodeCommandEventSchema,
   spsNodeCommandCompleteSchema,
+  reportSpsNodeRunnerAvailabilitySchema,
   spsNodeSignedRequestMessage,
   type SpsNodeCapability,
+  type SpsNodeRunnerAvailabilityStatus,
+  type SpsNodeRunnerCredentialStatus,
+  type SpsNodeRunnerAvailabilitySource,
+  type SpsNodeRunnerAvailability,
+  type SpsNodeRunnerProfile,
   type CreateSpsNode,
   type UpdateSpsNodeStatus,
   type BindSpsAgentNode,
@@ -679,6 +690,7 @@ export {
   type SpsNodeSignedRequest,
   type SpsNodeCommandEvent,
   type SpsNodeCommandComplete,
+  type ReportSpsNodeRunnerAvailability,
 } from "./sps-nodes.js";
 
 export {

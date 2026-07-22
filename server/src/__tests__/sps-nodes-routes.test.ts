@@ -13,7 +13,9 @@ import {
   spsNodeCommandEvents,
   spsNodeCommands,
   spsNodeAgentGrants,
+  spsNodeAgentRunnerGrants,
   spsNodeHeartbeats,
+  spsNodeRunnerProfiles,
   spsNodes,
 } from "@paperclipai/db";
 import { spsNodeHeartbeatMessage, spsNodeSignedRequestMessage } from "@paperclipai/shared";
@@ -170,9 +172,11 @@ describeEmbeddedPostgres("SPS Node routes", () => {
     await db.delete(activityLog);
     await db.delete(spsNodeCommandEvents);
     await db.delete(spsNodeCommands);
+    await db.delete(spsNodeAgentRunnerGrants);
     await db.delete(spsAgentNodeBindings);
     await db.delete(spsNodeAgentGrants);
     await db.delete(spsNodeHeartbeats);
+    await db.delete(spsNodeRunnerProfiles);
     await db.delete(spsNodes);
     await db.delete(agents);
     await db.delete(companyMemberships);
@@ -239,6 +243,86 @@ describeEmbeddedPostgres("SPS Node routes", () => {
     expect(list.body).toHaveLength(1);
     expect(list.body[0].agentGrants).toHaveLength(1);
     expect(list.body[0].primaryAgentBindings).toHaveLength(1);
+    expect(list.body[0].runners).toHaveLength(1);
+    expect(list.body[0].runners[0]).toMatchObject({
+      runnerKey: "codex_cli:default",
+      credentialStatus: "unknown",
+      availabilityStatus: "unknown",
+    });
+    expect(list.body[0].runners[0].agentGrants).toHaveLength(1);
+  });
+
+  it("records a signed Runner availability snapshot without receiving local credentials", async () => {
+    const fixture = await createCompanyFixture(db);
+    const app = await createApp(db, boardActor(fixture.company.id, fixture.ownerUserId, "owner"));
+    const node = createNodePayload();
+    const registered = await request(app)
+      .post(`/api/companies/${fixture.company.id}/sps-nodes`)
+      .send(node.payload);
+    expect(registered.status, JSON.stringify(registered.body)).toBe(201);
+
+    const path = `/sps-nodes/${registered.body.id}/runners/availability`;
+    const payload = {
+      runners: [{
+        runnerKey: "codex_cli:default",
+        credentialStatus: "ready",
+        availability: {
+          status: "quota_limited",
+          observedAt: "2026-07-22T01:00:00.000Z",
+          source: "adapter",
+          confidence: 80,
+          retryAfter: "2026-07-22T02:00:00.000Z",
+          detail: "Provider reported a temporary limit.",
+        },
+      }],
+    };
+    const reported = await request(app)
+      .post(`/api${path}`)
+      .send(createSignedNodeRequest(registered.body.id, node.privateKey, path, payload));
+    expect(reported.status, JSON.stringify(reported.body)).toBe(200);
+    expect(reported.body[0]).toMatchObject({
+      runnerKey: "codex_cli:default",
+      credentialStatus: "ready",
+      availabilityStatus: "quota_limited",
+      availabilitySource: "adapter",
+      availabilityConfidence: 80,
+    });
+    expect(JSON.stringify(reported.body)).not.toContain("privateKeyPem");
+
+    const listed = await request(app).get(`/api/companies/${fixture.company.id}/sps-nodes`);
+    const codexRunner = listed.body[0].runners.find((runner: { runnerKey: string }) => runner.runnerKey === "codex_cli:default");
+    expect(codexRunner).toMatchObject({ availabilityStatus: "quota_limited" });
+  });
+
+  it("does not restore a revoked Runner grant when its Node reconnects", async () => {
+    const fixture = await createCompanyFixture(db);
+    const app = await createApp(db, boardActor(fixture.company.id, fixture.ownerUserId, "owner"));
+    const node = createNodePayload();
+    const registered = await request(app)
+      .post(`/api/companies/${fixture.company.id}/sps-nodes`)
+      .send(node.payload);
+    await request(app)
+      .post(`/api/sps-nodes/${registered.body.id}/heartbeat`)
+      .send(createSignedHeartbeat(registered.body.id, node.privateKey));
+    await request(app).post(`/api/sps-nodes/${registered.body.id}/approve`).send({});
+    const granted = await request(app)
+      .put(`/api/sps-nodes/${registered.body.id}/agent-grants/${fixture.agent.id}`)
+      .send({});
+    expect(granted.status).toBe(200);
+
+    const beforeRevocation = await request(app).get(`/api/companies/${fixture.company.id}/sps-nodes`);
+    const runnerId = beforeRevocation.body[0].runners[0].id as string;
+    const revoked = await request(app)
+      .delete(`/api/sps-nodes/${registered.body.id}/runners/${runnerId}/agent-grants/${fixture.agent.id}`);
+    expect(revoked.status).toBe(204);
+
+    const reconnected = await request(app)
+      .post(`/api/companies/${fixture.company.id}/sps-nodes`)
+      .send(node.payload);
+    expect(reconnected.status).toBe(200);
+
+    const listed = await request(app).get(`/api/companies/${fixture.company.id}/sps-nodes`);
+    expect(listed.body[0].runners[0].agentGrants).toEqual([]);
   });
 
   it("rejects an Agent grant when the approved Node lacks that Agent's runtime", async () => {
