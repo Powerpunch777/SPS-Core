@@ -1,0 +1,63 @@
+{
+  "name": "@sps/plugin-mcp-connector",
+  "version": "0.1.0",
+  "description": "SPS plugin that exposes allowlisted remote HTTPS MCP tools to SPS agents",
+  "license": "MIT",
+  "homepage": "https://github.com/Powerpunch777/SPS-Core",
+  "bugs": {
+    "url": "https://github.com/Powerpunch777/SPS-Core/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Powerpunch777/SPS-Core.git",
+    "directory": "packages/plugins/plugin-mcp-connector"
+  },
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "publishConfig": {
+    "access": "public",
+    "exports": {
+      ".": {
+        "types": "./dist/index.d.ts",
+        "import": "./dist/index.js"
+      }
+    },
+    "main": "./dist/index.js",
+    "types": "./dist/index.d.ts"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "paperclipPlugin": {
+    "manifest": "./dist/manifest.js",
+    "worker": "./dist/worker.js"
+  },
+  "keywords": [
+    "sps",
+    "plugin",
+    "mcp",
+    "connector"
+  ],
+  "scripts": {
+    "prebuild": "pnpm -C ../../.. --filter @paperclipai/plugin-sdk ensure-build-deps",
+    "build": "rm -rf dist && tsc",
+    "clean": "rm -rf dist",
+    "typecheck": "pnpm -C ../../.. --filter @paperclipai/plugin-sdk ensure-build-deps && tsc --noEmit",
+    "test": "vitest run --config vitest.config.ts",
+    "prepack": "rm -f package.dev.json && cp package.json package.dev.json && node ../../../scripts/generate-plugin-package-json.mjs",
+    "postpack": "if [ -f package.dev.json ]; then mv package.dev.json package.json; fi"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@paperclipai/plugin-sdk": "workspace:*",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.21",
+    "typescript": "^5.7.3",
+    "vitest": "^4.1.8"
+  }
+}
