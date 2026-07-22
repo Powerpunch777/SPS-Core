@@ -548,6 +548,7 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
     (params: Record<string, unknown>, context: PluginPerformActionContext) => Promise<unknown>
   >();
   const toolHandlers = new Map<string, (params: unknown, runCtx: ToolRunContext) => Promise<ToolResult>>();
+  const dynamicToolNames = new Set<string>();
 
   function localFolderKey(companyId: string, folderKey: string): string {
     return `${companyId}:${folderKey}`;
@@ -2485,6 +2486,23 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
       register(name, _decl, fn) {
         requireCapability(manifest, capabilitySet, "agent.tools.register");
         toolHandlers.set(name, fn);
+      },
+      async replaceDynamic(tools) {
+        requireCapability(manifest, capabilitySet, "agent.tools.dynamic.register");
+        const names = new Set<string>();
+        for (const tool of tools) {
+          if (!tool.name || names.has(tool.name)) {
+            throw new Error("Dynamic tool names must be non-empty and unique");
+          }
+          names.add(tool.name);
+        }
+        for (const name of dynamicToolNames) toolHandlers.delete(name);
+        dynamicToolNames.clear();
+        for (const tool of tools) {
+          toolHandlers.set(tool.name, tool.fn);
+          dynamicToolNames.add(tool.name);
+        }
+        return { registered: tools.length };
       },
     },
     metrics: {

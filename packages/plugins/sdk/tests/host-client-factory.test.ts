@@ -207,4 +207,35 @@ describe("createHostClientHandlers invocation company scope", () => {
     await allowedHandlers["issues.submitReport"](params);
     expect(submitReport).toHaveBeenCalledOnce();
   });
+
+  it("gates runtime-discovered tools behind their dedicated capability", async () => {
+    const replaceDynamic = vi.fn(async () => ({ registered: 1 }));
+    const services = {
+      agentTools: { replaceDynamic },
+    } as unknown as HostServices;
+    const params = {
+      tools: [{
+        name: "search-remote",
+        displayName: "Search Remote",
+        description: "Searches the connected service",
+        parametersSchema: { type: "object", properties: {} },
+      }],
+    };
+
+    const deniedHandlers = createHostClientHandlers({
+      pluginId: "paperclip.test",
+      capabilities: [],
+      services,
+    });
+    await expect(deniedHandlers["agentTools.replaceDynamic"](params)).rejects.toBeInstanceOf(CapabilityDeniedError);
+    expect(replaceDynamic).not.toHaveBeenCalled();
+
+    const allowedHandlers = createHostClientHandlers({
+      pluginId: "paperclip.test",
+      capabilities: ["agent.tools.dynamic.register"],
+      services,
+    });
+    await expect(allowedHandlers["agentTools.replaceDynamic"](params)).resolves.toEqual({ registered: 1 });
+    expect(replaceDynamic).toHaveBeenCalledWith(params);
+  });
 });

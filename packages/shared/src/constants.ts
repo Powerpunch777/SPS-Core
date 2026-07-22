@@ -1007,6 +1007,7 @@ export const PLUGIN_CAPABILITIES = [
   "local.folders",
   // Agent Tools
   "agent.tools.register",
+  "agent.tools.dynamic.register",
   // UI
   "instance.settings.register",
   "ui.sidebar.register",

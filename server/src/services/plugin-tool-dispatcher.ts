@@ -25,6 +25,7 @@
 import type { Db } from "@paperclipai/db";
 import type {
   PaperclipPluginManifestV1,
+  PluginToolDeclaration,
   PluginRecord,
 } from "@paperclipai/shared";
 import type { ToolRunContext, ToolResult } from "@paperclipai/plugin-sdk";
@@ -163,6 +164,13 @@ export interface PluginToolDispatcher {
     manifest: PaperclipPluginManifestV1,
     pluginDbId: string,
   ): void;
+
+  /** Replace runtime-discovered tools for a connector plugin. */
+  replaceDynamicTools(
+    pluginKey: string,
+    pluginDbId: string,
+    tools: PluginToolDeclaration[],
+  ): { registered: number };
 
   /**
    * Unregister all tools for a plugin.
@@ -438,6 +446,14 @@ export function createPluginToolDispatcher(
       pluginDbId: string,
     ): void {
       registry.registerPlugin(pluginKey, manifest, pluginDbId);
+    },
+
+    replaceDynamicTools(
+      pluginKey: string,
+      pluginDbId: string,
+      tools: PluginToolDeclaration[],
+    ): { registered: number } {
+      return { registered: registry.replaceDynamicTools(pluginKey, pluginDbId, tools) };
     },
 
     unregisterPluginTools(pluginId: string): void {

@@ -313,6 +313,7 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
     declaration: Pick<import("@paperclipai/shared").PluginToolDeclaration, "displayName" | "description" | "parametersSchema">;
     fn: (params: unknown, runCtx: ToolRunContext) => Promise<ToolResult>;
   }>();
+  const dynamicToolNames = new Set<string>();
 
   // Agent session event callbacks (populated by sendMessage, cleared by close)
   const sessionEventCallbacks = new Map<string, (event: AgentSessionEvent) => void>();
@@ -1281,6 +1282,36 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
           fn: (params: unknown, runCtx: ToolRunContext) => Promise<ToolResult>,
         ): void {
           toolHandlers.set(name, { declaration, fn });
+        },
+        async replaceDynamic(tools) {
+          const seenNames = new Set<string>();
+          for (const tool of tools) {
+            if (!tool.name || seenNames.has(tool.name)) {
+              throw new Error("Dynamic tool names must be non-empty and unique");
+            }
+            seenNames.add(tool.name);
+          }
+
+          const previousHandlers = new Map(toolHandlers);
+          const previousNames = new Set(dynamicToolNames);
+          for (const name of dynamicToolNames) toolHandlers.delete(name);
+          dynamicToolNames.clear();
+          for (const tool of tools) {
+            toolHandlers.set(tool.name, { declaration: tool.declaration, fn: tool.fn });
+            dynamicToolNames.add(tool.name);
+          }
+
+          try {
+            return await callHost("agentTools.replaceDynamic", {
+              tools: tools.map((tool) => ({ name: tool.name, ...tool.declaration })),
+            });
+          } catch (error) {
+            toolHandlers.clear();
+            for (const [name, handler] of previousHandlers) toolHandlers.set(name, handler);
+            dynamicToolNames.clear();
+            for (const name of previousNames) dynamicToolNames.add(name);
+            throw error;
+          }
         },
       },
 

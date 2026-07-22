@@ -126,6 +126,7 @@ const OPERATION_CAPABILITIES: Record<string, readonly PluginCapability[]> = {
   // Agent tools
   "agent.tools.register": ["agent.tools.register"],
   "agent.tools.execute": ["agent.tools.register"],
+  "agent.tools.dynamic.replace": ["agent.tools.dynamic.register"],
 
   // Environment runtime drivers
   "environment.validateConfig": ["environment.drivers.register"],

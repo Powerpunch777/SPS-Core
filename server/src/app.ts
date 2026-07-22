@@ -314,6 +314,8 @@ export async function createApp(
         const services = buildHostServices(db, pluginId, manifest.id, eventBus, notifyWorker, {
           pluginWorkerManager: workerManager,
           manifest,
+          dynamicToolRegistrar: (tools) =>
+            toolDispatcher.replaceDynamicTools(manifest.id, pluginId, tools),
         });
         hostServicesDisposers.set(pluginId, () => services.dispose());
         return createHostClientHandlers({

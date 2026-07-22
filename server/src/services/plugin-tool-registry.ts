@@ -67,6 +67,8 @@ export interface RegisteredTool {
   description: string;
   /** JSON Schema describing the tool's input parameters. */
   parametersSchema: Record<string, unknown>;
+  /** Whether the tool came from the manifest or was discovered at runtime. */
+  source: "manifest" | "dynamic";
 }
 
 /**
@@ -116,6 +118,12 @@ export interface PluginToolRegistry {
    *   dispatch fails with `worker for plugin X is not running`.
    */
   registerPlugin(pluginId: string, manifest: PaperclipPluginManifestV1, pluginDbId: string): void;
+
+  /**
+   * Replace tools discovered by a running connector plugin. Dynamic tools are
+   * process-local and are cleared with the plugin lifecycle.
+   */
+  replaceDynamicTools(pluginId: string, pluginDbId: string, tools: PluginToolDeclaration[]): number;
 
   /**
    * Remove all tool registrations for a plugin.
@@ -237,6 +245,8 @@ export function createPluginToolRegistry(
 
   // Secondary index: pluginId → set of namespaced names (for bulk operations)
   const byPlugin = new Map<string, Set<string>>();
+  const manifestToolsByPlugin = new Map<string, Set<string>>();
+  const dynamicToolsByPlugin = new Map<string, Set<string>>();
 
   // -----------------------------------------------------------------------
   // Internal helpers
@@ -257,7 +267,12 @@ export function createPluginToolRegistry(
     };
   }
 
-  function addTool(pluginId: string, decl: PluginToolDeclaration, pluginDbId: string): void {
+  function addTool(
+    pluginId: string,
+    decl: PluginToolDeclaration,
+    pluginDbId: string,
+    source: RegisteredTool["source"],
+  ): void {
     const namespacedName = buildName(pluginId, decl.name);
 
     const entry: RegisteredTool = {
@@ -268,6 +283,7 @@ export function createPluginToolRegistry(
       displayName: decl.displayName,
       description: decl.description,
       parametersSchema: decl.parametersSchema,
+      source,
     };
 
     byNamespace.set(namespacedName, entry);
@@ -278,19 +294,33 @@ export function createPluginToolRegistry(
       byPlugin.set(pluginId, pluginTools);
     }
     pluginTools.add(namespacedName);
+
+    const sourceIndex = source === "manifest" ? manifestToolsByPlugin : dynamicToolsByPlugin;
+    let sourceTools = sourceIndex.get(pluginId);
+    if (!sourceTools) {
+      sourceTools = new Set();
+      sourceIndex.set(pluginId, sourceTools);
+    }
+    sourceTools.add(namespacedName);
+  }
+
+  function removeSourceTools(pluginId: string, source: RegisteredTool["source"]): number {
+    const sourceIndex = source === "manifest" ? manifestToolsByPlugin : dynamicToolsByPlugin;
+    const sourceTools = sourceIndex.get(pluginId);
+    if (!sourceTools) return 0;
+
+    for (const name of sourceTools) {
+      byNamespace.delete(name);
+      const pluginTools = byPlugin.get(pluginId);
+      pluginTools?.delete(name);
+      if (pluginTools?.size === 0) byPlugin.delete(pluginId);
+    }
+    sourceIndex.delete(pluginId);
+    return sourceTools.size;
   }
 
   function removePluginTools(pluginId: string): number {
-    const pluginTools = byPlugin.get(pluginId);
-    if (!pluginTools) return 0;
-
-    const count = pluginTools.size;
-    for (const name of pluginTools) {
-      byNamespace.delete(name);
-    }
-    byPlugin.delete(pluginId);
-
-    return count;
+    return removeSourceTools(pluginId, "manifest") + removeSourceTools(pluginId, "dynamic");
   }
 
   // -----------------------------------------------------------------------
@@ -310,8 +340,9 @@ export function createPluginToolRegistry(
       }
       const dbId = pluginDbId;
 
-      // Remove any previously registered tools for this plugin (idempotent)
-      const previousCount = removePluginTools(pluginId);
+      // Refresh manifest tools without discarding tools the worker discovered
+      // during its startup handshake.
+      const previousCount = removeSourceTools(pluginId, "manifest");
       if (previousCount > 0) {
         log.debug(
           { pluginId, previousCount },
@@ -326,7 +357,11 @@ export function createPluginToolRegistry(
       }
 
       for (const decl of tools) {
-        addTool(pluginId, decl, dbId);
+        const namespacedName = buildName(pluginId, decl.name);
+        if (dynamicToolsByPlugin.get(pluginId)?.has(namespacedName)) {
+          removeSourceTools(pluginId, "dynamic");
+        }
+        addTool(pluginId, decl, dbId, "manifest");
       }
 
       log.info(
@@ -337,6 +372,37 @@ export function createPluginToolRegistry(
         },
         `registered ${tools.length} tool(s) for plugin`,
       );
+    },
+
+    replaceDynamicTools(pluginId: string, pluginDbId: string, tools: PluginToolDeclaration[]): number {
+      if (!pluginDbId) {
+        throw new Error(
+          `plugin-tool-registry.replaceDynamicTools: pluginDbId is required (pluginId="${pluginId}")`,
+        );
+      }
+      if (tools.length > 64) {
+        throw new Error("A plugin may register at most 64 dynamic tools");
+      }
+
+      const names = new Set<string>();
+      const manifestTools = manifestToolsByPlugin.get(pluginId) ?? new Set<string>();
+      for (const tool of tools) {
+        if (!/^[A-Za-z][A-Za-z0-9._-]{0,79}$/.test(tool.name)) {
+          throw new Error(`Invalid dynamic tool name "${tool.name}"`);
+        }
+        if (names.has(tool.name)) {
+          throw new Error(`Duplicate dynamic tool name "${tool.name}"`);
+        }
+        if (manifestTools.has(buildName(pluginId, tool.name))) {
+          throw new Error(`Dynamic tool "${tool.name}" conflicts with a manifest tool`);
+        }
+        names.add(tool.name);
+      }
+
+      removeSourceTools(pluginId, "dynamic");
+      for (const tool of tools) addTool(pluginId, tool, pluginDbId, "dynamic");
+      log.info({ pluginId, toolCount: tools.length }, "replaced dynamic plugin tools");
+      return tools.length;
     },
 
     unregisterPlugin(pluginId: string): void {

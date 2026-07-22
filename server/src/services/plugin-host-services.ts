@@ -27,7 +27,7 @@ import type {
   PluginIssueOrchestrationSummary,
   PluginExecutionWorkspaceMetadata,
 } from "@paperclipai/plugin-sdk";
-import type { CreateIssueThreadInteraction, InviteJoinType, IssueDocumentSummary, PermissionKey, PrincipalType, ProjectWorkspace } from "@paperclipai/shared";
+import type { CreateIssueThreadInteraction, InviteJoinType, IssueDocumentSummary, PermissionKey, PluginToolDeclaration, PrincipalType, ProjectWorkspace } from "@paperclipai/shared";
 import { pluginOperationIssueOriginKind } from "@paperclipai/shared";
 import { badRequest } from "../errors.js";
 import { companyService } from "./companies.js";
@@ -512,7 +512,11 @@ export function buildHostServices(
   pluginKey: string,
   eventBus: PluginEventBus,
   notifyWorker?: (method: string, params: unknown) => void,
-  options: { pluginWorkerManager?: PluginWorkerManager; manifest?: import("@paperclipai/shared").PaperclipPluginManifestV1 } = {},
+  options: {
+    pluginWorkerManager?: PluginWorkerManager;
+    manifest?: import("@paperclipai/shared").PaperclipPluginManifestV1;
+    dynamicToolRegistrar?: (tools: PluginToolDeclaration[]) => Promise<{ registered: number }> | { registered: number };
+  } = {},
 ): HostServices & { dispose(): void } {
   const registry = pluginRegistryService(db);
   const stateStore = pluginStateStore(db);
@@ -1088,6 +1092,15 @@ export function buildHostServices(
       async get() {
         const configRow = await registry.getConfig(pluginId);
         return configRow?.configJson ?? {};
+      },
+    },
+
+    agentTools: {
+      async replaceDynamic({ tools }) {
+        if (!options.dynamicToolRegistrar) {
+          throw new Error("This SPS host does not support runtime-discovered agent tools");
+        }
+        return options.dynamicToolRegistrar(tools);
       },
     },
 

@@ -158,6 +158,40 @@ describe("dispatcher.registerPluginTools — activation path", () => {
       dispatcher.registerPluginTools(PLUGIN_KEY, MANIFEST, ""),
     ).toThrow(/pluginDbId is required/);
   });
+
+  it("keeps runtime-discovered tools separate from manifest tools", () => {
+    const workerManager = createUuidKeyedWorkerManager();
+    const dispatcher = createPluginToolDispatcher({ workerManager });
+    dispatcher.registerPluginTools(PLUGIN_KEY, MANIFEST, PLUGIN_DB_ID);
+
+    expect(
+      dispatcher.replaceDynamicTools(PLUGIN_KEY, PLUGIN_DB_ID, [
+        {
+          name: "search-remote",
+          displayName: "Search Remote",
+          description: "Runtime-discovered MCP tool",
+          parametersSchema: { type: "object", properties: { query: { type: "string" } } },
+        },
+      ]),
+    ).toEqual({ registered: 1 });
+
+    expect(dispatcher.getTool(`${PLUGIN_KEY}:ping`)?.source).toBe("manifest");
+    expect(dispatcher.getTool(`${PLUGIN_KEY}:search-remote`)?.source).toBe("dynamic");
+
+    dispatcher.registerPluginTools(PLUGIN_KEY, MANIFEST, PLUGIN_DB_ID);
+    expect(dispatcher.getTool(`${PLUGIN_KEY}:search-remote`)?.source).toBe("dynamic");
+
+    dispatcher.replaceDynamicTools(PLUGIN_KEY, PLUGIN_DB_ID, [
+      {
+        name: "create-remote",
+        displayName: "Create Remote",
+        description: "Replacement discovery result",
+        parametersSchema: { type: "object", properties: {} },
+      },
+    ]);
+    expect(dispatcher.getTool(`${PLUGIN_KEY}:search-remote`)).toBeNull();
+    expect(dispatcher.getTool(`${PLUGIN_KEY}:create-remote`)?.source).toBe("dynamic");
+  });
 });
 
 // ---------------------------------------------------------------------------

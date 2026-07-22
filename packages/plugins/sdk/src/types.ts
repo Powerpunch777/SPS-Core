@@ -1035,6 +1035,23 @@ export interface PluginToolsClient {
     declaration: Pick<PluginToolDeclaration, "displayName" | "description" | "parametersSchema">,
     fn: (params: unknown, runCtx: ToolRunContext) => Promise<ToolResult>,
   ): void;
+
+  /**
+   * Replace the plugin's runtime-discovered tools as one atomic set.
+   *
+   * This is for connector plugins whose remote integration discovers tools
+   * after startup. The host keeps these registrations in memory only and
+   * removes them when the plugin is disabled or unloaded.
+   *
+   * Requires `agent.tools.dynamic.register` capability.
+   */
+  replaceDynamic(
+    tools: Array<{
+      name: string;
+      declaration: Pick<PluginToolDeclaration, "displayName" | "description" | "parametersSchema">;
+      fn: (params: unknown, runCtx: ToolRunContext) => Promise<ToolResult>;
+    }>,
+  ): Promise<{ registered: number }>;
 }
 
 /**

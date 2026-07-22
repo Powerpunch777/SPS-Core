@@ -48,6 +48,7 @@ import type {
   ExternalObjectMentionConfidence,
   ExternalObjectMentionSourceKind,
   PermissionKey,
+  PluginToolDeclaration,
 } from "@paperclipai/shared";
 export type { PluginLauncherRenderContextSnapshot } from "@paperclipai/shared";
 
@@ -945,6 +946,12 @@ export const HOST_TO_WORKER_OPTIONAL_METHODS: readonly HostToWorkerMethodName[] 
 export interface WorkerToHostMethods {
   // Config
   "config.get": [params: Record<string, never>, result: Record<string, unknown>];
+
+  // Runtime-discovered agent tools
+  "agentTools.replaceDynamic": [
+    params: { tools: PluginToolDeclaration[] },
+    result: { registered: number },
+  ];
 
   // Trusted local folders
   "localFolders.declarations": [

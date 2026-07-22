@@ -415,6 +415,15 @@ tools?: Array<{
 
 Tool names are automatically namespaced by plugin ID at runtime (e.g. `linear:search-issues`), so plugins cannot shadow core tools or each other's tools.
 
+### 11.1.1 Runtime-Discovered Tools
+
+Connector plugins may discover a remote service's tools after their worker starts. A plugin that declares `agent.tools.dynamic.register` may call `ctx.tools.replaceDynamic(tools)` to replace its runtime-discovered tool set.
+
+- Dynamic tools are namespaced and routed to the same plugin worker as manifest tools.
+- The replacement is atomic, in-memory only, and is cleared when the plugin is disabled or unloaded.
+- The host limits one plugin to 64 dynamic tools, validates tool names, and rejects a dynamic name that conflicts with a manifest tool.
+- Dynamic discovery never grants additional host capabilities. Calling an external service still requires capabilities such as `http.outbound` and `secrets.read-ref`.
+
 ### 11.2 Tool Execution
 
 When an agent invokes a plugin tool during a run, the host routes the call to the plugin worker via a `executeTool` RPC method:
@@ -771,6 +780,7 @@ export interface PluginContext {
   };
   tools: {
     register(name: string, input: PluginToolDeclaration, fn: (params: unknown, runCtx: ToolRunContext) => Promise<ToolResult>): void;
+    replaceDynamic(tools: Array<{ name: string; declaration: Pick<PluginToolDeclaration, "displayName" | "description" | "parametersSchema">; fn: (params: unknown, runCtx: ToolRunContext) => Promise<ToolResult> }>): Promise<{ registered: number }>;
   };
   logger: {
     info(message: string, meta?: Record<string, unknown>): void;
@@ -864,6 +874,7 @@ The host enforces capabilities in the SDK layer and refuses calls outside the gr
 ### Agent Tools
 
 - `agent.tools.register`
+- `agent.tools.dynamic.register`
 
 ### UI
 

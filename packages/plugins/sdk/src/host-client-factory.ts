@@ -103,6 +103,13 @@ export interface HostServices {
     get(): Promise<Record<string, unknown>>;
   };
 
+  /** Registers runtime-discovered tools for connector-style plugins. */
+  agentTools?: {
+    replaceDynamic(
+      params: WorkerToHostMethods["agentTools.replaceDynamic"][0],
+    ): Promise<WorkerToHostMethods["agentTools.replaceDynamic"][1]>;
+  };
+
   /** Provides trusted company-scoped local folder helpers. */
   localFolders: {
     declarations(params: WorkerToHostMethods["localFolders.declarations"][0]): Promise<WorkerToHostMethods["localFolders.declarations"][1]>;
@@ -358,6 +365,7 @@ export type HostClientHandlers = {
 const METHOD_CAPABILITY_MAP: Record<WorkerToHostMethodName, PluginCapability | null> = {
   // Config — always allowed
   "config.get": null,
+  "agentTools.replaceDynamic": "agent.tools.dynamic.register",
 
   // Trusted local folders
   "localFolders.declarations": null,
@@ -637,6 +645,13 @@ export function createHostClientHandlers(
     // Config
     "config.get": gated("config.get", async () => {
       return services.config.get();
+    }),
+
+    "agentTools.replaceDynamic": gated("agentTools.replaceDynamic", async (params) => {
+      if (!services.agentTools) {
+        throw new Error("This SPS host does not support runtime-discovered agent tools");
+      }
+      return services.agentTools.replaceDynamic(params);
     }),
 
     "localFolders.declarations": gated("localFolders.declarations", async (params) => {
