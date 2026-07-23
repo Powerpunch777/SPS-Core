@@ -17,6 +17,10 @@ const BOARD_ROUTE_ROOTS = new Set([
   "costs",
   "usage",
   "activity",
+  // SPS Team Workplane mounts persistent role Rooms at this plugin route.
+  // Keep it in the board-route allowlist so `/agent-rooms` is prefixed as
+  // `/SPS/agent-rooms`, rather than being misread as a company prefix.
+  "agent-rooms",
   "decisions",
   "inbox",
   "board-chat",

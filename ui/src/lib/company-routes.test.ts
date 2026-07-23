@@ -88,6 +88,17 @@ describe("company routes", () => {
     expect(toCompanyRelativePath("/PAP/timeline")).toBe("/timeline");
   });
 
+  it("treats SPS Rooms as a board route instead of a company prefix", () => {
+    expect(isBoardPathWithoutPrefix("/agent-rooms")).toBe(true);
+    expect(extractCompanyPrefixFromPath("/agent-rooms")).toBeNull();
+    expect(applyCompanyPrefix("/agent-rooms?project=project-1", "SPS")).toBe(
+      "/SPS/agent-rooms?project=project-1",
+    );
+    expect(toCompanyRelativePath("/SPS/agent-rooms?project=project-1")).toBe(
+      "/agent-rooms?project=project-1",
+    );
+  });
+
   it("treats Skill Studio create mode as an unprefixed board route", () => {
     expect(isBoardPathWithoutPrefix("/skills/studio/new")).toBe(true);
     expect(extractCompanyPrefixFromPath("/skills/studio/new")).toBeNull();
