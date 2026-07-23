@@ -579,6 +579,28 @@ describe("IssuesList", () => {
     });
   });
 
+  it("hides direct Task creation when a workplane owns delegation", async () => {
+    const { root } = renderWithQueryClient(
+      <IssuesList
+        issues={[createIssue()]}
+        agents={[]}
+        projects={[]}
+        viewStateKey="paperclip:test-issues"
+        allowCreateIssue={false}
+        onUpdateIssue={() => undefined}
+      />,
+      container,
+    );
+
+    await waitForAssertion(() => {
+      expect(container.textContent).not.toContain("New Task");
+    });
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
   it("uses workspace group defaults when creating an issue from a grouped section", async () => {
     localStorage.setItem(
       "paperclip:test-issues:company-1",

@@ -423,6 +423,11 @@ interface IssuesListProps {
   searchWithinLoadedIssues?: boolean;
   baseCreateIssueDefaults?: Record<string, unknown>;
   createIssueLabel?: string;
+  /**
+   * SPS Team Workplane creates Tasks from Lead Rooms, not from the generic
+   * list. Other Core surfaces keep the existing direct-create affordances.
+   */
+  allowCreateIssue?: boolean;
   defaultSortField?: IssueSortField;
   showProgressSummary?: boolean;
   /**
@@ -639,6 +644,7 @@ export function IssuesList({
   searchWithinLoadedIssues = false,
   baseCreateIssueDefaults,
   createIssueLabel,
+  allowCreateIssue = true,
   defaultSortField,
   showProgressSummary = false,
   parentIssueIdForCostSummary,
@@ -1604,10 +1610,12 @@ export function IssuesList({
       {/* Toolbar */}
       <div className="flex items-center justify-between gap-2 sm:gap-3">
         <div className="flex min-w-0 items-center gap-2 sm:gap-3">
-          <Button size="sm" variant="outline" onClick={() => openCreateIssueDialog()}>
-            <Plus className="h-4 w-4 sm:mr-1" />
-            <span className="hidden sm:inline">{createButtonLabel}</span>
-          </Button>
+          {allowCreateIssue ? (
+            <Button size="sm" variant="outline" onClick={() => openCreateIssueDialog()}>
+              <Plus className="h-4 w-4 sm:mr-1" />
+              <span className="hidden sm:inline">{createButtonLabel}</span>
+            </Button>
+          ) : null}
           <IssueSearchInput
             value={issueSearch}
             onDebouncedChange={(nextSearch) => {
@@ -1852,8 +1860,8 @@ export function IssuesList({
         <EmptyState
           icon={CircleDot}
           message="No tasks match the current filters or search."
-          action={createActionLabel}
-          onAction={() => openCreateIssueDialog()}
+          action={allowCreateIssue ? createActionLabel : undefined}
+          onAction={allowCreateIssue ? () => openCreateIssueDialog() : undefined}
         />
       )}
 
@@ -1905,7 +1913,7 @@ export function IssuesList({
                       : [...viewState.collapsedGroups, group.key],
                   });
                 }}
-                trailing={(
+                trailing={allowCreateIssue ? (
                   <Button
                     variant="ghost"
                     size="icon-xs"
@@ -1916,7 +1924,7 @@ export function IssuesList({
                   >
                     <Plus className="h-3 w-3" />
                   </Button>
-                )}
+                ) : null}
               />
               </div>
             )}

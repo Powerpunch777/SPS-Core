@@ -236,6 +236,43 @@ describe("CompanySettingsSidebar", () => {
     });
   });
 
+  it("uses concise SPS labels in the workplane shell", async () => {
+    const basicMode = document.createElement("meta");
+    basicMode.name = "sps-basic-mode";
+    basicMode.content = "true";
+    document.head.appendChild(basicMode);
+    const workplaneMode = document.createElement("meta");
+    workplaneMode.name = "sps-workplane-mode";
+    workplaneMode.content = "true";
+    document.head.appendChild(workplaneMode);
+
+    const root = createRoot(container);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+
+    await act(async () => {
+      root.render(
+        <QueryClientProvider client={queryClient}>
+          <CompanySettingsSidebar />
+        </QueryClientProvider>,
+      );
+    });
+    await flushReact();
+
+    expect(container.textContent).toContain("서버 설정");
+    expect(container.textContent).toContain("워크스페이스");
+    expect(container.textContent).toContain("컴퓨터와 노드");
+    expect(container.textContent).toContain("Agent 연결");
+    expect(sidebarNavItemMock).toHaveBeenCalledWith(
+      expect.objectContaining({ to: "/company/settings/nodes", label: "컴퓨터와 노드" }),
+    );
+
+    await act(async () => {
+      root.unmount();
+    });
+    basicMode.remove();
+    workplaneMode.remove();
+  });
+
   it("shows cloud upstream only when cloud sync is enabled", async () => {
     mockInstanceSettingsApi.getExperimental.mockResolvedValue({
       enableCloudSync: true,

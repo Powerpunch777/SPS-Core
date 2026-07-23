@@ -28,6 +28,8 @@ import { queryKeys } from "@/lib/queryKeys";
 import { useCompany } from "@/context/CompanyContext";
 import { useSidebar } from "@/context/SidebarContext";
 import { usePluginSlots } from "@/plugins/slots";
+import { isSpsBasicModeEnabled } from "@/lib/sps-basic-mode";
+import { isWorkplaneModeEnabled } from "@/lib/workplane-mode";
 import { SidebarNavItem } from "./SidebarNavItem";
 
 /**
@@ -78,6 +80,7 @@ export function CompanySettingsSidebar() {
   });
   const showCloudUpstream = experimentalSettings?.enableCloudSync === true;
   const sidebarPlugins = (plugins ?? []).filter((plugin) => !isSandboxProviderOnly(plugin));
+  const spsWorkplaneShell = isSpsBasicModeEnabled() && isWorkplaneModeEnabled();
 
   return (
     <aside className="w-full h-full min-h-0 border-r border-border bg-background flex flex-col">
@@ -95,28 +98,28 @@ export function CompanySettingsSidebar() {
         <div className="flex items-center gap-2 px-2 py-1">
           <Settings className="h-4 w-4 text-muted-foreground shrink-0" />
           <span className="flex-1 truncate text-sm font-bold text-foreground">
-            Company Settings
+            {spsWorkplaneShell ? "서버 설정" : "Company Settings"}
           </span>
         </div>
       </div>
 
       <nav className="flex-1 min-h-0 overflow-y-auto scrollbar-auto-hide px-3 py-2">
         <div className="px-3 pb-1 text-(length:--text-micro) font-semibold uppercase tracking-wide text-muted-foreground">
-          Company settings
+          {spsWorkplaneShell ? "워크스페이스" : "Company settings"}
         </div>
         <div className="flex flex-col gap-0.5">
-          <SidebarNavItem to="/company/settings" label="General" icon={SlidersHorizontal} end />
+          <SidebarNavItem to="/company/settings" label={spsWorkplaneShell ? "기본 정보" : "General"} icon={SlidersHorizontal} end />
           {showCloudUpstream ? (
             <SidebarNavItem
               to="/company/settings/cloud-upstream"
-              label="Cloud upstream"
+              label={spsWorkplaneShell ? "클라우드 연결" : "Cloud upstream"}
               icon={CloudUpload}
               end
             />
           ) : null}
           <SidebarNavItem
             to="/company/settings/members"
-            label="Members"
+            label={spsWorkplaneShell ? "팀" : "Members"}
             icon={Users}
             badge={badges?.joinRequests ?? 0}
             end
@@ -132,52 +135,52 @@ export function CompanySettingsSidebar() {
                 end
               />
             ))}
-          <SidebarNavItem to="/company/settings/invites" label="Invites" icon={MailPlus} end />
-          <SidebarNavItem to="/company/settings/nodes" label="Nodes" icon={Network} end />
-          <SidebarNavItem to="/company/settings/secrets" label="Secrets" icon={KeyRound} end />
+          <SidebarNavItem to="/company/settings/invites" label={spsWorkplaneShell ? "초대" : "Invites"} icon={MailPlus} end />
+          <SidebarNavItem to="/company/settings/nodes" label={spsWorkplaneShell ? "컴퓨터와 노드" : "Nodes"} icon={Network} end />
+          <SidebarNavItem to="/company/settings/secrets" label={spsWorkplaneShell ? "연결 키" : "Secrets"} icon={KeyRound} end />
         </div>
         <div className="mt-5 px-3 pb-1 text-(length:--text-micro) font-semibold uppercase tracking-wide text-muted-foreground">
-          Instance settings
+          {spsWorkplaneShell ? "고급" : "Instance settings"}
         </div>
         <div className="flex flex-col gap-0.5">
           <SidebarNavItem
             to={`${INSTANCE_SETTINGS_PATH_PREFIX}/profile`}
-            label="Profile"
+            label={spsWorkplaneShell ? "프로필" : "Profile"}
             icon={UserRoundPen}
             end
           />
           <SidebarNavItem
             to={`${INSTANCE_SETTINGS_PATH_PREFIX}/general`}
-            label="General"
+            label={spsWorkplaneShell ? "인스턴스" : "General"}
             icon={SlidersHorizontal}
             end
           />
           <SidebarNavItem
             to={`${INSTANCE_SETTINGS_PATH_PREFIX}/environments`}
-            label="Environments"
+            label={spsWorkplaneShell ? "실행 환경" : "Environments"}
             icon={MonitorCog}
             end
           />
           <SidebarNavItem
             to={`${INSTANCE_SETTINGS_PATH_PREFIX}/access`}
-            label="Access"
+            label={spsWorkplaneShell ? "접근 제어" : "Access"}
             icon={Shield}
             end
           />
           <SidebarNavItem
             to={`${INSTANCE_SETTINGS_PATH_PREFIX}/heartbeats`}
-            label="Heartbeats"
+            label={spsWorkplaneShell ? "상태 확인" : "Heartbeats"}
             icon={Clock3}
             end
           />
           <SidebarNavItem
             to={`${INSTANCE_SETTINGS_PATH_PREFIX}/experimental`}
-            label="Experimental"
+            label={spsWorkplaneShell ? "실험 기능" : "Experimental"}
             icon={FlaskConical}
           />
           <SidebarNavItem
             to={`${INSTANCE_SETTINGS_PATH_PREFIX}/plugins`}
-            label="Plugins"
+            label={spsWorkplaneShell ? "플러그인" : "Plugins"}
             icon={Puzzle}
           />
           {sidebarPlugins.length > 0 ? (
@@ -203,7 +206,7 @@ export function CompanySettingsSidebar() {
           ) : null}
           <SidebarNavItem
             to={`${INSTANCE_SETTINGS_PATH_PREFIX}/adapters`}
-            label="Adapters"
+            label={spsWorkplaneShell ? "Agent 연결" : "Adapters"}
             icon={Cpu}
           />
         </div>
