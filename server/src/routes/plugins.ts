@@ -1494,7 +1494,10 @@ export function pluginRoutes(
 
       let plugin = await registry.getByKey(stage.pluginId);
       let updatedStage = stage;
-      if (stage.status === "staged") {
+      let operation: "installed" | "updated" | "restored" = "installed";
+
+      const restoringUninstalledPlugin = plugin?.status === "uninstalled";
+      if (!plugin || restoringUninstalledPlugin) {
         await loader.installPlugin({
           localPath: stage.packageRoot,
           registryStaticManifest: stage.staticManifest,
@@ -1503,23 +1506,47 @@ export function pluginRoutes(
         plugin = await registry.getByKey(stage.pluginId);
         if (!plugin) throw new Error("Registry plugin was not registered after Owner enable.");
         updatedStage = await registryStages.markRegistered(stage.stageId) ?? stage;
+        operation = restoringUninstalledPlugin ? "restored" : "installed";
       }
 
       if (!plugin) throw new Error("Registered plugin is missing from the Plugin registry.");
-      const result = plugin.status === "installed"
-        ? await lifecycle.load(plugin.id)
-        : plugin.status === "ready"
-          ? plugin
-          : await lifecycle.enable(plugin.id);
+      let result;
+      if (plugin.status === "installed") {
+        result = await lifecycle.load(plugin.id);
+      } else if (plugin.status === "ready" || plugin.status === "upgrade_pending") {
+        operation = "updated";
+        result = await lifecycle.upgrade(plugin.id, {
+          localPath: stage.packageRoot,
+          registryStaticManifest: stage.staticManifest,
+          skipLocalAutobuild: true,
+          // Reaching this route is the explicit Owner review action for this
+          // exact staged artifact, including any changed capability list.
+          approvedCapabilityEscalation: true,
+        });
+        updatedStage = await registryStages.markRegistered(stage.stageId) ?? stage;
+      } else {
+        // Disabled and error plugins have no running worker. Update their
+        // persisted package path first, then enable the reviewed version.
+        operation = "updated";
+        await loader.upgradePlugin(plugin.id, {
+          localPath: stage.packageRoot,
+          registryStaticManifest: stage.staticManifest,
+          skipLocalAutobuild: true,
+          approvedCapabilityEscalation: true,
+        });
+        result = await lifecycle.enable(plugin.id);
+        updatedStage = await registryStages.markRegistered(stage.stageId) ?? stage;
+      }
 
       await logPluginMutationActivity(req, "plugin.registry.enabled", plugin.id, {
         stageId: stage.stageId,
         pluginId: plugin.id,
         pluginKey: plugin.pluginKey,
         version: result.version,
+        operation,
         registryId: stage.source.registryId,
       });
-      publishGlobalLiveEvent({ type: "plugin.ui.updated", payload: { pluginId: plugin.id, action: "installed" } });
+      publishGlobalLiveEvent({ type: "plugin.ui.updated", payload: { pluginId: plugin.id, action: operation } });
       res.json({ stage: registryStageResponse(updatedStage), plugin: result });
     } catch (error) {
       res.status(400).json({ error: error instanceof Error ? error.message : String(error) });

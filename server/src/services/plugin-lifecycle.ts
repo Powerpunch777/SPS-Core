@@ -43,7 +43,11 @@ import type {
   PaperclipPluginManifestV1,
 } from "@paperclipai/shared";
 import { pluginRegistryService } from "./plugin-registry.js";
-import { pluginLoader, type PluginLoader } from "./plugin-loader.js";
+import {
+  pluginLoader,
+  type PluginLoader,
+  type PluginUpgradeOptions,
+} from "./plugin-loader.js";
 import type { PluginWorkerManager, WorkerStartOptions } from "./plugin-worker-manager.js";
 import { badRequest, notFound } from "../errors.js";
 import { logger } from "../middleware/logger.js";
@@ -127,6 +131,13 @@ export interface PluginLifecycleEvents {
   "plugin.worker_stopped": { pluginId: string; pluginKey: string };
 }
 
+/**
+ * Lifecycle-owned upgrade options. Passing a local path is useful for an
+ * already verified Registry stage, while the lifecycle remains responsible
+ * for stopping and starting the plugin runtime around the replacement.
+ */
+export type PluginLifecycleUpgradeOptions = PluginUpgradeOptions;
+
 type LifecycleEventName = keyof PluginLifecycleEvents;
 type LifecycleEventPayload<K extends LifecycleEventName> = PluginLifecycleEvents[K];
 
@@ -185,7 +196,7 @@ export interface PluginLifecycleManager {
    * If the upgrade adds new capabilities, transitions to `upgrade_pending`.
    * Otherwise, transitions to `ready` directly.
    */
-  upgrade(pluginId: string, version?: string): Promise<PluginRecord>;
+  upgrade(pluginId: string, options?: string | PluginLifecycleUpgradeOptions): Promise<PluginRecord>;
 
   /**
    * Start the worker process for a plugin that is already in `ready` state.
@@ -636,8 +647,14 @@ export function pluginLifecycleManager(
      * @returns The updated `PluginRecord`.
      * @throws {BadRequest} If the plugin is not in a ready or upgrade_pending state.
      */
-    async upgrade(pluginId: string, version?: string): Promise<PluginRecord> {
+    async upgrade(
+      pluginId: string,
+      input: string | PluginLifecycleUpgradeOptions = {},
+    ): Promise<PluginRecord> {
       const plugin = await requirePlugin(pluginId);
+      const options: PluginLifecycleUpgradeOptions = typeof input === "string"
+        ? { version: input }
+        : input;
 
       // Can only upgrade plugins that are ready or already in upgrade_pending
       if (plugin.status !== "ready" && plugin.status !== "upgrade_pending") {
@@ -648,7 +665,7 @@ export function pluginLifecycleManager(
       }
 
       log.info(
-        { pluginId, pluginKey: plugin.pluginKey, targetVersion: version },
+        { pluginId, pluginKey: plugin.pluginKey, targetVersion: options.version },
         "plugin lifecycle: upgrade requested",
       );
 
@@ -656,7 +673,13 @@ export function pluginLifecycleManager(
 
       // 1. Download and validate new package via loader
       const { oldManifest, newManifest, discovered } =
-        await pluginLoaderInstance.upgradePlugin(pluginId, { version });
+        await pluginLoaderInstance.upgradePlugin(pluginId, {
+          ...options,
+          // The lifecycle owns the pending/ready state transition below. The
+          // loader can therefore persist a reviewed manifest before that
+          // transition, without treating it as an unreviewed direct call.
+          approvedCapabilityEscalation: true,
+        });
 
       log.info(
         {
@@ -674,7 +697,7 @@ export function pluginLifecycleManager(
       );
 
       // 3. Transition state
-      if (addedCaps.length > 0) {
+      if (addedCaps.length > 0 && !options.approvedCapabilityEscalation) {
         // New capabilities require operator approval — worker stays stopped
         log.info(
           { pluginId, pluginKey: plugin.pluginKey, addedCaps },

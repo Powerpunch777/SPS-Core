@@ -330,6 +330,15 @@ export interface PluginInstallOptions {
   skipLocalAutobuild?: boolean;
 }
 
+/**
+ * An explicit upgrade request. Capability escalation stays denied by default
+ * for direct loader callers. A lifecycle operation can set the approval flag
+ * only after its own Owner-review boundary has been satisfied.
+ */
+export interface PluginUpgradeOptions extends Omit<PluginInstallOptions, "installDir"> {
+  approvedCapabilityEscalation?: boolean;
+}
+
 // ---------------------------------------------------------------------------
 // Runtime options — services needed for initializing loaded plugins
 // ---------------------------------------------------------------------------
@@ -528,7 +537,7 @@ export interface PluginLoader {
    *
    * @see PLUGIN_SPEC.md §25.3 — Upgrade Lifecycle
    */
-  upgradePlugin(pluginId: string, options: Omit<PluginInstallOptions, "installDir">): Promise<{
+  upgradePlugin(pluginId: string, options: PluginUpgradeOptions): Promise<{
     oldManifest: PaperclipPluginManifestV1;
     newManifest: PaperclipPluginManifestV1;
     discovered: DiscoveredPlugin;
@@ -1804,7 +1813,7 @@ export function pluginLoader(
      */
     async upgradePlugin(
       pluginId: string,
-      upgradeOptions: Omit<PluginInstallOptions, "installDir">,
+      upgradeOptions: PluginUpgradeOptions,
     ): Promise<{
       oldManifest: PaperclipPluginManifestV1;
       newManifest: PaperclipPluginManifestV1;
@@ -1826,6 +1835,7 @@ export function pluginLoader(
         // the caller to re-supply the path every time.
         localPath = plugin.packagePath ?? undefined,
         version,
+        approvedCapabilityEscalation = false,
       } = upgradeOptions;
 
       log.info(
@@ -1855,7 +1865,7 @@ export function pluginLoader(
       const newCaps = newManifest.capabilities ?? [];
       const escalated = newCaps.filter((c) => !oldCaps.has(c));
 
-      if (escalated.length > 0) {
+      if (escalated.length > 0 && !approvedCapabilityEscalation) {
         log.warn(
           { pluginId, escalated, oldVersion: oldManifest.version, newVersion: newManifest.version },
           "plugin-loader: upgrade introduces new capabilities — requires admin approval",
@@ -1870,6 +1880,7 @@ export function pluginLoader(
       // 4. Update the existing record
       await registry.update(pluginId, {
         packageName: discovered.packageName,
+        packagePath: discovered.packagePath,
         version: discovered.version,
         manifest: newManifest,
       });

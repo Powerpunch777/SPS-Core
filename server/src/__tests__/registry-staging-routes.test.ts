@@ -14,6 +14,7 @@ const mockRegistry = vi.hoisted(() => ({
 const mockLifecycle = vi.hoisted(() => ({
   load: vi.fn(),
   enable: vi.fn(),
+  upgrade: vi.fn(),
 }));
 
 vi.mock("../services/plugin-registry.js", () => ({
@@ -31,15 +32,15 @@ afterEach(async () => {
   await Promise.all(cleanup.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
 });
 
-async function createStagedPackage(root: string): Promise<string> {
-  const packageRoot = path.join(root, "incoming", "weather-1.2.3");
+async function createStagedPackage(root: string, version = "1.2.3"): Promise<string> {
+  const packageRoot = path.join(root, "incoming", `weather-${version}`);
   const runtimeSource = "export default {};";
   const capabilities = ["agent.tools.register"];
   await mkdir(path.join(packageRoot, "dist"), { recursive: true });
-  await writeFile(path.join(packageRoot, "package.json"), JSON.stringify({ name: "@example/weather", version: "1.2.3" }), "utf8");
+  await writeFile(path.join(packageRoot, "package.json"), JSON.stringify({ name: "@example/weather", version }), "utf8");
   await writeFile(path.join(packageRoot, "sps-plugin.json"), JSON.stringify({
     schemaVersion: 1,
-    plugin: { id: "com.example.weather", version: "1.2.3", apiVersion: "1" },
+    plugin: { id: "com.example.weather", version, apiVersion: "1" },
     runtime: { manifestEntry: "dist/manifest.js", manifestSha256: createHash("sha256").update(runtimeSource).digest("hex") },
     capabilities,
     permissionsDigest: calculateRegistryCapabilitiesDigest(capabilities),
@@ -114,5 +115,93 @@ describe("Registry staging routes", () => {
     expect(mockLifecycle.load).toHaveBeenCalledWith(installed.id);
     expect(enabled.body.stage.status).toBe("registered");
     expect(enabled.body.plugin.status).toBe("ready");
+  });
+
+  it("uses the reviewed staged package as an explicit lifecycle upgrade", async () => {
+    const stagingRoot = await mkdtemp(path.join(os.tmpdir(), "registry-route-upgrade-"));
+    cleanup.push(stagingRoot);
+    const packageRoot = await createStagedPackage(stagingRoot, "1.3.0");
+    const loader = {
+      previewRegistryPluginEnable: vi.fn().mockResolvedValue(undefined),
+      installPlugin: vi.fn().mockResolvedValue(undefined),
+      upgradePlugin: vi.fn().mockResolvedValue(undefined),
+    };
+    const app = await createApp(stagingRoot, loader);
+
+    const staged = await request(app)
+      .post("/api/plugins/registry/stages")
+      .send({
+        packageRoot,
+        artifactSha256: "b".repeat(64),
+        source: { registryId: "io.sps.example", kind: "local", releaseLocator: "releases/weather-1.3.0.json" },
+      })
+      .expect(201);
+
+    const existing = {
+      id: "11111111-1111-4111-8111-111111111111",
+      pluginKey: "com.example.weather",
+      status: "ready",
+      version: "1.2.3",
+    };
+    const upgraded = { ...existing, version: "1.3.0", status: "ready" };
+    mockRegistry.getByKey.mockResolvedValue(existing);
+    mockLifecycle.upgrade.mockResolvedValue(upgraded);
+
+    const enabled = await request(app)
+      .post(`/api/plugins/registry/stages/${staged.body.stageId}/enable`)
+      .expect(200);
+
+    expect(loader.installPlugin).not.toHaveBeenCalled();
+    expect(mockLifecycle.upgrade).toHaveBeenCalledWith(existing.id, expect.objectContaining({
+      localPath: packageRoot,
+      skipLocalAutobuild: true,
+      approvedCapabilityEscalation: true,
+    }));
+    expect(enabled.body.stage.status).toBe("registered");
+    expect(enabled.body.plugin.version).toBe("1.3.0");
+  });
+
+  it("updates a disabled plugin before enabling the reviewed version", async () => {
+    const stagingRoot = await mkdtemp(path.join(os.tmpdir(), "registry-route-disabled-"));
+    cleanup.push(stagingRoot);
+    const packageRoot = await createStagedPackage(stagingRoot, "1.4.0");
+    const loader = {
+      previewRegistryPluginEnable: vi.fn().mockResolvedValue(undefined),
+      installPlugin: vi.fn().mockResolvedValue(undefined),
+      upgradePlugin: vi.fn().mockResolvedValue(undefined),
+    };
+    const app = await createApp(stagingRoot, loader);
+
+    const staged = await request(app)
+      .post("/api/plugins/registry/stages")
+      .send({
+        packageRoot,
+        artifactSha256: "c".repeat(64),
+        source: { registryId: "io.sps.example", kind: "local", releaseLocator: "releases/weather-1.4.0.json" },
+      })
+      .expect(201);
+
+    const existing = {
+      id: "11111111-1111-4111-8111-111111111111",
+      pluginKey: "com.example.weather",
+      status: "disabled",
+      version: "1.3.0",
+    };
+    const enabledPlugin = { ...existing, version: "1.4.0", status: "ready" };
+    mockRegistry.getByKey.mockResolvedValue(existing);
+    mockLifecycle.enable.mockResolvedValue(enabledPlugin);
+
+    await request(app)
+      .post(`/api/plugins/registry/stages/${staged.body.stageId}/enable`)
+      .expect(200);
+
+    expect(loader.installPlugin).not.toHaveBeenCalled();
+    expect(loader.upgradePlugin).toHaveBeenCalledWith(existing.id, expect.objectContaining({
+      localPath: packageRoot,
+      skipLocalAutobuild: true,
+      approvedCapabilityEscalation: true,
+    }));
+    expect(mockLifecycle.enable).toHaveBeenCalledWith(existing.id);
+    expect(mockLifecycle.upgrade).not.toHaveBeenCalled();
   });
 });
