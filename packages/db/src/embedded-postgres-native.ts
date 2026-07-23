@@ -1,4 +1,4 @@
-import { promises as fs } from "node:fs";
+import { promises as fs, realpathSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
 import path from "node:path";
@@ -98,16 +98,24 @@ function registerWindowsSubstCleanup(): void {
   if (windowsSubstCleanupRegistered) return;
   windowsSubstCleanupRegistered = true;
 
-  process.once("exit", () => {
-    for (const drive of createdWindowsSubstDrives) {
-      try {
-        execFileSync("subst.exe", [drive, "/d"], { stdio: "ignore", windowsHide: true });
-      } catch {
-        // The mapping is process-local convenience state. Windows will also
-        // clear it at sign-out, so cleanup failures do not affect data.
-      }
+  process.once("exit", cleanupWindowsSubstMappings);
+}
+
+/**
+ * Releases only the temporary drive mappings created by this SPS process.
+ * Desktop calls this before its Owner Host shuts down because Electron-as-Node
+ * can terminate before a normal Node `exit` listener has a chance to finish.
+ */
+export function cleanupWindowsSubstMappings(): void {
+  for (const drive of createdWindowsSubstDrives) {
+    try {
+      execFileSync("subst.exe", [drive, "/d"], { stdio: "ignore", windowsHide: true });
+    } catch {
+      // The mapping is a local compatibility aid. Cleanup failures leave no
+      // project data behind and Windows clears mappings at sign-out.
     }
-  });
+  }
+  createdWindowsSubstDrives.clear();
 }
 
 function getWindowsSubstDrives(): Set<string> {
@@ -123,6 +131,23 @@ function getWindowsSubstDrives(): Set<string> {
   }
 }
 
+function windowsPathsMatch(left: string, right: string): boolean {
+  const resolveComparablePath = (value: string): string => {
+    try {
+      return (realpathSync.native?.(value) ?? realpathSync(value)).replaceAll("/", "\\").toLowerCase();
+    } catch {
+      return path.resolve(value).replaceAll("/", "\\").toLowerCase();
+    }
+  };
+  return resolveComparablePath(left) === resolveComparablePath(right);
+}
+
+function mappedWindowsPath(drive: string, unicodeRoot: string, value: string): string | null {
+  const relative = path.relative(unicodeRoot, value);
+  const mappedPath = relative ? `${drive}\\${relative}` : `${drive}\\`;
+  return isAsciiPath(mappedPath) ? mappedPath : null;
+}
+
 /**
  * NTFS 8.3 aliases can be disabled on a volume, leaving a Unicode segment in
  * an otherwise short path. In that case, expose the smallest Unicode ancestor
@@ -135,14 +160,20 @@ function resolveWindowsSubstPath(value: string): string | null {
   if (!unicodeRoot) return null;
 
   const usedDrives = getWindowsSubstDrives();
+  for (const candidate of WINDOWS_SUBST_CANDIDATES) {
+    const drive = `${candidate}:`;
+    if (usedDrives.has(drive) && windowsPathsMatch(`${drive}\\`, unicodeRoot)) {
+      return mappedWindowsPath(drive, unicodeRoot, value);
+    }
+  }
+
   const drive = WINDOWS_SUBST_CANDIDATES.find((candidate) => !usedDrives.has(`${candidate}:`));
   if (!drive) return null;
 
   try {
     execFileSync("subst.exe", [`${drive}:`, unicodeRoot], { stdio: "ignore", windowsHide: true });
-    const relative = path.relative(unicodeRoot, value);
-    const mappedPath = relative ? `${drive}:\\${relative}` : `${drive}:\\`;
-    if (!isAsciiPath(mappedPath)) return null;
+    const mappedPath = mappedWindowsPath(`${drive}:`, unicodeRoot, value);
+    if (!mappedPath) return null;
 
     createdWindowsSubstDrives.add(`${drive}:`);
     registerWindowsSubstCleanup();

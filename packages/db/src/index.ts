@@ -31,6 +31,7 @@ export {
   formatEmbeddedPostgresError,
 } from "./embedded-postgres-error.js";
 export {
+  cleanupWindowsSubstMappings,
   ensureLinuxSharedLibraryAliases,
   prepareEmbeddedPostgresNativeRuntime,
 } from "./embedded-postgres-native.js";
