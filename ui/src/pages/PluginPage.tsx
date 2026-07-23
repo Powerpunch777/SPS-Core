@@ -107,7 +107,14 @@ export function PluginPage() {
   const spsWorkplaneRoute = isSpsBasicModeEnabled()
     && isWorkplaneModeEnabled()
     && (pluginRoutePath === "agent-rooms" || pluginRoutePath === "tasks");
-  const spsWorkplaneRouteTitle = pluginRoutePath === "tasks" ? "Tasks" : "Rooms";
+  const spsSettingsRoute = isSpsBasicModeEnabled()
+    && isWorkplaneModeEnabled()
+    && pluginRoutePath === "organization";
+  const spsRouteTitle = spsWorkplaneRoute
+    ? (pluginRoutePath === "tasks" ? "Tasks" : "Rooms")
+    : spsSettingsRoute
+      ? "Workplane 운영"
+      : null;
 
   // When the active route has a routeSidebar slot, the sidebar provides the
   // back affordance, but the top bar still needs a route-specific title.
@@ -127,15 +134,15 @@ export function PluginPage() {
 
   useEffect(() => {
     if (!pageSlot) return;
-    if (routeSidebarActive || spsWorkplaneRoute) {
-      setBreadcrumbs([{ label: spsWorkplaneRoute ? spsWorkplaneRouteTitle : resolveRouteSidebarPageTitle(pageSlot, pluginRouteSplat) }]);
+    if (routeSidebarActive || spsWorkplaneRoute || spsSettingsRoute) {
+      setBreadcrumbs([{ label: spsRouteTitle ?? resolveRouteSidebarPageTitle(pageSlot, pluginRouteSplat) }]);
       return;
     }
     setBreadcrumbs([
       { label: "Plugins", href: "/company/settings/instance/plugins" },
       { label: pageSlot.pluginDisplayName },
     ]);
-  }, [pageSlot, pluginRouteSplat, setBreadcrumbs, routeSidebarActive, spsWorkplaneRoute, spsWorkplaneRouteTitle]);
+  }, [pageSlot, pluginRouteSplat, setBreadcrumbs, routeSidebarActive, spsRouteTitle, spsSettingsRoute, spsWorkplaneRoute]);
 
   if (!resolvedCompanyId) {
     if (hasInvalidCompanyPrefix) {
@@ -178,7 +185,7 @@ export function PluginPage() {
 
   return (
     <div className={spsWorkplaneRoute ? "h-full" : "space-y-4"}>
-      {!routeSidebarActive && !spsWorkplaneRoute && (
+      {!routeSidebarActive && !spsWorkplaneRoute && !spsSettingsRoute && (
         <div className="flex items-center gap-2">
           <Button variant="ghost" size="sm" asChild>
             <Link to={backHref}>

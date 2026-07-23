@@ -4,6 +4,8 @@ import { useBreadcrumbs } from "@/context/BreadcrumbContext";
 import { useCompany } from "@/context/CompanyContext";
 import { PluginSlotMount, usePluginSlots } from "@/plugins/slots";
 import { NotFoundPage } from "./NotFound";
+import { isSpsBasicModeEnabled } from "@/lib/sps-basic-mode";
+import { isWorkplaneModeEnabled } from "@/lib/workplane-mode";
 
 export function CompanySettingsPluginPage() {
   const params = useParams<{
@@ -13,6 +15,9 @@ export function CompanySettingsPluginPage() {
   const { companyPrefix: routeCompanyPrefix, settingsRoutePath } = params;
   const { companies, selectedCompanyId } = useCompany();
   const { setBreadcrumbs } = useBreadcrumbs();
+  const spsWorkplaneSettings = isSpsBasicModeEnabled()
+    && isWorkplaneModeEnabled()
+    && settingsRoutePath === "organization";
 
   const routeCompany = useMemo(() => {
     if (!routeCompanyPrefix) return null;
@@ -40,11 +45,15 @@ export function CompanySettingsPluginPage() {
 
   useEffect(() => {
     if (!pageSlot) return;
+    if (spsWorkplaneSettings) {
+      setBreadcrumbs([{ label: "Workplane 운영" }]);
+      return;
+    }
     setBreadcrumbs([
       { label: "Settings", href: "/company/settings" },
       { label: pageSlot.displayName },
     ]);
-  }, [pageSlot, setBreadcrumbs]);
+  }, [pageSlot, setBreadcrumbs, spsWorkplaneSettings]);
 
   if (!resolvedCompanyId) {
     if (hasInvalidCompanyPrefix) {

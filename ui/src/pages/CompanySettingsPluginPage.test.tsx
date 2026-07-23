@@ -104,6 +104,8 @@ describe("CompanySettingsPluginPage", () => {
   afterEach(() => {
     container.remove();
     document.body.innerHTML = "";
+    document.querySelectorAll('meta[name="sps-basic-mode"], meta[name="sps-workplane-mode"]')
+      .forEach((element) => element.remove());
     vi.clearAllMocks();
   });
 
@@ -132,6 +134,37 @@ describe("CompanySettingsPluginPage", () => {
     const root = await renderPage(container);
 
     expect(container.textContent).toContain("Page not found");
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it("uses a single Workplane breadcrumb for the SPS organization settings route", async () => {
+    document.head.insertAdjacentHTML(
+      "beforeend",
+      '<meta name="sps-basic-mode" content="true"><meta name="sps-workplane-mode" content="true">',
+    );
+    mockParams.settingsRoutePath = "organization";
+    mockUsePluginSlots.mockReturnValue({
+      slots: [{
+        type: "companySettingsPage",
+        id: "organization",
+        displayName: "Workplane 운영",
+        exportName: "OrganizationPage",
+        routePath: "organization",
+        pluginId: "plugin-1",
+        pluginKey: "room-chat",
+        pluginDisplayName: "SPS Workplane",
+        pluginVersion: "0.1.0",
+      }],
+      isLoading: false,
+      errorMessage: null,
+    });
+
+    const root = await renderPage(container);
+
+    expect(mockSetBreadcrumbs).toHaveBeenCalledWith([{ label: "Workplane 운영" }]);
 
     await act(async () => {
       root.unmount();

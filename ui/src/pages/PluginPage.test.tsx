@@ -237,6 +237,34 @@ describe("PluginPage", () => {
     });
   });
 
+  it("uses the SPS Workplane settings title instead of a generated route title", async () => {
+    mockParams.pluginRoutePath = "organization";
+    document.head.insertAdjacentHTML(
+      "beforeend",
+      '<meta name="sps-basic-mode" content="true"><meta name="sps-workplane-mode" content="true">',
+    );
+    mockPluginsApi.listUiContributions.mockResolvedValue([
+      pageContribution({
+        slots: [{
+          type: "page",
+          id: "workplane-settings",
+          displayName: "Workplane 운영",
+          exportName: "WorkplaneSettingsPage",
+          routePath: "organization",
+        }],
+      }),
+    ]);
+
+    const root = await renderPage(container);
+
+    expect(mockSetBreadcrumbs).toHaveBeenCalledWith([{ label: "Workplane 운영" }]);
+    expect(container.textContent).not.toContain("Back");
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
   it("uses the selected plugin page path as the route-sidebar title", async () => {
     mockParams.pluginRoutePath = "wiki";
     mockParams["*"] = "page/templates%3A%3Aindex.md";
