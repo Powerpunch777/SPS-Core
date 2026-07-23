@@ -1,7 +1,11 @@
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { parseRegistryStaticPluginManifest, type RegistryStaticPluginManifest } from "./registry-static-manifest.js";
+import {
+  assertRegistryRuntimeArtifactMatchesStatic,
+  parseRegistryStaticPluginManifest,
+  type RegistryStaticPluginManifest,
+} from "./registry-static-manifest.js";
 
 const STAGING_INDEX_FILE = "registry-stages.json";
 const SHA256 = /^[a-f0-9]{64}$/;
@@ -19,7 +23,8 @@ export interface RegistryStagedPluginRecord {
     kind: "local" | "git" | "official";
     releaseLocator: string;
   };
-  status: "staged";
+  /** Staged is static-only; registered means the Owner explicitly enabled it. */
+  status: "staged" | "registered";
   stagedAt: string;
 }
 
@@ -120,6 +125,11 @@ export function registryStagingService(stagingRoot: string) {
       if (packageJson.version !== staticManifest.plugin.version) {
         throw new Error("Registry staged package version does not match sps-plugin.json.");
       }
+      await assertRegistryRuntimeArtifactMatchesStatic({
+        packageRoot: managedPackageRoot,
+        manifestPath: path.join(managedPackageRoot, staticManifest.runtime.manifestEntry),
+        staticManifest,
+      });
 
       const stageId = stageIdFor(staticManifest.plugin.id, staticManifest.plugin.version, input.artifactSha256);
       const record: RegistryStagedPluginRecord = {
@@ -148,6 +158,20 @@ export function registryStagingService(stagingRoot: string) {
       if (next.length === records.length) return false;
       await writeIndex(indexPath, next);
       return true;
+    },
+
+    markRegistered: async (stageId: string): Promise<RegistryStagedPluginRecord | null> => {
+      const records = await readIndex(indexPath);
+      const index = records.findIndex((record) => record.stageId === stageId);
+      if (index < 0) return null;
+      const existing = records[index]!;
+      const updated: RegistryStagedPluginRecord = {
+        ...existing,
+        status: "registered",
+      };
+      records[index] = updated;
+      await writeIndex(indexPath, records);
+      return updated;
     },
   };
 }

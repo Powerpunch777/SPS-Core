@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { lstat, readFile, realpath } from "node:fs/promises";
 import path from "node:path";
 import type { PaperclipPluginManifestV1 } from "@paperclipai/shared";
 
@@ -37,6 +37,14 @@ function isSafeRelativeFilePath(value: unknown): value is string {
     && !value.includes("\\")
     && !value.includes("\u0000")
     && value.split("/").every((segment) => segment.length > 0 && segment !== "." && segment !== "..");
+}
+
+function isPathInside(root: string, candidate: string): boolean {
+  const relative = path.relative(root, candidate);
+  return relative.length > 0
+    && relative !== ".."
+    && !relative.startsWith(`..${path.sep}`)
+    && !path.isAbsolute(relative);
 }
 
 export function calculateRegistryCapabilitiesDigest(capabilities: readonly string[]): string {
@@ -82,6 +90,42 @@ export function parseRegistryStaticPluginManifest(value: unknown): RegistryStati
 }
 
 /**
+ * Verifies the reviewed runtime source without evaluating it. This must run
+ * before a Registry package's JavaScript manifest is imported.
+ */
+export async function assertRegistryRuntimeArtifactMatchesStatic(input: {
+  packageRoot: string;
+  manifestPath: string;
+  staticManifest: RegistryStaticPluginManifest;
+}): Promise<void> {
+  const reviewed = parseRegistryStaticPluginManifest(input.staticManifest);
+  const packageRoot = await realpath(input.packageRoot);
+  const expectedManifestPath = path.resolve(packageRoot, reviewed.runtime.manifestEntry);
+  const requestedManifestPath = path.resolve(input.manifestPath);
+  if (requestedManifestPath !== expectedManifestPath) {
+    throw new Error("Runtime manifest path does not match sps-plugin.json.");
+  }
+
+  const [packageStats, manifestStats, realManifestPath] = await Promise.all([
+    lstat(packageRoot),
+    lstat(expectedManifestPath),
+    realpath(expectedManifestPath),
+  ]);
+  if (!packageStats.isDirectory() || packageStats.isSymbolicLink()) {
+    throw new Error("Registry package root must be a regular directory.");
+  }
+  if (!manifestStats.isFile() || manifestStats.isSymbolicLink() || !isPathInside(packageRoot, realManifestPath)) {
+    throw new Error("Registry runtime manifest must be a regular file inside the package root.");
+  }
+
+  const manifestSource = await readFile(realManifestPath);
+  const manifestHash = createHash("sha256").update(manifestSource).digest("hex");
+  if (manifestHash !== reviewed.runtime.manifestSha256) {
+    throw new Error("Runtime manifest SHA-256 does not match sps-plugin.json.");
+  }
+}
+
+/**
  * Runs only after the Owner explicitly enables a staged Registry plugin. The
  * JavaScript import is intentionally outside disabled install; once loaded,
  * it must still match the previously reviewed static declaration exactly.
@@ -93,15 +137,7 @@ export async function assertRegistryRuntimeManifestMatchesStatic(input: {
   runtimeManifest: PaperclipPluginManifestV1;
 }): Promise<void> {
   const reviewed = parseRegistryStaticPluginManifest(input.staticManifest);
-  const relativeManifestPath = path.relative(input.packageRoot, input.manifestPath).split(path.sep).join("/");
-  if (relativeManifestPath !== reviewed.runtime.manifestEntry) {
-    throw new Error("Runtime manifest path does not match sps-plugin.json.");
-  }
-  const manifestSource = await readFile(input.manifestPath);
-  const manifestHash = createHash("sha256").update(manifestSource).digest("hex");
-  if (manifestHash !== reviewed.runtime.manifestSha256) {
-    throw new Error("Runtime manifest SHA-256 does not match sps-plugin.json.");
-  }
+  await assertRegistryRuntimeArtifactMatchesStatic(input);
 
   const runtimeCapabilities = [...input.runtimeManifest.capabilities].sort();
   const reviewedCapabilities = [...reviewed.capabilities].sort();

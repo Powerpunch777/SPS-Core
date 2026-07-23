@@ -45,6 +45,9 @@ describe("Registry staging service", () => {
     expect(record.pluginId).toBe("com.example.weather");
     expect(await service.get(record.stageId)).toMatchObject({ packageName: "@example/weather", status: "staged" });
     expect(await service.list()).toHaveLength(1);
+
+    await expect(service.markRegistered(record.stageId)).resolves.toMatchObject({ status: "registered" });
+    await expect(service.get(record.stageId)).resolves.toMatchObject({ status: "registered" });
   });
 
   it("refuses a package path outside the managed staging root", async () => {

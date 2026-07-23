@@ -160,6 +160,7 @@ export async function createApp(
     instanceId?: string;
     hostVersion?: string;
     localPluginDir?: string;
+    registryStagingDir?: string;
     pluginMigrationDb?: Db;
     pluginWorkerManager?: PluginWorkerManager;
     betterAuthHandler?: express.RequestHandler;
@@ -340,6 +341,14 @@ export async function createApp(
       { toolDispatcher },
       { workerManager },
       { runtime: memoryProviderRuntime },
+      {
+        stagingRoot: opts.registryStagingDir
+          ?? path.join(
+            process.env.PAPERCLIP_HOME?.trim()
+              || path.join(opts.localPluginDir ?? DEFAULT_LOCAL_PLUGIN_DIR, ".."),
+            "registry-staging",
+          ),
+      },
     ),
   );
   api.use(adapterRoutes());

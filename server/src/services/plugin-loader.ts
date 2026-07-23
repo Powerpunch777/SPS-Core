@@ -50,6 +50,7 @@ import type { PluginToolDispatcher } from "./plugin-tool-dispatcher.js";
 import type { PluginLifecycleManager } from "./plugin-lifecycle.js";
 import { pluginDatabaseService } from "./plugin-database.js";
 import {
+  assertRegistryRuntimeArtifactMatchesStatic,
   assertRegistryRuntimeManifestMatchesStatic,
   type RegistryStaticPluginManifest,
 } from "./registry-static-manifest.js";
@@ -1284,6 +1285,16 @@ export function pluginLoader(
       throw new Error(
         `Package ${resolvedPackageName} at ${resolvedPackagePath} does not appear to be a Paperclip plugin (no manifest found).${manualBuildHint}`,
       );
+    }
+
+    // A Registry package's runtime source must match the previously reviewed
+    // static declaration before dynamic import can execute its module body.
+    if (registryStaticManifest) {
+      await assertRegistryRuntimeArtifactMatchesStatic({
+        packageRoot: resolvedPackagePath,
+        manifestPath,
+        staticManifest: registryStaticManifest,
+      });
     }
 
     const manifest = await loadManifestFromPath(manifestPath);

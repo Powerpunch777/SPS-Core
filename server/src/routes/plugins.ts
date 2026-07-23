@@ -47,6 +47,7 @@ import {
   PERMISSION_KEYS,
 } from "@paperclipai/shared";
 import { pluginRegistryService } from "../services/plugin-registry.js";
+import { registryStagingService, type RegistryStagedPluginRecord } from "../services/registry-staging.js";
 import { listReadyMemoryProviders } from "../services/memory-providers.js";
 import type { CompanyMemoryProviderRuntime } from "../services/memory-provider-runtime.js";
 import { createPluginToolAccessService, pluginRequiresExplicitToolGrant } from "../services/plugin-tool-access.js";
@@ -125,6 +126,17 @@ interface PluginInstallRequest {
   version?: string;
   /** True if packageName is a local filesystem path */
   isLocalPath?: boolean;
+}
+
+interface RegistryStageRequest {
+  packageRoot: string;
+  artifactSha256: string;
+  source: RegistryStagedPluginRecord["source"];
+}
+
+function registryStageResponse(record: RegistryStagedPluginRecord) {
+  const { packageRoot: _packageRoot, ...safeRecord } = record;
+  return safeRecord;
 }
 
 interface AvailableBundledPlugin {
@@ -433,6 +445,11 @@ export interface PluginRouteMemoryDeps {
   runtime: CompanyMemoryProviderRuntime;
 }
 
+/** Owner Host storage for Registry packages that have not executed yet. */
+export interface PluginRouteRegistryStagingDeps {
+  stagingRoot: string;
+}
+
 interface PluginScopedApiRequest {
   routeKey: string;
   method: string;
@@ -519,6 +536,7 @@ export function pluginRoutes(
   toolDeps?: PluginRouteToolDeps,
   bridgeDeps?: PluginRouteBridgeDeps,
   memoryDeps?: PluginRouteMemoryDeps,
+  registryStagingDeps?: PluginRouteRegistryStagingDeps,
 ) {
   const router = Router();
   const registry = pluginRegistryService(db);
@@ -529,6 +547,9 @@ export function pluginRoutes(
   const issuesSvc = issueService(db);
   const accessSvc = accessService(db);
   const toolAccess = createPluginToolAccessService(db);
+  const registryStages = registryStagingDeps
+    ? registryStagingService(registryStagingDeps.stagingRoot)
+    : null;
 
   function matchScopedApiRoute(route: PluginApiRouteDeclaration, method: string, requestPath: string) {
     if (route.method !== method) return null;
@@ -1399,6 +1420,109 @@ export function pluginRoutes(
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       res.status(400).json({ error: message });
+    }
+  });
+
+  /**
+   * Registry packages use an intentionally separate path from /plugins/install.
+   * Staging reads only static package files. It never imports plugin code,
+   * creates a database plugin, applies migrations, or starts a worker.
+   */
+  router.get("/plugins/registry/stages", async (req, res) => {
+    assertInstanceAdmin(req);
+    if (!registryStages) {
+      res.status(501).json({ error: "Registry staging is not enabled" });
+      return;
+    }
+    res.json((await registryStages.list()).map(registryStageResponse));
+  });
+
+  router.post("/plugins/registry/stages", async (req, res) => {
+    assertInstanceAdmin(req);
+    if (!registryStages) {
+      res.status(501).json({ error: "Registry staging is not enabled" });
+      return;
+    }
+    const body = req.body as Partial<RegistryStageRequest> | undefined;
+    if (!body || typeof body.packageRoot !== "string" || typeof body.artifactSha256 !== "string" || !body.source) {
+      res.status(400).json({ error: "packageRoot, artifactSha256, and source are required" });
+      return;
+    }
+
+    try {
+      const stage = await registryStages.stage({
+        packageRoot: body.packageRoot,
+        artifactSha256: body.artifactSha256,
+        source: body.source as RegistryStagedPluginRecord["source"],
+      });
+      await logPluginMutationActivity(req, "plugin.registry.staged", stage.stageId, {
+        stageId: stage.stageId,
+        pluginKey: stage.pluginId,
+        version: stage.version,
+        registryId: stage.source.registryId,
+      });
+      res.status(201).json(registryStageResponse(stage));
+    } catch (error) {
+      res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  /**
+   * The only Registry route that is allowed to evaluate package JavaScript.
+   * The static declaration is checked before every enable attempt and must
+   * match the imported runtime manifest before the normal lifecycle begins.
+   */
+  router.post("/plugins/registry/stages/:stageId/enable", async (req, res) => {
+    assertInstanceAdmin(req);
+    if (!registryStages) {
+      res.status(501).json({ error: "Registry staging is not enabled" });
+      return;
+    }
+    const stage = await registryStages.get(req.params.stageId);
+    if (!stage) {
+      res.status(404).json({ error: "Registry stage not found" });
+      return;
+    }
+
+    try {
+      // This preflight is deliberately explicit: it performs the first dynamic
+      // import only after an Owner chose Enable for this reviewed stage.
+      await loader.previewRegistryPluginEnable({
+        localPath: stage.packageRoot,
+        staticManifest: stage.staticManifest,
+      });
+
+      let plugin = await registry.getByKey(stage.pluginId);
+      let updatedStage = stage;
+      if (stage.status === "staged") {
+        await loader.installPlugin({
+          localPath: stage.packageRoot,
+          registryStaticManifest: stage.staticManifest,
+          skipLocalAutobuild: true,
+        });
+        plugin = await registry.getByKey(stage.pluginId);
+        if (!plugin) throw new Error("Registry plugin was not registered after Owner enable.");
+        updatedStage = await registryStages.markRegistered(stage.stageId) ?? stage;
+      }
+
+      if (!plugin) throw new Error("Registered plugin is missing from the Plugin registry.");
+      const result = plugin.status === "installed"
+        ? await lifecycle.load(plugin.id)
+        : plugin.status === "ready"
+          ? plugin
+          : await lifecycle.enable(plugin.id);
+
+      await logPluginMutationActivity(req, "plugin.registry.enabled", plugin.id, {
+        stageId: stage.stageId,
+        pluginId: plugin.id,
+        pluginKey: plugin.pluginKey,
+        version: result.version,
+        registryId: stage.source.registryId,
+      });
+      publishGlobalLiveEvent({ type: "plugin.ui.updated", payload: { pluginId: plugin.id, action: "installed" } });
+      res.json({ stage: registryStageResponse(updatedStage), plugin: result });
+    } catch (error) {
+      res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
     }
   });
 

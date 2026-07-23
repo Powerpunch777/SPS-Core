@@ -5,6 +5,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { PaperclipPluginManifestV1 } from "@paperclipai/shared";
 import {
+  assertRegistryRuntimeArtifactMatchesStatic,
   assertRegistryRuntimeManifestMatchesStatic,
   calculateRegistryCapabilitiesDigest,
   parseRegistryStaticPluginManifest,
@@ -75,5 +76,27 @@ describe("Registry static plugin manifest", () => {
       staticManifest: reviewed,
       runtimeManifest: { ...runtimeManifest(), capabilities: ["agent.tools.register", "http.outbound"] },
     })).rejects.toThrow("Runtime manifest identity or capabilities do not match");
+  });
+
+  it("rejects changed runtime source before it is evaluated", async () => {
+    const packageRoot = await mkdtemp(path.join(os.tmpdir(), "registry-static-"));
+    cleanup.push(packageRoot);
+    const manifestPath = path.join(packageRoot, "dist", "manifest.js");
+    await mkdir(path.dirname(manifestPath), { recursive: true });
+    await writeFile(manifestPath, "export default { changed: true };", "utf8");
+    const capabilities = ["agent.tools.register"];
+    const reviewed = parseRegistryStaticPluginManifest({
+      schemaVersion: 1,
+      plugin: { id: "com.example.weather", version: "1.2.3", apiVersion: "1" },
+      runtime: { manifestEntry: "dist/manifest.js", manifestSha256: "a".repeat(64) },
+      capabilities,
+      permissionsDigest: calculateRegistryCapabilitiesDigest(capabilities),
+    });
+
+    await expect(assertRegistryRuntimeArtifactMatchesStatic({
+      packageRoot,
+      manifestPath,
+      staticManifest: reviewed,
+    })).rejects.toThrow("SHA-256");
   });
 });
