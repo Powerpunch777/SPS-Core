@@ -149,6 +149,17 @@ const MEMORY_PROVIDER_ENV_PASSTHROUGH = [
   "SPS_MEMORY_SIDECAR_TOKEN",
 ];
 
+/**
+ * A plugin that explicitly integrates with a local Desktop Host may receive
+ * only the ephemeral loopback endpoint and access token for that Host. The
+ * grant is intentionally separate from outbound HTTP: it is a privileged
+ * same-machine capability and never exposes general server secrets.
+ */
+const LOCAL_HOST_ACCESS_ENV_PASSTHROUGH = [
+  "SPS_ROOM_API_URL",
+  "SPS_DESKTOP_ACCESS_TOKEN",
+];
+
 export function buildPluginWorkerEnv(input: {
   manifest: Pick<PaperclipPluginManifestV1, "capabilities">;
   instanceInfo: { deploymentMode?: string | null; deploymentExposure?: string | null };
@@ -163,6 +174,8 @@ export function buildPluginWorkerEnv(input: {
     && input.manifest.capabilities.includes("environment.drivers.register");
   const canRegisterMemoryProvider = Array.isArray(input.manifest.capabilities)
     && input.manifest.capabilities.includes("memory.providers.register");
+  const canAccessLocalHost = Array.isArray(input.manifest.capabilities)
+    && input.manifest.capabilities.includes("host.local_api.access");
   if (canRegisterEnvironmentDrivers) {
     for (const key of [...ADAPTER_ENV_PASSTHROUGH, ...K8S_IN_CLUSTER_ENV_PASSTHROUGH]) {
       const value = processEnv[key];
@@ -173,6 +186,12 @@ export function buildPluginWorkerEnv(input: {
   }
   if (canRegisterMemoryProvider) {
     for (const key of MEMORY_PROVIDER_ENV_PASSTHROUGH) {
+      const value = processEnv[key];
+      if (value && value.trim().length > 0) env[key] = value;
+    }
+  }
+  if (canAccessLocalHost) {
+    for (const key of LOCAL_HOST_ACCESS_ENV_PASSTHROUGH) {
       const value = processEnv[key];
       if (value && value.trim().length > 0) env[key] = value;
     }

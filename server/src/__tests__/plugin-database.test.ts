@@ -221,6 +221,25 @@ describe("buildPluginWorkerEnv", () => {
       SPS_MEMORY_SIDECAR_TOKEN: "vault-local-token",
     });
   });
+
+  it("passes Desktop loopback access only to plugins that explicitly request it", () => {
+    const env = buildPluginWorkerEnv({
+      manifest: { capabilities: ["host.local_api.access"] },
+      instanceInfo,
+      processEnv: {
+        SPS_ROOM_API_URL: "http://127.0.0.1:31310",
+        SPS_DESKTOP_ACCESS_TOKEN: "launch-scoped-token",
+        DATABASE_URL: "must-not-leak",
+      },
+    });
+
+    expect(env).toEqual({
+      PAPERCLIP_DEPLOYMENT_MODE: "authenticated",
+      PAPERCLIP_DEPLOYMENT_EXPOSURE: "public",
+      SPS_ROOM_API_URL: "http://127.0.0.1:31310",
+      SPS_DESKTOP_ACCESS_TOKEN: "launch-scoped-token",
+    });
+  });
 });
 
 describeEmbeddedPostgres("plugin database namespaces", () => {

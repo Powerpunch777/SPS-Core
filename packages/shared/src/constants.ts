@@ -1002,6 +1002,7 @@ export const PLUGIN_CAPABILITIES = [
   "webhooks.receive",
   "api.routes.register",
   "http.outbound",
+  "host.local_api.access",
   "secrets.read-ref",
   "environment.drivers.register",
   "local.folders",
