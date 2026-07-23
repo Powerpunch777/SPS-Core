@@ -49,6 +49,10 @@ import type { PluginJobStore } from "./plugin-job-store.js";
 import type { PluginToolDispatcher } from "./plugin-tool-dispatcher.js";
 import type { PluginLifecycleManager } from "./plugin-lifecycle.js";
 import { pluginDatabaseService } from "./plugin-database.js";
+import {
+  assertRegistryRuntimeManifestMatchesStatic,
+  type RegistryStaticPluginManifest,
+} from "./registry-static-manifest.js";
 
 const execFileAsync = promisify(execFile);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -313,6 +317,16 @@ export interface PluginInstallOptions {
    * Defaults to the localPluginDir configured on the service.
    */
   installDir?: string;
+
+  /**
+   * Registry packages are staged with a static declaration first. This field
+   * is only accepted during an Owner's explicit enable operation and forces
+   * the imported runtime manifest to match that reviewed declaration.
+   */
+  registryStaticManifest?: RegistryStaticPluginManifest;
+
+  /** Do not run local development build recovery for a staged Registry path. */
+  skipLocalAutobuild?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -492,6 +506,15 @@ export interface PluginLoader {
    * @see PLUGIN_SPEC.md §8.3 — Install Process
    */
   installPlugin(options: PluginInstallOptions): Promise<DiscoveredPlugin>;
+
+  /**
+   * Imports and validates a Registry package only after an Owner explicitly
+   * enables it. This does not persist, migrate, or start the plugin.
+   */
+  previewRegistryPluginEnable(options: {
+    localPath: string;
+    staticManifest: RegistryStaticPluginManifest;
+  }): Promise<DiscoveredPlugin>;
 
   /**
    * Upgrade an already-installed plugin to a newer version.
@@ -1163,7 +1186,14 @@ export function pluginLoader(
   async function fetchAndValidate(
     installOptions: PluginInstallOptions,
   ): Promise<DiscoveredPlugin> {
-    const { packageName, localPath, version, installDir } = installOptions;
+    const {
+      packageName,
+      localPath,
+      version,
+      installDir,
+      registryStaticManifest,
+      skipLocalAutobuild,
+    } = installOptions;
 
     if (!packageName && !localPath) {
       throw new Error("Either packageName or localPath must be provided");
@@ -1242,7 +1272,7 @@ export function pluginLoader(
     const pkgJson = await readPackageJson(resolvedPackagePath);
     if (!pkgJson) throw new Error(`Missing package.json at ${resolvedPackagePath}`);
 
-    if (localPath) {
+    if (localPath && !skipLocalAutobuild) {
       await ensureLocalPluginBuilt(resolvedPackagePath, pkgJson);
     }
 
@@ -1257,6 +1287,15 @@ export function pluginLoader(
     }
 
     const manifest = await loadManifestFromPath(manifestPath);
+
+    if (registryStaticManifest) {
+      await assertRegistryRuntimeManifestMatchesStatic({
+        packageRoot: resolvedPackagePath,
+        manifestPath,
+        staticManifest: registryStaticManifest,
+        runtimeManifest: manifest,
+      });
+    }
 
     // Step 4: Reject incompatible plugin API versions
     if (!manifestValidator.getSupportedVersions().includes(manifest.apiVersion)) {
@@ -1725,6 +1764,14 @@ export function pluginLoader(
       );
 
       return discovered;
+    },
+
+    async previewRegistryPluginEnable({ localPath, staticManifest }): Promise<DiscoveredPlugin> {
+      return await fetchAndValidate({
+        localPath,
+        registryStaticManifest: staticManifest,
+        skipLocalAutobuild: true,
+      });
     },
 
     // -----------------------------------------------------------------------
