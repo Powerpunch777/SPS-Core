@@ -356,6 +356,8 @@ describe("Agents", () => {
     queryClient.clear();
     container.remove();
     document.body.innerHTML = "";
+    document.head.querySelector('meta[name="sps-basic-mode"]')?.remove();
+    document.head.querySelector('meta[name="sps-workplane-mode"]')?.remove();
     vi.clearAllMocks();
   });
 
@@ -381,6 +383,31 @@ describe("Agents", () => {
     const heartbeatCell = container.querySelector(".whitespace-nowrap.w-24");
     expect(heartbeatCell).not.toBeNull();
     expect(heartbeatCell?.textContent).not.toContain("\n");
+  });
+
+  it("uses SPS labels for Agent controls in workplane mode", async () => {
+    document.head.insertAdjacentHTML(
+      "beforeend",
+      '<meta name="sps-basic-mode" content="true"><meta name="sps-workplane-mode" content="true">',
+    );
+    root = createRoot(container);
+    await act(async () => {
+      root!.render(
+        <QueryClientProvider client={queryClient}>
+          <ToastProvider>
+            <Agents />
+          </ToastProvider>
+        </QueryClientProvider>,
+      );
+    });
+    await flushReact();
+    await flushReact();
+
+    expect(container.textContent).toContain("전체");
+    expect(container.textContent).toContain("일시 중지");
+    expect(container.textContent).toContain("Agent 추가");
+    expect(container.textContent).toContain("1명");
+    expect(container.textContent).not.toContain("New Agent");
   });
 
   it("gives mobile agent names the full row width after the leading status indicator", async () => {

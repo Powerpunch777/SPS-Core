@@ -49,6 +49,8 @@ import { SidebarNavItem } from "./SidebarNavItem";
 import { SidebarSection, type SidebarSectionRadioChoice } from "./SidebarSection";
 import { StarToggle } from "./StarToggle";
 import { Button } from "@/components/ui/button";
+import { isSpsBasicModeEnabled } from "@/lib/sps-basic-mode";
+import { isWorkplaneModeEnabled } from "@/lib/workplane-mode";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -304,6 +306,7 @@ export function SidebarAgents({ streamlined = false }: { streamlined?: boolean }
   const lastSeenLiveAtRef = useRef<Map<string, number>>(new Map());
   const queryClient = useQueryClient();
   const { selectedCompanyId } = useCompany();
+  const spsWorkplaneShell = isSpsBasicModeEnabled() && isWorkplaneModeEnabled();
   const { openNewAgent } = useDialogActions();
   const { isMobile, setSidebarOpen, collapsed, peeking } = useSidebar();
   const rail = collapsed && !peeking;
@@ -634,17 +637,17 @@ export function SidebarAgents({ streamlined = false }: { streamlined?: boolean }
 
   return (
     <SidebarSection
-      label="Agents"
+      label={spsWorkplaneShell ? "AGENTS" : "Agents"}
       collapsible={{ open, onOpenChange: setOpen }}
       headerAction={{
-        ariaLabel: "New agent",
+        ariaLabel: spsWorkplaneShell ? "Agent 추가" : "New agent",
         icon: Plus,
         onClick: openNewAgent,
       }}
       menu={{
         ariaLabel: "Agents section actions",
         actions: [
-          { type: "item", label: "Browse agents", icon: Users, href: "/agents/all" },
+          { type: "item", label: spsWorkplaneShell ? "Agent 목록" : "Browse agents", icon: Users, href: "/agents/all" },
           { type: "separator" },
         ],
         radioLabel: "Agent sort",
@@ -662,20 +665,20 @@ export function SidebarAgents({ streamlined = false }: { streamlined?: boolean }
           <Link
             to="/agents/all"
             state={SIDEBAR_SCROLL_RESET_STATE}
-            aria-label={rail ? "See all agents" : undefined}
+            aria-label={rail ? (spsWorkplaneShell ? "모든 Agent" : "See all agents") : undefined}
             onClick={() => {
               if (isMobile) setSidebarOpen(false);
             }}
             className="flex items-center gap-2.5 mx-2 rounded-lg px-2 py-1.5 pointer-coarse:py-1 text-(length:--text-compact) font-medium text-muted-foreground transition-colors hover:bg-accent/50 hover:text-foreground"
           >
             <Users className="shrink-0 h-4 w-4" />
-            <span className={rail ? SIDEBAR_RAIL_HIDDEN_LABEL : undefined}>See all agents</span>
+            <span className={rail ? SIDEBAR_RAIL_HIDDEN_LABEL : undefined}>{spsWorkplaneShell ? "모든 Agent" : "See all agents"}</span>
           </Link>
         );
         return rail ? (
           <Tooltip>
             <TooltipTrigger asChild>{seeAllLink}</TooltipTrigger>
-            <TooltipContent side="right">See all agents</TooltipContent>
+            <TooltipContent side="right">{spsWorkplaneShell ? "모든 Agent" : "See all agents"}</TooltipContent>
           </Tooltip>
         ) : (
           seeAllLink

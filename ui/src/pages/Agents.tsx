@@ -34,6 +34,8 @@ import {
 import { usePublishSharedQueryData, useSharedPollingQuery } from "../hooks/useSharedPolling";
 
 import { getAdapterLabel } from "../adapters/adapter-display-registry";
+import { isSpsBasicModeEnabled } from "../lib/sps-basic-mode";
+import { isWorkplaneModeEnabled } from "../lib/workplane-mode";
 
 const roleLabels = AGENT_ROLE_LABELS as Record<string, string>;
 
@@ -54,6 +56,14 @@ const AGENT_FILTER_TAB_ITEMS: { value: FilterTab; label: string }[] = [
   { value: "paused", label: "Paused" },
   { value: "error", label: "Error" },
   { value: "builtin", label: "Built-in" },
+];
+
+const SPS_AGENT_FILTER_TAB_ITEMS: { value: FilterTab; label: string }[] = [
+  { value: "all", label: "전체" },
+  { value: "active", label: "활성" },
+  { value: "paused", label: "일시 중지" },
+  { value: "error", label: "오류" },
+  { value: "builtin", label: "기본 제공" },
 ];
 
 function isFilterTab(value: string): value is FilterTab {
@@ -197,6 +207,7 @@ export function Agents() {
   const [view, setView] = useState<"list" | "org">("org");
   const forceListView = isMobile;
   const effectiveView: "list" | "org" = forceListView ? "list" : view;
+  const spsWorkplaneShell = isSpsBasicModeEnabled() && isWorkplaneModeEnabled();
 
   const { data: instanceSettings } = useQuery({
     queryKey: queryKeys.instance.settings,
@@ -206,8 +217,9 @@ export function Agents() {
   const builtInAgentsEnabled = instanceSettings?.experimental.enableBuiltInAgents === true;
   const tab: FilterTab = requestedTab === "builtin" && !builtInAgentsEnabled ? "all" : requestedTab;
   const visibleTabItems = useMemo(
-    () => AGENT_FILTER_TAB_ITEMS.filter((item) => item.value !== "builtin" || builtInAgentsEnabled),
-    [builtInAgentsEnabled],
+    () => (spsWorkplaneShell ? SPS_AGENT_FILTER_TAB_ITEMS : AGENT_FILTER_TAB_ITEMS)
+      .filter((item) => item.value !== "builtin" || builtInAgentsEnabled),
+    [builtInAgentsEnabled, spsWorkplaneShell],
   );
 
   const { data: builtInAgents } = useQuery({
@@ -315,8 +327,8 @@ export function Agents() {
   }, [agents, environmentsById, environmentCapabilities, instanceSettings?.defaultEnvironmentId]);
 
   useEffect(() => {
-    setBreadcrumbs([{ label: "Agents" }]);
-  }, [setBreadcrumbs]);
+    setBreadcrumbs([{ label: spsWorkplaneShell ? "Agent" : "Agents" }]);
+  }, [setBreadcrumbs, spsWorkplaneShell]);
 
   useEffect(() => {
     if (selectedCompanyId && requestedTab === "builtin" && instanceSettings && !builtInAgentsEnabled) {
@@ -505,15 +517,15 @@ export function Agents() {
         <div className="flex items-center gap-2">
           {/* View toggle */}
           {!forceListView && (
-            <div className="flex items-center border border-border" role="group" aria-label="View mode">
+            <div className="flex items-center border border-border" role="group" aria-label={spsWorkplaneShell ? "보기 방식" : "View mode"}>
               <button
                 className={cn(
                   "p-1.5 transition-colors",
                   effectiveView === "list" ? "bg-accent text-foreground" : "text-muted-foreground hover:bg-accent/50"
                 )}
                 onClick={() => setView("list")}
-                title="List view"
-                aria-label="List view"
+                title={spsWorkplaneShell ? "목록 보기" : "List view"}
+                aria-label={spsWorkplaneShell ? "목록 보기" : "List view"}
                 aria-pressed={effectiveView === "list"}
               >
                 <List className="h-3.5 w-3.5" />
@@ -524,8 +536,8 @@ export function Agents() {
                   effectiveView === "org" ? "bg-accent text-foreground" : "text-muted-foreground hover:bg-accent/50"
                 )}
                 onClick={() => setView("org")}
-                title="Org chart view"
-                aria-label="Org chart view"
+                title={spsWorkplaneShell ? "조직도 보기" : "Org chart view"}
+                aria-label={spsWorkplaneShell ? "조직도 보기" : "Org chart view"}
                 aria-pressed={effectiveView === "org"}
               >
                 <GitBranch className="h-3.5 w-3.5" />
@@ -534,13 +546,15 @@ export function Agents() {
           )}
           <Button size="sm" variant="outline" onClick={openNewAgent}>
             <Plus className="h-3.5 w-3.5 mr-1.5" />
-            New Agent
+            {spsWorkplaneShell ? "Agent 추가" : "New Agent"}
           </Button>
         </div>
       </div>
 
       {filtered.length > 0 && (
-        <p className="text-xs text-muted-foreground">{filtered.length} agent{filtered.length !== 1 ? "s" : ""}</p>
+        <p className="text-xs text-muted-foreground">
+          {spsWorkplaneShell ? `${filtered.length}명` : `${filtered.length} agent${filtered.length !== 1 ? "s" : ""}`}
+        </p>
       )}
 
       {error && <p className="text-sm text-destructive">{error.message}</p>}
@@ -548,8 +562,8 @@ export function Agents() {
       {agents && agents.length === 0 && (
         <EmptyState
           icon={Bot}
-          message="Create your first agent to get started."
-          action="New Agent"
+          message={spsWorkplaneShell ? "첫 Agent를 추가해 작업을 시작하세요." : "Create your first agent to get started."}
+          action={spsWorkplaneShell ? "Agent 추가" : "New Agent"}
           onAction={openNewAgent}
         />
       )}
@@ -563,7 +577,7 @@ export function Agents() {
 
       {effectiveView === "list" && agents && agents.length > 0 && filtered.length === 0 && (
         <p className="text-sm text-muted-foreground text-center py-8">
-          No agents match the selected status.
+          {spsWorkplaneShell ? "선택한 상태의 Agent가 없습니다." : "No agents match the selected status."}
         </p>
       )}
 
@@ -592,7 +606,7 @@ export function Agents() {
 
       {effectiveView === "org" && orgTree && orgTree.length > 0 && filteredOrg.length === 0 && (
         <p className="text-sm text-muted-foreground text-center py-8">
-          No agents match the selected status.
+          {spsWorkplaneShell ? "선택한 상태의 Agent가 없습니다." : "No agents match the selected status."}
         </p>
       )}
 
