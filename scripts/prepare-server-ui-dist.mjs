@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(scriptDir, "..");
+const uiDir = path.join(rootDir, "ui");
 const uiDist = path.join(rootDir, "ui", "dist");
 const serverUiDist = path.join(rootDir, "server", "ui-dist");
 const reuseExistingUiDist = /^(1|true|yes)$/i.test(
@@ -17,10 +18,16 @@ if (reuseExistingUiDist && fs.existsSync(path.join(uiDist, "index.html"))) {
   console.log("  -> Reusing existing @paperclipai/ui dist output");
 } else {
   console.log("  -> Building @paperclipai/ui...");
-  const result = spawnSync("pnpm", ["--dir", rootDir, "--filter", "@paperclipai/ui", "build"], {
-    cwd: rootDir,
+  // Invoke the installed Vite CLI with Node instead of a package-manager shell
+  // wrapper. This keeps workspace paths containing spaces as one argument.
+  const viteCli = path.join(uiDir, "node_modules", "vite", "bin", "vite.js");
+  if (!fs.existsSync(viteCli)) {
+    throw new Error(`UI build dependency missing at ${viteCli}. Run pnpm install first.`);
+  }
+  const result = spawnSync(process.execPath, [viteCli, "build"], {
+    cwd: uiDir,
     stdio: "inherit",
-    shell: process.platform === "win32",
+    shell: false,
   });
 
   if (result.error) throw result.error;

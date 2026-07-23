@@ -78,9 +78,12 @@ export function CompanySettingsSidebar() {
     queryKey: queryKeys.plugins.all,
     queryFn: () => pluginsApi.list(),
   });
-  const showCloudUpstream = experimentalSettings?.enableCloudSync === true;
-  const sidebarPlugins = (plugins ?? []).filter((plugin) => !isSandboxProviderOnly(plugin));
   const spsWorkplaneShell = isSpsBasicModeEnabled() && isWorkplaneModeEnabled();
+  const showCloudUpstream = experimentalSettings?.enableCloudSync === true;
+  const sidebarPlugins = (plugins ?? []).filter((plugin) => {
+    if (isSandboxProviderOnly(plugin)) return false;
+    return !spsWorkplaneShell || !plugin.packageName.startsWith("@paperclipai/");
+  });
 
   return (
     <aside className="w-full h-full min-h-0 border-r border-border bg-background flex flex-col">
@@ -180,7 +183,7 @@ export function CompanySettingsSidebar() {
           />
           <SidebarNavItem
             to={`${INSTANCE_SETTINGS_PATH_PREFIX}/plugins`}
-            label={spsWorkplaneShell ? "플러그인" : "Plugins"}
+            label={spsWorkplaneShell ? "확장 기능" : "Plugins"}
             icon={Puzzle}
           />
           {sidebarPlugins.length > 0 ? (

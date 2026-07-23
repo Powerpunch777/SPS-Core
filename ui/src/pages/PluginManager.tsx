@@ -29,6 +29,9 @@ import {
 } from "@/components/ui/dialog";
 import { useToastActions } from "@/context/ToastContext";
 import { cn } from "@/lib/utils";
+import { isSpsBasicModeEnabled } from "@/lib/sps-basic-mode";
+import { isWorkplaneModeEnabled } from "@/lib/workplane-mode";
+import { SpsExtensionsManager } from "./SpsExtensionsManager";
 
 function firstNonEmptyLine(value: string | null | undefined): string | null {
   if (!value) return null;
@@ -86,6 +89,14 @@ function ExperimentalBadge() {
  * @see doc/plugins/PLUGIN_SPEC.md §3 — Plugin Lifecycle for status semantics.
  */
 export function PluginManager() {
+  if (isSpsBasicModeEnabled() && isWorkplaneModeEnabled()) {
+    return <SpsExtensionsManager />;
+  }
+
+  return <GenericPluginManager />;
+}
+
+function GenericPluginManager() {
   const { selectedCompany } = useCompany();
   const { setBreadcrumbs } = useBreadcrumbs();
   const queryClient = useQueryClient();
