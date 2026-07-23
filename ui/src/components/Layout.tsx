@@ -41,6 +41,8 @@ import { queryKeys } from "../lib/queryKeys";
 import { scheduleMainContentFocus } from "../lib/main-content-focus";
 import { pinDocumentScrollToZero } from "../lib/pin-document-scroll";
 import { cn } from "../lib/utils";
+import { isSpsBasicModeEnabled } from "../lib/sps-basic-mode";
+import { isWorkplaneModeEnabled } from "../lib/workplane-mode";
 import { NotFoundPage } from "../pages/NotFound";
 import { PluginSlotMount, resolveRouteSidebarSlot, usePluginSlots } from "../plugins/slots";
 
@@ -72,6 +74,7 @@ export function Layout() {
     peeking,
     setPeeking,
     isMobile,
+    setCollapsed,
     setForceCollapsed,
   } = useSidebar();
   const { openNewIssue, openOnboarding } = useDialogActions();
@@ -172,6 +175,25 @@ export function Layout() {
     setForceCollapsed(forceRailCollapsed);
     return () => setForceCollapsed(false);
   }, [forceRailCollapsed, setForceCollapsed]);
+
+  // SPS Workplane is intentionally Rooms-first. The generic Core remembers a
+  // compact icon rail, which makes the role-and-project navigation hard to
+  // scan on a fresh SPS install. Expand the primary navigation once when a
+  // normal SPS page opens; takeover pages keep their focused secondary pane.
+  const spsWorkplaneShell = isSpsBasicModeEnabled() && isWorkplaneModeEnabled();
+  const expandedSpsRouteRef = useRef<string | null>(null);
+  useEffect(() => {
+    const shouldExpand = spsWorkplaneShell && !hasSecondarySidebar && !isSkillsRoute;
+    if (!shouldExpand) {
+      expandedSpsRouteRef.current = null;
+      return;
+    }
+
+    const routeKey = `${location.pathname}${location.search}`;
+    if (expandedSpsRouteRef.current === routeKey) return;
+    expandedSpsRouteRef.current = routeKey;
+    setCollapsed(false);
+  }, [hasSecondarySidebar, isSkillsRoute, location.pathname, location.search, setCollapsed, spsWorkplaneShell]);
 
   useEffect(() => {
     if (companiesLoading || onboardingTriggered.current) return;

@@ -28,7 +28,7 @@ vi.mock("@/lib/router", () => ({
 }));
 
 vi.mock("../context/CompanyContext", () => ({
-  useCompany: () => ({ selectedCompanyId: "company-1" }),
+  useCompany: () => ({ selectedCompanyId: "company-1", selectedCompany: { id: "company-1", issuePrefix: "SPS" } }),
 }));
 
 vi.mock("../context/DialogContext", () => ({
@@ -115,6 +115,7 @@ describe("Projects", () => {
   let queryClient: QueryClient;
 
   beforeEach(() => {
+    document.head.querySelectorAll('meta[name="sps-workplane-mode"]').forEach((element) => element.remove());
     container = document.createElement("div");
     document.body.appendChild(container);
     root = null;
@@ -217,6 +218,16 @@ describe("Projects", () => {
     expect(content.indexOf("Charlie")).toBeLessThan(content.indexOf("Other Projects"));
     expect(content.indexOf("Other Projects")).toBeLessThan(content.indexOf("Bravo"));
     expect(content).toContain("in progress");
+  });
+
+  it("opens a project directly in its Rooms when SPS Workplane mode is enabled", async () => {
+    document.head.insertAdjacentHTML("beforeend", '<meta name="sps-workplane-mode" content="true">');
+    await renderProjects();
+
+    const alphaLink = Array.from(container.querySelectorAll<HTMLAnchorElement>("a")).find((link) =>
+      link.textContent?.includes("Alpha"),
+    );
+    expect(alphaLink?.getAttribute("href")).toBe("/SPS/agent-rooms?project=project-a");
   });
 
   it("sorts grouped projects by the selected field", async () => {

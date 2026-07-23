@@ -157,6 +157,7 @@ describe("Sidebar", () => {
     container.remove();
     document.body.innerHTML = "";
     document.head.querySelector('meta[name="sps-basic-mode"]')?.remove();
+    document.head.querySelector('meta[name="sps-workplane-mode"]')?.remove();
     vi.clearAllMocks();
   });
 
@@ -179,6 +180,34 @@ describe("Sidebar", () => {
     expect(labels).not.toContain("Costs");
     expect(container.textContent).not.toContain("Plugin slot outlet");
     expect(container.textContent).not.toContain("Plugin launcher outlet");
+
+    flushSync(() => {
+      root.unmount();
+    });
+  });
+
+  it("uses Room-first SPS navigation and hides the generic Task creation shortcut", async () => {
+    const basicMode = document.createElement("meta");
+    basicMode.name = "sps-basic-mode";
+    basicMode.content = "true";
+    document.head.appendChild(basicMode);
+    const workplaneMode = document.createElement("meta");
+    workplaneMode.name = "sps-workplane-mode";
+    workplaneMode.content = "true";
+    document.head.appendChild(workplaneMode);
+    mockInstanceSettingsApi.getExperimental.mockResolvedValue({ enableIsolatedWorkspaces: false });
+    const root = await renderSidebar();
+
+    const labels = [...container.querySelectorAll("nav a")].map((anchor) => anchor.textContent?.trim());
+    expect(labels).toContain("홈");
+    expect(labels).toContain("검토함");
+    expect(labels).toContain("Rooms");
+    expect(labels).toContain("프로젝트");
+    expect(labels).toContain("Tasks");
+    expect(labels).not.toContain("Projects");
+    expect(container.textContent).not.toContain("New Task");
+    const roomsLink = [...container.querySelectorAll("nav a")].find((anchor) => anchor.textContent?.trim() === "Rooms");
+    expect(roomsLink?.getAttribute("href")).toBe("/agent-rooms");
 
     flushSync(() => {
       root.unmount();

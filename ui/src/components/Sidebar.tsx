@@ -53,6 +53,10 @@ import { isSpsBasicModeEnabled } from "../lib/sps-basic-mode";
 export function Sidebar() {
   const workplaneMode = isWorkplaneModeEnabled();
   const basicMode = isSpsBasicModeEnabled();
+  // SPS Desktop's bundled Workplane is intentionally room-first. Keep this
+  // product navigation behind the existing runtime profile so generic Core
+  // deployments retain their own information architecture.
+  const spsWorkplaneShell = basicMode && workplaneMode;
   const { openNewIssue } = useDialogActions();
   // Every labeled section is collapsible (session-scoped, default open) —
   // one policy across static nav groups and the data-driven sections.
@@ -180,8 +184,10 @@ export function Sidebar() {
           <SidebarCompanyMenu />
         </div>
         <div className="flex flex-col gap-0.5">
-          {/* New Task button aligned with nav items */}
-          {(() => {
+          {/* A Workplane Task is created by a Lead from a Room. The general
+              Core shortcut remains available to other deployments, but SPS
+              Desktop does not surface a bypass in its primary navigation. */}
+          {!spsWorkplaneShell ? (() => {
             const newTaskButton = (
               <button
                 onClick={() => openNewIssue()}
@@ -201,11 +207,11 @@ export function Sidebar() {
             ) : (
               newTaskButton
             );
-          })()}
-          <SidebarNavItem to="/dashboard" label="Dashboard" icon={LayoutDashboard} liveCount={liveRunCount} />
+          })() : null}
+          <SidebarNavItem to="/dashboard" label={spsWorkplaneShell ? "홈" : "Dashboard"} icon={LayoutDashboard} liveCount={liveRunCount} />
           <SidebarNavItem
             to="/inbox"
-            label="Inbox"
+            label={spsWorkplaneShell ? "검토함" : "Inbox"}
             icon={Inbox}
             badge={inboxBadge.inbox}
             badgeLabel="unread"
@@ -226,52 +232,62 @@ export function Sidebar() {
           ) : null}
         </div>
 
-        <SidebarSection label="Work" collapsible={{ open: workOpen, onOpenChange: setWorkOpen }}>
-          <SidebarNavItem to="/issues" label="Tasks" icon={CircleDot} />
-          {showCases ? (
-            <SidebarNavItem to="/cases" label="Cases" icon={Layers} textBadge="beta" />
-          ) : null}
-          {!basicMode ? <SidebarNavItem to="/routines" label="Routines" icon={Repeat} /> : null}
-          {showPipelines ? (
-            <SidebarNavItem to="/pipelines" label="Pipelines" icon={GitBranch} />
-          ) : null}
-          {showGoalsLink ? (
-            <SidebarNavItem to="/goals" label="Goals" icon={Target} />
-          ) : goalsLinkPending ? (
-            <div
-              data-testid="sidebar-goals-placeholder"
-              className="h-8 pointer-coarse:h-7"
-              aria-hidden="true"
-            />
-          ) : null}
-          {!basicMode ? <SidebarNavItem to="/artifacts" label="Artifacts" icon={Package} /> : null}
-          {!basicMode ? <SidebarNavItem to="/skills" label="Skills" icon={Boxes} /> : null}
-          {showWorkspacesLink ? (
-            <SidebarNavItem to="/workspaces" label="Workspaces" icon={GitBranch} />
-          ) : null}
-          {streamlined ? (
+        <SidebarSection label={spsWorkplaneShell ? "작업" : "Work"} collapsible={{ open: workOpen, onOpenChange: setWorkOpen }}>
+          {spsWorkplaneShell ? (
             <>
-              <SidebarNavItem to="/projects" label="Projects" icon={FolderOpen} />
-              <SidebarStarredProjects />
+              <SidebarNavItem to="/agent-rooms" label="Rooms" icon={MessagesSquare} />
+              <SidebarNavItem to="/projects" label="프로젝트" icon={FolderOpen} />
+              <SidebarNavItem to="/issues" label="Tasks" icon={CircleDot} />
             </>
-          ) : null}
-          {!basicMode ? (
+          ) : (
             <>
-              <PluginSlotOutlet
-                slotTypes={["sidebar"]}
-                context={pluginContext}
-                className="flex flex-col gap-0.5"
-                itemClassName="text-(length:--text-compact) font-medium"
-                missingBehavior="placeholder"
-              />
-              <PluginLauncherOutlet
-                placementZones={["sidebar"]}
-                context={pluginContext}
-                className="flex flex-col gap-0.5"
-                itemClassName="text-(length:--text-compact) font-medium"
-              />
+              <SidebarNavItem to="/issues" label="Tasks" icon={CircleDot} />
+              {showCases ? (
+                <SidebarNavItem to="/cases" label="Cases" icon={Layers} textBadge="beta" />
+              ) : null}
+              {!basicMode ? <SidebarNavItem to="/routines" label="Routines" icon={Repeat} /> : null}
+              {showPipelines ? (
+                <SidebarNavItem to="/pipelines" label="Pipelines" icon={GitBranch} />
+              ) : null}
+              {showGoalsLink ? (
+                <SidebarNavItem to="/goals" label="Goals" icon={Target} />
+              ) : goalsLinkPending ? (
+                <div
+                  data-testid="sidebar-goals-placeholder"
+                  className="h-8 pointer-coarse:h-7"
+                  aria-hidden="true"
+                />
+              ) : null}
+              {!basicMode ? <SidebarNavItem to="/artifacts" label="Artifacts" icon={Package} /> : null}
+              {!basicMode ? <SidebarNavItem to="/skills" label="Skills" icon={Boxes} /> : null}
+              {showWorkspacesLink ? (
+                <SidebarNavItem to="/workspaces" label="Workspaces" icon={GitBranch} />
+              ) : null}
+              {streamlined ? (
+                <>
+                  <SidebarNavItem to="/projects" label="Projects" icon={FolderOpen} />
+                  <SidebarStarredProjects />
+                </>
+              ) : null}
+              {!basicMode ? (
+                <>
+                  <PluginSlotOutlet
+                    slotTypes={["sidebar"]}
+                    context={pluginContext}
+                    className="flex flex-col gap-0.5"
+                    itemClassName="text-(length:--text-compact) font-medium"
+                    missingBehavior="placeholder"
+                  />
+                  <PluginLauncherOutlet
+                    placementZones={["sidebar"]}
+                    context={pluginContext}
+                    className="flex flex-col gap-0.5"
+                    itemClassName="text-(length:--text-compact) font-medium"
+                  />
+                </>
+              ) : null}
             </>
-          ) : null}
+          )}
         </SidebarSection>
 
         {/* Classic mode restores the per-project collapsible below Work. */}
@@ -279,12 +295,12 @@ export function Sidebar() {
 
         <SidebarAgents streamlined={streamlined} />
 
-        <SidebarSection label={basicMode ? "Server" : workplaneMode ? "System" : "Company"} collapsible={{ open: companyOpen, onOpenChange: setCompanyOpen }}>
+        <SidebarSection label={spsWorkplaneShell ? "관리" : basicMode ? "Server" : workplaneMode ? "System" : "Company"} collapsible={{ open: companyOpen, onOpenChange: setCompanyOpen }}>
           {!basicMode && !workplaneMode ? <SidebarNavItem to="/org" label="Org" icon={Network} /> : null}
           {!basicMode ? <SidebarNavItem to="/timeline" label="Timeline" icon={GanttChartSquare} /> : null}
           {!basicMode ? <SidebarNavItem to="/costs" label="Costs" icon={DollarSign} /> : null}
           {!basicMode ? <SidebarNavItem to="/activity" label="Activity" icon={History} /> : null}
-          <SidebarNavItem to="/company/settings" label={basicMode ? "Server Settings" : "Settings"} icon={Settings} />
+          <SidebarNavItem to="/company/settings" label={spsWorkplaneShell ? "서버 설정" : basicMode ? "Server Settings" : "Settings"} icon={Settings} />
         </SidebarSection>
 
         {!basicMode ? (

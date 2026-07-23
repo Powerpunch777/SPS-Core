@@ -171,6 +171,7 @@ vi.mock("../context/SidebarContext", () => ({
     sidebarOpen: mockSidebarState.sidebarOpen,
     setSidebarOpen: mockSetSidebarOpen,
     toggleSidebar: vi.fn(),
+    setCollapsed: vi.fn(),
     toggleCollapsed: vi.fn(),
     collapsed: mockSidebarState.collapsed,
     collapseLocked: false,

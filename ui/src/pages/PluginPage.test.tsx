@@ -116,6 +116,7 @@ describe("PluginPage", () => {
     mockParams.pluginId = undefined;
     mockParams.pluginRoutePath = undefined;
     mockParams["*"] = undefined;
+    document.head.querySelectorAll('meta[name^="sps-"]').forEach((element) => element.remove());
   });
 
   afterEach(() => {
@@ -172,6 +173,64 @@ describe("PluginPage", () => {
     expect(container.querySelector('a[href="/PAP/dashboard"]')).toBeNull();
     // Page slot itself still renders.
     expect(container.querySelector('[data-testid="plugin-slot-mount"]')?.textContent).toBe("Wiki");
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it("uses the Rooms chrome instead of generic plugin navigation for the SPS Workplane route", async () => {
+    mockParams.pluginRoutePath = "agent-rooms";
+    document.head.insertAdjacentHTML(
+      "beforeend",
+      '<meta name="sps-basic-mode" content="true"><meta name="sps-workplane-mode" content="true">',
+    );
+    mockPluginsApi.listUiContributions.mockResolvedValue([
+      pageContribution({
+        slots: [{
+          type: "page",
+          id: "agent-rooms",
+          displayName: "Team Rooms",
+          exportName: "AgentRoomsPage",
+          routePath: "agent-rooms",
+        }],
+      }),
+    ]);
+
+    const root = await renderPage(container);
+
+    expect(mockSetBreadcrumbs).toHaveBeenCalledWith([{ label: "Rooms" }]);
+    expect(container.textContent).not.toContain("Back");
+    expect(container.querySelector('a[href="/PAP/dashboard"]')).toBeNull();
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it("uses the Tasks chrome instead of generic plugin navigation for the SPS Task list route", async () => {
+    mockParams.pluginRoutePath = "tasks";
+    document.head.insertAdjacentHTML(
+      "beforeend",
+      '<meta name="sps-basic-mode" content="true"><meta name="sps-workplane-mode" content="true">',
+    );
+    mockPluginsApi.listUiContributions.mockResolvedValue([
+      pageContribution({
+        slots: [{
+          type: "page",
+          id: "project-tasks",
+          displayName: "Tasks",
+          exportName: "ProjectTasksPage",
+          routePath: "tasks",
+        }],
+      }),
+    ]);
+
+    const root = await renderPage(container);
+
+    expect(mockSetBreadcrumbs).toHaveBeenCalledWith([{ label: "Tasks" }]);
+    expect(container.textContent).not.toContain("Back");
+    expect(container.querySelector('a[href="/PAP/dashboard"]')).toBeNull();
 
     await act(async () => {
       root.unmount();

@@ -470,6 +470,31 @@ export function ProjectDetail() {
     });
   }, [project, isolatedWorkspacesEnabled, workspaceTabIssues, workspaceTabExecutionWorkspaces]);
   const showWorkspacesTab = isolatedWorkspacesEnabled && workspaceSummaries.length > 0;
+  const projectTabItems = useMemo(() => {
+    if (workplaneMode) {
+      const roomsTab = workplaneProfile.defaultProjectTab
+        ? pluginTabItems.find((item) => item.value === workplaneProfile.defaultProjectTab)
+        : null;
+      const secondaryPluginTabs = pluginTabItems.filter((item) => item !== roomsTab);
+      return [
+        ...(roomsTab ? [{ value: roomsTab.value, label: "Rooms" }] : []),
+        { value: "list" as const, label: "Tasks" },
+        { value: "configuration" as const, label: "프로젝트 설정" },
+        { value: "budget" as const, label: "예산" },
+        ...secondaryPluginTabs.map((item) => ({ value: item.value, label: item.label })),
+      ];
+    }
+
+    return [
+      { value: "list" as const, label: "Tasks" },
+      { value: "overview" as const, label: "Overview" },
+      ...(project?.managedByPlugin ? [{ value: "plugin-operations" as const, label: "Plugin operations" }] : []),
+      ...(showWorkspacesTab ? [{ value: "workspaces" as const, label: "Workspaces" }] : []),
+      { value: "configuration" as const, label: "Configuration" },
+      { value: "budget" as const, label: "Budget" },
+      ...pluginTabItems.map((item) => ({ value: item.value, label: item.label })),
+    ];
+  }, [pluginTabItems, project?.managedByPlugin, showWorkspacesTab, workplaneMode, workplaneProfile.defaultProjectTab]);
   const workspaceTabDecisionLoaded =
     experimentalSettingsQuery.isFetched &&
     (!isolatedWorkspacesEnabled || (!isWorkspaceTabIssuesLoading && !isWorkspaceTabExecutionWorkspacesLoading));
@@ -536,10 +561,10 @@ export function ProjectDetail() {
 
   useEffect(() => {
     setBreadcrumbs([
-      { label: "Projects", href: "/projects" },
-      { label: project?.name ?? routeProjectRef ?? "Project" },
+      { label: workplaneMode ? "프로젝트" : "Projects", href: "/projects" },
+      { label: project?.name ?? routeProjectRef ?? (workplaneMode ? "프로젝트" : "Project") },
     ]);
-  }, [setBreadcrumbs, project, routeProjectRef]);
+  }, [setBreadcrumbs, project, routeProjectRef, workplaneMode]);
 
   useEffect(() => {
     if (!project) return;
@@ -887,18 +912,7 @@ export function ProjectDetail() {
 
       <Tabs value={activeTab ?? "list"} onValueChange={(value) => handleTabChange(value as ProjectTab)}>
         <PageTabBar
-          items={[
-            { value: "list", label: "Tasks" },
-            { value: "overview", label: "Overview" },
-            ...(project.managedByPlugin ? [{ value: "plugin-operations", label: "Plugin operations" }] : []),
-            ...(showWorkspacesTab ? [{ value: "workspaces", label: "Workspaces" }] : []),
-            { value: "configuration", label: "Configuration" },
-            { value: "budget", label: "Budget" },
-            ...pluginTabItems.map((item) => ({
-              value: item.value,
-              label: item.label,
-            })),
-          ]}
+          items={projectTabItems}
           align="start"
           value={activeTab ?? "list"}
           onValueChange={(value) => handleTabChange(value as ProjectTab)}

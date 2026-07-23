@@ -24,6 +24,7 @@ import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { ArrowUpDown, Check, Hexagon, Plus } from "lucide-react";
 import { Card } from "@/components/ui/card";
+import { isWorkplaneModeEnabled } from "../lib/workplane-mode";
 
 type ProjectSortField = "name" | "updated" | "created" | "targetDate";
 type ProjectSortDir = "asc" | "desc";
@@ -77,15 +78,16 @@ function sortProjects(projects: Project[], sortField: ProjectSortField, sortDir:
 }
 
 export function Projects() {
-  const { selectedCompanyId } = useCompany();
+  const workplaneMode = isWorkplaneModeEnabled();
+  const { selectedCompanyId, selectedCompany } = useCompany();
   const { openNewProject } = useDialogActions();
   const { setBreadcrumbs } = useBreadcrumbs();
   const [sortField, setSortField] = useState<ProjectSortField>("name");
   const [sortDir, setSortDir] = useState<ProjectSortDir>("asc");
 
   useEffect(() => {
-    setBreadcrumbs([{ label: "Projects" }]);
-  }, [setBreadcrumbs]);
+    setBreadcrumbs([{ label: workplaneMode ? "프로젝트" : "Projects" }]);
+  }, [setBreadcrumbs, workplaneMode]);
 
   const { data: allProjects, isLoading, error } = useQuery({
     queryKey: queryKeys.projects.list(selectedCompanyId!),
@@ -117,6 +119,7 @@ export function Projects() {
     return groups;
   }, [membershipsQuery.data, sortedProjects]);
   const sortLabel = PROJECT_SORT_OPTIONS.find((option) => option.field === sortField)?.label ?? "Name";
+  const workplaneRoutePrefix = selectedCompany?.issuePrefix ? `/${selectedCompany.issuePrefix}` : "";
 
   if (!selectedCompanyId) {
     return <EmptyState icon={Hexagon} message="Select a company to view projects." />;
@@ -128,12 +131,20 @@ export function Projects() {
 
   return (
     <div className="space-y-4">
+      {workplaneMode ? (
+        <header className="space-y-1 border-b border-border pb-4">
+          <h1 className="text-xl font-semibold tracking-tight">프로젝트</h1>
+          <p className="max-w-2xl text-sm text-muted-foreground">
+            프로젝트를 열면 해당 팀의 Rooms로 이동합니다. Lead는 Room에서 작업을 정리한 뒤 Worker에게 Task를 배정합니다.
+          </p>
+        </header>
+      ) : null}
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
         <Popover>
           <PopoverTrigger asChild>
             <Button variant="ghost" size="sm" className="w-fit text-xs" title="Sort">
               <ArrowUpDown className="h-3.5 w-3.5 sm:h-3 sm:w-3 sm:mr-1" />
-              <span>Sort: {sortLabel}</span>
+              <span>{workplaneMode ? `정렬: ${sortLabel}` : `Sort: ${sortLabel}`}</span>
             </Button>
           </PopoverTrigger>
           <PopoverContent align="start" className="w-44 p-0">
@@ -170,7 +181,7 @@ export function Projects() {
         </Popover>
         <Button size="sm" variant="outline" onClick={openNewProject}>
           <Plus className="h-4 w-4 mr-1" />
-          Add Project
+          {workplaneMode ? "프로젝트 추가" : "Add Project"}
         </Button>
       </div>
 
@@ -179,8 +190,8 @@ export function Projects() {
       {!isLoading && projects.length === 0 && (
         <EmptyState
           icon={Hexagon}
-          message="No projects yet."
-          action="Add Project"
+          message={workplaneMode ? "아직 프로젝트가 없습니다." : "No projects yet."}
+          action={workplaneMode ? "프로젝트 추가" : "Add Project"}
           onAction={openNewProject}
         />
       )}
@@ -188,8 +199,8 @@ export function Projects() {
       {projects.length > 0 && (
         <div className="space-y-6">
           {([
-            ["My Projects", groupedProjects.mine],
-            ["Other Projects", groupedProjects.other],
+            [workplaneMode ? "내 프로젝트" : "My Projects", groupedProjects.mine],
+            [workplaneMode ? "다른 프로젝트" : "Other Projects", groupedProjects.other],
           ] as const).map(([label, sectionProjects]) => {
             if (sectionProjects.length === 0) return null;
 
@@ -210,6 +221,9 @@ export function Projects() {
                     const starPending = pending && membershipMutation.variables?.starred !== undefined;
                     const joinLeavePending = pending && membershipMutation.variables?.starred === undefined;
                     const starred = isStarred(membershipsQuery.data, "project", project.id);
+                    const projectHref = workplaneMode
+                      ? `${workplaneRoutePrefix}/agent-rooms?project=${encodeURIComponent(project.id)}`
+                      : projectUrl(project);
                     return (
                       <EntityRow
                         key={project.id}
@@ -217,7 +231,7 @@ export function Projects() {
                         title={project.name}
                         subtitle={project.description ?? undefined}
                         reserveSubtitleSpace
-                        to={projectUrl(project)}
+                        to={projectHref}
                         className={state === "left" ? "group text-foreground/55" : "group"}
                         trailing={
                           <div className="flex items-center gap-3">
@@ -225,7 +239,9 @@ export function Projects() {
                               className="hidden text-xs text-muted-foreground tabular-nums sm:inline"
                               title={`${formatNumber(project.taskCount ?? 0)} task${(project.taskCount ?? 0) === 1 ? "" : "s"}`}
                             >
-                              {formatNumber(project.taskCount ?? 0)} task{(project.taskCount ?? 0) === 1 ? "" : "s"}
+                              {workplaneMode
+                                ? `Task ${formatNumber(project.taskCount ?? 0)}개`
+                                : `${formatNumber(project.taskCount ?? 0)} task${(project.taskCount ?? 0) === 1 ? "" : "s"}`}
                             </span>
                             {project.budget && (
                               <span className="hidden text-xs text-muted-foreground tabular-nums sm:inline">

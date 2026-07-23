@@ -13,6 +13,8 @@ import {
 import { Button } from "@/components/ui/button";
 import { ArrowLeft } from "lucide-react";
 import { NotFoundPage } from "./NotFound";
+import { isSpsBasicModeEnabled } from "../lib/sps-basic-mode";
+import { isWorkplaneModeEnabled } from "../lib/workplane-mode";
 
 /**
  * Company-context plugin page. Renders a plugin's `page` slot at
@@ -102,6 +104,10 @@ export function PluginPage() {
     : companyPrefix
       ? `/${companyPrefix}/dashboard`
       : "/dashboard";
+  const spsWorkplaneRoute = isSpsBasicModeEnabled()
+    && isWorkplaneModeEnabled()
+    && (pluginRoutePath === "agent-rooms" || pluginRoutePath === "tasks");
+  const spsWorkplaneRouteTitle = pluginRoutePath === "tasks" ? "Tasks" : "Rooms";
 
   // When the active route has a routeSidebar slot, the sidebar provides the
   // back affordance, but the top bar still needs a route-specific title.
@@ -121,15 +127,15 @@ export function PluginPage() {
 
   useEffect(() => {
     if (!pageSlot) return;
-    if (routeSidebarActive) {
-      setBreadcrumbs([{ label: resolveRouteSidebarPageTitle(pageSlot, pluginRouteSplat) }]);
+    if (routeSidebarActive || spsWorkplaneRoute) {
+      setBreadcrumbs([{ label: spsWorkplaneRoute ? spsWorkplaneRouteTitle : resolveRouteSidebarPageTitle(pageSlot, pluginRouteSplat) }]);
       return;
     }
     setBreadcrumbs([
       { label: "Plugins", href: "/company/settings/instance/plugins" },
       { label: pageSlot.pluginDisplayName },
     ]);
-  }, [pageSlot, pluginRouteSplat, setBreadcrumbs, routeSidebarActive]);
+  }, [pageSlot, pluginRouteSplat, setBreadcrumbs, routeSidebarActive, spsWorkplaneRoute, spsWorkplaneRouteTitle]);
 
   if (!resolvedCompanyId) {
     if (hasInvalidCompanyPrefix) {
@@ -171,8 +177,8 @@ export function PluginPage() {
   }
 
   return (
-    <div className="space-y-4">
-      {!routeSidebarActive && (
+    <div className={spsWorkplaneRoute ? "h-full" : "space-y-4"}>
+      {!routeSidebarActive && !spsWorkplaneRoute && (
         <div className="flex items-center gap-2">
           <Button variant="ghost" size="sm" asChild>
             <Link to={backHref}>
