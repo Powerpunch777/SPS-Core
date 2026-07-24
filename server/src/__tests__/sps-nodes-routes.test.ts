@@ -243,13 +243,20 @@ describeEmbeddedPostgres("SPS Node routes", () => {
     expect(list.body).toHaveLength(1);
     expect(list.body[0].agentGrants).toHaveLength(1);
     expect(list.body[0].primaryAgentBindings).toHaveLength(1);
-    expect(list.body[0].runners).toHaveLength(1);
-    expect(list.body[0].runners[0]).toMatchObject({
+    expect(list.body[0].runners).toHaveLength(2);
+    expect(list.body[0].runners.map((runner: { runnerKey: string }) => runner.runnerKey).sort()).toEqual([
+      "codex_cli:default",
+      "ollama:default",
+    ]);
+    const codexRunner = list.body[0].runners.find((runner: { runnerKey: string }) => (
+      runner.runnerKey === "codex_cli:default"
+    ));
+    expect(codexRunner).toMatchObject({
       runnerKey: "codex_cli:default",
       credentialStatus: "unknown",
       availabilityStatus: "unknown",
     });
-    expect(list.body[0].runners[0].agentGrants).toHaveLength(1);
+    expect(codexRunner.agentGrants).toHaveLength(1);
   });
 
   it("records a signed Runner availability snapshot without receiving local credentials", async () => {
