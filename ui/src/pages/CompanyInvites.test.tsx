@@ -14,6 +14,7 @@ const revokeInviteMock = vi.hoisted(() => vi.fn());
 const pushToastMock = vi.hoisted(() => vi.fn());
 const setBreadcrumbsMock = vi.hoisted(() => vi.fn());
 const clipboardWriteTextMock = vi.hoisted(() => vi.fn());
+const healthGetMock = vi.hoisted(() => vi.fn());
 
 vi.mock("@/api/access", () => ({
   accessApi: {
@@ -22,6 +23,10 @@ vi.mock("@/api/access", () => ({
       createCompanyInviteMock(companyId, input),
     revokeInvite: (inviteId: string) => revokeInviteMock(inviteId),
   },
+}));
+
+vi.mock("@/api/health", () => ({
+  healthApi: { get: () => healthGetMock() },
 }));
 
 vi.mock("@/context/CompanyContext", () => ({
@@ -106,6 +111,7 @@ describe("CompanyInvites", () => {
     });
 
     revokeInviteMock.mockResolvedValue(undefined);
+    healthGetMock.mockResolvedValue({ status: "ok", deploymentMode: "authenticated" });
 
     Object.defineProperty(globalThis.navigator, "clipboard", {
       configurable: true,
@@ -298,6 +304,35 @@ describe("CompanyInvites", () => {
       body: "SPS invite code copied to clipboard.",
       tone: "success",
     });
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it("does not create unusable cross-computer invites from a local-only server", async () => {
+    healthGetMock.mockResolvedValue({ status: "ok", deploymentMode: "local_trusted" });
+    const root = createRoot(container);
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+
+    await act(async () => {
+      root.render(
+        <MemoryRouter>
+          <QueryClientProvider client={queryClient}>
+            <CompanyInvites />
+          </QueryClientProvider>
+        </MemoryRouter>,
+      );
+    });
+    await flushReact();
+    await flushReact();
+
+    expect(container.textContent).toContain("This SPS Server is local only.");
+    expect(container.textContent).toContain("Enable authenticated private or public server access");
+    expect(container.textContent).not.toContain("Create SPS invite");
+    expect(createCompanyInviteMock).not.toHaveBeenCalled();
 
     await act(async () => {
       root.unmount();

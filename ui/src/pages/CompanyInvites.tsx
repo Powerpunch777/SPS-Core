@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useInfiniteQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, Copy, ExternalLink, MailPlus, QrCode } from "lucide-react";
 import { QRCodeSVG } from "qrcode.react";
 import { accessApi } from "@/api/access";
 import { ApiError } from "@/api/client";
 import { Button } from "@/components/ui/button";
+import { healthApi } from "@/api/health";
 import { useBreadcrumbs } from "@/context/BreadcrumbContext";
 import { useCompany } from "@/context/CompanyContext";
 import { useToast } from "@/context/ToastContext";
@@ -72,6 +73,11 @@ export function CompanyInvites() {
   const [latestInvite, setLatestInvite] = useState<LatestInvite | null>(null);
   const [latestInviteCopied, setLatestInviteCopied] = useState(false);
   const latestInviteInputRef = useRef<HTMLInputElement | null>(null);
+  const healthQuery = useQuery({
+    queryKey: queryKeys.health,
+    queryFn: () => healthApi.get(),
+  });
+  const canCreateTeamInvites = healthQuery.data?.deploymentMode === "authenticated";
 
   useEffect(() => {
     if (!latestInviteCopied) return;
@@ -164,13 +170,17 @@ export function CompanyInvites() {
   );
 
   const createInviteMutation = useMutation({
-    mutationFn: () =>
-      accessApi.createCompanyInvite(selectedCompanyId!, {
+    mutationFn: () => {
+      if (!canCreateTeamInvites) {
+        throw new Error("Invitations require authenticated server access.");
+      }
+      return accessApi.createCompanyInvite(selectedCompanyId!, {
         allowedJoinTypes: "human",
         humanRole,
         agentMessage: null,
         expiresInMinutes,
-      }),
+      });
+    },
     onSuccess: async (invite) => {
       setLatestInvite({ token: invite.token, inviteUrl: invite.inviteUrl, expiresAt: invite.expiresAt });
       setLatestInviteCopied(false);
@@ -254,7 +264,25 @@ export function CompanyInvites() {
           </p>
         </div>
 
-        <fieldset className="space-y-3">
+        {healthQuery.isLoading ? (
+          <div className="rounded-lg border border-border px-4 py-3 text-sm text-muted-foreground" role="status">
+            Checking whether this SPS Server can accept team invitations…
+          </div>
+        ) : healthQuery.error ? (
+          <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm" role="status">
+            <p className="font-medium">Server access could not be verified.</p>
+            <p className="mt-1 text-muted-foreground">Team invitations stay unavailable until this server health check succeeds.</p>
+          </div>
+        ) : !canCreateTeamInvites ? (
+          <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm" role="status">
+            <p className="font-medium">This SPS Server is local only.</p>
+            <p className="mt-1 text-muted-foreground">
+              A local address cannot be used by another computer. Enable authenticated private or public server access before creating a team invitation.
+            </p>
+          </div>
+        ) : (
+          <>
+            <fieldset className="space-y-3">
           <legend className="text-sm font-medium">Choose a role</legend>
           <div className="rounded-xl border border-border">
             {inviteRoleOptions.map((option, index) => {
@@ -288,9 +316,9 @@ export function CompanyInvites() {
               );
             })}
           </div>
-        </fieldset>
+            </fieldset>
 
-        <fieldset className="space-y-2">
+            <fieldset className="space-y-2">
           <legend className="text-sm font-medium">Invite expiration</legend>
           <div className="flex flex-wrap gap-2">
             {inviteExpiryOptions.map((option) => (
@@ -305,20 +333,20 @@ export function CompanyInvites() {
               </Button>
             ))}
           </div>
-        </fieldset>
+            </fieldset>
 
-        <div className="rounded-lg border border-border px-4 py-3 text-sm text-muted-foreground">
+            <div className="rounded-lg border border-border px-4 py-3 text-sm text-muted-foreground">
           Each invite is single-use. Invitees complete Google sign-in before the selected company role is granted.
-        </div>
+            </div>
 
-        <div className="flex flex-wrap items-center gap-3">
+            <div className="flex flex-wrap items-center gap-3">
           <Button onClick={() => createInviteMutation.mutate()} disabled={createInviteMutation.isPending}>
             {createInviteMutation.isPending ? "Creating…" : "Create SPS invite"}
           </Button>
           <span className="text-sm text-muted-foreground">Invite history below keeps the audit trail.</span>
-        </div>
+            </div>
 
-        {latestInvite ? (
+            {latestInvite ? (
           <div className="space-y-3 rounded-lg border border-border px-4 py-4">
             <div className="space-y-1">
               <div className="flex items-center justify-between gap-3">
@@ -429,7 +457,9 @@ export function CompanyInvites() {
               </Button>
             </div>
           </div>
-        ) : null}
+            ) : null}
+          </>
+        )}
       </section>
 
       <section className="rounded-xl border border-border">
