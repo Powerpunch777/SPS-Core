@@ -525,6 +525,7 @@ export async function startServer(): Promise<StartedServer> {
   
   let authReady = config.deploymentMode === "local_trusted";
   let betterAuthHandler: RequestHandler | undefined;
+  let spsIdentityHandler: RequestHandler | undefined;
   let resolveSession:
     | ((req: ExpressRequest) => Promise<BetterAuthSessionResult | null>)
     | undefined;
@@ -539,35 +540,51 @@ export async function startServer(): Promise<StartedServer> {
     logger.info(accessBackfill, "Backfilled principal access compatibility records");
   }
   if (config.deploymentMode === "authenticated") {
-    const {
-      createBetterAuthHandler,
-      createBetterAuthInstance,
-      deriveAuthTrustedOrigins,
-      resolveBetterAuthSession,
-      resolveBetterAuthSessionFromHeaders,
-    } = await import("./auth/better-auth.js");
-    const derivedTrustedOrigins = deriveAuthTrustedOrigins(config, { listenPort });
-    const envTrustedOrigins = (process.env.BETTER_AUTH_TRUSTED_ORIGINS ?? "")
-      .split(",")
-      .map((value) => value.trim())
-      .filter((value) => value.length > 0);
-    const effectiveTrustedOrigins = Array.from(new Set([...derivedTrustedOrigins, ...envTrustedOrigins]));
-    logger.info(
-      {
-        authBaseUrlMode: config.authBaseUrlMode,
-        authPublicBaseUrl: config.authPublicBaseUrl ?? null,
-        trustedOrigins: effectiveTrustedOrigins,
-        trustedOriginsSource: {
-          derived: derivedTrustedOrigins.length,
-          env: envTrustedOrigins.length,
+    if (config.authIdentityEnabled) {
+      const { createSpsIdentityAuth } = await import("./auth/sps-identity.js");
+      const identityAuth = createSpsIdentityAuth(db as any, config);
+      spsIdentityHandler = identityAuth.routes;
+      resolveSession = (req) => identityAuth.resolveSession(req);
+      resolveSessionFromHeaders = (headers) => identityAuth.resolveSessionFromHeaders(headers);
+      logger.info(
+        {
+          issuer: config.authIdentityIssuer,
+          audience: config.authIdentityAudience,
+          jwksUrl: config.authIdentityJwksUrl,
         },
-      },
-      "Authenticated mode auth origin configuration",
-    );
-    const auth = createBetterAuthInstance(db as any, config, effectiveTrustedOrigins);
-    betterAuthHandler = createBetterAuthHandler(auth);
-    resolveSession = (req) => resolveBetterAuthSession(auth, req);
-    resolveSessionFromHeaders = (headers) => resolveBetterAuthSessionFromHeaders(auth, headers);
+        "Authenticated mode uses SPS Identity",
+      );
+    } else {
+      const {
+        createBetterAuthHandler,
+        createBetterAuthInstance,
+        deriveAuthTrustedOrigins,
+        resolveBetterAuthSession,
+        resolveBetterAuthSessionFromHeaders,
+      } = await import("./auth/better-auth.js");
+      const derivedTrustedOrigins = deriveAuthTrustedOrigins(config, { listenPort });
+      const envTrustedOrigins = (process.env.BETTER_AUTH_TRUSTED_ORIGINS ?? "")
+        .split(",")
+        .map((value) => value.trim())
+        .filter((value) => value.length > 0);
+      const effectiveTrustedOrigins = Array.from(new Set([...derivedTrustedOrigins, ...envTrustedOrigins]));
+      logger.info(
+        {
+          authBaseUrlMode: config.authBaseUrlMode,
+          authPublicBaseUrl: config.authPublicBaseUrl ?? null,
+          trustedOrigins: effectiveTrustedOrigins,
+          trustedOriginsSource: {
+            derived: derivedTrustedOrigins.length,
+            env: envTrustedOrigins.length,
+          },
+        },
+        "Authenticated mode auth origin configuration",
+      );
+      const auth = createBetterAuthInstance(db as any, config, effectiveTrustedOrigins);
+      betterAuthHandler = createBetterAuthHandler(auth);
+      resolveSession = (req) => resolveBetterAuthSession(auth, req);
+      resolveSessionFromHeaders = (headers) => resolveBetterAuthSessionFromHeaders(auth, headers);
+    }
     await initializeBoardClaimChallenge(db as any, { deploymentMode: config.deploymentMode });
     authReady = true;
   }
@@ -689,6 +706,7 @@ export async function startServer(): Promise<StartedServer> {
     companyDeletionEnabled: config.companyDeletionEnabled,
     pluginMigrationDb: pluginMigrationDb as any,
     betterAuthHandler,
+    spsIdentityHandler,
     resolveSession,
     pluginWorkerManager,
   });

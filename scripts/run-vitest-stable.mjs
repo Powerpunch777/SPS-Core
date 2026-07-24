@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readdirSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -66,6 +66,19 @@ function resolvePnpmInvocation() {
   const npmExecPath = process.env.npm_execpath;
   if (npmExecPath && /(?:^|[\\/])pnpm(?:\.c?js)?$/i.test(npmExecPath)) {
     return { command: process.execPath, prefixArgs: [npmExecPath] };
+  }
+
+  // On Windows, invoke npm's npx CLI through Node instead of joining a
+  // `npx.cmd` command string. The latter loses quoting when Node is installed
+  // under `Program Files` or the workspace path contains spaces.
+  if (process.platform === "win32") {
+    const bundledNpxCli = path.join(path.dirname(process.execPath), "node_modules", "npm", "bin", "npx-cli.js");
+    if (existsSync(bundledNpxCli)) {
+      return {
+        command: process.execPath,
+        prefixArgs: [bundledNpxCli, "--yes", "pnpm@9.15.4"],
+      };
+    }
   }
 
   return {
@@ -273,9 +286,8 @@ function runVitest(args, label) {
   mkdirSync(env.TMPDIR, { recursive: true });
   const pnpm = resolvePnpmInvocation();
   const commandArgs = [...pnpm.prefixArgs, "exec", "vitest", "run", ...args];
-  // `spawn(..., { shell: true })` joins its arguments without preserving a
-  // Windows workspace path containing spaces. The fallback uses npx.cmd only
-  // when pnpm did not invoke this script, so run it through cmd explicitly.
+  // The direct Node + npx-cli path above handles normal Windows installs. Keep
+  // this fallback for unusual environments that expose only npx.cmd.
   const needsWindowsCmdWrapper = process.platform === "win32" && pnpm.command.toLowerCase() === "npx.cmd";
   const result = needsWindowsCmdWrapper
     ? spawnSync(process.env.ComSpec ?? "cmd.exe", ["/d", "/s", "/c", [pnpm.command, ...commandArgs].join(" ")], {
@@ -288,7 +300,7 @@ function runVitest(args, label) {
     cwd: repoRoot,
     env,
     stdio: "inherit",
-    shell: process.platform === "win32",
+    shell: false,
   });
   if (result.error) {
     console.error(`[test:run] Failed to start Vitest: ${result.error.message}`);

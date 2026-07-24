@@ -64,6 +64,10 @@ export interface Config {
   authGoogleClientSecret: string | undefined;
   authGoogleHostedDomain: string | undefined;
   authGoogleOnly: boolean;
+  authIdentityEnabled: boolean;
+  authIdentityIssuer: string | undefined;
+  authIdentityAudience: string;
+  authIdentityJwksUrl: string | undefined;
   databaseMode: DatabaseMode;
   databaseUrl: string | undefined;
   databaseMigrationUrl: string | undefined;
@@ -232,16 +236,33 @@ export function loadConfig(): Config {
     process.env.SPS_GOOGLE_HOSTED_DOMAIN?.trim() ||
     process.env.PAPERCLIP_GOOGLE_HOSTED_DOMAIN?.trim() ||
     undefined;
+  const authIdentityIssuer = process.env.SPS_IDENTITY_ISSUER?.trim().replace(/\/$/, "") || undefined;
+  const authIdentityAudience = process.env.SPS_IDENTITY_AUDIENCE?.trim() || "sps-core";
+  const authIdentityJwksUrl = process.env.SPS_IDENTITY_JWKS_URL?.trim()
+    || (authIdentityIssuer ? `${authIdentityIssuer}/.well-known/jwks.json` : undefined);
+  const identityEnabledFromEnv = process.env.SPS_AUTH_IDENTITY_ENABLED;
+  const authIdentityEnabled = identityEnabledFromEnv !== undefined
+    ? identityEnabledFromEnv === "true"
+    : Boolean(authIdentityIssuer && authIdentityJwksUrl);
+  if (authIdentityEnabled && (!authIdentityIssuer || !authIdentityJwksUrl)) {
+    throw new Error("SPS_AUTH_IDENTITY_ENABLED=true requires SPS_IDENTITY_ISSUER and SPS_IDENTITY_JWKS_URL.");
+  }
+  if (authIdentityJwksUrl && !/^https:\/\//i.test(authIdentityJwksUrl) && process.env.NODE_ENV === "production") {
+    throw new Error("SPS_IDENTITY_JWKS_URL must use HTTPS in production.");
+  }
   const googleAuthConfigured = Boolean(authGoogleClientId && authGoogleClientSecret);
   const googleOnlyFromEnv = process.env.SPS_AUTH_GOOGLE_ONLY ?? process.env.PAPERCLIP_AUTH_GOOGLE_ONLY;
   const authGoogleOnly =
     googleOnlyFromEnv !== undefined
       ? googleOnlyFromEnv === "true"
-      : googleAuthConfigured;
+    : (googleAuthConfigured && !authIdentityEnabled);
   if (authGoogleOnly && !googleAuthConfigured) {
     throw new Error(
       "SPS_AUTH_GOOGLE_ONLY=true requires SPS_GOOGLE_CLIENT_ID and SPS_GOOGLE_CLIENT_SECRET.",
     );
+  }
+  if (authGoogleOnly && authIdentityEnabled) {
+    throw new Error("SPS Google-only authentication cannot be enabled with SPS Identity.");
   }
   const allowedHostnamesFromEnvRaw = process.env.SPS_ALLOWED_HOSTNAMES ?? process.env.PAPERCLIP_ALLOWED_HOSTNAMES;
   const allowedHostnamesFromEnv = allowedHostnamesFromEnvRaw
@@ -330,6 +351,10 @@ export function loadConfig(): Config {
     authGoogleClientSecret,
     authGoogleHostedDomain,
     authGoogleOnly,
+    authIdentityEnabled,
+    authIdentityIssuer,
+    authIdentityAudience,
+    authIdentityJwksUrl,
     databaseMode: fileDatabaseMode,
     databaseUrl: process.env.DATABASE_URL ?? fileDbUrl,
     databaseMigrationUrl: process.env.DATABASE_MIGRATION_URL,

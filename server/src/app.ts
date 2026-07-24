@@ -165,6 +165,7 @@ export async function createApp(
     pluginWorkerManager?: PluginWorkerManager;
     betterAuthHandler?: express.RequestHandler;
     resolveSession?: (req: ExpressRequest) => Promise<BetterAuthSessionResult | null>;
+    spsIdentityHandler?: express.RequestHandler;
   },
 ) {
   const app = express();
@@ -210,6 +211,9 @@ export async function createApp(
     }),
   );
   app.use("/api/auth", authRoutes(db));
+  if (opts.spsIdentityHandler) {
+    app.use("/api/sps-identity", opts.spsIdentityHandler);
+  }
   if (opts.betterAuthHandler) {
     app.all("/api/auth/{*authPath}", opts.betterAuthHandler);
   }
