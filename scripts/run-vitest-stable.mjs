@@ -272,7 +272,19 @@ function runVitest(args, label) {
   mkdirSync(env.PAPERCLIP_HOME, { recursive: true });
   mkdirSync(env.TMPDIR, { recursive: true });
   const pnpm = resolvePnpmInvocation();
-  const result = spawnSync(pnpm.command, [...pnpm.prefixArgs, "exec", "vitest", "run", ...args], {
+  const commandArgs = [...pnpm.prefixArgs, "exec", "vitest", "run", ...args];
+  // `spawn(..., { shell: true })` joins its arguments without preserving a
+  // Windows workspace path containing spaces. The fallback uses npx.cmd only
+  // when pnpm did not invoke this script, so run it through cmd explicitly.
+  const needsWindowsCmdWrapper = process.platform === "win32" && pnpm.command.toLowerCase() === "npx.cmd";
+  const result = needsWindowsCmdWrapper
+    ? spawnSync(process.env.ComSpec ?? "cmd.exe", ["/d", "/s", "/c", [pnpm.command, ...commandArgs].join(" ")], {
+      cwd: repoRoot,
+      env,
+      stdio: "inherit",
+      shell: false,
+    })
+    : spawnSync(pnpm.command, commandArgs, {
     cwd: repoRoot,
     env,
     stdio: "inherit",

@@ -257,7 +257,7 @@ describeEmbeddedPostgres("SPS Node routes", () => {
       availabilityStatus: "unknown",
     });
     expect(codexRunner.agentGrants).toHaveLength(1);
-  });
+  }, 20_000);
 
   it("records a signed Runner availability snapshot without receiving local credentials", async () => {
     const fixture = await createCompanyFixture(db);

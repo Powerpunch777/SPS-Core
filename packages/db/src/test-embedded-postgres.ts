@@ -102,8 +102,16 @@ async function createEmbeddedPostgresTestInstance(tempDirPrefix: string) {
   return { dataDir, port, instance };
 }
 
-function cleanupEmbeddedPostgresTestDirs(dataDir: string) {
-  fs.rmSync(dataDir, { recursive: true, force: true });
+async function cleanupEmbeddedPostgresTestDirs(dataDir: string) {
+  // Windows can retain the Postgres data-directory handle briefly after stop().
+  // `rm` retries the documented transient EPERM/EBUSY cases before surfacing a
+  // real cleanup failure to the test that owns the database.
+  await fs.promises.rm(dataDir, {
+    recursive: true,
+    force: true,
+    maxRetries: 8,
+    retryDelay: 150,
+  });
 }
 
 function formatEmbeddedPostgresError(error: unknown): string {
@@ -132,7 +140,7 @@ async function probeEmbeddedPostgresSupport(): Promise<EmbeddedPostgresTestSuppo
     };
   } finally {
     await instance?.stop().catch(() => {});
-    if (dataDir) cleanupEmbeddedPostgresTestDirs(dataDir);
+    if (dataDir) await cleanupEmbeddedPostgresTestDirs(dataDir);
   }
 }
 
@@ -166,12 +174,12 @@ export async function startEmbeddedPostgresTestDatabase(
       connectionString,
       cleanup: async () => {
         await instance?.stop().catch(() => {});
-        if (dataDir) cleanupEmbeddedPostgresTestDirs(dataDir);
+        if (dataDir) await cleanupEmbeddedPostgresTestDirs(dataDir);
       },
     };
   } catch (error) {
     await instance?.stop().catch(() => {});
-    if (dataDir) cleanupEmbeddedPostgresTestDirs(dataDir);
+    if (dataDir) await cleanupEmbeddedPostgresTestDirs(dataDir);
     throw new Error(
       `Failed to start embedded PostgreSQL test database: ${formatEmbeddedPostgresError(error)}`,
     );
