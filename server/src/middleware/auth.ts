@@ -17,6 +17,7 @@ import { isUuidLike, normalizeAgentApiKeyScope, type DeploymentMode } from "@pap
 import type { BetterAuthSessionResult } from "../auth/better-auth.js";
 import { logger } from "./logger.js";
 import { boardAuthService } from "../services/board-auth.js";
+import { hasTrustedDesktopOwnerBootstrap } from "./desktop-local-access.js";
 import { ensureHumanRoleDefaultGrants } from "../services/principal-access-compatibility.js";
 import { forbidden, unprocessable } from "../errors.js";
 
@@ -140,12 +141,14 @@ interface ActorMiddlewareOptions {
 export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHandler {
   const boardAuth = boardAuthService(db);
   return async (req, _res, next) => {
+    const desktopOwnerBootstrap =
+      opts.deploymentMode === "authenticated" && hasTrustedDesktopOwnerBootstrap(req);
     req.actor =
-      opts.deploymentMode === "local_trusted"
+      opts.deploymentMode === "local_trusted" || desktopOwnerBootstrap
         ? {
             type: "board",
             userId: "local-board",
-            userName: "Local Board",
+            userName: desktopOwnerBootstrap ? "SPS Desktop Owner" : "Local Board",
             userEmail: null,
             isInstanceAdmin: true,
             source: "local_implicit",
@@ -153,6 +156,15 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
         : { type: "none", source: "none" };
 
     const runIdHeader = req.header("x-paperclip-run-id");
+
+    // The Desktop main process can use this short-lived, loopback-only path to
+    // repair its own Identity membership. Do not let an ordinary cookie replace
+    // that explicitly proven local Owner authority.
+    if (desktopOwnerBootstrap) {
+      if (runIdHeader) req.actor.runId = runIdHeader;
+      next();
+      return;
+    }
 
     const authHeader = req.header("authorization");
     if (!authHeader?.toLowerCase().startsWith("bearer ")) {

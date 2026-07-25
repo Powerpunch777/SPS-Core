@@ -53,7 +53,10 @@ export function findReusableHumanJoinRequest<
         (row.status === "pending_approval" || row.status === "approved") &&
         row.requestingUserId === actorUserId
     );
-    if (sameUser) return sameUser;
+    // A verified user id is the only stable identity boundary. A legacy
+    // account and an SPS Identity account can share an email address while
+    // intentionally retaining distinct principals.
+    return sameUser ?? null;
   }
 
   const actorEmail = normalizeJoinRequestEmail(actor.requestEmailSnapshot);

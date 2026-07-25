@@ -38,6 +38,25 @@ describe("findReusableHumanJoinRequest", () => {
     ).toBe("pending-new");
   });
 
+  it("does not reuse a different verified user solely because the email matches", () => {
+    const rows = [
+      {
+        id: "legacy-user-request",
+        requestType: "human",
+        status: "approved",
+        requestingUserId: "legacy-user",
+        requestEmailSnapshot: "person@example.com",
+      },
+    ] as const;
+
+    expect(
+      findReusableHumanJoinRequest(rows, {
+        requestingUserId: "sps-identity-user",
+        requestEmailSnapshot: "person@example.com",
+      }),
+    ).toBeNull();
+  });
+
   it("falls back to email matching when the user id is unavailable", () => {
     const rows = [
       {

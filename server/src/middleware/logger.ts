@@ -33,6 +33,7 @@ export const logger = pino({
   redact: [
     "req.headers.authorization",
     "req.headers.x-sps-desktop-access",
+    "req.headers.x-sps-desktop-owner-bootstrap",
   ],
 }, pino.transport({
   targets: [

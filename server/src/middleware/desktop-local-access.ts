@@ -2,6 +2,11 @@ import { timingSafeEqual } from "node:crypto";
 import type { Request, RequestHandler } from "express";
 
 export const SPS_DESKTOP_ACCESS_HEADER = "x-sps-desktop-access";
+// A second proof is intentionally required before an authenticated private
+// Host may perform the narrow Owner-membership recovery flow. The normal
+// Desktop access header only protects the local transport; it must not turn
+// every Electron Workspace request into an implicit instance administrator.
+export const SPS_DESKTOP_OWNER_BOOTSTRAP_HEADER = "x-sps-desktop-owner-bootstrap";
 export const SPS_DESKTOP_ACCESS_TOKEN_ENV = "SPS_DESKTOP_ACCESS_TOKEN";
 
 function requestHostname(req: Request): string {
@@ -25,6 +30,23 @@ function tokenMatches(value: string | undefined, expected: string): boolean {
   const candidate = Buffer.from(value, "utf8");
   const expectedBuffer = Buffer.from(expected, "utf8");
   return candidate.length === expectedBuffer.length && timingSafeEqual(candidate, expectedBuffer);
+}
+
+/**
+ * True only for an SPS Desktop main-process request on the loopback Owner
+ * Host. It grants local-implicit authority for one recovery operation: adding
+ * the currently signed-in Owner account back to its private team. Both
+ * per-launch headers must match, so a browser never gains this capability.
+ */
+export function hasTrustedDesktopOwnerBootstrap(
+  req: Request,
+  { token = process.env[SPS_DESKTOP_ACCESS_TOKEN_ENV]?.trim() } = {},
+): boolean {
+  if (!token || !isLoopbackHostname(requestHostname(req))) return false;
+  return (
+    tokenMatches(req.header(SPS_DESKTOP_ACCESS_HEADER) ?? undefined, token)
+    && tokenMatches(req.header(SPS_DESKTOP_OWNER_BOOTSTRAP_HEADER) ?? undefined, token)
+  );
 }
 
 function sendDesktopOnlyResponse(req: Request, res: Parameters<RequestHandler>[1]) {
