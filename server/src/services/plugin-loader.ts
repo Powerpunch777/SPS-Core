@@ -48,7 +48,10 @@ import type { PluginJobScheduler } from "./plugin-job-scheduler.js";
 import type { PluginJobStore } from "./plugin-job-store.js";
 import type { PluginToolDispatcher } from "./plugin-tool-dispatcher.js";
 import type { PluginLifecycleManager } from "./plugin-lifecycle.js";
-import { pluginDatabaseService } from "./plugin-database.js";
+import {
+  pluginDatabaseService,
+  type PluginDatabaseMigrationPlan,
+} from "./plugin-database.js";
 import {
   assertRegistryRuntimeArtifactMatchesStatic,
   assertRegistryRuntimeManifestMatchesStatic,
@@ -356,6 +359,16 @@ export interface PluginInstallOptions {
  */
 export interface PluginUpgradeOptions extends Omit<PluginInstallOptions, "installDir"> {
   approvedCapabilityEscalation?: boolean;
+  approvedDataMigrationPlanHash?: string;
+}
+
+/**
+ * Activation-only override used after the Host has reviewed an exact pending
+ * plugin database migration plan. The hash is verified again by the database
+ * service immediately before SQL can run.
+ */
+export interface PluginLoadOptions {
+  approvedMigrationPlanHash?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -563,6 +576,12 @@ export interface PluginLoader {
   }>;
 
   /**
+   * Return a read-only description of pending database work for the installed
+   * package. This never creates a namespace or executes plugin SQL.
+   */
+  inspectPluginMigrations(pluginId: string): Promise<PluginDatabaseMigrationPlan | null>;
+
+  /**
    * Check whether a plugin API version is supported by this host.
    */
   isSupportedApiVersion(apiVersion: number): boolean;
@@ -626,7 +645,7 @@ export interface PluginLoader {
    *
    * @see PLUGIN_SPEC.md §8.3 — Install Process
    */
-  loadSingle(pluginId: string): Promise<PluginLoadResult>;
+  loadSingle(pluginId: string, options?: PluginLoadOptions): Promise<PluginLoadResult>;
 
   /**
    * Deactivate a single plugin — stop its worker and unregister all
@@ -1911,6 +1930,14 @@ export function pluginLoader(
       };
     },
 
+    async inspectPluginMigrations(pluginId: string): Promise<PluginDatabaseMigrationPlan | null> {
+      const plugin = (await registry.getById(pluginId)) as PluginRecord | null;
+      if (!plugin) throw new Error(`Plugin not found: ${pluginId}`);
+      const packageRoot = resolvePluginPackageRoot(plugin, localPluginDir);
+      const manifest = (await refreshPluginManifestFromPackage(plugin, packageRoot)).manifestJson;
+      return pluginDatabaseService(migrationDb).inspectMigrations(pluginId, manifest, packageRoot);
+    },
+
     // -----------------------------------------------------------------------
     // isSupportedApiVersion
     // -----------------------------------------------------------------------
@@ -2064,7 +2091,10 @@ export function pluginLoader(
      * @param pluginId - The UUID of the plugin to load.
      * @returns A promise that resolves with the result of the activation.
      */
-    async loadSingle(pluginId: string): Promise<PluginLoadResult> {
+    async loadSingle(
+      pluginId: string,
+      options: PluginLoadOptions = {},
+    ): Promise<PluginLoadResult> {
       if (!runtimeServices) {
         throw new Error(
           "Cannot loadSingle: no PluginRuntimeServices provided. " +
@@ -2100,7 +2130,7 @@ export function pluginLoader(
         );
       }
 
-      return activatePlugin(plugin);
+      return activatePlugin(plugin, options);
     },
 
     // -----------------------------------------------------------------------
@@ -2197,7 +2227,10 @@ export function pluginLoader(
    * Failures are caught and reported in the result; the plugin is marked as
    * `error` in the database when activation fails.
    */
-  async function activatePlugin(plugin: PluginRecord): Promise<PluginLoadResult> {
+  async function activatePlugin(
+    plugin: PluginRecord,
+    options: PluginLoadOptions = {},
+  ): Promise<PluginLoadResult> {
     const pluginId = plugin.id;
     const pluginKey = plugin.pluginKey;
     let activePlugin = plugin;
@@ -2250,7 +2283,9 @@ export function pluginLoader(
       // 2. Apply restricted database migrations before worker startup
       // ------------------------------------------------------------------
       const databaseNamespace = manifest.database
-        ? (await pluginDatabaseService(migrationDb).applyMigrations(pluginId, manifest, packageRoot))?.namespaceName ?? null
+        ? (await pluginDatabaseService(migrationDb).applyMigrations(pluginId, manifest, packageRoot, {
+          approvedPlanHash: options.approvedMigrationPlanHash,
+        }))?.namespaceName ?? null
         : null;
 
       // ------------------------------------------------------------------

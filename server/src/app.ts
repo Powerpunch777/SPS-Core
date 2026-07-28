@@ -277,7 +277,11 @@ export async function createApp(
   const eventBus = createPluginEventBus();
   setPluginEventBus(eventBus);
   const jobStore = pluginJobStore(db);
-  const lifecycle = pluginLifecycleManager(db, { workerManager });
+  const lifecycle = pluginLifecycleManager(db, {
+    workerManager,
+    migrationDb: opts.pluginMigrationDb ?? db,
+    databaseBackupService: opts.databaseBackupService,
+  });
   const memoryProviderRuntime = createCompanyMemoryProviderRuntime({ db, workerManager });
   eventBus.observe((event) => memoryProviderRuntime.handleEvent(event));
   const scheduler = createPluginJobScheduler({
@@ -354,6 +358,7 @@ export async function createApp(
             "registry-staging",
           ),
       },
+      lifecycle,
     ),
   );
   api.use(adapterRoutes());

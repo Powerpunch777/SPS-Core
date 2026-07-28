@@ -28,6 +28,31 @@ export type PluginDatabaseRuntimeResult<T = Record<string, unknown>> = {
   rowCount?: number;
 };
 
+export type PluginMigrationOperationKind = "create" | "alter" | "insert" | "update" | "comment" | "other";
+
+export interface PluginPendingMigrationSummary {
+  migrationKey: string;
+  checksum: string;
+  statementCount: number;
+  operationKinds: PluginMigrationOperationKind[];
+}
+
+/**
+ * Read-only description of the database work a plugin version would perform.
+ * The review hash binds an approval to the exact target version and migration
+ * checksums rather than to an arbitrary future package with the same name.
+ */
+export interface PluginDatabaseMigrationPlan {
+  pluginId: string;
+  pluginKey: string;
+  targetVersion: string;
+  namespaceName: string;
+  hasAppliedMigrations: boolean;
+  requiresHostApproval: boolean;
+  reviewHash: string;
+  pendingMigrations: PluginPendingMigrationSummary[];
+}
+
 export function derivePluginDatabaseNamespace(
   pluginKey: string,
   namespaceSlug?: string,
@@ -343,6 +368,31 @@ function resolveMigrationsDir(packageRoot: string, migrationsDir: string): strin
   return resolvedDir;
 }
 
+function classifyMigrationOperation(statement: string): PluginMigrationOperationKind {
+  const normalized = normaliseSql(statement);
+  if (normalized.startsWith("create ")) return "create";
+  if (normalized.startsWith("alter ")) return "alter";
+  if (normalized.startsWith("insert ") || normalized.startsWith("with ") && /\binsert\s+into\b/.test(normalized)) {
+    return "insert";
+  }
+  if (normalized.startsWith("update ") || normalized.startsWith("with ") && /\bupdate\b/.test(normalized)) {
+    return "update";
+  }
+  if (normalized.startsWith("comment ")) return "comment";
+  return "other";
+}
+
+function migrationPlanHash(input: {
+  pluginId: string;
+  pluginKey: string;
+  targetVersion: string;
+  pendingMigrations: PluginPendingMigrationSummary[];
+}): string {
+  return createHash("sha256")
+    .update(JSON.stringify(input))
+    .digest("hex");
+}
+
 type PluginDatabaseClient = Pick<Db, "select" | "insert" | "update" | "execute">;
 type PluginDatabaseRootClient = PluginDatabaseClient & Partial<Pick<Db, "transaction">>;
 
@@ -353,6 +403,13 @@ export interface ApplyPluginMigrationsOptions {
    * namespace together.
    */
   persistFailure?: boolean;
+
+  /**
+   * Required when the plan adds migrations to a plugin that already has
+   * applied migrations. The caller obtains this exact value from
+   * inspectMigrations after an explicit Host review.
+   */
+  approvedPlanHash?: string;
 }
 
 export function pluginDatabaseService(db: PluginDatabaseRootClient) {
@@ -460,6 +517,68 @@ export function pluginDatabaseService(db: PluginDatabaseRootClient) {
   return {
     ensureNamespace,
 
+    async inspectMigrations(
+      pluginId: string,
+      manifest: PaperclipPluginManifestV1,
+      packageRoot: string,
+    ): Promise<PluginDatabaseMigrationPlan | null> {
+      if (!manifest.database) return null;
+
+      const namespaceName = derivePluginDatabaseNamespace(manifest.id, manifest.database.namespaceSlug);
+      const migrationDir = resolveMigrationsDir(packageRoot, manifest.database.migrationsDir);
+      const migrationFiles = await listSqlMigrationFiles(migrationDir);
+      const existingRows = await db
+        .select()
+        .from(pluginMigrations)
+        .where(eq(pluginMigrations.pluginId, pluginId));
+      const existingByKey = new Map(
+        (existingRows as PluginMigrationRecord[]).map((row) => [row.migrationKey, row]),
+      );
+      const pendingMigrations: PluginPendingMigrationSummary[] = [];
+
+      for (const migrationKey of migrationFiles) {
+        const content = await readFile(path.join(migrationDir, migrationKey), "utf8");
+        const checksum = createHash("sha256").update(content).digest("hex");
+        const existing = existingByKey.get(migrationKey);
+        if (existing?.status === "applied") {
+          if (existing.checksum !== checksum) {
+            throw new Error(`Plugin migration checksum mismatch for ${migrationKey}`);
+          }
+          continue;
+        }
+
+        const statements = splitSqlStatements(content);
+        if (statements.length === 0) {
+          throw new Error(`Plugin migration ${migrationKey} is empty`);
+        }
+        pendingMigrations.push({
+          migrationKey,
+          checksum,
+          statementCount: statements.length,
+          operationKinds: [...new Set(statements.map(classifyMigrationOperation))],
+        });
+      }
+
+      const hasAppliedMigrations = (existingRows as PluginMigrationRecord[]).some(
+        (row) => row.status === "applied",
+      );
+      return {
+        pluginId,
+        pluginKey: manifest.id,
+        targetVersion: manifest.version,
+        namespaceName,
+        hasAppliedMigrations,
+        requiresHostApproval: hasAppliedMigrations && pendingMigrations.length > 0,
+        reviewHash: migrationPlanHash({
+          pluginId,
+          pluginKey: manifest.id,
+          targetVersion: manifest.version,
+          pendingMigrations,
+        }),
+        pendingMigrations,
+      };
+    },
+
     async applyMigrations(
       pluginId: string,
       manifest: PaperclipPluginManifestV1,
@@ -467,6 +586,13 @@ export function pluginDatabaseService(db: PluginDatabaseRootClient) {
       options: ApplyPluginMigrationsOptions = {},
     ) {
       if (!manifest.database) return null;
+      const plan = await pluginDatabaseService(db).inspectMigrations(pluginId, manifest, packageRoot);
+      if (plan?.requiresHostApproval && options.approvedPlanHash !== plan.reviewHash) {
+        throw new Error(
+          `Plugin data migration approval is required for ${manifest.id}@${manifest.version}. ` +
+            `Review plan ${plan.reviewHash} and approve that exact plan before activation.`,
+        );
+      }
       const namespace = await ensureNamespace(pluginId, manifest);
       if (!namespace) return null;
 

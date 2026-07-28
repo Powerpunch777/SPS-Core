@@ -56,7 +56,7 @@ import {
   setPluginCompanyActivation,
 } from "../services/plugin-company-activation.js";
 import { listReadyAgentPlatformExtensions } from "../services/agent-platform-extensions.js";
-import { pluginLifecycleManager } from "../services/plugin-lifecycle.js";
+import { pluginLifecycleManager, type PluginLifecycleManager } from "../services/plugin-lifecycle.js";
 import {
   getPluginUiContributionMetadata,
   listMissingDeclaredPluginEntrypoints,
@@ -503,6 +503,7 @@ interface PluginToolExecuteRequest {
  * | POST | /plugins/:pluginId/enable | Enable a plugin |
  * | POST | /plugins/:pluginId/disable | Disable a plugin |
  * | GET | /plugins/:pluginId/health | Run health diagnostics |
+ * | GET | /plugins/:pluginId/migration-plan | Inspect pending database migration work |
  * | POST | /plugins/:pluginId/upgrade | Upgrade to newer version |
  * | GET | /plugins/:pluginId/jobs | List jobs for a plugin |
  * | GET | /plugins/:pluginId/jobs/:jobId/runs | List runs for a job |
@@ -541,10 +542,11 @@ export function pluginRoutes(
   bridgeDeps?: PluginRouteBridgeDeps,
   memoryDeps?: PluginRouteMemoryDeps,
   registryStagingDeps?: PluginRouteRegistryStagingDeps,
+  lifecycleManager?: PluginLifecycleManager,
 ) {
   const router = Router();
   const registry = pluginRegistryService(db);
-  const lifecycle = pluginLifecycleManager(db, {
+  const lifecycle = lifecycleManager ?? pluginLifecycleManager(db, {
     loader,
     workerManager: bridgeDeps?.workerManager ?? webhookDeps?.workerManager,
   });
@@ -2644,10 +2646,30 @@ export function pluginRoutes(
    * Response: PluginRecord
    * Errors: 404 if plugin not found, 400 for lifecycle errors
    */
+  router.get("/plugins/:pluginId/migration-plan", async (req, res) => {
+    assertInstanceAdmin(req);
+    const plugin = await resolvePlugin(registry, req.params.pluginId);
+    if (!plugin) {
+      res.status(404).json({ error: "Plugin not found" });
+      return;
+    }
+
+    try {
+      res.json(await loader.inspectPluginMigrations(plugin.id));
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      res.status(400).json({ error: message });
+    }
+  });
+
   router.post("/plugins/:pluginId/upgrade", async (req, res) => {
     assertInstanceAdmin(req);
     const { pluginId } = req.params;
-    const body = req.body as { version?: string } | undefined;
+    const body = req.body as {
+      version?: string;
+      approvedCapabilityEscalation?: boolean;
+      approvedDataMigrationPlanHash?: string;
+    } | undefined;
     const version = body?.version;
 
     const plugin = await resolvePlugin(registry, pluginId);
@@ -2662,13 +2684,26 @@ export function pluginRoutes(
       // 2. Compare capabilities
       // 3. If new capabilities, mark as upgrade_pending
       // 4. Otherwise, transition to ready
-      const result = await lifecycle.upgrade(plugin.id, version);
+      const hasExplicitApproval = body?.approvedCapabilityEscalation === true
+        || typeof body?.approvedDataMigrationPlanHash === "string";
+      const result = await lifecycle.upgrade(
+        plugin.id,
+        hasExplicitApproval
+          ? {
+            version,
+            approvedCapabilityEscalation: body?.approvedCapabilityEscalation === true,
+            approvedDataMigrationPlanHash: body?.approvedDataMigrationPlanHash,
+          }
+          : version,
+      );
       await logPluginMutationActivity(req, "plugin.upgraded", plugin.id, {
         pluginId: plugin.id,
         pluginKey: plugin.pluginKey,
         previousVersion: plugin.version,
         version: result?.version ?? plugin.version,
         targetVersion: version ?? null,
+        approvedCapabilityEscalation: body?.approvedCapabilityEscalation === true,
+        approvedDataMigrationPlanHash: body?.approvedDataMigrationPlanHash ?? null,
       });
       publishGlobalLiveEvent({ type: "plugin.ui.updated", payload: { pluginId: plugin.id, action: "upgraded" } });
       res.json(result);

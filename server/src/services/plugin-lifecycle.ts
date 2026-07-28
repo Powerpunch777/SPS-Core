@@ -48,6 +48,7 @@ import {
   type PluginLoader,
   type PluginUpgradeOptions,
 } from "./plugin-loader.js";
+import { pluginDatabaseService } from "./plugin-database.js";
 import type { PluginWorkerManager, WorkerStartOptions } from "./plugin-worker-manager.js";
 import { badRequest, notFound } from "../errors.js";
 import { logger } from "../middleware/logger.js";
@@ -289,6 +290,14 @@ export interface PluginLifecycleManagerOptions {
    * caller is responsible for managing worker processes externally.
    */
   workerManager?: PluginWorkerManager;
+
+  /** Database connection used for restricted plugin namespace migrations. */
+  migrationDb?: Db;
+
+  /** Host-owned backup service used before an approved data migration runs. */
+  databaseBackupService?: {
+    runManualBackup(): Promise<{ backupFile?: string; startedAt?: string; finishedAt?: string }>;
+  };
 }
 
 /**
@@ -320,6 +329,8 @@ export function pluginLifecycleManager(
   // as well as the new options object form.
   let loaderArg: PluginLoader | undefined;
   let workerManager: PluginWorkerManager | undefined;
+  let migrationDb = db;
+  let databaseBackupService: PluginLifecycleManagerOptions["databaseBackupService"];
 
   if (options && typeof options === "object" && "discoverAll" in options) {
     // Legacy: second arg is a PluginLoader directly
@@ -328,6 +339,8 @@ export function pluginLifecycleManager(
     const opts = options as PluginLifecycleManagerOptions;
     loaderArg = opts.loader;
     workerManager = opts.workerManager;
+    migrationDb = opts.migrationDb ?? db;
+    databaseBackupService = opts.databaseBackupService;
   }
 
   const registry = pluginRegistryService(db);
@@ -425,7 +438,10 @@ export function pluginLifecycleManager(
     }
   }
 
-  async function activateReadyPlugin(pluginId: string): Promise<void> {
+  async function activateReadyPlugin(
+    pluginId: string,
+    approvedMigrationPlanHash?: string,
+  ): Promise<void> {
     const supportsRuntimeActivation =
       typeof pluginLoaderInstance.hasRuntimeServices === "function"
       && typeof pluginLoaderInstance.loadSingle === "function";
@@ -433,7 +449,9 @@ export function pluginLifecycleManager(
       return;
     }
 
-    const loadResult = await pluginLoaderInstance.loadSingle(pluginId);
+    const loadResult = approvedMigrationPlanHash
+      ? await pluginLoaderInstance.loadSingle(pluginId, { approvedMigrationPlanHash })
+      : await pluginLoaderInstance.loadSingle(pluginId);
     if (!loadResult.success) {
       throw new Error(
         loadResult.error
@@ -502,11 +520,14 @@ export function pluginLifecycleManager(
     async enable(pluginId: string): Promise<PluginRecord> {
       const plugin = await requirePlugin(pluginId);
 
-      // Only allow enabling from disabled, error, or upgrade_pending states
-      if (plugin.status !== "disabled" && plugin.status !== "error" && plugin.status !== "upgrade_pending") {
+      if (plugin.status === "upgrade_pending") {
         throw badRequest(
-          `Cannot enable plugin in status '${plugin.status}'. ` +
-            `Plugin must be in 'disabled', 'error', or 'upgrade_pending' status to be enabled.`,
+          "Plugin update is waiting for review. Re-run the upgrade with the required approval instead of enabling it directly.",
+        );
+      }
+      if (plugin.status !== "disabled" && plugin.status !== "error") {
+        throw badRequest(
+          `Cannot enable plugin in status '${plugin.status}'. Plugin must be in 'disabled' or 'error' status to be enabled.`,
         );
       }
 
@@ -696,27 +717,74 @@ export function pluginLifecycleManager(
         (cap) => !oldManifest.capabilities.includes(cap),
       );
 
+      const migrationPlan = newManifest.database
+        ? await pluginDatabaseService(migrationDb).inspectMigrations(
+          pluginId,
+          newManifest,
+          discovered.packagePath,
+        )
+        : null;
+      const needsCapabilityApproval = addedCaps.length > 0 && !options.approvedCapabilityEscalation;
+      const needsDataMigrationApproval = Boolean(
+        migrationPlan?.requiresHostApproval
+          && options.approvedDataMigrationPlanHash !== migrationPlan.reviewHash,
+      );
+
       // 3. Transition state
-      if (addedCaps.length > 0 && !options.approvedCapabilityEscalation) {
+      if (needsCapabilityApproval || needsDataMigrationApproval) {
         // New capabilities require operator approval — worker stays stopped
         log.info(
           { pluginId, pluginKey: plugin.pluginKey, addedCaps },
           "plugin lifecycle: new capabilities detected, transitioning to upgrade_pending",
         );
         // Skip the inner stopWorkerIfRunning since we already stopped above
-        const result = await transition(pluginId, "upgrade_pending", null, plugin);
+        const reviewReasons = [
+          ...(needsCapabilityApproval ? [`new capabilities: ${addedCaps.join(", ")}`] : []),
+          ...(needsDataMigrationApproval
+            ? [`data migration plan: ${migrationPlan!.reviewHash}`]
+            : []),
+        ];
+        const result = await transition(
+          pluginId,
+          "upgrade_pending",
+          `Upgrade review required: ${reviewReasons.join("; ")}`,
+          plugin,
+        );
         emitDomain("plugin.upgrade_pending", {
           pluginId,
           pluginKey: result.pluginKey,
         });
         return result;
       } else {
+        if (migrationPlan?.requiresHostApproval) {
+          if (!databaseBackupService) {
+            throw badRequest(
+              "An approved plugin data migration requires a Host database backup service.",
+            );
+          }
+          const backup = await databaseBackupService.runManualBackup();
+          if (!backup.backupFile) {
+            throw badRequest("Host backup completed without a backup file reference.");
+          }
+          log.info(
+            {
+              pluginId,
+              pluginKey: plugin.pluginKey,
+              migrationPlanHash: migrationPlan.reviewHash,
+              backupFile: backup.backupFile,
+            },
+            "plugin lifecycle: created Host backup before approved data migration",
+          );
+        }
         const result = await transition(pluginId, "ready", null, {
           ...plugin,
           version: discovered.version,
           manifestJson: newManifest,
         } as PluginRecord);
-        await activateReadyPlugin(pluginId);
+        await activateReadyPlugin(
+          pluginId,
+          migrationPlan?.requiresHostApproval ? migrationPlan.reviewHash : undefined,
+        );
 
         emitDomain("plugin.loaded", {
           pluginId,

@@ -405,6 +405,46 @@ describe.sequential("plugin install and upgrade authz", () => {
     expect(res.status).toBe(200);
     expect(mockLifecycle.upgrade).toHaveBeenCalledWith(pluginId, "1.1.0");
   }, 20_000);
+
+  it("exposes a read-only migration plan only to instance admins", async () => {
+    readyPlugin();
+    const inspectPluginMigrations = vi.fn().mockResolvedValue({
+      targetVersion: "1.1.0",
+      reviewHash: "exact-plan-hash",
+      requiresHostApproval: true,
+      pendingMigrations: [{ migrationKey: "002_add_state.sql" }],
+    });
+    const { app } = await createApp(
+      boardActor({ isInstanceAdmin: true }),
+      { inspectPluginMigrations },
+    );
+
+    const res = await request(app).get(`/api/plugins/${pluginId}/migration-plan`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.reviewHash).toBe("exact-plan-hash");
+    expect(inspectPluginMigrations).toHaveBeenCalledWith(pluginId);
+  }, 20_000);
+
+  it("passes an explicit reviewed migration approval through the upgrade route", async () => {
+    readyPlugin();
+    mockLifecycle.upgrade.mockResolvedValue({ id: pluginId, version: "1.1.0" });
+    const { app } = await createApp(boardActor({ isInstanceAdmin: true }));
+
+    const res = await request(app)
+      .post(`/api/plugins/${pluginId}/upgrade`)
+      .send({
+        version: "1.1.0",
+        approvedDataMigrationPlanHash: "exact-plan-hash",
+      });
+
+    expect(res.status).toBe(200);
+    expect(mockLifecycle.upgrade).toHaveBeenCalledWith(pluginId, {
+      version: "1.1.0",
+      approvedCapabilityEscalation: false,
+      approvedDataMigrationPlanHash: "exact-plan-hash",
+    });
+  }, 20_000);
 });
 
 describe.sequential("scoped plugin API routes", () => {

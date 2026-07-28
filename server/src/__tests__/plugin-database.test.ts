@@ -392,6 +392,37 @@ describeEmbeddedPostgres("plugin database namespaces", () => {
     expect(migrations).toHaveLength(2);
   });
 
+  it("requires an exact reviewed plan before applying migrations to existing plugin data", async () => {
+    const pluginManifest = manifest();
+    const namespace = derivePluginDatabaseNamespace(pluginManifest.id);
+    const packageRoot = await createPluginPackage(
+      pluginManifest,
+      `CREATE TABLE ${namespace}.notes (id uuid PRIMARY KEY, body text NOT NULL);`,
+    );
+    const pluginId = await installPluginRecord(pluginManifest);
+    const service = pluginDatabaseService(db);
+    await service.applyMigrations(pluginId, pluginManifest, packageRoot);
+
+    await writeFile(
+      path.join(packageRoot, pluginManifest.database!.migrationsDir, "002_add_state.sql"),
+      `ALTER TABLE ${namespace}.notes ADD COLUMN state text NOT NULL DEFAULT 'open';`,
+      "utf8",
+    );
+
+    const plan = await service.inspectMigrations(pluginId, pluginManifest, packageRoot);
+    expect(plan).toMatchObject({
+      hasAppliedMigrations: true,
+      requiresHostApproval: true,
+      pendingMigrations: [{ migrationKey: "002_add_state.sql", operationKinds: ["alter"] }],
+    });
+
+    await expect(service.applyMigrations(pluginId, pluginManifest, packageRoot))
+      .rejects.toThrow(/approval is required/i);
+    await service.applyMigrations(pluginId, pluginManifest, packageRoot, {
+      approvedPlanHash: plan!.reviewHash,
+    });
+  });
+
   it("applies the bundled LLM Wiki migrations through the production validator", async () => {
     const pluginManifest = llmWikiManifest();
     const repoRoot = path.basename(process.cwd()) === "server" ? path.resolve(process.cwd(), "..") : process.cwd();
