@@ -324,6 +324,7 @@ export const queryKeys = {
     examples: ["plugins", "examples"] as const,
     detail: (pluginId: string) => ["plugins", pluginId] as const,
     migrationPlan: (pluginId: string) => ["plugins", pluginId, "migration-plan"] as const,
+    pendingUpdate: (pluginId: string) => ["plugins", pluginId, "pending-update"] as const,
     health: (pluginId: string) => ["plugins", pluginId, "health"] as const,
     uiContributions: (companyId?: string | null) =>
       ["plugins", "ui-contributions", companyId ?? "global"] as const,

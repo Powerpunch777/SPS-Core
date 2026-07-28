@@ -6,6 +6,7 @@ import {
   parseRegistryStaticPluginManifest,
   type RegistryStaticPluginManifest,
 } from "./registry-static-manifest.js";
+import type { PluginDatabaseMigrationPlan } from "./plugin-database.js";
 
 const STAGING_INDEX_FILE = "registry-stages.json";
 const SHA256 = /^[a-f0-9]{64}$/;
@@ -23,9 +24,22 @@ export interface RegistryStagedPluginRecord {
     kind: "local" | "git" | "official";
     releaseLocator: string;
   };
-  /** Staged is static-only; registered means the Owner explicitly enabled it. */
-  status: "staged" | "registered";
+  /**
+   * Staged is static-only. A review_pending stage is pinned to one installed
+   * plugin until the Host approves that exact candidate. Registered means the
+   * candidate has completed its lifecycle activation.
+   */
+  status: "staged" | "review_pending" | "registered";
+  review: RegistryStageReview | null;
   stagedAt: string;
+}
+
+export interface RegistryStageReview {
+  pluginRecordId: string;
+  targetVersion: string;
+  addedCapabilities: string[];
+  migrationPlan: PluginDatabaseMigrationPlan | null;
+  requestedAt: string;
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -103,6 +117,13 @@ export function registryStagingService(stagingRoot: string) {
       return records.find((record) => record.stageId === stageId) ?? null;
     },
 
+    findPendingReview: async (pluginRecordId: string): Promise<RegistryStagedPluginRecord | null> => {
+      const records = await readIndex(indexPath);
+      return records.find(
+        (record) => record.status === "review_pending" && record.review?.pluginRecordId === pluginRecordId,
+      ) ?? null;
+    },
+
     stage: async (input: {
       packageRoot: string;
       artifactSha256: string;
@@ -142,6 +163,7 @@ export function registryStagingService(stagingRoot: string) {
         staticManifest,
         source: input.source,
         status: "staged",
+        review: null,
         stagedAt: new Date().toISOString(),
       };
       const records = await readIndex(indexPath);
@@ -160,6 +182,27 @@ export function registryStagingService(stagingRoot: string) {
       return true;
     },
 
+    markReviewPending: async (
+      stageId: string,
+      review: Omit<RegistryStageReview, "requestedAt">,
+    ): Promise<RegistryStagedPluginRecord | null> => {
+      const records = await readIndex(indexPath);
+      const index = records.findIndex((record) => record.stageId === stageId);
+      if (index < 0) return null;
+      const existing = records[index]!;
+      const updated: RegistryStagedPluginRecord = {
+        ...existing,
+        status: "review_pending",
+        review: {
+          ...review,
+          requestedAt: new Date().toISOString(),
+        },
+      };
+      records[index] = updated;
+      await writeIndex(indexPath, records);
+      return updated;
+    },
+
     markRegistered: async (stageId: string): Promise<RegistryStagedPluginRecord | null> => {
       const records = await readIndex(indexPath);
       const index = records.findIndex((record) => record.stageId === stageId);
@@ -168,6 +211,7 @@ export function registryStagingService(stagingRoot: string) {
       const updated: RegistryStagedPluginRecord = {
         ...existing,
         status: "registered",
+        review: null,
       };
       records[index] = updated;
       await writeIndex(indexPath, records);

@@ -84,8 +84,8 @@ import { logger } from "../middleware/logger.js";
 const VALID_TRANSITIONS: Record<string, readonly PluginStatus[]> = {
   installed: ["ready", "error", "uninstalled"],
   ready: ["ready", "disabled", "error", "upgrade_pending", "uninstalled"],
-  disabled: ["ready", "uninstalled"],
-  error: ["ready", "uninstalled"],
+  disabled: ["ready", "upgrade_pending", "uninstalled"],
+  error: ["ready", "upgrade_pending", "uninstalled"],
   upgrade_pending: ["ready", "error", "uninstalled"],
   uninstalled: ["installed"], // reinstall
 };
@@ -677,11 +677,18 @@ export function pluginLifecycleManager(
         ? { version: input }
         : input;
 
-      // Can only upgrade plugins that are ready or already in upgrade_pending
-      if (plugin.status !== "ready" && plugin.status !== "upgrade_pending") {
+      // A reviewed stage can replace a disabled or errored plugin without
+      // starting the old package first. High-risk candidates still stop in
+      // upgrade_pending until the Host approves them.
+      if (
+        plugin.status !== "ready"
+        && plugin.status !== "disabled"
+        && plugin.status !== "error"
+        && plugin.status !== "upgrade_pending"
+      ) {
         throw badRequest(
           `Cannot upgrade plugin in status '${plugin.status}'. ` +
-            `Plugin must be in 'ready' or 'upgrade_pending' status to be upgraded.`,
+            `Plugin must be in 'ready', 'disabled', 'error', or 'upgrade_pending' status to be upgraded.`,
         );
       }
 

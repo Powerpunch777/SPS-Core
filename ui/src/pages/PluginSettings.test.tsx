@@ -12,6 +12,7 @@ const mockPluginsApi = vi.hoisted(() => ({
   dashboard: vi.fn(),
   logs: vi.fn(),
   migrationPlan: vi.fn(),
+  pendingUpdate: vi.fn(),
   upgrade: vi.fn(),
   getConfig: vi.fn(),
   listLocalFolders: vi.fn(),
@@ -150,6 +151,7 @@ describe("PluginSettings", () => {
     mockPluginsApi.health.mockResolvedValue({ pluginId: "plugin-1", status: "ready", healthy: true, checks: [] });
     mockPluginsApi.logs.mockResolvedValue([]);
     mockPluginsApi.migrationPlan.mockResolvedValue(null);
+    mockPluginsApi.pendingUpdate.mockResolvedValue(null);
     mockPluginsApi.upgrade.mockResolvedValue({ ok: true });
     mockPluginsApi.listLocalFolders.mockResolvedValue({
       pluginId: "plugin-1",
@@ -198,6 +200,15 @@ describe("PluginSettings", () => {
         operationKinds: ["alter", "update"],
       }],
     });
+    mockPluginsApi.pendingUpdate.mockResolvedValue({
+      stageId: "registry-stage-1",
+      pluginId: "paperclip.e2b-sandbox-provider",
+      targetVersion: "1.1.0",
+      addedCapabilities: ["tools.invoke"],
+      migrationPlan: null,
+      source: { registryId: "io.sps.example", kind: "official", releaseLocator: "releases/plugin-1.1.0.json" },
+      requestedAt: "2026-07-29T00:00:00.000Z",
+    });
 
     const root = await renderSettings(container);
 
@@ -230,6 +241,7 @@ describe("PluginSettings", () => {
 
     expect(mockPluginsApi.upgrade).toHaveBeenCalledWith("plugin-1", {
       version: "1.1.0",
+      stageId: "registry-stage-1",
       approvedCapabilityEscalation: true,
       approvedDataMigrationPlanHash: "review-hash",
     });

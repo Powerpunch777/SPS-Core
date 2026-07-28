@@ -169,6 +169,23 @@ export interface PluginDatabaseMigrationPlan {
   requiresHostApproval: boolean;
   reviewHash: string;
   pendingMigrations: PluginPendingMigrationSummary[];
+  /** Present when this plan belongs to an immutable Registry-staged candidate. */
+  registryStageId?: string;
+}
+
+/** An immutable Registry candidate that is waiting for Host approval. */
+export interface PluginPendingUpdateReview {
+  stageId: string;
+  pluginId: string;
+  targetVersion: string;
+  addedCapabilities: string[];
+  migrationPlan: PluginDatabaseMigrationPlan | null;
+  source: {
+    registryId: string;
+    kind: "local" | "git" | "official";
+    releaseLocator: string;
+  };
+  requestedAt: string;
 }
 
 export interface AvailableBundledPlugin {
@@ -420,10 +437,14 @@ export const pluginsApi = {
   migrationPlan: (pluginId: string) =>
     api.get<PluginDatabaseMigrationPlan | null>(`/plugins/${pluginId}/migration-plan`),
 
+  pendingUpdate: (pluginId: string) =>
+    api.get<PluginPendingUpdateReview | null>(`/plugins/${pluginId}/pending-update`),
+
   upgrade: (
     pluginId: string,
     input?: string | {
       version?: string;
+      stageId?: string;
       approvedCapabilityEscalation?: boolean;
       approvedDataMigrationPlanHash?: string;
     },

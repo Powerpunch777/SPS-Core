@@ -612,16 +612,24 @@ function PluginUpdateReview({ plugin }: { plugin: PluginRecord }) {
   const queryClient = useQueryClient();
   const [dataMigrationApproved, setDataMigrationApproved] = useState(false);
   const [capabilityApproved, setCapabilityApproved] = useState(false);
-  const targetVersion = pendingReviewTargetVersion(plugin.lastError);
-  const capabilityEscalations = pendingReviewCapabilities(plugin.lastError);
+  const pendingUpdateQuery = useQuery({
+    queryKey: queryKeys.plugins.pendingUpdate(plugin.id),
+    queryFn: () => pluginsApi.pendingUpdate(plugin.id),
+    enabled: plugin.status === "upgrade_pending",
+  });
   const migrationPlanQuery = useQuery({
     queryKey: queryKeys.plugins.migrationPlan(plugin.id),
     queryFn: () => pluginsApi.migrationPlan(plugin.id),
     enabled: plugin.status === "upgrade_pending",
   });
+  const pendingUpdate = pendingUpdateQuery.data;
+  const targetVersion = pendingUpdate?.targetVersion ?? pendingReviewTargetVersion(plugin.lastError);
+  const capabilityEscalations = pendingUpdate?.addedCapabilities ?? pendingReviewCapabilities(plugin.lastError);
   const migrationPlan = migrationPlanQuery.data;
   const requiresDataMigrationApproval = migrationPlan?.requiresHostApproval === true;
   const canApprove =
+    !pendingUpdateQuery.isLoading &&
+    !pendingUpdateQuery.isError &&
     !migrationPlanQuery.isLoading &&
     !migrationPlanQuery.isError &&
     (!requiresDataMigrationApproval || dataMigrationApproved) &&
@@ -631,6 +639,9 @@ function PluginUpdateReview({ plugin }: { plugin: PluginRecord }) {
     mutationFn: () =>
       pluginsApi.upgrade(plugin.id, {
         version: targetVersion,
+        ...((pendingUpdate?.stageId ?? migrationPlan?.registryStageId)
+          ? { stageId: pendingUpdate?.stageId ?? migrationPlan?.registryStageId }
+          : {}),
         approvedCapabilityEscalation: capabilityEscalations.length > 0 ? capabilityApproved : undefined,
         approvedDataMigrationPlanHash: requiresDataMigrationApproval ? migrationPlan?.reviewHash : undefined,
       }),
@@ -638,6 +649,7 @@ function PluginUpdateReview({ plugin }: { plugin: PluginRecord }) {
       queryClient.invalidateQueries({ queryKey: queryKeys.plugins.all });
       queryClient.invalidateQueries({ queryKey: queryKeys.plugins.detail(plugin.id) });
       queryClient.invalidateQueries({ queryKey: queryKeys.plugins.migrationPlan(plugin.id) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.plugins.pendingUpdate(plugin.id) });
       queryClient.invalidateQueries({ queryKey: queryKeys.plugins.uiContributionsPrefix });
     },
   });
@@ -659,6 +671,12 @@ function PluginUpdateReview({ plugin }: { plugin: PluginRecord }) {
             <span className="text-muted-foreground">Candidate version</span>
             <span className="font-mono">v{targetVersion}</span>
           </div>
+        ) : null}
+
+        {pendingUpdate ? (
+          <p className="text-xs text-muted-foreground">
+            Registry candidate from {pendingUpdate.source.registryId} is pinned to this review. Approval applies only to this exact staged package.
+          </p>
         ) : null}
 
         {capabilityEscalations.length > 0 ? (

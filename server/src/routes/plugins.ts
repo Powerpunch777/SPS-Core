@@ -48,6 +48,7 @@ import {
 } from "@paperclipai/shared";
 import { pluginRegistryService } from "../services/plugin-registry.js";
 import { registryStagingService, type RegistryStagedPluginRecord } from "../services/registry-staging.js";
+import { pluginDatabaseService } from "../services/plugin-database.js";
 import { listReadyMemoryProviders } from "../services/memory-providers.js";
 import type { CompanyMemoryProviderRuntime } from "../services/memory-provider-runtime.js";
 import { createPluginToolAccessService, pluginRequiresExplicitToolGrant } from "../services/plugin-tool-access.js";
@@ -1589,11 +1590,17 @@ export function pluginRoutes(
       res.status(404).json({ error: "Registry stage not found" });
       return;
     }
+    if (stage.status === "review_pending") {
+      res.status(409).json({
+        error: "This Registry update is waiting for Host review. Approve or reject it from the plugin settings page.",
+      });
+      return;
+    }
 
     try {
       // This preflight is deliberately explicit: it performs the first dynamic
       // import only after an Owner chose Enable for this reviewed stage.
-      await loader.previewRegistryPluginEnable({
+      const preview = await loader.previewRegistryPluginEnable({
         localPath: stage.packageRoot,
         staticManifest: stage.staticManifest,
       });
@@ -1619,29 +1626,32 @@ export function pluginRoutes(
       let result;
       if (plugin.status === "installed") {
         result = await lifecycle.load(plugin.id);
-      } else if (plugin.status === "ready" || plugin.status === "upgrade_pending") {
+      } else {
         operation = "updated";
         result = await lifecycle.upgrade(plugin.id, {
           localPath: stage.packageRoot,
           registryStaticManifest: stage.staticManifest,
           skipLocalAutobuild: true,
-          // Reaching this route is the explicit Owner review action for this
-          // exact staged artifact, including any changed capability list.
-          approvedCapabilityEscalation: true,
         });
-        updatedStage = await registryStages.markRegistered(stage.stageId) ?? stage;
-      } else {
-        // Disabled and error plugins have no running worker. Update their
-        // persisted package path first, then enable the reviewed version.
-        operation = "updated";
-        await loader.upgradePlugin(plugin.id, {
-          localPath: stage.packageRoot,
-          registryStaticManifest: stage.staticManifest,
-          skipLocalAutobuild: true,
-          approvedCapabilityEscalation: true,
-        });
-        result = await lifecycle.enable(plugin.id);
-        updatedStage = await registryStages.markRegistered(stage.stageId) ?? stage;
+        if (result.status === "upgrade_pending") {
+          if (!preview.manifest) {
+            throw new Error("Registry stage does not expose a runtime plugin manifest for the pending review.");
+          }
+          const addedCapabilities = preview.manifest.capabilities.filter(
+            (capability) => !plugin.manifestJson.capabilities.includes(capability),
+          );
+          const migrationPlan = preview.manifest.database
+            ? await pluginDatabaseService(db).inspectMigrations(plugin.id, preview.manifest, stage.packageRoot)
+            : null;
+          updatedStage = await registryStages.markReviewPending(stage.stageId, {
+            pluginRecordId: plugin.id,
+            targetVersion: preview.manifest.version,
+            addedCapabilities,
+            migrationPlan,
+          }) ?? stage;
+        } else {
+          updatedStage = await registryStages.markRegistered(stage.stageId) ?? stage;
+        }
       }
 
       await logPluginMutationActivity(req, "plugin.registry.enabled", plugin.id, {
@@ -2656,6 +2666,16 @@ export function pluginRoutes(
     }
 
     try {
+      const pendingStage = registryStages
+        ? await registryStages.findPendingReview(plugin.id)
+        : null;
+      if (pendingStage?.review?.migrationPlan) {
+        res.json({
+          ...pendingStage.review.migrationPlan,
+          registryStageId: pendingStage.stageId,
+        });
+        return;
+      }
       res.json(await loader.inspectPluginMigrations(plugin.id));
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -2663,11 +2683,42 @@ export function pluginRoutes(
     }
   });
 
+  /**
+   * Returns the immutable Registry candidate behind an upgrade_pending state.
+   * This lets settings submit the exact staged artifact instead of trying to
+   * rediscover an update after a Host has reviewed it.
+   */
+  router.get("/plugins/:pluginId/pending-update", async (req, res) => {
+    assertInstanceAdmin(req);
+    const plugin = await resolvePlugin(registry, req.params.pluginId);
+    if (!plugin) {
+      res.status(404).json({ error: "Plugin not found" });
+      return;
+    }
+    const pendingStage = registryStages
+      ? await registryStages.findPendingReview(plugin.id)
+      : null;
+    if (!pendingStage?.review) {
+      res.json(null);
+      return;
+    }
+    res.json({
+      stageId: pendingStage.stageId,
+      pluginId: pendingStage.pluginId,
+      targetVersion: pendingStage.review.targetVersion,
+      addedCapabilities: pendingStage.review.addedCapabilities,
+      migrationPlan: pendingStage.review.migrationPlan,
+      source: pendingStage.source,
+      requestedAt: pendingStage.review.requestedAt,
+    });
+  });
+
   router.post("/plugins/:pluginId/upgrade", async (req, res) => {
     assertInstanceAdmin(req);
     const { pluginId } = req.params;
     const body = req.body as {
       version?: string;
+      stageId?: string;
       approvedCapabilityEscalation?: boolean;
       approvedDataMigrationPlanHash?: string;
     } | undefined;
@@ -2680,6 +2731,31 @@ export function pluginRoutes(
     }
 
     try {
+      const pendingStage = body?.stageId && registryStages
+        ? await registryStages.get(body.stageId)
+        : null;
+      if (body?.stageId && !registryStages) {
+        res.status(501).json({ error: "Registry staging is not enabled" });
+        return;
+      }
+      if (body?.stageId && (!pendingStage || pendingStage.status !== "review_pending")) {
+        res.status(400).json({ error: "The requested Registry update is no longer waiting for review." });
+        return;
+      }
+      if (pendingStage && (pendingStage.review?.pluginRecordId !== plugin.id || pendingStage.pluginId !== plugin.pluginKey)) {
+        res.status(400).json({ error: "The requested Registry update does not belong to this plugin." });
+        return;
+      }
+      const requiredRegistryReview = registryStages
+        ? await registryStages.findPendingReview(plugin.id)
+        : null;
+      if (requiredRegistryReview && !body?.stageId) {
+        res.status(400).json({
+          error: "This plugin update was staged by a Registry. Approve the exact staged candidate from plugin settings.",
+        });
+        return;
+      }
+
       // Upgrade the plugin - this would typically:
       // 1. Download the new version
       // 2. Compare capabilities
@@ -2691,18 +2767,34 @@ export function pluginRoutes(
         plugin.id,
         hasExplicitApproval
           ? {
-            version,
+            version: pendingStage?.version ?? version,
+            ...(pendingStage ? {
+              localPath: pendingStage.packageRoot,
+              registryStaticManifest: pendingStage.staticManifest,
+              skipLocalAutobuild: true,
+            } : {}),
             approvedCapabilityEscalation: body?.approvedCapabilityEscalation === true,
             approvedDataMigrationPlanHash: body?.approvedDataMigrationPlanHash,
           }
-          : version,
+          : pendingStage
+            ? {
+              version: pendingStage.version,
+              localPath: pendingStage.packageRoot,
+              registryStaticManifest: pendingStage.staticManifest,
+              skipLocalAutobuild: true,
+            }
+            : version,
       );
+      if (pendingStage && result.status === "ready") {
+        await registryStages!.markRegistered(pendingStage.stageId);
+      }
       await logPluginMutationActivity(req, "plugin.upgraded", plugin.id, {
         pluginId: plugin.id,
         pluginKey: plugin.pluginKey,
         previousVersion: plugin.version,
         version: result?.version ?? plugin.version,
-        targetVersion: version ?? null,
+        targetVersion: pendingStage?.version ?? version ?? null,
+        registryStageId: pendingStage?.stageId ?? null,
         approvedCapabilityEscalation: body?.approvedCapabilityEscalation === true,
         approvedDataMigrationPlanHash: body?.approvedDataMigrationPlanHash ?? null,
       });
