@@ -68,6 +68,9 @@ export const agentPlatformExtensionKindSchema = z.enum([
   "store_provider",
   "backend_provider",
   "surface",
+  // A tool provider can assist an Agent without selecting a work model,
+  // storage strategy, backend, or UI surface for the Company.
+  "tool_provider",
 ]);
 export type AgentPlatformExtensionKind = z.infer<typeof agentPlatformExtensionKindSchema>;
 

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   AGENT_PLATFORM_CONTRACT_VERSION,
+  agentPlatformExtensionKindSchema,
   isAgentPlatformContractCompatible,
   normalizeAgentPlatformScope,
 } from "./agent-platform-contract.js";
@@ -21,5 +22,9 @@ describe("agent platform contract", () => {
     expect(isAgentPlatformContractCompatible(AGENT_PLATFORM_CONTRACT_VERSION)).toBe(true);
     expect(isAgentPlatformContractCompatible("1.7")).toBe(true);
     expect(isAgentPlatformContractCompatible("2.0")).toBe(false);
+  });
+
+  it("accepts a neutral tool provider extension", () => {
+    expect(agentPlatformExtensionKindSchema.parse("tool_provider")).toBe("tool_provider");
   });
 });
