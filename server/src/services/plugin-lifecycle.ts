@@ -694,13 +694,7 @@ export function pluginLifecycleManager(
 
       // 1. Download and validate new package via loader
       const { oldManifest, newManifest, discovered } =
-        await pluginLoaderInstance.upgradePlugin(pluginId, {
-          ...options,
-          // The lifecycle owns the pending/ready state transition below. The
-          // loader can therefore persist a reviewed manifest before that
-          // transition, without treating it as an unreviewed direct call.
-          approvedCapabilityEscalation: true,
-        });
+        await pluginLoaderInstance.prepareUpgrade(pluginId, options);
 
       log.info(
         {
@@ -739,6 +733,7 @@ export function pluginLifecycleManager(
         );
         // Skip the inner stopWorkerIfRunning since we already stopped above
         const reviewReasons = [
+          `target version: ${newManifest.version}`,
           ...(needsCapabilityApproval ? [`new capabilities: ${addedCaps.join(", ")}`] : []),
           ...(needsDataMigrationApproval
             ? [`data migration plan: ${migrationPlan!.reviewHash}`]
@@ -776,6 +771,11 @@ export function pluginLifecycleManager(
             "plugin lifecycle: created Host backup before approved data migration",
           );
         }
+        await pluginLoaderInstance.commitPreparedUpgrade(pluginId, {
+          oldManifest,
+          newManifest,
+          discovered,
+        });
         const result = await transition(pluginId, "ready", null, {
           ...plugin,
           version: discovered.version,

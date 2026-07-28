@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Puzzle, ArrowLeft, ShieldAlert, ShieldCheck, ActivitySquare, CheckCircle, XCircle, Loader2, Clock, Cpu, Webhook, CalendarClock, AlertTriangle, FolderOpen, Save } from "lucide-react";
-import type { PluginLocalFolderDeclaration } from "@paperclipai/shared";
+import type { PluginLocalFolderDeclaration, PluginRecord } from "@paperclipai/shared";
 import { useCompany } from "@/context/CompanyContext";
 import { useBreadcrumbs } from "@/context/BreadcrumbContext";
 import { Link, Navigate, useParams } from "@/lib/router";
 import { PluginSlotMount, usePluginSlots } from "@/plugins/slots";
-import { pluginsApi, type PluginLocalFolderStatus } from "@/api/plugins";
+import { pluginsApi, type PluginDatabaseMigrationPlan, type PluginLocalFolderStatus } from "@/api/plugins";
 import { agentsApi } from "@/api/agents";
 import { queryKeys } from "@/lib/queryKeys";
 import { Button } from "@/components/ui/button";
@@ -23,6 +23,8 @@ import { Separator } from "@/components/ui/separator";
 import { Tabs, TabsContent } from "@/components/ui/tabs";
 import { PageTabBar } from "@/components/PageTabBar";
 import { ToggleSwitch } from "@/components/ui/toggle-switch";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Label } from "@/components/ui/label";
 import {
   JsonSchemaForm,
   validateJsonSchemaForm,
@@ -176,6 +178,8 @@ export function PluginSettings() {
           </Badge>
         </div>
       </div>
+
+      {plugin.status === "upgrade_pending" ? <PluginUpdateReview plugin={plugin} /> : null}
 
       <Tabs value={activeTab} onValueChange={(value) => setActiveTab(value as "configuration" | "status")} className="space-y-6">
         <PageTabBar
@@ -590,6 +594,201 @@ export function PluginSettings() {
 // ---------------------------------------------------------------------------
 // PluginLocalFoldersSettings — host-managed company-scoped folders
 // ---------------------------------------------------------------------------
+
+function pendingReviewTargetVersion(lastError: string | null): string | undefined {
+  const match = lastError?.match(/target version:\s*([^;\n]+)/i);
+  return match?.[1]?.trim() || undefined;
+}
+
+function pendingReviewCapabilities(lastError: string | null): string[] {
+  const match = lastError?.match(/new capabilities:\s*([^;\n]+)/i);
+  return match?.[1]
+    ?.split(",")
+    .map((value) => value.trim())
+    .filter(Boolean) ?? [];
+}
+
+function PluginUpdateReview({ plugin }: { plugin: PluginRecord }) {
+  const queryClient = useQueryClient();
+  const [dataMigrationApproved, setDataMigrationApproved] = useState(false);
+  const [capabilityApproved, setCapabilityApproved] = useState(false);
+  const targetVersion = pendingReviewTargetVersion(plugin.lastError);
+  const capabilityEscalations = pendingReviewCapabilities(plugin.lastError);
+  const migrationPlanQuery = useQuery({
+    queryKey: queryKeys.plugins.migrationPlan(plugin.id),
+    queryFn: () => pluginsApi.migrationPlan(plugin.id),
+    enabled: plugin.status === "upgrade_pending",
+  });
+  const migrationPlan = migrationPlanQuery.data;
+  const requiresDataMigrationApproval = migrationPlan?.requiresHostApproval === true;
+  const canApprove =
+    !migrationPlanQuery.isLoading &&
+    !migrationPlanQuery.isError &&
+    (!requiresDataMigrationApproval || dataMigrationApproved) &&
+    (capabilityEscalations.length === 0 || capabilityApproved);
+
+  const approveMutation = useMutation({
+    mutationFn: () =>
+      pluginsApi.upgrade(plugin.id, {
+        version: targetVersion,
+        approvedCapabilityEscalation: capabilityEscalations.length > 0 ? capabilityApproved : undefined,
+        approvedDataMigrationPlanHash: requiresDataMigrationApproval ? migrationPlan?.reviewHash : undefined,
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.plugins.all });
+      queryClient.invalidateQueries({ queryKey: queryKeys.plugins.detail(plugin.id) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.plugins.migrationPlan(plugin.id) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.plugins.uiContributionsPrefix });
+    },
+  });
+
+  return (
+    <Card className="border-amber-500/35 bg-amber-500/[0.05]">
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-base">
+          <AlertTriangle className="h-4 w-4 text-amber-700 dark:text-amber-300" />
+          Update review required
+        </CardTitle>
+        <CardDescription>
+          This update is stopped until the Host reviews its requested changes. No worker is running while it is pending.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        {targetVersion ? (
+          <div className="flex items-center justify-between rounded-md border border-border/70 bg-background/60 px-3 py-2 text-sm">
+            <span className="text-muted-foreground">Candidate version</span>
+            <span className="font-mono">v{targetVersion}</span>
+          </div>
+        ) : null}
+
+        {capabilityEscalations.length > 0 ? (
+          <div className="space-y-3 rounded-md border border-border/70 bg-background/60 p-3">
+            <div>
+              <h3 className="text-sm font-medium">New capabilities</h3>
+              <p className="mt-1 text-sm text-muted-foreground">
+                The updated plugin asks the Host for access it did not have before.
+              </p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {capabilityEscalations.map((capability) => (
+                <Badge key={capability} variant="outline" className="font-mono text-xs">
+                  {capability}
+                </Badge>
+              ))}
+            </div>
+            <div className="flex items-start gap-2">
+              <Checkbox
+                id={`approve-capabilities-${plugin.id}`}
+                checked={capabilityApproved}
+                onCheckedChange={(value) => setCapabilityApproved(value === true)}
+              />
+              <Label htmlFor={`approve-capabilities-${plugin.id}`} className="cursor-pointer text-sm leading-5">
+                I reviewed and approve these additional capabilities for this update.
+              </Label>
+            </div>
+          </div>
+        ) : null}
+
+        {migrationPlanQuery.isLoading ? (
+          <div className="flex items-center gap-2 rounded-md border border-border/70 bg-background/60 px-3 py-3 text-sm text-muted-foreground">
+            <Loader2 className="h-4 w-4 animate-spin" />
+            Reading requested database changes...
+          </div>
+        ) : migrationPlanQuery.isError ? (
+          <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-3 text-sm text-destructive">
+            The database change review could not be loaded. Approval stays disabled until this check succeeds.
+          </div>
+        ) : migrationPlan ? (
+          <MigrationPlanReview
+            pluginId={plugin.id}
+            plan={migrationPlan}
+            approved={dataMigrationApproved}
+            onApprovedChange={setDataMigrationApproved}
+          />
+        ) : (
+          <div className="rounded-md border border-border/70 bg-background/60 px-3 py-3 text-sm text-muted-foreground">
+            This update does not declare plugin-owned database changes.
+          </div>
+        )}
+
+        {plugin.lastError ? <p className="text-xs text-muted-foreground">{plugin.lastError}</p> : null}
+
+        {approveMutation.error ? (
+          <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-3 text-sm text-destructive">
+            {approveMutation.error.message || "The reviewed update could not be applied."}
+          </div>
+        ) : null}
+
+        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border/60 pt-4">
+          <p className="max-w-2xl text-xs leading-5 text-muted-foreground">
+            When database changes are approved, SPS creates a fresh Host database backup immediately before the update runs.
+          </p>
+          <Button onClick={() => approveMutation.mutate()} disabled={!canApprove || approveMutation.isPending}>
+            {approveMutation.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <ShieldCheck className="h-4 w-4" />}
+            Approve and apply update
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function MigrationPlanReview({
+  pluginId,
+  plan,
+  approved,
+  onApprovedChange,
+}: {
+  pluginId: string;
+  plan: PluginDatabaseMigrationPlan;
+  approved: boolean;
+  onApprovedChange: (approved: boolean) => void;
+}) {
+  if (!plan.requiresHostApproval) {
+    return (
+      <div className="rounded-md border border-border/70 bg-background/60 px-3 py-3 text-sm text-muted-foreground">
+        The plugin database is new or there are no pending database changes. No database approval is required.
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-3 rounded-md border border-border/70 bg-background/60 p-3">
+      <div>
+        <h3 className="text-sm font-medium">Plugin database changes</h3>
+        <p className="mt-1 text-sm text-muted-foreground">
+          {plan.pendingMigrations.length} migration file{plan.pendingMigrations.length === 1 ? "" : "s"} will change this plugin's private data namespace.
+        </p>
+      </div>
+      <div className="space-y-2">
+        {plan.pendingMigrations.map((migration) => (
+          <div key={migration.migrationKey} className="rounded border border-border/60 px-3 py-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="font-mono text-xs text-foreground">{migration.migrationKey}</span>
+              <span className="text-xs text-muted-foreground">{migration.statementCount} SQL statement{migration.statementCount === 1 ? "" : "s"}</span>
+            </div>
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {migration.operationKinds.map((operation) => (
+                <Badge key={operation} variant="outline" className="text-xs capitalize">{operation}</Badge>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+      <div className="flex items-start gap-2">
+        <Checkbox
+          id={`approve-migrations-${pluginId}`}
+          checked={approved}
+          onCheckedChange={(value) => onApprovedChange(value === true)}
+        />
+        <Label htmlFor={`approve-migrations-${pluginId}`} className="cursor-pointer text-sm leading-5">
+          I reviewed these database changes and understand SPS will create a Host backup first.
+        </Label>
+      </div>
+      <p className="font-mono text-xs text-muted-foreground">Review hash: {plan.reviewHash}</p>
+    </div>
+  );
+}
 
 function PluginToolAccessSettings({ pluginId, companyId }: { pluginId: string; companyId: string | null }) {
   const queryClient = useQueryClient();

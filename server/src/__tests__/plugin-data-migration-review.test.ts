@@ -43,7 +43,7 @@ function makeLoader(): PluginLoader {
       registered: { worker: true, eventSubscriptions: 0, jobs: 0, webhooks: 0, tools: 0 },
     }),
     unloadSingle: vi.fn().mockResolvedValue(undefined),
-    upgradePlugin: vi.fn().mockResolvedValue({
+    prepareUpgrade: vi.fn().mockResolvedValue({
       oldManifest: pluginRecord.manifestJson,
       newManifest: {
         ...pluginRecord.manifestJson,
@@ -54,6 +54,7 @@ function makeLoader(): PluginLoader {
         version: "1.1.0",
       },
     }),
+    commitPreparedUpgrade: vi.fn().mockResolvedValue(undefined),
   } as unknown as PluginLoader;
 }
 
@@ -99,6 +100,7 @@ describe("plugin data migration review", () => {
 
     expect(result.status).toBe("upgrade_pending");
     expect(backup.runManualBackup).not.toHaveBeenCalled();
+    expect(loader.commitPreparedUpgrade).not.toHaveBeenCalled();
     expect(loader.loadSingle).not.toHaveBeenCalled();
   });
 
@@ -121,6 +123,7 @@ describe("plugin data migration review", () => {
 
     expect(result.status).toBe("ready");
     expect(backup.runManualBackup).toHaveBeenCalledOnce();
+    expect(loader.commitPreparedUpgrade).toHaveBeenCalledOnce();
     expect(loader.loadSingle).toHaveBeenCalledWith(pluginId, {
       approvedMigrationPlanHash: planHash,
     });

@@ -150,6 +150,27 @@ export interface PluginDashboardData {
   checkedAt: string;
 }
 
+export type PluginMigrationOperationKind = "create" | "alter" | "insert" | "update" | "comment" | "other";
+
+export interface PluginPendingMigrationSummary {
+  migrationKey: string;
+  checksum: string;
+  statementCount: number;
+  operationKinds: PluginMigrationOperationKind[];
+}
+
+/** A read-only review of database work requested by a pending plugin update. */
+export interface PluginDatabaseMigrationPlan {
+  pluginId: string;
+  pluginKey: string;
+  targetVersion: string;
+  namespaceName: string;
+  hasAppliedMigrations: boolean;
+  requiresHostApproval: boolean;
+  reviewHash: string;
+  pendingMigrations: PluginPendingMigrationSummary[];
+}
+
 export interface AvailableBundledPlugin {
   packageName: string;
   pluginKey: string;
@@ -390,14 +411,27 @@ export const pluginsApi = {
   /**
    * Upgrade a plugin to a newer version.
    *
-   * If the new version declares additional capabilities, the plugin is
-   * transitioned to `upgrade_pending` state awaiting operator approval.
+   * Capability escalation or database changes to an existing plugin namespace
+   * transition the plugin to `upgrade_pending` until a Host reviews them.
    *
    * @param pluginId - UUID of the plugin to upgrade.
    * @param version - Target version (optional; defaults to latest published).
    */
-  upgrade: (pluginId: string, version?: string) =>
-    api.post<{ ok: boolean }>(`/plugins/${pluginId}/upgrade`, version ? { version } : {}),
+  migrationPlan: (pluginId: string) =>
+    api.get<PluginDatabaseMigrationPlan | null>(`/plugins/${pluginId}/migration-plan`),
+
+  upgrade: (
+    pluginId: string,
+    input?: string | {
+      version?: string;
+      approvedCapabilityEscalation?: boolean;
+      approvedDataMigrationPlanHash?: string;
+    },
+  ) =>
+    api.post<{ ok: boolean }>(
+      `/plugins/${pluginId}/upgrade`,
+      typeof input === "string" ? { version: input } : input ?? {},
+    ),
 
   /**
    * Returns normalized UI contribution declarations for ready plugins.

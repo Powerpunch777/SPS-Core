@@ -323,7 +323,7 @@ function GenericPluginManager() {
                     <div className="flex items-center gap-2 shrink-0">
                       {installedPlugin ? (
                         <>
-                          {installedPlugin.status !== "ready" && (
+                          {installedPlugin.status !== "ready" && installedPlugin.status !== "upgrade_pending" && (
                             <Button
                               variant="outline"
                               size="sm"
@@ -465,15 +465,18 @@ function GenericPluginManager() {
                           variant="outline"
                           size="icon-sm"
                           className="h-8 w-8"
-                          title={plugin.status === "ready" ? "Disable" : "Enable"}
+                          title={plugin.status === "upgrade_pending" ? "Review update in plugin settings" : plugin.status === "ready" ? "Disable" : "Enable"}
                           onClick={() => {
+                            if (plugin.status === "upgrade_pending") {
+                              return;
+                            }
                             if (plugin.status === "ready") {
                               disableMutation.mutate(plugin.id);
                             } else {
                               enableMutation.mutate(plugin.id);
                             }
                           }}
-                          disabled={enableMutation.isPending || disableMutation.isPending}
+                          disabled={plugin.status === "upgrade_pending" || enableMutation.isPending || disableMutation.isPending}
                         >
                           <Power className={cn("h-4 w-4", plugin.status === "ready" ? "text-green-600" : "")} />
                         </Button>

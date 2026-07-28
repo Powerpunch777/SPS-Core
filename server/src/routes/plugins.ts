@@ -2639,9 +2639,10 @@ export function pluginRoutes(
    * Request body (optional):
    * - version: Target version (defaults to latest)
    *
-   * If the upgrade adds new capabilities, the plugin transitions to
-   * 'upgrade_pending' state for board approval. Otherwise, it goes
-   * directly to 'ready'.
+   * If the upgrade adds capabilities or needs database changes in an existing
+   * plugin namespace, it transitions to 'upgrade_pending' for Host review.
+   * An approved database plan triggers a fresh Host backup immediately before
+   * the plugin is activated.
    *
    * Response: PluginRecord
    * Errors: 404 if plugin not found, 400 for lifecycle errors

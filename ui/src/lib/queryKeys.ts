@@ -323,6 +323,7 @@ export const queryKeys = {
     all: ["plugins"] as const,
     examples: ["plugins", "examples"] as const,
     detail: (pluginId: string) => ["plugins", pluginId] as const,
+    migrationPlan: (pluginId: string) => ["plugins", pluginId, "migration-plan"] as const,
     health: (pluginId: string) => ["plugins", pluginId, "health"] as const,
     uiContributions: (companyId?: string | null) =>
       ["plugins", "ui-contributions", companyId ?? "global"] as const,

@@ -11,6 +11,8 @@ const mockPluginsApi = vi.hoisted(() => ({
   health: vi.fn(),
   dashboard: vi.fn(),
   logs: vi.fn(),
+  migrationPlan: vi.fn(),
+  upgrade: vi.fn(),
   getConfig: vi.fn(),
   listLocalFolders: vi.fn(),
   configureLocalFolder: vi.fn(),
@@ -147,6 +149,8 @@ describe("PluginSettings", () => {
     mockPluginsApi.dashboard.mockResolvedValue(null);
     mockPluginsApi.health.mockResolvedValue({ pluginId: "plugin-1", status: "ready", healthy: true, checks: [] });
     mockPluginsApi.logs.mockResolvedValue([]);
+    mockPluginsApi.migrationPlan.mockResolvedValue(null);
+    mockPluginsApi.upgrade.mockResolvedValue({ ok: true });
     mockPluginsApi.listLocalFolders.mockResolvedValue({
       pluginId: "plugin-1",
       companyId: "company-1",
@@ -168,6 +172,67 @@ describe("PluginSettings", () => {
     expect(container.textContent).toContain("secret bindings still resolve through the selected company context");
     const link = container.querySelector('a[href="/company/settings/instance/environments"]');
     expect(link?.textContent).toContain("Open Environments");
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it("requires explicit review before applying a pending capability and data update", async () => {
+    mockPluginsApi.get.mockResolvedValue(basePlugin({
+      status: "upgrade_pending",
+      lastError: "Upgrade review required: target version: 1.1.0; new capabilities: tools.invoke; data migration plan: review-hash",
+    }));
+    mockPluginsApi.migrationPlan.mockResolvedValue({
+      pluginId: "plugin-1",
+      pluginKey: "paperclip.e2b-sandbox-provider",
+      targetVersion: "1.1.0",
+      namespaceName: "plugin_example",
+      hasAppliedMigrations: true,
+      requiresHostApproval: true,
+      reviewHash: "review-hash",
+      pendingMigrations: [{
+        migrationKey: "002_add_state.sql",
+        checksum: "checksum",
+        statementCount: 2,
+        operationKinds: ["alter", "update"],
+      }],
+    });
+
+    const root = await renderSettings(container);
+
+    expect(container.textContent).toContain("Update review required");
+    expect(container.textContent).toContain("tools.invoke");
+    expect(container.textContent).toContain("002_add_state.sql");
+    const approveButton = Array.from(container.querySelectorAll("button"))
+      .find((button) => button.textContent?.includes("Approve and apply update"));
+    expect(approveButton).toBeTruthy();
+    expect((approveButton as HTMLButtonElement).disabled).toBe(true);
+
+    const capabilityCheckbox = container.querySelector('[id="approve-capabilities-plugin-1"]') as HTMLElement | null;
+    const migrationCheckbox = container.querySelector('[id="approve-migrations-plugin-1"]') as HTMLElement | null;
+    expect(capabilityCheckbox).toBeTruthy();
+    expect(migrationCheckbox).toBeTruthy();
+
+    await act(async () => {
+      capabilityCheckbox?.click();
+      migrationCheckbox?.click();
+      await Promise.resolve();
+    });
+    await flushReact();
+
+    expect((approveButton as HTMLButtonElement).disabled).toBe(false);
+    await act(async () => {
+      (approveButton as HTMLButtonElement).click();
+      await Promise.resolve();
+    });
+    await flushReact();
+
+    expect(mockPluginsApi.upgrade).toHaveBeenCalledWith("plugin-1", {
+      version: "1.1.0",
+      approvedCapabilityEscalation: true,
+      approvedDataMigrationPlanHash: "review-hash",
+    });
 
     await act(async () => {
       root.unmount();

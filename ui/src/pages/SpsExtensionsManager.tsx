@@ -66,6 +66,11 @@ function ExtensionRow({
           {plugin.manifestJson.description || "No description provided."}
         </p>
         <p className="mt-1 text-xs text-muted-foreground">v{plugin.manifestJson.version ?? plugin.version}</p>
+        {plugin.status === "upgrade_pending" ? (
+          <p className="mt-2 text-sm text-amber-700 dark:text-amber-300">
+            This update is stopped for Host review. Open Settings to inspect and approve it.
+          </p>
+        ) : null}
       </div>
       <div className="flex shrink-0 items-center gap-2">
         <Button
@@ -80,7 +85,7 @@ function ExtensionRow({
         <Button variant="outline" size="sm" asChild>
           <Link to={`/company/settings/instance/plugins/${plugin.id}`}>
             <Settings className="h-4 w-4" />
-            Settings
+            {plugin.status === "upgrade_pending" ? "Review update" : "Settings"}
           </Link>
         </Button>
       </div>

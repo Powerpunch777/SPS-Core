@@ -476,6 +476,16 @@ export interface PluginUiContributionMetadata {
   launchers: PluginLauncherDeclaration[];
 }
 
+/**
+ * A validated plugin update candidate that has not changed the installed
+ * plugin record yet. The lifecycle manager owns the decision to commit it.
+ */
+export interface PreparedPluginUpgrade {
+  oldManifest: PaperclipPluginManifestV1;
+  newManifest: PaperclipPluginManifestV1;
+  discovered: DiscoveredPlugin;
+}
+
 // ---------------------------------------------------------------------------
 // Service interface
 // ---------------------------------------------------------------------------
@@ -569,11 +579,11 @@ export interface PluginLoader {
    *
    * @see PLUGIN_SPEC.md §25.3 — Upgrade Lifecycle
    */
-  upgradePlugin(pluginId: string, options: PluginUpgradeOptions): Promise<{
-    oldManifest: PaperclipPluginManifestV1;
-    newManifest: PaperclipPluginManifestV1;
-    discovered: DiscoveredPlugin;
-  }>;
+  prepareUpgrade(pluginId: string, options: PluginUpgradeOptions): Promise<PreparedPluginUpgrade>;
+
+  commitPreparedUpgrade(pluginId: string, prepared: PreparedPluginUpgrade): Promise<void>;
+
+  upgradePlugin(pluginId: string, options: PluginUpgradeOptions): Promise<PreparedPluginUpgrade>;
 
   /**
    * Return a read-only description of pending database work for the installed
@@ -1520,6 +1530,60 @@ export function pluginLoader(
     }
   }
 
+  async function preparePluginUpgrade(
+    pluginId: string,
+    upgradeOptions: PluginUpgradeOptions,
+  ): Promise<PreparedPluginUpgrade> {
+    const plugin = (await registry.getById(pluginId)) as {
+      id: string;
+      packageName: string;
+      packagePath: string | null;
+      manifestJson: PaperclipPluginManifestV1;
+    } | null;
+    if (!plugin) throw new Error(`Plugin not found: ${pluginId}`);
+
+    const oldManifest = plugin.manifestJson;
+    const {
+      packageName = plugin.packageName,
+      localPath = plugin.packagePath ?? undefined,
+      version,
+    } = upgradeOptions;
+
+    log.info(
+      { pluginId, packageName, version, localPath },
+      "plugin-loader: preparing plugin upgrade",
+    );
+
+    const discovered = await fetchAndValidate({
+      ...upgradeOptions,
+      packageName,
+      localPath,
+      version,
+      installDir: localPluginDir,
+    });
+    const newManifest = discovered.manifest!;
+
+    if (newManifest.id !== oldManifest.id) {
+      throw new Error(
+        `Upgrade failed: new manifest ID '${newManifest.id}' does not match existing plugin ID '${oldManifest.id}'`,
+      );
+    }
+
+    return { oldManifest, newManifest, discovered };
+  }
+
+  async function commitPreparedPluginUpgrade(
+    pluginId: string,
+    prepared: PreparedPluginUpgrade,
+  ): Promise<void> {
+    await registry.update(pluginId, {
+      packageName: prepared.discovered.packageName,
+      packagePath: prepared.discovered.packagePath,
+      version: prepared.discovered.version,
+      manifest: prepared.newManifest,
+    });
+  }
+
   // -------------------------------------------------------------------------
   // Public API
   // -------------------------------------------------------------------------
@@ -1852,11 +1916,7 @@ export function pluginLoader(
     async upgradePlugin(
       pluginId: string,
       upgradeOptions: PluginUpgradeOptions,
-    ): Promise<{
-      oldManifest: PaperclipPluginManifestV1;
-      newManifest: PaperclipPluginManifestV1;
-      discovered: DiscoveredPlugin;
-    }> {
+    ): Promise<PreparedPluginUpgrade> {
       const plugin = (await registry.getById(pluginId)) as {
         id: string;
         packageName: string;
@@ -1930,11 +1990,31 @@ export function pluginLoader(
       };
     },
 
+    async prepareUpgrade(
+      pluginId: string,
+      upgradeOptions: PluginUpgradeOptions,
+    ): Promise<PreparedPluginUpgrade> {
+      return await preparePluginUpgrade(pluginId, upgradeOptions);
+    },
+
+    async commitPreparedUpgrade(
+      pluginId: string,
+      prepared: PreparedPluginUpgrade,
+    ): Promise<void> {
+      await commitPreparedPluginUpgrade(pluginId, prepared);
+    },
+
     async inspectPluginMigrations(pluginId: string): Promise<PluginDatabaseMigrationPlan | null> {
       const plugin = (await registry.getById(pluginId)) as PluginRecord | null;
       if (!plugin) throw new Error(`Plugin not found: ${pluginId}`);
       const packageRoot = resolvePluginPackageRoot(plugin, localPluginDir);
-      const manifest = (await refreshPluginManifestFromPackage(plugin, packageRoot)).manifestJson;
+      const manifest = await loadManifestFromPackageRoot(packageRoot);
+      if (!manifest) {
+        throw new Error(`Plugin package ${plugin.packageName} no longer exposes a Paperclip manifest`);
+      }
+      if (manifest.id !== plugin.pluginKey) {
+        throw new Error(`Plugin manifest ID '${manifest.id}' does not match installed plugin '${plugin.pluginKey}'`);
+      }
       return pluginDatabaseService(migrationDb).inspectMigrations(pluginId, manifest, packageRoot);
     },
 
