@@ -1459,6 +1459,8 @@ export interface WorkerToHostMethods {
       companyId: string;
       title?: string;
       format?: string;
+      /** Required when replacing an existing document. Omit or pass null to create a new document. */
+      baseRevisionId?: string | null;
       changeSummary?: string;
     },
     result: IssueDocument,

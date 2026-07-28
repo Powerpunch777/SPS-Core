@@ -993,6 +993,7 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
               companyId: input.companyId,
               title: input.title,
               format: input.format,
+              baseRevisionId: input.baseRevisionId,
               changeSummary: input.changeSummary,
             });
           },

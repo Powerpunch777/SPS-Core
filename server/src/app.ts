@@ -155,6 +155,7 @@ export async function createApp(
     deploymentExposure: DeploymentExposure;
     allowedHostnames: string[];
     bindHost: string;
+    publicBaseUrl?: string;
     authReady: boolean;
     companyDeletionEnabled: boolean;
     instanceId?: string;
@@ -363,6 +364,7 @@ export async function createApp(
       deploymentExposure: opts.deploymentExposure,
       bindHost: opts.bindHost,
       allowedHostnames: opts.allowedHostnames,
+      publicBaseUrl: opts.publicBaseUrl,
     }),
   );
   app.use("/api", api);
@@ -586,6 +588,12 @@ export async function createApp(
   const configuredBundledPluginPaths = parseBundledPluginPaths(
     process.env.SPS_BUNDLED_PLUGIN_PATHS ?? process.env.PAPERCLIP_BUNDLED_PLUGIN_PATHS,
   );
+  // Desktop may ship a newer copy of an optional first-party plugin without
+  // making that workplane part of the neutral Core default. These paths only
+  // refresh plugins the Owner has already chosen to install.
+  const configuredBundledPluginRefreshPaths = parseBundledPluginPaths(
+    process.env.SPS_BUNDLED_PLUGIN_REFRESH_PATHS,
+  );
   const ensureConfiguredBundledPlugins = async (): Promise<void> => {
     await installConfiguredBundledPlugins(configuredBundledPluginPaths, {
       loader,
@@ -594,8 +602,17 @@ export async function createApp(
       pluginRegistry,
     });
   };
+  const refreshConfiguredBundledPlugins = async (): Promise<void> => {
+    await installConfiguredBundledPlugins(configuredBundledPluginRefreshPaths, {
+      loader,
+      lifecycle,
+      logger,
+      pluginRegistry,
+    }, { installMissing: false });
+  };
   void ensureBundledKubernetesPlugin()
     .then(() => ensureConfiguredBundledPlugins())
+    .then(() => refreshConfiguredBundledPlugins())
     .then(() => loader.loadAll())
     .then((result) => {
     if (!result) return;

@@ -2240,6 +2240,7 @@ export function buildHostServices(
           body: params.body,
           title: params.title ?? null,
           format: params.format ?? "markdown",
+          baseRevisionId: params.baseRevisionId ?? null,
           changeSummary: params.changeSummary ?? null,
         });
         await logPluginActivity({

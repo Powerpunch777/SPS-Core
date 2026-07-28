@@ -49,7 +49,9 @@ export function parseBundledPluginPaths(raw: string | undefined, delimiter = pat
 export async function installConfiguredBundledPlugins(
   pluginPaths: readonly string[],
   dependencies: BundledPluginBootstrapDependencies,
+  options: { installMissing?: boolean } = {},
 ): Promise<void> {
+  const installMissing = options.installMissing ?? true;
   for (const configuredPath of pluginPaths) {
     const pluginPath = path.resolve(configuredPath);
     try {
@@ -63,6 +65,13 @@ export async function installConfiguredBundledPlugins(
         continue;
       }
       const existing = await dependencies.pluginRegistry.getByKey(manifest.id);
+      if (!existing && !installMissing) {
+        dependencies.logger.info(
+          { pluginKey: manifest.id, pluginPath },
+          "configured bundled plugin is not installed; skipping refresh",
+        );
+        continue;
+      }
       if (existing) {
         const existingPath = existing.packagePath ? path.resolve(existing.packagePath) : null;
         const hasSameBundle = existing.status === "ready"

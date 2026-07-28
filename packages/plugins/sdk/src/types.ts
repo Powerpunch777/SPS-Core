@@ -1215,6 +1215,12 @@ export interface PluginIssueDocumentsClient {
     companyId: string;
     title?: string;
     format?: string;
+    /**
+     * Revision used for optimistic concurrency when replacing an existing
+     * document. Pass the latest value returned by `get`; omit or use `null`
+     * only when creating a new document.
+     */
+    baseRevisionId?: string | null;
     changeSummary?: string;
   }): Promise<IssueDocument>;
 
