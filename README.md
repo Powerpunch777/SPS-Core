@@ -1,3 +1,10 @@
+> **SPS Core (private product runtime)**
+>
+> This repository is the private runtime Core for SPS Desktop. It retains
+> Paperclip-compatible upstream source and notices where applicable. The public
+> `SPS-Core-Compat` repository is a compatibility mirror only, not the SPS
+> product runtime, release channel, or support surface.
+
 <p align="center">
   <img src="doc/assets/banner.jpg" alt="Paperclip is the app people use to manage AI agents for work." width="720" />
 </p>
