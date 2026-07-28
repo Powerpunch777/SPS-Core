@@ -12,6 +12,7 @@ import {
   type MemoryProviderDescriptor,
 } from "./memory-providers.js";
 import { pluginRegistryService } from "./plugin-registry.js";
+import { resolvePluginCompanyActivation } from "./plugin-company-activation.js";
 import { logger } from "../middleware/logger.js";
 
 export type MemoryProviderSelectionStatus = "enabled" | "disabled";
@@ -39,6 +40,7 @@ export interface MemoryLifecycleDelivery {
 
 export interface CompanyMemoryProviderRuntime {
   listProviders(): Promise<MemoryProviderDescriptor[]>;
+  listProvidersForCompany(companyId: string): Promise<MemoryProviderDescriptor[]>;
   getSelection(companyId: string): Promise<CompanyMemoryProviderSelection>;
   selectProvider(input: {
     companyId: string;
@@ -155,22 +157,34 @@ export function createCompanyMemoryProviderRuntime(input: {
   const registry = pluginRegistryService(input.db);
   const log = logger.child({ service: "memory-provider-runtime" });
   const listProviders = async () => listReadyMemoryProviders(await registry.listByStatus("ready"));
+  const listProvidersForCompany = async (companyId: string) => {
+    const providers = await listProviders();
+    const activated = await Promise.all(providers.map(async (provider) => {
+      const plugin = await registry.getById(provider.pluginId);
+      if (!plugin) return null;
+      return (await resolvePluginCompanyActivation(registry, plugin, companyId)).enabled
+        ? provider
+        : null;
+    }));
+    return activated.filter((provider): provider is MemoryProviderDescriptor => provider !== null);
+  };
   const storedSelection = async (companyId: string) => input.db
     .select()
     .from(companyMemorySettings)
     .where(eq(companyMemorySettings.companyId, companyId))
     .then((rows) => rows[0] ?? null);
   const getSelection = async (companyId: string) => resolveEffectiveMemoryProvider({
-    providers: await listProviders(),
+    providers: await listProvidersForCompany(companyId),
     stored: await storedSelection(companyId),
   });
 
   return {
     listProviders,
+    listProvidersForCompany,
     getSelection,
 
     async selectProvider({ companyId, providerKey, configuredByUserId }) {
-      const providers = await listProviders();
+      const providers = await listProvidersForCompany(companyId);
       const provider = providerKey === null
         ? null
         : providers.find((candidate) => candidate.providerKey === providerKey) ?? null;
@@ -215,7 +229,7 @@ export function createCompanyMemoryProviderRuntime(input: {
     },
 
     async isSelectedProviderTool({ companyId, pluginDbId, toolName }) {
-      const [providers, stored] = await Promise.all([listProviders(), storedSelection(companyId)]);
+      const [providers, stored] = await Promise.all([listProvidersForCompany(companyId), storedSelection(companyId)]);
       const toolProvider = providers.find((provider) => provider.pluginId === pluginDbId);
       if (!toolProvider || !isDeclaredMemoryProviderTool(toolProvider, toolName)) return true;
       return resolveEffectiveMemoryProvider({ providers, stored }).provider?.pluginId === pluginDbId;

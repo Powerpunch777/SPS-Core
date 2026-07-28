@@ -130,7 +130,7 @@ function GenericPluginManager() {
   const invalidatePluginQueries = () => {
     queryClient.invalidateQueries({ queryKey: queryKeys.plugins.all });
     queryClient.invalidateQueries({ queryKey: queryKeys.plugins.examples });
-    queryClient.invalidateQueries({ queryKey: queryKeys.plugins.uiContributions });
+    queryClient.invalidateQueries({ queryKey: queryKeys.plugins.uiContributionsPrefix });
   };
 
   const installMutation = useMutation({

@@ -801,6 +801,9 @@ export const pluginManifestV1Schema = z.object({
   webhooks: z.array(pluginWebhookDeclarationSchema).optional(),
   tools: z.array(pluginToolDeclarationSchema).optional(),
   agentToolAccess: z.enum(["company_default", "explicit_grant"]).optional(),
+  companyActivation: z.object({
+    defaultEnabled: z.boolean().optional(),
+  }).optional(),
   database: pluginDatabaseDeclarationSchema.optional(),
   apiRoutes: z.array(pluginApiRouteDeclarationSchema).optional(),
   environmentDrivers: z.array(pluginEnvironmentDriverDeclarationSchema).optional(),

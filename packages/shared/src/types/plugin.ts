@@ -568,6 +568,19 @@ export interface PluginObjectReferenceProviderDeclaration {
 export type PluginAgentToolAccessPolicy = "company_default" | "explicit_grant";
 
 /**
+ * Declares the Company-level default for an installed plugin. A plugin package
+ * is installed and its worker is prepared once per Host, while this policy
+ * decides whether a Company can use it. A Company can always store an
+ * explicit enabled/disabled override through the Core lifecycle API.
+ *
+ * Omitted means `true` for compatibility with existing plugin packages.
+ */
+export interface PluginCompanyActivationDeclaration {
+  /** Whether a Company without an explicit override starts with this plugin enabled. */
+  defaultEnabled?: boolean;
+}
+
+/**
  * Declares a memory provider that the host can select for a company. Memory
  * content, retention, recall, and scope enforcement remain provider-owned.
  * Core owns company selection, lifecycle dispatch, tool authorization, and
@@ -655,6 +668,8 @@ export interface PaperclipPluginManifestV1 {
   tools?: PluginToolDeclaration[];
   /** Access policy shared by all static and dynamic tools from this plugin. */
   agentToolAccess?: PluginAgentToolAccessPolicy;
+  /** Company-level default activation policy for this installed plugin. */
+  companyActivation?: PluginCompanyActivationDeclaration;
   /** Restricted plugin-owned database namespace declaration. */
   database?: PluginDatabaseDeclaration;
   /** Scoped JSON API routes mounted under `/api/plugins/:pluginId/api/*`. */

@@ -51,6 +51,10 @@ import { registryStagingService, type RegistryStagedPluginRecord } from "../serv
 import { listReadyMemoryProviders } from "../services/memory-providers.js";
 import type { CompanyMemoryProviderRuntime } from "../services/memory-provider-runtime.js";
 import { createPluginToolAccessService, pluginRequiresExplicitToolGrant } from "../services/plugin-tool-access.js";
+import {
+  resolvePluginCompanyActivation,
+  setPluginCompanyActivation,
+} from "../services/plugin-company-activation.js";
 import { listReadyAgentPlatformExtensions } from "../services/agent-platform-extensions.js";
 import { pluginLifecycleManager } from "../services/plugin-lifecycle.js";
 import {
@@ -881,6 +885,24 @@ export function pluginRoutes(
     }
   }
 
+  async function resolveCompanyPluginActivation(
+    plugin: { id: string; pluginKey: string; manifestJson: PaperclipPluginManifestV1 },
+    companyId: string,
+  ) {
+    return await resolvePluginCompanyActivation(registry, plugin, companyId);
+  }
+
+  async function assertCompanyPluginEnabled(
+    plugin: { id: string; pluginKey: string; manifestJson: PaperclipPluginManifestV1 },
+    companyId: string,
+  ) {
+    const activation = await resolveCompanyPluginActivation(plugin, companyId);
+    if (!activation.enabled) {
+      throw forbidden(`Plugin \"${plugin.pluginKey}\" is disabled for this Company.`);
+    }
+    return activation;
+  }
+
   /**
    * GET /api/plugins
    *
@@ -942,7 +964,7 @@ export function pluginRoutes(
       return;
     }
     const [providers, selection] = await Promise.all([
-      memoryDeps.runtime.listProviders(),
+      memoryDeps.runtime.listProvidersForCompany(companyId),
       memoryDeps.runtime.getSelection(companyId),
     ]);
     res.json({ providers, selection });
@@ -982,6 +1004,61 @@ export function pluginRoutes(
     const rawLimit = Number(req.query.limit ?? 50);
     const deliveries = await memoryDeps.runtime.listDeliveries(companyId, Number.isFinite(rawLimit) ? rawLimit : 50);
     res.json({ deliveries });
+  });
+
+  /**
+   * Lists installed plugin packages with the effective activation state for
+   * one Company. Package installation remains Host-wide; this is the Company
+   * boundary used by the Desktop settings UI and plugin-aware automation.
+   */
+  router.get("/plugins/companies/:companyId", async (req, res) => {
+    const { companyId } = req.params;
+    assertBoardOrgAccess(req);
+    assertCompanyAccess(req, companyId);
+    const plugins = await registry.listInstalled();
+    const rows = await Promise.all(plugins.map(async (plugin) => ({
+      id: plugin.id,
+      pluginKey: plugin.pluginKey,
+      displayName: plugin.manifestJson.displayName,
+      version: plugin.version,
+      status: plugin.status,
+      activation: await resolveCompanyPluginActivation(plugin, companyId),
+    })));
+    res.json({ companyId, plugins: rows });
+  });
+
+  /**
+   * Stores an explicit Company-level activation override. It never installs,
+   * upgrades, unloads, or restarts the Host-wide plugin package.
+   */
+  router.put("/plugins/:pluginId/companies/:companyId/activation", async (req, res) => {
+    const { pluginId, companyId } = req.params;
+    await assertPluginCompanyAdministrator(req, companyId);
+    const enabled = (req.body as { enabled?: unknown } | undefined)?.enabled;
+    if (typeof enabled !== "boolean") {
+      res.status(400).json({ error: '"enabled" must be a boolean.' });
+      return;
+    }
+    const plugin = await resolvePlugin(registry, pluginId);
+    if (!plugin) {
+      res.status(404).json({ error: "Plugin not found" });
+      return;
+    }
+    const activation = await setPluginCompanyActivation(registry, plugin, companyId, enabled);
+    const actor = getActorInfo(req);
+    await logActivity(db, {
+      companyId,
+      actorType: actor.actorType,
+      actorId: actor.actorId,
+      agentId: actor.agentId,
+      runId: actor.runId,
+      action: "plugin.company_activation.updated",
+      entityType: "plugin",
+      entityId: plugin.id,
+      details: { pluginId: plugin.id, pluginKey: plugin.pluginKey, enabled },
+    });
+    publishGlobalLiveEvent({ type: "plugin.ui.updated", payload: { pluginId: plugin.id, companyId, action: "company-activation-updated" } });
+    res.json({ activation });
   });
 
   router.get("/plugins/:pluginId/companies/:companyId/tool-grants", async (req, res) => {
@@ -1104,8 +1181,20 @@ export function pluginRoutes(
   router.get("/plugins/ui-contributions", async (req, res) => {
     assertBoardOrgAccess(req);
     const plugins = await registry.listByStatus("ready");
+    const rawCompanyId = req.query.companyId;
+    if (rawCompanyId !== undefined && (typeof rawCompanyId !== "string" || rawCompanyId.trim().length === 0)) {
+      res.status(400).json({ error: '"companyId" must be a non-empty string when provided.' });
+      return;
+    }
+    const companyId = typeof rawCompanyId === "string" ? rawCompanyId.trim() : null;
+    if (companyId) assertCompanyAccess(req, companyId);
+    const companyPlugins = companyId
+      ? (await Promise.all(plugins.map(async (plugin) => (
+        (await resolveCompanyPluginActivation(plugin, companyId)).enabled ? plugin : null
+      )))).filter((plugin): plugin is (typeof plugins)[number] => plugin !== null)
+      : plugins;
 
-    const contributions: PluginUiContribution[] = plugins
+    const contributions: PluginUiContribution[] = companyPlugins
       .map((plugin) => {
         // Safety check: manifestJson should always exist for ready plugins, but guard against null
         const manifest = plugin.manifestJson;
@@ -1178,6 +1267,7 @@ export function pluginRoutes(
         toolName: registeredTool.name,
       })) return false;
       const plugin = await registry.getById(registeredTool.pluginDbId);
+      if (plugin && !(await resolveCompanyPluginActivation(plugin, companyId)).enabled) return false;
       return !plugin || toolAccess.isAllowed({ companyId, plugin, agentId });
     }));
     res.json(tools.filter((_tool, index) => authorized[index]));
@@ -1252,6 +1342,20 @@ export function pluginRoutes(
       return;
     }
     const toolPlugin = await registry.getById(registeredTool.pluginDbId);
+    if (toolPlugin && !(await resolveCompanyPluginActivation(toolPlugin, runContext.companyId)).enabled) {
+      await toolAccess.record({
+        companyId: runContext.companyId,
+        pluginId: registeredTool.pluginDbId,
+        agentId: runContext.agentId,
+        runId: runContext.runId,
+        projectId: runContext.projectId,
+        toolName: registeredTool.namespacedName,
+        status: "denied",
+        errorCode: "PLUGIN_DISABLED_FOR_COMPANY",
+      });
+      res.status(403).json({ error: "This plugin is disabled for the current Company." });
+      return;
+    }
     if (memoryDeps && !await memoryDeps.runtime.isSelectedProviderTool({
       companyId: runContext.companyId,
       pluginDbId: registeredTool.pluginDbId,
@@ -1750,6 +1854,7 @@ export function pluginRoutes(
     }
 
     const companyId = assertPluginBridgeScope(req, body.companyId);
+    if (companyId) await assertCompanyPluginEnabled(plugin, companyId);
 
     try {
       const result = await bridgeDeps.workerManager.call(
@@ -1842,6 +1947,7 @@ export function pluginRoutes(
       return;
     }
     const companyId = assertPluginBridgeScope(req, body.companyId);
+    if (companyId) await assertCompanyPluginEnabled(plugin, companyId);
     const requestedPermissions = requestedPluginActionPermissions(body.params);
 
     try {
@@ -1937,6 +2043,7 @@ export function pluginRoutes(
     } | undefined;
 
     const companyId = assertPluginBridgeScope(req, body?.companyId);
+    if (companyId) await assertCompanyPluginEnabled(plugin, companyId);
 
     try {
       const result = await bridgeDeps.workerManager.call(
@@ -2027,6 +2134,7 @@ export function pluginRoutes(
     } | undefined;
 
     const companyId = assertPluginBridgeScope(req, body?.companyId);
+    if (companyId) await assertCompanyPluginEnabled(plugin, companyId);
     const requestedPermissions = requestedPluginActionPermissions(body?.params);
 
     try {
@@ -2103,6 +2211,7 @@ export function pluginRoutes(
     }
 
     assertCompanyAccess(req, companyId);
+    await assertCompanyPluginEnabled(plugin, companyId);
 
     // Set SSE headers
     res.writeHead(200, {
@@ -2192,6 +2301,7 @@ export function pluginRoutes(
         return;
       }
       assertCompanyAccess(req, companyId);
+      await assertCompanyPluginEnabled(plugin, companyId);
       await enforceScopedApiCheckout(req, match.route, match.params, companyId);
       if (req.method !== "GET" && req.headers["content-type"] && !req.is("application/json")) {
         res.status(415).json({ error: "Plugin API routes accept JSON requests only" });

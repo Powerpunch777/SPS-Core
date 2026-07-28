@@ -324,7 +324,9 @@ export const queryKeys = {
     examples: ["plugins", "examples"] as const,
     detail: (pluginId: string) => ["plugins", pluginId] as const,
     health: (pluginId: string) => ["plugins", pluginId, "health"] as const,
-    uiContributions: ["plugins", "ui-contributions"] as const,
+    uiContributions: (companyId?: string | null) =>
+      ["plugins", "ui-contributions", companyId ?? "global"] as const,
+    uiContributionsPrefix: ["plugins", "ui-contributions"] as const,
     config: (pluginId: string) => ["plugins", pluginId, "config"] as const,
     localFolders: (pluginId: string, companyId: string) =>
       ["plugins", pluginId, "companies", companyId, "local-folders"] as const,

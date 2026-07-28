@@ -4350,7 +4350,31 @@ registry.registerPath({
   path: "/api/plugins/ui-contributions",
   tags: ["plugins"],
   summary: "List plugin UI contributions",
+  request: {
+    query: z.object({ companyId: z.string().optional() }).passthrough(),
+  },
   responses: { 200: r.ok(), 401: r.unauthorized },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/api/plugins/companies/{companyId}",
+  tags: ["plugins"],
+  summary: "List installed plugins with Company activation state",
+  request: { params: z.object({ companyId: z.string() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
+});
+
+registry.registerPath({
+  method: "put",
+  path: "/api/plugins/{pluginId}/companies/{companyId}/activation",
+  tags: ["plugins"],
+  summary: "Set a Company plugin activation override",
+  request: {
+    params: z.object({ pluginId: z.string(), companyId: z.string() }),
+    body: jsonBody(z.object({ enabled: z.boolean() })),
+  },
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
 });
 
 registry.registerPath({

@@ -212,11 +212,30 @@ Plugins that need local tooling (file browsing, git, terminals, process tracking
 
 ## 8. Installation Model
 
-Plugin installation is global and operator-driven.
+Plugin package installation is Host-global and operator-driven. The Host installs
+one package version and prepares one worker runtime for that package.
 
-There is no per-company install table and no per-company enable/disable switch.
+Company activation is separate from installation. A manifest may declare:
 
-If a plugin needs business-object-specific mappings, those are stored as plugin configuration or plugin state.
+```ts
+companyActivation?: {
+  /** Defaults to true when omitted for legacy compatibility. */
+  defaultEnabled?: boolean;
+};
+```
+
+Each Company can store an explicit enabled/disabled override. An enabled
+override does not reinstall, upgrade, restart, or duplicate the Host worker;
+it only controls whether that Company can use the plugin's Company-scoped UI,
+tools, bridge/API calls, and provider surfaces. A disabled plugin can still
+retain its Company settings so it can be configured before it is re-enabled.
+
+The Core treats omitted `companyActivation` as `defaultEnabled: true` so older
+plugins keep their existing behavior. New optional SPS workplanes and providers
+should declare `defaultEnabled: false` explicitly.
+
+If a plugin needs business-object-specific mappings, those are stored as
+Company settings or plugin state.
 
 Examples:
 
@@ -224,6 +243,11 @@ Examples:
 - mappings from company A to Linear team X and company B to Linear team Y
 - one global git plugin install
 - per-project workspace state stored under `project_workspace`
+
+Host-global scheduled jobs remain Host-global in this contract. They must not
+assume they run once for every activated Company. A future Company-targeted job
+contract will add an explicit Company target instead of inferring one from
+activation state.
 
 ## 8.1 On-Disk Layout
 
@@ -328,6 +352,10 @@ export interface PaperclipPluginManifestV1 {
   entrypoints: {
     worker: string;
     ui?: string;
+  };
+  companyActivation?: {
+    /** Omitted means true for legacy compatibility. */
+    defaultEnabled?: boolean;
   };
   instanceConfigSchema?: JsonSchema;
   jobs?: PluginJobDeclaration[];
@@ -1024,6 +1052,10 @@ Job rules:
 4. Every job run is recorded in Postgres.
 5. Failed jobs are retryable.
 6. For recurring business workflows that should create visible Paperclip work, prefer managed routines and managed resources over jobs. Jobs remain useful for private plugin-runtime maintenance tasks.
+7. Declared schedules are Host-global. A job must not infer a Company target
+   from Company activation; Company-specific work must receive an explicit
+   Company context through a user action, event, or a future targeted-job
+   contract.
 
 ## 18. Webhooks
 

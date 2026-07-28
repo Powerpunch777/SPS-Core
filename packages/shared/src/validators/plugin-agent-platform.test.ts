@@ -31,4 +31,11 @@ describe("plugin agent platform declaration", () => {
       agentPlatform: { contractVersion: "2.0", kind: "workplane" },
     }).success).toBe(false);
   });
+
+  it("accepts an explicit Company activation default", () => {
+    expect(pluginManifestV1Schema.safeParse({
+      ...baseManifest,
+      companyActivation: { defaultEnabled: false },
+    }).success).toBe(true);
+  });
 });

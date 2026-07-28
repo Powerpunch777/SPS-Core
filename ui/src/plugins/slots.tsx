@@ -674,8 +674,8 @@ function usePluginModuleLoader(contributions: PluginUiContribution[] | undefined
 export function usePluginSlots(filters: SlotFilters): UsePluginSlotsResult {
   const queryEnabled = filters.enabled ?? true;
   const { data, isLoading: isQueryLoading, error } = useQuery({
-    queryKey: queryKeys.plugins.uiContributions,
-    queryFn: () => pluginsApi.listUiContributions(),
+    queryKey: queryKeys.plugins.uiContributions(filters.companyId),
+    queryFn: () => pluginsApi.listUiContributions(filters.companyId),
     enabled: queryEnabled,
   });
 

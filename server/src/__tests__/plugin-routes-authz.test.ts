@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mockRegistry = vi.hoisted(() => ({
   getById: vi.fn(),
   getByKey: vi.fn(),
+  listInstalled: vi.fn(),
   upsertConfig: vi.fn(),
   getCompanySettings: vi.fn(),
   upsertCompanySettings: vi.fn(),
@@ -153,6 +154,7 @@ function readyPlugin() {
     pluginKey: "paperclip.example",
     version: "1.0.0",
     status: "ready",
+    manifestJson: {},
   });
 }
 
@@ -529,6 +531,14 @@ describe.sequential("plugin local folder routes", () => {
 describe.sequential("plugin tool and bridge authz", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockRegistry.getById.mockReset();
+    mockRegistry.getByKey.mockReset();
+    mockRegistry.getCompanySettings.mockReset();
+    mockRegistry.upsertCompanySettings.mockReset();
+    mockAccess.canUser.mockReset();
+    mockAccess.hasPermission.mockReset();
+    mockAccess.canUser.mockResolvedValue(false);
+    mockAccess.hasPermission.mockResolvedValue(false);
   });
 
   it("rejects tool execution when the board user cannot access runContext.companyId", async () => {
@@ -1054,6 +1064,36 @@ describe.sequential("plugin tool and bridge authz", () => {
     expect(res.body).toEqual([]);
   });
 
+  it("hides a Company-disabled plugin from an Agent tool list", async () => {
+    mockRegistry.getById.mockResolvedValueOnce({
+      id: pluginId,
+      pluginKey: "paperclip.example",
+      manifestJson: { companyActivation: { defaultEnabled: false } },
+    });
+    mockRegistry.getCompanySettings.mockResolvedValueOnce(null);
+    const listToolsForAgent = vi.fn(() => [{
+      name: "paperclip.example:search",
+      displayName: "Search",
+      description: "Searches.",
+      parametersSchema: {},
+      pluginId: "paperclip.example",
+    }]);
+    const { app } = await createApp(agentActor(), {}, {
+      toolDeps: {
+        toolDispatcher: {
+          listToolsForAgent,
+          getTool: vi.fn(),
+          executeTool: vi.fn(),
+        },
+      },
+    });
+
+    const res = await request(app).get("/api/plugins/tools");
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual([]);
+  });
+
   it("allows agent JWT to execute a tool within its company scope", async () => {
     const executeTool = vi.fn().mockResolvedValue({ content: "ok" });
     const { app } = await createApp(
@@ -1089,6 +1129,51 @@ describe.sequential("plugin tool and bridge authz", () => {
       { q: "test" },
       { agentId: agentA, runId: runA, companyId: companyA, projectId: projectA },
     );
+  });
+
+  it("rejects Company-disabled plugin bridge calls before they reach the worker", async () => {
+    mockRegistry.getById.mockResolvedValueOnce({
+      id: pluginId,
+      pluginKey: "paperclip.example",
+      status: "ready",
+      manifestJson: { companyActivation: { defaultEnabled: false } },
+    });
+    mockRegistry.getCompanySettings.mockResolvedValueOnce(null);
+    const call = vi.fn();
+    const { app } = await createApp(boardActor(), {}, {
+      bridgeDeps: { workerManager: { call } },
+    });
+
+    const res = await request(app)
+      .post(`/api/plugins/${pluginId}/data/health`)
+      .send({ companyId: companyA });
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toContain("disabled");
+    expect(call).not.toHaveBeenCalled();
+  });
+
+  it("stores an explicit Company activation override without changing the Host package", async () => {
+    mockRegistry.getById.mockResolvedValueOnce({
+      id: pluginId,
+      pluginKey: "paperclip.example",
+      manifestJson: {},
+    });
+    mockRegistry.getCompanySettings.mockResolvedValueOnce(null);
+    mockRegistry.upsertCompanySettings.mockResolvedValueOnce({});
+    const { app } = await createApp(boardActor({ isInstanceAdmin: true }));
+
+    const res = await request(app)
+      .put(`/api/plugins/${pluginId}/companies/${companyA}/activation`)
+      .send({ enabled: false });
+
+    expect(res.status).toBe(200);
+    expect(res.body.activation).toMatchObject({ enabled: false, source: "explicit" });
+    expect(mockRegistry.upsertCompanySettings).toHaveBeenCalledWith(pluginId, companyA, {
+      enabled: false,
+      settingsJson: {},
+      lastError: null,
+    });
   });
 
   it("rejects agent JWT when runContext.companyId is outside the agent's company scope", async () => {

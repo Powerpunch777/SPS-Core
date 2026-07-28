@@ -31,6 +31,7 @@ export interface PluginToolAuditSummary {
 
 export type PluginToolAuditErrorCode =
   | "MEMORY_PROVIDER_NOT_SELECTED"
+  | "PLUGIN_DISABLED_FOR_COMPANY"
   | "EXPLICIT_GRANT_REQUIRED"
   | "PLUGIN_TOOL_EXECUTION_FAILED";
 
