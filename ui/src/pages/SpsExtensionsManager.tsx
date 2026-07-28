@@ -1,8 +1,8 @@
 import { useEffect, useMemo } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { PluginRecord } from "@paperclipai/shared";
-import { CheckCircle2, Puzzle, Settings, ShieldCheck, Store } from "lucide-react";
-import { pluginsApi } from "@/api/plugins";
+import { CheckCircle2, Power, Puzzle, Settings, ShieldCheck, Store } from "lucide-react";
+import { pluginsApi, type CompanyPluginActivation } from "@/api/plugins";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -10,8 +10,13 @@ import { useBreadcrumbs } from "@/context/BreadcrumbContext";
 import { useCompany } from "@/context/CompanyContext";
 import { queryKeys } from "@/lib/queryKeys";
 import { Link } from "@/lib/router";
+import { useToastActions } from "@/context/ToastContext";
 
-const SPS_BUNDLED_EXTENSION_IDS = new Set(["sps.default-memory", "local.room-chat"]);
+const SPS_BUNDLED_EXTENSION_IDS = new Set([
+  "sps.default-memory",
+  "sps.plugin-discovery",
+  "local.room-chat",
+]);
 
 function extensionId(plugin: PluginRecord): string {
   return plugin.manifestJson.id ?? plugin.packageName;
@@ -29,8 +34,21 @@ function isLegacyPaperclipExtension(plugin: PluginRecord): boolean {
   return plugin.packageName.startsWith("@paperclipai/");
 }
 
-function ExtensionRow({ plugin, builtIn = false }: { plugin: PluginRecord; builtIn?: boolean }) {
+function ExtensionRow({
+  plugin,
+  activation,
+  builtIn = false,
+  changing = false,
+  onToggle,
+}: {
+  plugin: PluginRecord;
+  activation: CompanyPluginActivation | null;
+  builtIn?: boolean;
+  changing?: boolean;
+  onToggle: () => void;
+}) {
   const state = plugin.status === "ready" ? "Ready" : plugin.status;
+  const companyEnabled = activation?.enabled ?? false;
   return (
     <div className="flex items-start justify-between gap-4 px-4 py-4">
       <div className="min-w-0">
@@ -40,18 +58,32 @@ function ExtensionRow({ plugin, builtIn = false }: { plugin: PluginRecord; built
           <Badge className={plugin.status === "ready" ? "bg-emerald-600 hover:bg-emerald-700" : undefined} variant={plugin.status === "ready" ? "default" : "secondary"}>
             {state}
           </Badge>
+          <Badge variant={companyEnabled ? "default" : "secondary"} className={companyEnabled ? "bg-blue-600 hover:bg-blue-700" : undefined}>
+            {companyEnabled ? "Enabled in this Company" : "Disabled in this Company"}
+          </Badge>
         </div>
         <p className="mt-1 text-sm text-muted-foreground">
           {plugin.manifestJson.description || "No description provided."}
         </p>
         <p className="mt-1 text-xs text-muted-foreground">v{plugin.manifestJson.version ?? plugin.version}</p>
       </div>
-      <Button variant="outline" size="sm" asChild>
-        <Link to={`/company/settings/instance/plugins/${plugin.id}`}>
-          <Settings className="h-4 w-4" />
-          Settings
-        </Link>
-      </Button>
+      <div className="flex shrink-0 items-center gap-2">
+        <Button
+          variant={companyEnabled ? "outline" : "default"}
+          size="sm"
+          disabled={plugin.status !== "ready" || changing}
+          onClick={onToggle}
+        >
+          <Power className="h-4 w-4" />
+          {companyEnabled ? "Disable" : "Enable"}
+        </Button>
+        <Button variant="outline" size="sm" asChild>
+          <Link to={`/company/settings/instance/plugins/${plugin.id}`}>
+            <Settings className="h-4 w-4" />
+            Settings
+          </Link>
+        </Button>
+      </div>
     </div>
   );
 }
@@ -59,9 +91,31 @@ function ExtensionRow({ plugin, builtIn = false }: { plugin: PluginRecord; built
 export function SpsExtensionsManager() {
   const { selectedCompany } = useCompany();
   const { setBreadcrumbs } = useBreadcrumbs();
+  const queryClient = useQueryClient();
+  const { pushToast } = useToastActions();
   const { data: plugins, isLoading, error } = useQuery({
     queryKey: queryKeys.plugins.all,
     queryFn: () => pluginsApi.list(),
+  });
+  const companyPluginsQuery = useQuery({
+    queryKey: queryKeys.plugins.companyActivation(selectedCompany?.id ?? "none"),
+    queryFn: () => pluginsApi.listForCompany(selectedCompany!.id),
+    enabled: Boolean(selectedCompany?.id),
+  });
+  const activationMutation = useMutation({
+    mutationFn: ({ pluginId, enabled }: { pluginId: string; enabled: boolean }) =>
+      pluginsApi.setCompanyActivation(pluginId, selectedCompany!.id, enabled),
+    onSuccess: (_result, variables) => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.plugins.companyActivation(selectedCompany!.id) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.plugins.uiContributionsPrefix });
+      pushToast({
+        title: variables.enabled ? "Extension enabled for this Company" : "Extension disabled for this Company",
+        tone: variables.enabled ? "success" : "info",
+      });
+    },
+    onError: (error: Error) => {
+      pushToast({ title: "Could not change Company extension", body: error.message, tone: "error" });
+    },
   });
 
   useEffect(() => {
@@ -78,9 +132,30 @@ export function SpsExtensionsManager() {
     () => installed.filter((plugin) => !isSpsBundledExtension(plugin) && !isLegacyPaperclipExtension(plugin)),
     [installed],
   );
+  const activationByPluginId = useMemo(
+    () => new Map(companyPluginsQuery.data?.plugins.map((plugin) => [plugin.id, plugin.activation]) ?? []),
+    [companyPluginsQuery.data],
+  );
 
   if (isLoading) return <div className="p-4 text-sm text-muted-foreground">Loading SPS extensions...</div>;
   if (error) return <div className="p-4 text-sm text-destructive">Failed to load SPS extensions.</div>;
+  if (!selectedCompany) return <div className="p-4 text-sm text-muted-foreground">Select a Company to manage its extensions.</div>;
+  if (companyPluginsQuery.isLoading) return <div className="p-4 text-sm text-muted-foreground">Loading Company extensions...</div>;
+  if (companyPluginsQuery.error) return <div className="p-4 text-sm text-destructive">Failed to load Company extension settings.</div>;
+
+  const renderExtension = (plugin: PluginRecord, builtIn: boolean) => {
+    const activation = activationByPluginId.get(plugin.id) ?? null;
+    return (
+      <ExtensionRow
+        key={plugin.id}
+        plugin={plugin}
+        activation={activation}
+        builtIn={builtIn}
+        changing={activationMutation.isPending && activationMutation.variables?.pluginId === plugin.id}
+        onToggle={() => activationMutation.mutate({ pluginId: plugin.id, enabled: !activation?.enabled })}
+      />
+    );
+  };
 
   return (
     <div className="max-w-4xl space-y-6">
@@ -91,7 +166,7 @@ export function SpsExtensionsManager() {
         <div>
           <h1 className="text-xl font-semibold">SPS Extensions</h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            SPS keeps its essential collaboration features built in. Extra capabilities are added only through reviewed Registry packages.
+            Packages are installed once on this Host. Enable only the extensions this Company should use.
           </p>
         </div>
       </header>
@@ -114,7 +189,7 @@ export function SpsExtensionsManager() {
           <h2 className="text-base font-semibold">Built-in SPS components</h2>
         </div>
         {bundled.length ? (
-          <Card className="py-0"><div className="divide-y">{bundled.map((plugin) => <ExtensionRow key={plugin.id} plugin={plugin} builtIn />)}</div></Card>
+          <Card className="py-0"><div className="divide-y">{bundled.map((plugin) => renderExtension(plugin, true))}</div></Card>
         ) : (
           <Card className="bg-muted/30"><CardContent className="py-5 text-sm text-muted-foreground">SPS is starting its built-in components. Refresh this page in a moment.</CardContent></Card>
         )}
@@ -126,7 +201,7 @@ export function SpsExtensionsManager() {
           <h2 className="text-base font-semibold">Registry extensions</h2>
         </div>
         <Card className="py-0">
-          {custom.length ? <div className="divide-y">{custom.map((plugin) => <ExtensionRow key={plugin.id} plugin={plugin} />)}</div> : (
+          {custom.length ? <div className="divide-y">{custom.map((plugin) => renderExtension(plugin, false))}</div> : (
             <CardContent className="py-5 text-sm text-muted-foreground">
               No Registry extensions are installed. Open the SPS Desktop menu and choose <strong>Manage Plugin Registries...</strong> to review a trusted source.
             </CardContent>

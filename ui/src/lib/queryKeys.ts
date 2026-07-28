@@ -327,6 +327,8 @@ export const queryKeys = {
     uiContributions: (companyId?: string | null) =>
       ["plugins", "ui-contributions", companyId ?? "global"] as const,
     uiContributionsPrefix: ["plugins", "ui-contributions"] as const,
+    companyActivation: (companyId: string) =>
+      ["plugins", "companies", companyId, "activation"] as const,
     config: (pluginId: string) => ["plugins", pluginId, "config"] as const,
     localFolders: (pluginId: string, companyId: string) =>
       ["plugins", pluginId, "companies", companyId, "local-folders"] as const,

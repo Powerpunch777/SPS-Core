@@ -45,6 +45,24 @@ export type PluginUiContribution = {
   launchers: PluginLauncherDeclaration[];
 };
 
+export interface CompanyPluginActivation {
+  pluginId: string;
+  pluginKey: string;
+  companyId: string;
+  enabled: boolean;
+  source: "default" | "explicit";
+  defaultEnabled: boolean;
+}
+
+export interface CompanyPluginRecord {
+  id: string;
+  pluginKey: string;
+  displayName: string;
+  version: string;
+  status: PluginStatus;
+  activation: CompanyPluginActivation;
+}
+
 /**
  * Health check result returned by `GET /api/plugins/:pluginId/health`.
  *
@@ -401,6 +419,15 @@ export const pluginsApi = {
   listUiContributions: (companyId?: string | null) =>
     api.get<PluginUiContribution[]>(
       `/plugins/ui-contributions${companyId ? `?companyId=${encodeURIComponent(companyId)}` : ""}`,
+    ),
+
+  listForCompany: (companyId: string) =>
+    api.get<{ companyId: string; plugins: CompanyPluginRecord[] }>(`/plugins/companies/${companyId}`),
+
+  setCompanyActivation: (pluginId: string, companyId: string, enabled: boolean) =>
+    api.put<{ activation: CompanyPluginActivation }>(
+      `/plugins/${pluginId}/companies/${companyId}/activation`,
+      { enabled },
     ),
 
   // ===========================================================================
