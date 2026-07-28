@@ -109,6 +109,14 @@ export async function startServer(): Promise<StartedServer> {
   // connection or the HTTP server exists — see instrumentation.ts.
   await instrumentationReady;
   let config = loadConfig();
+  const configuredHostVersion = process.env.PAPERCLIP_HOST_VERSION?.trim();
+  if (configuredHostVersion && !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(configuredHostVersion)) {
+    throw new Error("PAPERCLIP_HOST_VERSION must be a SemVer version when configured.");
+  }
+  // A product host can supply its release version without coupling the Core to
+  // a specific product name. Plugin minimumHostVersion checks must never run
+  // against an implicit or stale desktop version.
+  const hostVersion = configuredHostVersion || "0.0.0";
   initTelemetry({ enabled: config.telemetryEnabled });
   if (process.env.PAPERCLIP_SECRETS_PROVIDER === undefined) {
     process.env.PAPERCLIP_SECRETS_PROVIDER = config.secretsProvider;
@@ -706,6 +714,7 @@ export async function startServer(): Promise<StartedServer> {
     companyDeletionEnabled: config.companyDeletionEnabled,
     pluginMigrationDb: pluginMigrationDb as any,
     betterAuthHandler,
+    hostVersion,
     spsIdentityHandler,
     resolveSession,
     pluginWorkerManager,
