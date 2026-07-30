@@ -160,6 +160,7 @@ describe("Sidebar", () => {
       user: null,
       userId: "host-1",
       isInstanceAdmin: true,
+      isCoreHost: true,
       companyIds: ["company-1"],
       source: "local_implicit",
       keyId: null,
@@ -677,7 +678,39 @@ describe("Sidebar", () => {
     });
   });
 
-  it("hides Host-only navigation from a technical Member in Core baseline mode", async () => {
+  it("keeps Host settings visible for a signed-in Desktop Host in Core baseline mode", async () => {
+    const basicMode = document.createElement("meta");
+    basicMode.name = "sps-basic-mode";
+    basicMode.content = "true";
+    document.head.appendChild(basicMode);
+    const coreBaselineMode = document.createElement("meta");
+    coreBaselineMode.name = "sps-core-baseline-mode";
+    coreBaselineMode.content = "true";
+    document.head.appendChild(coreBaselineMode);
+    mockAccessApi.getCurrentBoardAccess.mockResolvedValue({
+      user: null,
+      userId: "host-1",
+      isInstanceAdmin: true,
+      isCoreHost: true,
+      companyIds: ["company-1"],
+      source: "session",
+      keyId: null,
+    });
+    mockInstanceSettingsApi.getExperimental.mockResolvedValue({ enableIsolatedWorkspaces: false });
+    const root = await renderSidebar();
+
+    const labels = [...container.querySelectorAll("nav a")].map((anchor) => anchor.textContent?.trim());
+    expect(labels).toContain("Workspace");
+    expect(labels).toContain("Host settings");
+    expect(labels).toContain("Plugins");
+    expect(container.textContent).toContain("Plugin slot outlet");
+
+    flushSync(() => {
+      root.unmount();
+    });
+  });
+
+  it("hides Host-only navigation from a Member in Core baseline mode", async () => {
     const basicMode = document.createElement("meta");
     basicMode.name = "sps-basic-mode";
     basicMode.content = "true";
@@ -689,7 +722,8 @@ describe("Sidebar", () => {
     mockAccessApi.getCurrentBoardAccess.mockResolvedValue({
       user: null,
       userId: "member-1",
-      isInstanceAdmin: true,
+      isInstanceAdmin: false,
+      isCoreHost: false,
       companyIds: ["company-1"],
       source: "session",
       keyId: null,

@@ -5,8 +5,33 @@ import {
   SPS_DESKTOP_ACCESS_HEADER,
   SPS_DESKTOP_OWNER_BOOTSTRAP_HEADER,
 } from "./desktop-local-access.js";
+import { hasSpsCoreHostAuthority } from "../routes/authz.js";
 
 describe("actorMiddleware Desktop Owner bootstrap", () => {
+  it("recognizes the physical Desktop Host independently of legacy instance-admin rows", () => {
+    const previousBaseline = process.env.SPS_CORE_BASELINE_MODE;
+    const previousToken = process.env.SPS_DESKTOP_ACCESS_TOKEN;
+    process.env.SPS_CORE_BASELINE_MODE = "true";
+    process.env.SPS_DESKTOP_ACCESS_TOKEN = "desktop-launch-token";
+    const request = {
+      actor: { type: "board", source: "session", isInstanceAdmin: false },
+      header: (name: string) => ({
+        host: "127.0.0.1:31310",
+        [SPS_DESKTOP_ACCESS_HEADER]: "desktop-launch-token",
+        [SPS_DESKTOP_OWNER_BOOTSTRAP_HEADER]: "desktop-launch-token",
+      })[name.toLowerCase()],
+    } as unknown as Request;
+
+    try {
+      expect(hasSpsCoreHostAuthority(request)).toBe(true);
+    } finally {
+      if (previousBaseline === undefined) delete process.env.SPS_CORE_BASELINE_MODE;
+      else process.env.SPS_CORE_BASELINE_MODE = previousBaseline;
+      if (previousToken === undefined) delete process.env.SPS_DESKTOP_ACCESS_TOKEN;
+      else process.env.SPS_DESKTOP_ACCESS_TOKEN = previousToken;
+    }
+  });
+
   it("uses the signed-in Owner identity with the two loopback launch proofs", async () => {
     const resolveSession = vi.fn(async () => ({
       session: { id: "session-owner", userId: "sps-owner" },

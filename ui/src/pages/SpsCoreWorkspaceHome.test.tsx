@@ -4,6 +4,7 @@ import { createRoot } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SpsCoreWorkspaceHome } from "./SpsCoreWorkspaceHome";
+import { queryKeys } from "@/lib/queryKeys";
 
 const mockPluginsApi = vi.hoisted(() => ({
   listForCompany: vi.fn(),
@@ -132,6 +133,38 @@ describe("SpsCoreWorkspaceHome", () => {
 
     expect(mockNavigate).toHaveBeenCalledWith({ to: "/assistants/new", replace: true });
     expect(container.innerHTML).toContain('data-redirect="/assistants/new"');
+
+    root.unmount();
+  });
+
+  it("does not redirect while a newly created Assistant replaces cached empty data", async () => {
+    let resolveAgents: ((agents: Array<{ id: string; name: string; title: string; status: string; adapterType: string }>) => void) | null = null;
+    mockAgentsApi.list.mockReturnValue(new Promise((resolve) => {
+      resolveAgents = resolve;
+    }));
+    mockPluginsApi.listForCompany.mockResolvedValue({ companyId: "workspace-1", plugins: [] });
+    const root = createRoot(container);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    queryClient.setQueryData(queryKeys.agents.list("workspace-1"), []);
+
+    root.render(
+      <QueryClientProvider client={queryClient}>
+        <SpsCoreWorkspaceHome />
+      </QueryClientProvider>,
+    );
+    await flushReact();
+    await flushReact();
+
+    expect(mockNavigate).not.toHaveBeenCalled();
+
+    resolveAgents?.([
+      { id: "assistant-1", name: "Workspace Assistant", title: "Initial Assistant", status: "idle", adapterType: "codex_local" },
+    ]);
+    await flushReact();
+    await flushReact();
+
+    expect(mockNavigate).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("Workspace Assistant");
 
     root.unmount();
   });

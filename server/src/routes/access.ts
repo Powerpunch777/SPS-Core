@@ -76,7 +76,12 @@ import {
   collapseDuplicatePendingHumanJoinRequests,
   findReusableHumanJoinRequest,
 } from "../lib/join-request-dedupe.js";
-import { assertAuthenticated, assertCompanyAccess, assertSpsCoreHostAuthority } from "./authz.js";
+import {
+  assertAuthenticated,
+  assertCompanyAccess,
+  assertSpsCoreHostAuthority,
+  hasSpsCoreHostAuthority,
+} from "./authz.js";
 import {
   claimBoardOwnership,
   inspectBoardClaimChallenge
@@ -2887,6 +2892,11 @@ export function accessRoutes(
       user: accessSnapshot.user,
       userId: req.actor.userId,
       isInstanceAdmin: accessSnapshot.isInstanceAdmin,
+      // Core Host authority is a live Desktop capability, not an inherited
+      // database role. The sidebar needs this explicit signal so a signed-in
+      // Host and a remote Member cannot be confused after an account session
+      // is established.
+      isCoreHost: hasSpsCoreHostAuthority(req),
       companyIds: accessSnapshot.companyIds,
       memberships: accessSnapshot.memberships,
       source: req.actor.source ?? "none",

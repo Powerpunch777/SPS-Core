@@ -237,6 +237,7 @@ export type CurrentBoardAccess = {
   user: { id: string; email: string | null; name: string | null; image: string | null } | null;
   userId: string;
   isInstanceAdmin: boolean;
+  isCoreHost: boolean;
   companyIds: string[];
   memberships?: Array<{
     companyId: string;
