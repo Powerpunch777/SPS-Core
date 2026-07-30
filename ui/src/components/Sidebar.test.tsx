@@ -670,8 +670,8 @@ describe("Sidebar", () => {
     expect(labels).not.toContain("Projects");
     expect(labels).not.toContain("Inbox");
     expect(container.querySelector('[data-testid="sidebar-agents"]')).toBeNull();
-    expect(container.textContent).toContain("Plugin slot outlet");
-    expect(container.textContent).toContain("Plugin launcher outlet");
+    expect(container.textContent).not.toContain("Plugin slot outlet");
+    expect(container.textContent).not.toContain("Plugin launcher outlet");
 
     flushSync(() => {
       root.unmount();
@@ -703,7 +703,7 @@ describe("Sidebar", () => {
     expect(labels).toContain("Workspace");
     expect(labels).toContain("Host settings");
     expect(labels).toContain("Plugins");
-    expect(container.textContent).toContain("Plugin slot outlet");
+    expect(container.textContent).not.toContain("Plugin slot outlet");
 
     flushSync(() => {
       root.unmount();
@@ -735,7 +735,7 @@ describe("Sidebar", () => {
     expect(labels).toContain("Workspace");
     expect(labels).not.toContain("Host settings");
     expect(labels).not.toContain("Plugins");
-    expect(container.textContent).toContain("Plugin slot outlet");
+    expect(container.textContent).not.toContain("Plugin slot outlet");
 
     flushSync(() => {
       root.unmount();
