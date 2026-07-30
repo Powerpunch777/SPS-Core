@@ -64,7 +64,7 @@ describe("create-paperclip-plugin entrypoints", () => {
     expect(stdout).toEqual([`Created plugin scaffold at ${outputDir}`]);
     expect(JSON.parse(fs.readFileSync(path.join(outputDir, "package.json"), "utf8"))).toMatchObject({
       name: "demo-plugin",
-      paperclipPlugin: {
+      spsPlugin: {
         manifest: "./dist/manifest.js",
         worker: "./dist/worker.js",
         ui: "./dist/ui/",

@@ -18,6 +18,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import path from "node:path";
 import { logger } from "../middleware/logger.js";
 import type { PluginLifecycleManager } from "./plugin-lifecycle.js";
+import { resolveSpsPluginPackageMetadata } from "./plugin-package-metadata.js";
 
 const log = logger.child({ service: "plugin-dev-watcher" });
 
@@ -48,14 +49,6 @@ type PluginWatchTarget = {
   path: string;
   recursive: boolean;
   kind: "file" | "dir";
-};
-
-type PluginPackageJson = {
-  paperclipPlugin?: {
-    manifest?: string;
-    worker?: string;
-    ui?: string;
-  };
 };
 
 function shouldIgnorePath(filename: string | null | undefined): boolean {
@@ -119,18 +112,17 @@ export function resolvePluginWatchTargets(
     return [...targets.values()];
   }
 
-  let packageJson: PluginPackageJson | null = null;
+  let packageJson: Record<string, unknown> | null = null;
   try {
-    packageJson = JSON.parse(readFile(packageJsonPath, "utf8")) as PluginPackageJson;
+    packageJson = JSON.parse(readFile(packageJsonPath, "utf8")) as Record<string, unknown>;
   } catch {
     packageJson = null;
   }
 
-  const entrypointPaths = [
-    packageJson?.paperclipPlugin?.manifest,
-    packageJson?.paperclipPlugin?.worker,
-    packageJson?.paperclipPlugin?.ui,
-  ].filter((value): value is string => typeof value === "string" && value.length > 0);
+  const metadata = packageJson ? resolveSpsPluginPackageMetadata(packageJson) : null;
+  const entrypointPaths = ["manifest", "worker", "ui"]
+    .map((key) => metadata?.entrypoints[key])
+    .filter((value): value is string => typeof value === "string" && value.length > 0);
 
   if (entrypointPaths.length === 0) {
     addRuntimeFilesFromDir(path.join(absPath, "dist"));

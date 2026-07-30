@@ -265,6 +265,8 @@ export type {
   PluginSpsRun,
   PluginSpsRunEvent,
   PluginSpsClient,
+  PluginSpsRuntimeOperation,
+  PluginSpsRuntimeTransport,
   PluginEventsClient,
   PluginJobsClient,
   PluginLaunchersClient,

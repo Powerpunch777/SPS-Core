@@ -837,6 +837,11 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
         return status;
       },
     },
+    spsTransport: {
+      async request() {
+        throw new Error("The in-memory plugin test harness does not provide SPS Node infrastructure");
+      },
+    },
     sps: {
       workspaceSources: {
         async list() {

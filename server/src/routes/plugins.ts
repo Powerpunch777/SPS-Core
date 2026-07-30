@@ -64,6 +64,10 @@ import {
   pluginLoader,
   REPO_ROOT,
 } from "../services/plugin-loader.js";
+import {
+  declaredSpsPluginEntrypoint,
+  resolveSpsPluginPackageMetadata,
+} from "../services/plugin-package-metadata.js";
 import { logActivity } from "../services/activity-log.js";
 import { publishGlobalLiveEvent } from "../services/live-events.js";
 import { issueService } from "../services/issues.js";
@@ -251,17 +255,8 @@ async function findPackageJsonFiles(root: string, maxDepth = 4): Promise<string[
 }
 
 function manifestSourcePath(packageRoot: string, pkgJson: Record<string, unknown>): string | null {
-  const paperclipPlugin = pkgJson.paperclipPlugin;
-  if (
-    !paperclipPlugin
-    || typeof paperclipPlugin !== "object"
-    || Array.isArray(paperclipPlugin)
-  ) {
-    return null;
-  }
-
-  const manifestPath = (paperclipPlugin as Record<string, unknown>).manifest;
-  if (typeof manifestPath !== "string") return null;
+  const manifestPath = declaredSpsPluginEntrypoint(pkgJson, "manifest");
+  if (!manifestPath) return null;
 
   const sourcePath = manifestPath
     .replace(/^\.\/dist\//, "./src/")
@@ -315,13 +310,7 @@ async function discoverBundledPlugins(): Promise<DiscoveredBundledPlugin[]> {
   for (const packageJsonPath of await findPackageJsonFiles(pluginRoot)) {
     const packageRoot = path.dirname(packageJsonPath);
     const pkgJson = await readJsonFile(packageJsonPath);
-    const paperclipPlugin = pkgJson?.paperclipPlugin;
-    if (
-      !pkgJson
-      || !paperclipPlugin
-      || typeof paperclipPlugin !== "object"
-      || Array.isArray(paperclipPlugin)
-    ) {
+    if (!pkgJson || !resolveSpsPluginPackageMetadata(pkgJson)) {
       continue;
     }
 
@@ -336,7 +325,7 @@ async function discoverBundledPlugins(): Promise<DiscoveredBundledPlugin[]> {
         pluginKey: metadata.pluginKey ?? packageName,
         displayName: metadata.displayName ?? titleCasePluginName(packageName),
         description: metadata.description
-          ?? `Bundled Paperclip plugin from ${path.relative(REPO_ROOT, packageRoot)}.`,
+          ?? `Bundled SPS plugin from ${path.relative(REPO_ROOT, packageRoot)}.`,
         localPath: packageRoot,
         tag,
         experimental: isExperimentalBundledPlugin(packageRoot, packageName),
