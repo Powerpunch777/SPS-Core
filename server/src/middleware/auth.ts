@@ -20,6 +20,9 @@ import { boardAuthService } from "../services/board-auth.js";
 import { hasTrustedDesktopOwnerBootstrap } from "./desktop-local-access.js";
 import { ensureHumanRoleDefaultGrants } from "../services/principal-access-compatibility.js";
 import { forbidden, unprocessable } from "../errors.js";
+import { claimDesktopBootstrapInstanceAdmin } from "../first-admin-claim.js";
+import { clearBoardClaimChallenge } from "../board-claim.js";
+import { isSpsCoreBaselineModeEnabled } from "../ui-branding.js";
 
 function hashToken(token: string) {
   return createHash("sha256").update(token).digest("hex");
@@ -136,6 +139,7 @@ async function auditAgentKeyMissingResponsibleUser(
 interface ActorMiddlewareOptions {
   deploymentMode: DeploymentMode;
   resolveSession?: (req: Request) => Promise<BetterAuthSessionResult | null>;
+  claimDesktopBootstrapAdmin?: (input: { userId: string }) => Promise<boolean>;
 }
 
 export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHandler {
@@ -157,10 +161,55 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
 
     const runIdHeader = req.header("x-paperclip-run-id");
 
-    // The Desktop main process can use this short-lived, loopback-only path to
-    // repair its own Identity membership. Do not let an ordinary cookie replace
-    // that explicitly proven local Owner authority.
+    // The Desktop main process can use this short-lived, loopback-only path
+    // only together with a real SPS Identity session. The session identity is
+    // retained so a first company belongs to the actual Host account instead
+    // of to the retired local-board placeholder.
     if (desktopOwnerBootstrap) {
+      if (opts.resolveSession) {
+        let session: BetterAuthSessionResult | null = null;
+        try {
+          session = await opts.resolveSession(req);
+        } catch (err) {
+          logger.warn(
+            { err, method: req.method, url: req.originalUrl },
+            "Failed to resolve SPS Desktop Owner bootstrap session",
+          );
+        }
+        if (session?.user?.id) {
+          let isInstanceAdmin = false;
+          try {
+            isInstanceAdmin = await (opts.claimDesktopBootstrapAdmin
+              ? opts.claimDesktopBootstrapAdmin({ userId: session.user.id })
+              : claimDesktopBootstrapInstanceAdmin(db, { userId: session.user.id }));
+            if (isInstanceAdmin) clearBoardClaimChallenge();
+          } catch (err) {
+            logger.warn(
+              { err, userId: session.user.id, method: req.method, url: req.originalUrl },
+              "Failed to establish SPS Desktop Owner bootstrap administration",
+            );
+          }
+          req.actor = {
+            type: "board",
+            userId: session.user.id,
+            userName: session.user.name ?? null,
+            userEmail: session.user.email ?? null,
+            companyIds: [],
+            memberships: [],
+            isInstanceAdmin,
+            // This is a normal SPS Identity session. The two Desktop launch
+            // proofs narrow its temporary instance-admin capability to the
+            // local first-company bootstrap flow.
+            source: "session",
+            runId: runIdHeader ?? undefined,
+          };
+          next();
+          return;
+        }
+      }
+      // A current SPS account is required even on the local loopback Host.
+      // Do not fall back to an anonymous implicit board actor.
+      req.actor = { type: "none", source: "none", runId: runIdHeader ?? undefined };
       if (runIdHeader) req.actor.runId = runIdHeader;
       next();
       return;
@@ -218,7 +267,11 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
             userEmail: session.user.email ?? null,
             companyIds: memberships.map((row) => row.companyId),
             memberships,
-            isInstanceAdmin: Boolean(roleRow),
+            // In the SPS Core baseline a remote session is never a Core Host
+            // merely because an older deployment left an instance_admin row
+            // behind. Host authority is proved by the local Desktop request
+            // path, while Team/workflow roles belong to plugins.
+            isInstanceAdmin: isSpsCoreBaselineModeEnabled() ? false : Boolean(roleRow),
             runId: runIdHeader ?? undefined,
             source: "session",
           };
@@ -249,7 +302,9 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
           userEmail: access.user?.email ?? null,
           companyIds: access.companyIds,
           memberships: access.memberships,
-          isInstanceAdmin: access.isInstanceAdmin,
+          // A board API key is a remote capability. It must not inherit a
+          // stale global instance-admin role in the SPS Core baseline.
+          isInstanceAdmin: isSpsCoreBaselineModeEnabled() ? false : access.isInstanceAdmin,
           keyId: boardKey.id,
           runId: runIdHeader || undefined,
           source: "board_key",

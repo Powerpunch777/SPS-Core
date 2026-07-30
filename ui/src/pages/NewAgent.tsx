@@ -38,6 +38,7 @@ import { DEFAULT_CURSOR_LOCAL_MODEL } from "@paperclipai/adapter-cursor-local";
 import { DEFAULT_GEMINI_LOCAL_MODEL } from "@paperclipai/adapter-gemini-local";
 import { DEFAULT_OPENCODE_LOCAL_MODEL, isValidOpenCodeModelId } from "@paperclipai/adapter-opencode-local";
 import { isWorkplaneModeEnabled } from "../lib/workplane-mode";
+import { isSpsCoreBaselineModeEnabled } from "../lib/sps-core-baseline-mode";
 
 function createValuesForAdapterType(
   adapterType: CreateConfigValues["adapterType"],
@@ -59,6 +60,7 @@ function createValuesForAdapterType(
 
 export function NewAgent() {
   const workplaneMode = isWorkplaneModeEnabled();
+  const coreBaselineMode = isSpsCoreBaselineModeEnabled();
   const { selectedCompanyId } = useCompany();
   const { setBreadcrumbs } = useBreadcrumbs();
   const queryClient = useQueryClient();
@@ -116,21 +118,27 @@ export function NewAgent() {
   });
 
   const isFirstAgent = !agents || agents.length === 0;
-  const effectiveRole = isFirstAgent ? "ceo" : role;
+  const initialAssistantMode = coreBaselineMode;
+  const effectiveRole = initialAssistantMode ? "general" : isFirstAgent ? "ceo" : role;
 
   useEffect(() => {
     setBreadcrumbs([
-      { label: "Agents", href: "/agents" },
-      { label: "New Agent" },
+      ...(initialAssistantMode ? [{ label: "Workspace", href: "/dashboard" }] : [{ label: "Agents", href: "/agents" }]),
+      { label: initialAssistantMode ? "Initial Assistant" : "New Agent" },
     ]);
-  }, [setBreadcrumbs]);
+  }, [initialAssistantMode, setBreadcrumbs]);
 
   useEffect(() => {
+    if (initialAssistantMode) {
+      if (!name) setName("Assistant");
+      if (!title) setTitle("Initial Assistant");
+      return;
+    }
     if (isFirstAgent) {
       if (!name) setName("CEO");
       if (!title) setTitle("CEO");
     }
-  }, [isFirstAgent]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [initialAssistantMode, isFirstAgent]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     const requested = presetAdapterType;
@@ -148,7 +156,7 @@ export function NewAgent() {
     onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: queryKeys.agents.list(selectedCompanyId!) });
       queryClient.invalidateQueries({ queryKey: queryKeys.approvals.list(selectedCompanyId!) });
-      navigate(agentUrl(result.agent));
+      navigate(initialAssistantMode ? "/dashboard" : agentUrl(result.agent));
     },
     onError: (error) => {
       setFormError(error instanceof Error ? error.message : "Failed to create agent");
@@ -174,7 +182,7 @@ export function NewAgent() {
         name,
         effectiveRole,
         title,
-        reportsTo: workplaneMode ? null : reportsTo,
+        reportsTo: workplaneMode || initialAssistantMode ? null : reportsTo,
         selectedSkillKeys,
         configValues,
         adapterConfig: buildAdapterConfig(),
@@ -212,9 +220,11 @@ export function NewAgent() {
   return (
     <div className="mx-auto max-w-2xl space-y-6">
       <div>
-        <h1 className="text-lg font-semibold">New Agent</h1>
+        <h1 className="text-lg font-semibold">{initialAssistantMode ? "Add initial Assistant" : "New Agent"}</h1>
         <p className="text-sm text-muted-foreground mt-1">
-          Advanced agent configuration
+          {initialAssistantMode
+            ? "Choose the runtime that will answer in Plugin Discovery & Builder. Workflow roles belong to the plugins you enable later."
+            : "Advanced agent configuration"}
         </p>
       </div>
 
@@ -240,8 +250,8 @@ export function NewAgent() {
           />
         </div>
 
-        {/* Property chips: Role + Reports To */}
-        <div className="flex items-center gap-1.5 px-4 py-2 border-t border-border flex-wrap">
+        {/* Workflow roles and reporting lines belong to a Workplane plugin. */}
+        {!initialAssistantMode ? <div className="flex items-center gap-1.5 px-4 py-2 border-t border-border flex-wrap">
           <Popover open={roleOpen} onOpenChange={setRoleOpen}>
             <PopoverTrigger asChild>
               <button
@@ -279,9 +289,9 @@ export function NewAgent() {
               disabled={isFirstAgent}
             />
           ) : null}
-        </div>
+        </div> : null}
 
-        <div className="border-t border-border px-4 py-4">
+        {!initialAssistantMode ? <div className="border-t border-border px-4 py-4">
           <TrustPresetSection
             permissions={permissions}
             onChange={setPermissions}
@@ -297,7 +307,7 @@ export function NewAgent() {
             }))}
             candidatesLoading={boundaryProjectsLoading || boundaryIssuesLoading}
           />
-        </div>
+        </div> : null}
 
         {/* Shared config form */}
         <AgentConfigForm
@@ -309,7 +319,7 @@ export function NewAgent() {
           onTestFeedbackChange={handleTestAgentFeedbackChange}
         />
 
-        <div className="border-t border-border px-4 py-4">
+        {!initialAssistantMode ? <div className="border-t border-border px-4 py-4">
           <div className="space-y-3">
             <div>
               <h2 className="text-sm font-medium">Company skills</h2>
@@ -344,11 +354,11 @@ export function NewAgent() {
               </div>
             )}
           </div>
-        </div>
+        </div> : null}
 
         {/* Footer */}
         <div className="border-t border-border px-4 py-3">
-          {isFirstAgent && (
+          {isFirstAgent && !initialAssistantMode && (
             <p className="text-xs text-muted-foreground mb-2">This will be the CEO</p>
           )}
           {formError && (
@@ -364,7 +374,7 @@ export function NewAgent() {
               <AdapterEnvironmentResult result={testAgentFeedback.result} />
             )}
             <div className="flex items-center justify-between gap-2">
-              <Button variant="outline" size="sm" onClick={() => navigate("/agents")}>
+              <Button variant="outline" size="sm" onClick={() => navigate(initialAssistantMode ? "/dashboard" : "/agents")}>
                 Cancel
               </Button>
               <div className="flex items-center gap-2">
@@ -382,7 +392,7 @@ export function NewAgent() {
                   disabled={!name.trim() || createAgent.isPending}
                   onClick={handleSubmit}
                 >
-                  {createAgent.isPending ? "Creating…" : "Create agent"}
+                  {createAgent.isPending ? "Creating..." : initialAssistantMode ? "Add Assistant" : "Create agent"}
                 </Button>
               </div>
             </div>

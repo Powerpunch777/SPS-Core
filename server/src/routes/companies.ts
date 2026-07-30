@@ -31,7 +31,13 @@ import {
   workTimelineService,
 } from "../services/index.js";
 import type { StorageService } from "../storage/types.js";
-import { assertBoard, assertCompanyAccess, assertInstanceAdmin, getActorInfo } from "./authz.js";
+import {
+  assertBoard,
+  assertCompanyAccess,
+  assertInstanceAdmin,
+  getActorInfo,
+  hasSpsCoreHostAuthority,
+} from "./authz.js";
 import { COMPANY_IMPORT_ROUTE_PATH } from "./company-import-paths.js";
 
 export function companyRoutes(db: Db, storage?: StorageService) {
@@ -109,7 +115,7 @@ export function companyRoutes(db: Db, storage?: StorageService) {
   router.get("/", async (req, res) => {
     assertBoard(req);
     const result = await svc.list();
-    if (req.actor.source === "local_implicit" || req.actor.isInstanceAdmin) {
+    if (hasSpsCoreHostAuthority(req)) {
       res.json(result);
       return;
     }
@@ -119,7 +125,7 @@ export function companyRoutes(db: Db, storage?: StorageService) {
 
   router.get("/stats", async (req, res) => {
     assertBoard(req);
-    const allowed = req.actor.source === "local_implicit" || req.actor.isInstanceAdmin
+    const allowed = hasSpsCoreHostAuthority(req)
       ? null
       : new Set(req.actor.companyIds ?? []);
     const stats = await svc.stats();
@@ -372,9 +378,7 @@ export function companyRoutes(db: Db, storage?: StorageService) {
 
   router.post("/", validate(createCompanySchema), async (req, res) => {
     assertBoard(req);
-    if (!(req.actor.source === "local_implicit" || req.actor.isInstanceAdmin)) {
-      throw forbidden("Instance admin required");
-    }
+    assertInstanceAdmin(req);
     const ownerPrincipalId = req.actor.userId ?? "local-board";
     const company = await svc.create({
       ...req.body,

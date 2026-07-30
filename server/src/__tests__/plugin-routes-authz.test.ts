@@ -224,6 +224,25 @@ describe.sequential("plugin install and upgrade authz", () => {
     expect(loader.installPlugin).not.toHaveBeenCalled();
   }, 20_000);
 
+  it("rejects remote instance admins from installing plugins in the SPS Core baseline", async () => {
+    const previous = process.env.SPS_CORE_BASELINE_MODE;
+    process.env.SPS_CORE_BASELINE_MODE = "true";
+    try {
+      const { app, loader } = await createApp(boardActor({ isInstanceAdmin: true }));
+
+      const res = await request(app)
+        .post("/api/plugins/install")
+        .send({ packageName: "paperclip-plugin-example" });
+
+      expect(res.status).toBe(403);
+      expect(res.body.error).toContain("Only the SPS Host");
+      expect(loader.installPlugin).not.toHaveBeenCalled();
+    } finally {
+      if (previous === undefined) delete process.env.SPS_CORE_BASELINE_MODE;
+      else process.env.SPS_CORE_BASELINE_MODE = previous;
+    }
+  }, 20_000);
+
   it("allows instance admins to install plugins", async () => {
     const pluginId = "11111111-1111-4111-8111-111111111111";
     const pluginKey = "paperclip.example";
@@ -1214,6 +1233,26 @@ describe.sequential("plugin tool and bridge authz", () => {
       settingsJson: {},
       lastError: null,
     });
+  });
+
+  it("rejects a remote legacy instance admin from changing Company activation in the SPS Core baseline", async () => {
+    const previous = process.env.SPS_CORE_BASELINE_MODE;
+    process.env.SPS_CORE_BASELINE_MODE = "true";
+    try {
+      const { app } = await createApp(boardActor({ isInstanceAdmin: true }));
+
+      const res = await request(app)
+        .put(`/api/plugins/${pluginId}/companies/${companyA}/activation`)
+        .send({ enabled: false });
+
+      expect(res.status).toBe(403);
+      expect(res.body.error).toContain("Only the SPS Host");
+      expect(mockRegistry.getById).not.toHaveBeenCalled();
+      expect(mockRegistry.upsertCompanySettings).not.toHaveBeenCalled();
+    } finally {
+      if (previous === undefined) delete process.env.SPS_CORE_BASELINE_MODE;
+      else process.env.SPS_CORE_BASELINE_MODE = previous;
+    }
   });
 
   it("rejects agent JWT when runContext.companyId is outside the agent's company scope", async () => {

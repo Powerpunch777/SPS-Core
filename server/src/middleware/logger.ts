@@ -32,6 +32,8 @@ export const logger = pino({
   level: "debug",
   redact: [
     "req.headers.authorization",
+    "req.headers.cookie",
+    "req.headers.set-cookie",
     "req.headers.x-sps-desktop-access",
     "req.headers.x-sps-desktop-owner-bootstrap",
   ],

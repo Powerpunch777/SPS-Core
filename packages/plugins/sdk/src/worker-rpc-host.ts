@@ -482,6 +482,62 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
         },
       },
 
+      sps: {
+        workspaceSources: {
+          async list(companyId: string) {
+            return callHost("sps.workspaceSources.list", { companyId });
+          },
+        },
+        runtimes: {
+          async list(companyId: string, options = {}) {
+            return callHost("sps.runtimes.list", { companyId, nodeId: options.nodeId });
+          },
+        },
+        executionGrants: {
+          async list(companyId: string, options = {}) {
+            return callHost("sps.executionGrants.list", {
+              companyId,
+              subjectKey: options.subjectKey,
+              includeRevoked: options.includeRevoked,
+            });
+          },
+          async upsert(input) {
+            return callHost("sps.executionGrants.upsert", input);
+          },
+          async revoke(companyId: string, grantId: string) {
+            return callHost("sps.executionGrants.revoke", { companyId, grantId });
+          },
+        },
+        runs: {
+          async dispatch(input) {
+            return callHost("sps.runs.dispatch", input);
+          },
+          async get(companyId: string, runId: string) {
+            return callHost("sps.runs.get", { companyId, runId });
+          },
+          async listEvents(companyId: string, runId: string, options = {}) {
+            return callHost("sps.runs.listEvents", {
+              companyId,
+              runId,
+              afterSequence: options.afterSequence,
+            });
+          },
+        },
+        artifacts: {
+          async publish(input) {
+            return callHost("sps.artifacts.publish", input);
+          },
+          async list(companyId: string, options = {}) {
+            return callHost("sps.artifacts.list", {
+              companyId,
+              subjectKey: options.subjectKey,
+              runId: options.runId,
+              limit: options.limit,
+            });
+          },
+        },
+      },
+
       events: {
         on(
           name: string,

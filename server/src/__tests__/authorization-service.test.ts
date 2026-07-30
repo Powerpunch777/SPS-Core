@@ -179,8 +179,8 @@ describeEmbeddedPostgres("authorization service", () => {
     await db.delete(companyMemberships);
     await db.delete(instanceUserRoles);
     await db.delete(issues);
-    await db.delete(agents);
     await db.delete(projects);
+    await db.delete(agents);
     await db.delete(companies);
     await db.delete(authUsers);
   });
@@ -1458,6 +1458,22 @@ describeEmbeddedPostgres("authorization service", () => {
       scope: { assigneeAgentId: targetAgent.id },
     });
     expect(sessionDecision).toMatchObject({ allowed: true, reason: "allow_instance_admin" });
+
+    const previousBaseline = process.env.SPS_CORE_BASELINE_MODE;
+    process.env.SPS_CORE_BASELINE_MODE = "true";
+    try {
+      const baselineDecision = await authorizationService(db).decide({
+        actor: { type: "board", userId, companyIds: [tenantCompany.id], source: "session" },
+        action: "tasks:assign",
+        resource: { type: "issue", companyId: otherCompany.id, assigneeAgentId: targetAgent.id },
+        scope: { assigneeAgentId: targetAgent.id },
+      });
+      expect(baselineDecision.allowed).toBe(false);
+      expect(baselineDecision.reason).not.toBe("allow_instance_admin");
+    } finally {
+      if (previousBaseline === undefined) delete process.env.SPS_CORE_BASELINE_MODE;
+      else process.env.SPS_CORE_BASELINE_MODE = previousBaseline;
+    }
   });
 
   it("denies simple-mode assignment to a target agent from another company", async () => {

@@ -153,6 +153,15 @@ const MEMORY_PROVIDER_ENV_PASSTHROUGH = [
 ];
 
 /**
+ * A registry-aware plugin can receive the local path to the Host's verified
+ * registry catalog. This catalog contains public release metadata only; it
+ * does not grant package installation, lifecycle, or secret access.
+ */
+const REGISTRY_CATALOG_ENV_PASSTHROUGH = [
+  "SPS_PLUGIN_DISCOVERY_CATALOG_PATH",
+];
+
+/**
  * A plugin that explicitly integrates with a local Desktop Host may receive
  * only the ephemeral loopback endpoint and access token for that Host. The
  * grant is intentionally separate from outbound HTTP: it is a privileged
@@ -177,6 +186,8 @@ export function buildPluginWorkerEnv(input: {
     && input.manifest.capabilities.includes("environment.drivers.register");
   const canRegisterMemoryProvider = Array.isArray(input.manifest.capabilities)
     && input.manifest.capabilities.includes("memory.providers.register");
+  const canReadRegistryCatalog = Array.isArray(input.manifest.capabilities)
+    && input.manifest.capabilities.includes("registry.catalog.read");
   const canAccessLocalHost = Array.isArray(input.manifest.capabilities)
     && input.manifest.capabilities.includes("host.local_api.access");
   if (canRegisterEnvironmentDrivers) {
@@ -189,6 +200,12 @@ export function buildPluginWorkerEnv(input: {
   }
   if (canRegisterMemoryProvider) {
     for (const key of MEMORY_PROVIDER_ENV_PASSTHROUGH) {
+      const value = processEnv[key];
+      if (value && value.trim().length > 0) env[key] = value;
+    }
+  }
+  if (canReadRegistryCatalog) {
+    for (const key of REGISTRY_CATALOG_ENV_PASSTHROUGH) {
       const value = processEnv[key];
       if (value && value.trim().length > 0) env[key] = value;
     }

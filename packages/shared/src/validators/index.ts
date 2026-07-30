@@ -664,6 +664,7 @@ export {
   spsNodeRunnerAvailabilitySourceSchema,
   spsNodeRunnerAvailabilitySchema,
   spsNodeRunnerProfileSchema,
+  spsNodeExecutableRuntimeKindSchema,
   SPS_NODE_CAPABILITY_BY_ADAPTER,
   spsNodeCapabilityForAdapter,
   spsNodeSupportsAdapter,
@@ -681,6 +682,7 @@ export {
   type SpsNodeRunnerAvailabilityStatus,
   type SpsNodeRunnerCredentialStatus,
   type SpsNodeRunnerAvailabilitySource,
+  type SpsNodeExecutableRuntimeKind,
   type SpsNodeRunnerAvailability,
   type SpsNodeRunnerProfile,
   type CreateSpsNode,
@@ -694,6 +696,22 @@ export {
 } from "./sps-nodes.js";
 
 export {
+  upsertSpsHostProjectShareSchema,
+  grantSpsHostProjectShareNodeSchema,
+  type UpsertSpsHostProjectShare,
+  type GrantSpsHostProjectShareNode,
+} from "./sps-host-project-share.js";
+
+export {
+  createSpsWorkspaceSourceSchema,
+  updateSpsWorkspaceSourceSchema,
+  grantSpsWorkspaceSourceNodeSchema,
+  type CreateSpsWorkspaceSource,
+  type UpdateSpsWorkspaceSource,
+  type GrantSpsWorkspaceSourceNode,
+} from "./sps-workspace-sources.js";
+
+export {
   jsonSchemaSchema,
   pluginJobDeclarationSchema,
   pluginWebhookDeclarationSchema,
@@ -705,6 +723,7 @@ export {
   pluginLauncherDeclarationSchema,
   pluginDatabaseDeclarationSchema,
   pluginAgentPlatformDeclarationSchema,
+  pluginSpsCoreDeclarationSchema,
   pluginManagedSkillFileDeclarationSchema,
   pluginManagedSkillDeclarationSchema,
   pluginApiRouteDeclarationSchema,

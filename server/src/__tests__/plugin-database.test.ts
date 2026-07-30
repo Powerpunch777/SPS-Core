@@ -222,6 +222,32 @@ describe("buildPluginWorkerEnv", () => {
     });
   });
 
+  it("passes verified registry metadata only to registry-aware plugins", () => {
+    const processEnv = {
+      SPS_PLUGIN_DISCOVERY_CATALOG_PATH: "C:/SPS/registry-catalog.json",
+      DATABASE_URL: "must-not-leak",
+    };
+
+    expect(buildPluginWorkerEnv({
+      manifest: { capabilities: ["registry.catalog.read"] },
+      instanceInfo,
+      processEnv,
+    })).toEqual({
+      PAPERCLIP_DEPLOYMENT_MODE: "authenticated",
+      PAPERCLIP_DEPLOYMENT_EXPOSURE: "public",
+      SPS_PLUGIN_DISCOVERY_CATALOG_PATH: "C:/SPS/registry-catalog.json",
+    });
+
+    expect(buildPluginWorkerEnv({
+      manifest: { capabilities: ["ui.page.register"] },
+      instanceInfo,
+      processEnv,
+    })).toEqual({
+      PAPERCLIP_DEPLOYMENT_MODE: "authenticated",
+      PAPERCLIP_DEPLOYMENT_EXPOSURE: "public",
+    });
+  });
+
   it("passes Desktop loopback access only to plugins that explicitly request it", () => {
     const env = buildPluginWorkerEnv({
       manifest: { capabilities: ["host.local_api.access"] },

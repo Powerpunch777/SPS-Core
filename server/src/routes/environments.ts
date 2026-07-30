@@ -45,7 +45,7 @@ import { probeEnvironment } from "../services/environment-probe.js";
 import { secretService } from "../services/secrets.js";
 import { listReadyPluginEnvironmentDrivers } from "../services/plugin-environment-driver.js";
 import { getConfiguredSecretProvider } from "../secrets/configured-provider.js";
-import { assertBoardOrgAccess, getActorInfo } from "./authz.js";
+import { assertBoardOrgAccess, assertSpsCoreHostAuthority, getActorInfo, hasSpsCoreHostAuthority } from "./authz.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
 import { environmentService } from "../services/environments.js";
 import { executionWorkspaceService } from "../services/execution-workspaces.js";
@@ -76,8 +76,7 @@ export function environmentRoutes(
     if (req.actor.type !== "board") {
       throw forbidden("Instance environment management is restricted to board operators");
     }
-    if (req.actor.source === "local_implicit" || req.actor.isInstanceAdmin) return;
-    throw forbidden("Instance admin access required");
+    assertSpsCoreHostAuthority(req);
   }
 
   function assertCanReadInstanceEnvironments(req: Request) {
@@ -88,7 +87,7 @@ export function environmentRoutes(
     if (req.actor.type !== "board") {
       throw forbidden("Board access required");
     }
-    if (req.actor.source === "local_implicit" || req.actor.isInstanceAdmin) return;
+    if (hasSpsCoreHostAuthority(req)) return;
     const allowedCompanies = req.actor.companyIds ?? [];
     if (!allowedCompanies.includes(companyId)) {
       throw forbidden("User does not have access to this company");
@@ -96,8 +95,7 @@ export function environmentRoutes(
   }
 
   function canReadFullInstanceEnvironment(req: Request) {
-    return req.actor.type === "board"
-      && (req.actor.source === "local_implicit" || req.actor.isInstanceAdmin);
+    return hasSpsCoreHostAuthority(req);
   }
 
   function redactEnvironmentForRestrictedView<T extends {

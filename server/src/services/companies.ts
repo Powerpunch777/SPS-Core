@@ -35,6 +35,7 @@ import { environmentService } from "./environments.js";
 import { heartbeatService } from "./heartbeat.js";
 import { logActivity } from "./activity-log.js";
 import { builtInAgentService } from "./built-in-agents.js";
+import { isSpsCoreBaselineModeEnabled } from "../ui-branding.js";
 
 export interface CompanyActivityActor {
   actorType: "user" | "agent" | "system" | "plugin";
@@ -266,7 +267,12 @@ export function companyService(db: Db) {
     create: async (data: typeof companies.$inferInsert) => {
       const created = await createCompanyWithUniquePrefix(data);
       await environmentsSvc.ensureLocalEnvironment(created.id);
-      await builtInAgents.autoProvisionBundledAgents(created.id);
+      // A fresh SPS Workspace is intentionally empty. Workflow plugins may
+      // offer their own onboarding, but Core must not silently create a
+      // Paperclip-era built-in agent before the Host selects one.
+      if (!isSpsCoreBaselineModeEnabled()) {
+        await builtInAgents.autoProvisionBundledAgents(created.id);
+      }
       const row = await getCompanyQuery(db)
         .where(eq(companies.id, created.id))
         .then((rows) => rows[0] ?? null);

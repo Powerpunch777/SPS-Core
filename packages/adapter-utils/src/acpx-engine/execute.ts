@@ -49,6 +49,7 @@ import {
   type PaperclipSkillEntry,
 } from "@paperclipai/adapter-utils/server-utils";
 import { shellQuote } from "@paperclipai/adapter-utils/ssh";
+import { findAgentRuntimePackCommand } from "@paperclipai/adapter-utils/runtime-pack";
 import {
   createAcpRuntime,
   createAgentRegistry,
@@ -204,9 +205,10 @@ export async function findAncestorBin(startDir: string, binName: string): Promis
       if (await pathExists(candidate)) return candidate;
     }
     const parent = path.dirname(current);
-    if (parent === current) return null;
+    if (parent === current) break;
     current = parent;
   }
+  return await findAgentRuntimePackCommand(binName);
 }
 
 interface BuiltInAgentCommand {

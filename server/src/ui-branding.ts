@@ -161,6 +161,15 @@ export function isSpsBasicModeEnabled(env: NodeJS.ProcessEnv = process.env): boo
   return isTruthyEnvValue(env.SPS_BASIC_MODE);
 }
 
+/**
+ * A fresh SPS Desktop Workspace starts as a plugin platform. This remains
+ * separate from basic mode so a Host that deliberately enables a Workplane
+ * plugin can render that plugin's navigation instead.
+ */
+export function isSpsCoreBaselineModeEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return isTruthyEnvValue(env.SPS_CORE_BASELINE_MODE);
+}
+
 export function getWorktreeUiBranding(env: NodeJS.ProcessEnv = process.env): WorktreeUiBranding {
   if (!isWorktreeUiBrandingEnabled(env)) {
     return {
@@ -235,6 +244,12 @@ export function renderSpsBasicModeMeta(env: NodeJS.ProcessEnv = process.env): st
     : "";
 }
 
+export function renderSpsCoreBaselineModeMeta(env: NodeJS.ProcessEnv = process.env): string {
+  return isSpsCoreBaselineModeEnabled(env)
+    ? '<meta name="sps-core-baseline-mode" content="true" />'
+    : "";
+}
+
 function replaceMarkedBlock(html: string, startMarker: string, endMarker: string, content: string): string {
   const start = html.indexOf(startMarker);
   const end = html.indexOf(endMarker);
@@ -254,7 +269,12 @@ function replaceMarkedBlock(html: string, startMarker: string, endMarker: string
 export function applyUiBranding(html: string, env: NodeJS.ProcessEnv = process.env): string {
   const branding = getWorktreeUiBranding(env);
   const withFavicon = replaceMarkedBlock(html, FAVICON_BLOCK_START, FAVICON_BLOCK_END, renderFaviconLinks(branding));
-  const runtimeMeta = [renderRuntimeBrandingMeta(branding), renderWorkplaneModeMeta(env), renderSpsBasicModeMeta(env)]
+  const runtimeMeta = [
+    renderRuntimeBrandingMeta(branding),
+    renderWorkplaneModeMeta(env),
+    renderSpsBasicModeMeta(env),
+    renderSpsCoreBaselineModeMeta(env),
+  ]
     .filter(Boolean)
     .join("\n");
   return replaceMarkedBlock(

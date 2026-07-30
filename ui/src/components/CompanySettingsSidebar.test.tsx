@@ -131,6 +131,9 @@ describe("CompanySettingsSidebar", () => {
   afterEach(() => {
     container.remove();
     document.body.innerHTML = "";
+    document.head.querySelector('meta[name="sps-basic-mode"]')?.remove();
+    document.head.querySelector('meta[name="sps-workplane-mode"]')?.remove();
+    document.head.querySelector('meta[name="sps-core-baseline-mode"]')?.remove();
     vi.clearAllMocks();
   });
 
@@ -160,6 +163,7 @@ describe("CompanySettingsSidebar", () => {
     expect(container.textContent).not.toContain("Cloud upstream");
     expect(container.textContent).toContain("Invites");
     expect(container.textContent).toContain("Nodes");
+    expect(container.textContent).toContain("Project Sources");
     expect(container.textContent).toContain("Secrets");
     expect(sidebarNavItemMock).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -194,6 +198,13 @@ describe("CompanySettingsSidebar", () => {
       expect.objectContaining({
         to: "/company/settings/nodes",
         label: "Nodes",
+        end: true,
+      }),
+    );
+    expect(sidebarNavItemMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        to: "/company/settings/project-sources",
+        label: "Project Sources",
         end: true,
       }),
     );
@@ -271,6 +282,45 @@ describe("CompanySettingsSidebar", () => {
     });
     basicMode.remove();
     workplaneMode.remove();
+  });
+
+  it("shows only technical Workspace settings in the plugin-first Core baseline", async () => {
+    const basicMode = document.createElement("meta");
+    basicMode.name = "sps-basic-mode";
+    basicMode.content = "true";
+    document.head.appendChild(basicMode);
+    const baselineMode = document.createElement("meta");
+    baselineMode.name = "sps-core-baseline-mode";
+    baselineMode.content = "true";
+    document.head.appendChild(baselineMode);
+
+    const root = createRoot(container);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+
+    await act(async () => {
+      root.render(
+        <QueryClientProvider client={queryClient}>
+          <CompanySettingsSidebar />
+        </QueryClientProvider>,
+      );
+    });
+    await flushReact();
+
+    expect(container.textContent).toContain("Host settings");
+    expect(container.textContent).toContain("Sources");
+    expect(container.textContent).toContain("Nodes");
+    expect(container.textContent).toContain("Plugins");
+    expect(container.textContent).not.toContain("Members");
+    expect(container.textContent).not.toContain("Invites");
+    expect(container.textContent).not.toContain("Secrets");
+    expect(container.textContent).not.toContain("Experimental");
+    expect(sidebarNavItemMock).toHaveBeenCalledWith(
+      expect.objectContaining({ to: "/company/settings/project-sources", label: "Sources", end: true }),
+    );
+
+    await act(async () => {
+      root.unmount();
+    });
   });
 
   it("shows cloud upstream only when cloud sync is enabled", async () => {

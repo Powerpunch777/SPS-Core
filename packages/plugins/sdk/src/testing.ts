@@ -837,6 +837,48 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
         return status;
       },
     },
+    sps: {
+      workspaceSources: {
+        async list() {
+          throw new Error("The in-memory plugin test harness does not provide SPS Node infrastructure");
+        },
+      },
+      runtimes: {
+        async list() {
+          throw new Error("The in-memory plugin test harness does not provide SPS Node infrastructure");
+        },
+      },
+      executionGrants: {
+        async list() {
+          throw new Error("The in-memory plugin test harness does not provide SPS Node infrastructure");
+        },
+        async upsert() {
+          throw new Error("The in-memory plugin test harness does not provide SPS Node infrastructure");
+        },
+        async revoke() {
+          throw new Error("The in-memory plugin test harness does not provide SPS Node infrastructure");
+        },
+      },
+      runs: {
+        async dispatch() {
+          throw new Error("The in-memory plugin test harness does not provide SPS Node infrastructure");
+        },
+        async get() {
+          throw new Error("The in-memory plugin test harness does not provide SPS Node infrastructure");
+        },
+        async listEvents() {
+          throw new Error("The in-memory plugin test harness does not provide SPS Node infrastructure");
+        },
+      },
+      artifacts: {
+        async publish() {
+          throw new Error("The in-memory plugin test harness does not provide SPS Node infrastructure");
+        },
+        async list() {
+          throw new Error("The in-memory plugin test harness does not provide SPS Node infrastructure");
+        },
+      },
+    },
     events: {
       on(name: PluginEventType | `plugin.${string}`, filterOrFn: EventFilter | ((event: PluginEvent) => Promise<void>), maybeFn?: (event: PluginEvent) => Promise<void>): () => void {
         requireCapability(manifest, capabilitySet, "events.subscribe");

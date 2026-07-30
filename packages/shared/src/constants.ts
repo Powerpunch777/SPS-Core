@@ -938,6 +938,11 @@ export const PLUGIN_CAPABILITIES = [
   "project.workspaces.read",
   "project.workspaces.write",
   "execution.workspaces.read",
+  "sps.workspaceSources.read",
+  "sps.runtimes.read",
+  "sps.executionGrants.read",
+  "sps.runs.read",
+  "sps.artifacts.read",
   "issues.read",
   "issue.relations.read",
   "issue.subtree.read",
@@ -1002,10 +1007,16 @@ export const PLUGIN_CAPABILITIES = [
   "webhooks.receive",
   "api.routes.register",
   "http.outbound",
+  // Read the Host-provided verified plugin registry catalog. The catalog is
+  // public metadata; this does not grant package lifecycle control.
+  "registry.catalog.read",
   "host.local_api.access",
   "secrets.read-ref",
   "environment.drivers.register",
   "local.folders",
+  "sps.executionGrants.write",
+  "sps.runs.dispatch",
+  "sps.artifacts.write",
   // Agent Tools
   "agent.tools.register",
   "agent.tools.dynamic.register",

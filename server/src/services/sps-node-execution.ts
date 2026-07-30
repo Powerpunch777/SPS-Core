@@ -2,6 +2,8 @@ import { and, asc, eq, gt, isNull } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   spsAgentNodeBindings,
+  spsHostProjectShareNodeGrants,
+  spsHostProjectShares,
   spsNodeAgentGrants,
   spsNodeAgentRunnerGrants,
   spsNodeCommandEvents,
@@ -68,6 +70,63 @@ function appendExcerpt(current: string, chunk: string) {
 
 function sleep(milliseconds: number) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+type SpsHostProjectWorkspaceAccess = {
+  kind: "sps_host_share";
+  shareId: string;
+  sharePath: string;
+  credentialAlgorithm: "rsa-oaep-sha256" | "rsa-oaep-sha256+a256gcm";
+  credentialEnvelope: string;
+};
+
+async function resolveProjectWorkspaceAccess(input: {
+  db: Db;
+  companyId: string;
+  projectId: string | null;
+  nodeId: string;
+}): Promise<{ cwdHint: string | null; workspaceAccess: SpsHostProjectWorkspaceAccess | null }> {
+  if (!input.projectId) return { cwdHint: null, workspaceAccess: null };
+  const share = await input.db
+    .select()
+    .from(spsHostProjectShares)
+    .where(and(
+      eq(spsHostProjectShares.companyId, input.companyId),
+      eq(spsHostProjectShares.projectId, input.projectId),
+      eq(spsHostProjectShares.status, "active"),
+    ))
+    .then((rows) => rows[0] ?? null);
+  if (!share || (share.hostNodeId && share.hostNodeId === input.nodeId)) {
+    return { cwdHint: null, workspaceAccess: null };
+  }
+  const grant = await input.db
+    .select()
+    .from(spsHostProjectShareNodeGrants)
+    .where(and(
+      eq(spsHostProjectShareNodeGrants.companyId, input.companyId),
+      eq(spsHostProjectShareNodeGrants.shareId, share.id),
+      eq(spsHostProjectShareNodeGrants.nodeId, input.nodeId),
+      isNull(spsHostProjectShareNodeGrants.revokedAt),
+    ))
+    .then((rows) => rows[0] ?? null);
+  if (!grant) {
+    throw new SpsNodeExecutionUnavailableError(
+      "The Owner Host has not granted this SPS Node access to the project's source folder.",
+    );
+  }
+  if (grant.credentialAlgorithm !== "rsa-oaep-sha256" && grant.credentialAlgorithm !== "rsa-oaep-sha256+a256gcm") {
+    throw new SpsNodeExecutionUnavailableError("This SPS Host project share uses an unsupported Node credential envelope.");
+  }
+  return {
+    cwdHint: share.sharePath,
+    workspaceAccess: {
+      kind: "sps_host_share",
+      shareId: share.id,
+      sharePath: share.sharePath,
+      credentialAlgorithm: grant.credentialAlgorithm,
+      credentialEnvelope: grant.credentialEnvelope,
+    },
+  };
 }
 
 export async function resolveSpsNodeExecutionTarget(input: {
@@ -174,6 +233,12 @@ export async function resolveSpsNodeExecutionTarget(input: {
     remoteCwd,
     runner: {
       execute: async (commandInput) => {
+        const projectWorkspaceAccess = await resolveProjectWorkspaceAccess({
+          db: input.db,
+          companyId: input.companyId,
+          projectId: input.projectId,
+          nodeId: node.id,
+        });
         const created = await input.db
           .insert(spsNodeCommands)
           .values({
@@ -185,7 +250,8 @@ export async function resolveSpsNodeExecutionTarget(input: {
             projectId: input.projectId,
             command: commandInput.command,
             args: commandInput.args,
-            cwdHint: commandInput.cwd,
+            cwdHint: projectWorkspaceAccess.cwdHint ?? commandInput.cwd,
+            workspaceAccess: projectWorkspaceAccess.workspaceAccess,
             env: commandInput.env,
             stdin: commandInput.stdin ?? null,
             timeoutMs: commandInput.timeoutMs ?? null,

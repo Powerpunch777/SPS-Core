@@ -73,6 +73,10 @@ export function getBoardClaimWarningUrl(host: string, port: number): string | nu
   return `http://${visibleHost}:${port}/board-claim/${activeChallenge.token}?code=${activeChallenge.code}`;
 }
 
+export function clearBoardClaimChallenge() {
+  activeChallenge = null;
+}
+
 export function inspectBoardClaimChallenge(token: string, code: string | undefined) {
   const status = getChallengeStatus(token, code);
   return {

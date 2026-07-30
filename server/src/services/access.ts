@@ -11,6 +11,7 @@ import { conflict } from "../errors.js";
 import { assertAssignableAgent } from "./agent-assignability.js";
 import { authorizationService, type AuthorizationActor, type AuthorizationResource } from "./authorization.js";
 import { ensureHumanRoleDefaultGrants } from "./principal-access-compatibility.js";
+import { isSpsCoreBaselineModeEnabled } from "../ui-branding.js";
 
 type MembershipRow = typeof companyMemberships.$inferSelect;
 type GrantInput = {
@@ -29,6 +30,10 @@ export function accessService(db: Db) {
   const authorization = authorizationService(db);
 
   async function isInstanceAdmin(userId: string | null | undefined): Promise<boolean> {
+    // The plugin-first SPS Core has no global remote administrator role.
+    // Preserve legacy rows for migration/rollback, but never treat them as a
+    // current capability while the baseline is active.
+    if (isSpsCoreBaselineModeEnabled()) return false;
     if (!userId) return false;
     const row = await db
       .select({ id: instanceUserRoles.id })
@@ -408,6 +413,39 @@ export function accessService(db: Db) {
         member: archived,
         reassignedIssueCount: resetInProgress.length + reassigned.length,
       };
+    });
+  }
+
+  async function archiveTechnicalMember(companyId: string, memberId: string) {
+    return db.transaction(async (tx) => {
+      const existing = await tx
+        .select()
+        .from(companyMemberships)
+        .where(and(eq(companyMemberships.companyId, companyId), eq(companyMemberships.id, memberId)))
+        .then((rows) => rows[0] ?? null);
+      if (!existing) return null;
+      if (existing.principalType !== "user") {
+        throw conflict("Only human technical Members can be removed");
+      }
+      if (existing.status === "archived") return existing;
+
+      const now = new Date();
+      await tx
+        .delete(principalPermissionGrants)
+        .where(
+          and(
+            eq(principalPermissionGrants.companyId, companyId),
+            eq(principalPermissionGrants.principalType, existing.principalType),
+            eq(principalPermissionGrants.principalId, existing.principalId),
+          ),
+        );
+
+      return tx
+        .update(companyMemberships)
+        .set({ status: "archived", updatedAt: now })
+        .where(eq(companyMemberships.id, existing.id))
+        .returning()
+        .then((rows) => rows[0] ?? existing);
     });
   }
 
@@ -792,6 +830,7 @@ export function accessService(db: Db) {
     copyActiveUserMemberships,
     ensureRoleDefaultGrants,
     archiveMember,
+    archiveTechnicalMember,
     setMemberPermissions,
     updateMemberAndPermissions,
     promoteInstanceAdmin,

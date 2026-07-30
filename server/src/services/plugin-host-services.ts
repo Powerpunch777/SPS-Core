@@ -79,6 +79,7 @@ import { accessService } from "./access.js";
 import { authorizationService, type AuthorizationActor } from "./authorization.js";
 import { sanitizeRecord } from "../redaction.js";
 import { isCoreManagedMemoryLifecycleSubscription } from "./memory-providers.js";
+import { spsPluginExecutionService } from "./sps-plugin-execution.js";
 
 // ---------------------------------------------------------------------------
 // SSRF protection for plugin HTTP fetch
@@ -558,6 +559,7 @@ export function buildHostServices(
     pluginKey,
     manifest: options.manifest,
   });
+  const spsExecution = spsPluginExecutionService(db, pluginKey);
   const heartbeat = heartbeatService(db, {
     pluginWorkerManager: options.pluginWorkerManager,
   });
@@ -1200,6 +1202,81 @@ export function buildHostServices(
         assertWritableConfiguredLocalFolder(status);
         await deletePluginLocalFolderFile(status.realPath!, params.relativePath, params.folderKey);
         return inspectStoredLocalFolder(companyId, params.folderKey);
+      },
+    },
+
+    sps: {
+      async listWorkspaceSources(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        return spsExecution.listWorkspaceSources(companyId);
+      },
+
+      async listRuntimes(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        return spsExecution.listRuntimes({ companyId, nodeId: params.nodeId });
+      },
+
+      async listExecutionGrants(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        return spsExecution.listExecutionGrants({
+          companyId,
+          subjectKey: params.subjectKey,
+          includeRevoked: params.includeRevoked,
+        });
+      },
+
+      async upsertExecutionGrant(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        return spsExecution.upsertExecutionGrant({ ...params, companyId });
+      },
+
+      async revokeExecutionGrant(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        return spsExecution.revokeExecutionGrant({ companyId, grantId: params.grantId });
+      },
+
+      async dispatchRun(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        return spsExecution.dispatchRun({ ...params, companyId });
+      },
+
+      async getRun(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        return spsExecution.getRun({ companyId, runId: params.runId });
+      },
+
+      async listRunEvents(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        return spsExecution.listRunEvents({
+          companyId,
+          runId: params.runId,
+          afterSequence: params.afterSequence,
+        });
+      },
+
+      async publishArtifact(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        return spsExecution.publishArtifact({ ...params, companyId });
+      },
+
+      async listArtifacts(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        return spsExecution.listArtifacts({
+          companyId,
+          subjectKey: params.subjectKey,
+          runId: params.runId,
+          limit: params.limit,
+        });
       },
     },
 

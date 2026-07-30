@@ -96,8 +96,29 @@ export type SpsNode = {
   runners: SpsNodeRunnerProfile[];
 };
 
+/** Core exposes technical membership facts only; plugins own workflow roles. */
+export type SpsTechnicalMember = {
+  id: string;
+  accountId: string;
+  isHost: boolean;
+  status: "active" | "archived";
+  joinedAt: string;
+  archivedAt: string | null;
+  nodeCount: number;
+  activeNodeCount: number;
+};
+
+export type SpsTechnicalMemberRemoval = {
+  member: Pick<SpsTechnicalMember, "id" | "accountId" | "status" | "joinedAt" | "archivedAt">;
+  revokedNodeCount: number;
+};
+
 export const spsNodesApi = {
   list: (companyId: string) => api.get<SpsNode[]>(`/companies/${companyId}/sps-nodes`),
+  listTechnicalMembers: (companyId: string) =>
+    api.get<{ members: SpsTechnicalMember[] }>(`/companies/${companyId}/sps-members`),
+  revokeTechnicalMember: (companyId: string, memberId: string) =>
+    api.post<SpsTechnicalMemberRemoval>(`/companies/${companyId}/sps-members/${memberId}/revoke`, {}),
   approve: (nodeId: string) => api.post<SpsNode>(`/sps-nodes/${nodeId}/approve`, {}),
   revoke: (nodeId: string) => api.post<SpsNode>(`/sps-nodes/${nodeId}/revoke`, {}),
   grantAgent: (nodeId: string, agentId: string) =>

@@ -8,6 +8,7 @@ import { builtInAgentService } from "../services/built-in-agents.js";
 import { authorizationDeniedDetails } from "../services/authorization.js";
 import { assertCompanyAccess, getActorInfo } from "./authz.js";
 import type { BuiltInAgentState } from "../services/built-in-agents.js";
+import { isSpsCoreBaselineModeEnabled } from "../ui-branding.js";
 
 const WEEKDAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
@@ -76,6 +77,11 @@ export function builtInAgentRoutes(db: Db) {
   const settings = instanceSettingsService(db);
 
   async function assertBuiltInAgentsEnabled() {
+    // SPS Baseline starts without Paperclip workflow assumptions. Keep the legacy
+    // built-in-agent API closed even if a migrated instance has its old flag set.
+    if (isSpsCoreBaselineModeEnabled()) {
+      throw notFound("Built-in agents are not enabled");
+    }
     const experimental = await settings.getExperimental();
     if (experimental.enableBuiltInAgents !== true) {
       throw notFound("Built-in agents are not enabled");

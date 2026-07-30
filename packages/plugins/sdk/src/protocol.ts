@@ -76,6 +76,12 @@ import type {
   PluginAuthorizationPolicyRecord,
   PluginAuthorizationPolicySummary,
   PluginMemoryLifecyclePublishInput,
+  PluginSpsArtifact,
+  PluginSpsExecutionGrant,
+  PluginSpsRun,
+  PluginSpsRunEvent,
+  PluginSpsRuntime,
+  PluginSpsWorkspaceSource,
 } from "./types.js";
 import type {
   PluginHealthDiagnostics,
@@ -994,6 +1000,70 @@ export interface WorkerToHostMethods {
   "localFolders.deleteFile": [
     params: { companyId: string; folderKey: string; relativePath: string },
     result: PluginLocalFolderStatus,
+  ];
+
+  // Workflow-neutral SPS infrastructure
+  "sps.workspaceSources.list": [
+    params: { companyId: string },
+    result: PluginSpsWorkspaceSource[],
+  ];
+  "sps.runtimes.list": [
+    params: { companyId: string; nodeId?: string | null },
+    result: PluginSpsRuntime[],
+  ];
+  "sps.executionGrants.list": [
+    params: { companyId: string; subjectKey?: string | null; includeRevoked?: boolean },
+    result: PluginSpsExecutionGrant[],
+  ];
+  "sps.executionGrants.upsert": [
+    params: {
+      companyId: string;
+      subjectKey: string;
+      nodeId: string;
+      runnerProfileId: string;
+      workspaceSourceId?: string | null;
+    },
+    result: PluginSpsExecutionGrant,
+  ];
+  "sps.executionGrants.revoke": [
+    params: { companyId: string; grantId: string },
+    result: PluginSpsExecutionGrant,
+  ];
+  "sps.runs.dispatch": [
+    params: {
+      companyId: string;
+      executionGrantId: string;
+      args: string[];
+      env?: Record<string, string>;
+      stdin?: string | null;
+      timeoutMs?: number | null;
+    },
+    result: PluginSpsRun,
+  ];
+  "sps.runs.get": [
+    params: { companyId: string; runId: string },
+    result: PluginSpsRun,
+  ];
+  "sps.runs.listEvents": [
+    params: { companyId: string; runId: string; afterSequence?: number | null },
+    result: PluginSpsRunEvent[],
+  ];
+  "sps.artifacts.publish": [
+    params: {
+      companyId: string;
+      subjectKey: string;
+      runId?: string | null;
+      title: string;
+      kind?: string | null;
+      referenceUrl?: string | null;
+      summary?: string | null;
+      data?: Record<string, unknown>;
+    },
+    result: PluginSpsArtifact,
+  ];
+  "sps.artifacts.list": [
+    params: { companyId: string; subjectKey?: string | null; runId?: string | null; limit?: number | null },
+    result: PluginSpsArtifact[],
   ];
 
   // State

@@ -90,6 +90,18 @@ describe("StatusIcon", () => {
     const html = renderToStaticMarkup(<StatusIcon status="todo" onChange={() => {}} />);
     expect(html).toContain('viewBox="0 0 24 24"');
   });
+
+  it("labels unavailable transitions before they reach the server", () => {
+    const html = renderToStaticMarkup(
+      <StatusIcon
+        status="todo"
+        onChange={() => {}}
+        showLabel
+        unavailableStatuses={{ in_progress: "Assign an agent or member before starting this task." }}
+      />,
+    );
+    expect(html).toContain("Assign an agent or member before starting this task.");
+  });
 });
 
 describe("StatusIcon — glyph size (PAP-243a)", () => {
