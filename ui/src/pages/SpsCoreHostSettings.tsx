@@ -7,6 +7,12 @@ import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/ca
 
 const settings = [
   {
+    to: "/company/settings/sps-server",
+    title: "SPS Server",
+    description: "Manage this Host's local server, private team access, and runtime packs.",
+    icon: ServerCog,
+  },
+  {
     to: "/company/settings/team",
     title: "Team access",
     description: "Create member invitations and manage unused technical access links.",

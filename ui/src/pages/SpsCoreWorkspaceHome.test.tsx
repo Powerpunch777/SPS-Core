@@ -138,11 +138,9 @@ describe("SpsCoreWorkspaceHome", () => {
   });
 
   it("does not redirect while a newly created Assistant replaces cached empty data", async () => {
-    const resolveAgents: {
-      current?: (agents: Array<{ id: string; name: string; title: string; status: string; adapterType: string }>) => void;
-    } = {};
+    let resolveAgents!: (agents: Array<{ id: string; name: string; title: string; status: string; adapterType: string }>) => void;
     mockAgentsApi.list.mockReturnValue(new Promise((resolve) => {
-      resolveAgents.current = resolve;
+      resolveAgents = resolve;
     }));
     mockPluginsApi.listForCompany.mockResolvedValue({ companyId: "workspace-1", plugins: [] });
     const root = createRoot(container);
@@ -159,7 +157,7 @@ describe("SpsCoreWorkspaceHome", () => {
 
     expect(mockNavigate).not.toHaveBeenCalled();
 
-    resolveAgents.current?.([
+    resolveAgents([
       { id: "assistant-1", name: "Workspace Assistant", title: "Initial Assistant", status: "idle", adapterType: "codex_local" },
     ]);
     await flushReact();
