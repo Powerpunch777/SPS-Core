@@ -3,11 +3,13 @@ import {
   applyUiBranding,
   getWorktreeUiBranding,
   isSpsBasicModeEnabled,
+  isSpsCoreBaselineModeEnabled,
   isWorkplaneModeEnabled,
   isWorktreeUiBrandingEnabled,
   renderFaviconLinks,
   renderRuntimeBrandingMeta,
   renderSpsBasicModeMeta,
+  renderSpsCoreBaselineModeMeta,
   renderWorkplaneModeMeta,
 } from "../ui-branding.js";
 
@@ -60,6 +62,17 @@ describe("ui branding", () => {
     const branded = applyUiBranding(TEMPLATE, { SPS_BASIC_MODE: "true" });
     expect(branded).toContain('<meta name="sps-basic-mode" content="true" />');
     expect(applyUiBranding(TEMPLATE, {})).not.toContain('name="sps-basic-mode"');
+  });
+
+  it("marks a fresh SPS plugin-first Workspace independently from basic mode", () => {
+    expect(isSpsCoreBaselineModeEnabled({ SPS_CORE_BASELINE_MODE: "true" })).toBe(true);
+    expect(isSpsCoreBaselineModeEnabled({ SPS_CORE_BASELINE_MODE: "false" })).toBe(false);
+    expect(renderSpsCoreBaselineModeMeta({ SPS_CORE_BASELINE_MODE: "1" }))
+      .toContain('name="sps-core-baseline-mode"');
+
+    const branded = applyUiBranding(TEMPLATE, { SPS_CORE_BASELINE_MODE: "true" });
+    expect(branded).toContain('<meta name="sps-core-baseline-mode" content="true" />');
+    expect(applyUiBranding(TEMPLATE, {})).not.toContain('name="sps-core-baseline-mode"');
   });
 
   it("resolves name, color, and text color for worktree branding", () => {

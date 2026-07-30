@@ -26,6 +26,7 @@ import {
   asString,
   parseObject,
 } from "@paperclipai/adapter-utils/server-utils";
+import { findAgentRuntimePackCommand } from "@paperclipai/adapter-utils/runtime-pack";
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const packageRootDir = path.resolve(moduleDir, "../..");
@@ -254,6 +255,7 @@ async function resolveClaudeAcpCommand(config: Record<string, unknown>): Promise
   if (configured) return configured;
   return (
     (await findAncestorBin(packageRootDir, "claude-agent-acp")) ??
+    (await findAgentRuntimePackCommand("claude-agent-acp")) ??
     (await findCommandOnPath("claude-agent-acp")) ??
     path.join(packageRootDir, "node_modules", ".bin", "claude-agent-acp")
   );

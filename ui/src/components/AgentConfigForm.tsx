@@ -85,6 +85,8 @@ type AgentConfigFormProps = {
   showAdapterTypeField?: boolean;
   showAdapterTestEnvironmentButton?: boolean;
   showCreateRunPolicySection?: boolean;
+  /** Hide role/reporting identity fields when Core is configuring a workflow-neutral Assistant. */
+  hideWorkflowIdentityFields?: boolean;
   hideInstructionsFile?: boolean;
   /** Hide the prompt template field from the Identity section (used when it's shown in a separate Prompts tab). */
   hidePromptTemplate?: boolean;
@@ -209,6 +211,7 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
     showAdapterTestEnvironmentButton && !props.onTestActionChange;
   const showInlineAdapterTestEnvironmentFeedback = !props.onTestFeedbackChange;
   const showCreateRunPolicySection = props.showCreateRunPolicySection ?? true;
+  const hideWorkflowIdentityFields = props.hideWorkflowIdentityFields ?? false;
   const hideInstructionsFile = props.hideInstructionsFile ?? false;
   const { selectedCompanyId } = useCompany();
   const queryClient = useQueryClient();
@@ -949,7 +952,7 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
                 placeholder="e.g. VP of Engineering"
               />
             </Field>
-            {!workplaneMode ? (
+            {!workplaneMode && !hideWorkflowIdentityFields ? (
               <Field label="Reports to" hint={help.reportsTo}>
                 <ReportsToPicker
                   agents={companyAgents}
@@ -960,21 +963,23 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
                 />
               </Field>
             ) : null}
-            <Field label="Capabilities" hint={help.capabilities}>
-              <MarkdownEditor
-                value={eff("identity", "capabilities", props.agent.capabilities ?? "") ?? ""}
-                onChange={(v) => mark("identity", "capabilities", v || null)}
-                placeholder="Describe what this agent can do..."
-                contentClassName="min-h-(--sz-44px) text-sm font-mono"
-                imageUploadHandler={async (file) => {
-                  const asset = await uploadMarkdownImage.mutateAsync({
-                    file,
-                    namespace: `agents/${props.agent.id}/capabilities`,
-                  });
-                  return asset.contentPath;
-                }}
-              />
-            </Field>
+            {!hideWorkflowIdentityFields ? (
+              <Field label="Capabilities" hint={help.capabilities}>
+                <MarkdownEditor
+                  value={eff("identity", "capabilities", props.agent.capabilities ?? "") ?? ""}
+                  onChange={(v) => mark("identity", "capabilities", v || null)}
+                  placeholder="Describe what this agent can do..."
+                  contentClassName="min-h-(--sz-44px) text-sm font-mono"
+                  imageUploadHandler={async (file) => {
+                    const asset = await uploadMarkdownImage.mutateAsync({
+                      file,
+                      namespace: `agents/${props.agent.id}/capabilities`,
+                    });
+                    return asset.contentPath;
+                  }}
+                />
+              </Field>
+            ) : null}
             {isLocal && !props.hidePromptTemplate && (
               <>
                 <Field label="Prompt Template" hint={help.promptTemplate}>

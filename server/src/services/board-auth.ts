@@ -10,6 +10,7 @@ import {
   instanceUserRoles,
 } from "@paperclipai/db";
 import { conflict, forbidden, notFound } from "../errors.js";
+import { isSpsCoreBaselineModeEnabled } from "../ui-branding.js";
 
 export const BOARD_API_KEY_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 export const CLI_AUTH_CHALLENGE_TTL_MS = 10 * 60 * 1000;
@@ -87,7 +88,10 @@ export function boardAuthService(db: Db) {
       user,
       companyIds: memberships.map((row) => row.companyId),
       memberships,
-      isInstanceAdmin: Boolean(adminRole),
+      // Remote board keys in the plugin-first SPS baseline are always scoped
+      // by their active Team memberships. A stale legacy global role must not
+      // let a key become a Host capability.
+      isInstanceAdmin: isSpsCoreBaselineModeEnabled() ? false : Boolean(adminRole),
     };
   }
 
@@ -118,7 +122,7 @@ export function boardAuthService(db: Db) {
       }
     }
 
-    if (companyIds.size === 0 && access.isInstanceAdmin) {
+    if (companyIds.size === 0 && !isSpsCoreBaselineModeEnabled() && access.isInstanceAdmin) {
       const allCompanyIds = await db
         .select({ id: companies.id })
         .from(companies)

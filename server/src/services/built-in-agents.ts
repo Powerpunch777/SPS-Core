@@ -21,6 +21,7 @@ import {
 import { companySkillService } from "./company-skills.js";
 import { routineService } from "./routines.js";
 import { accessService } from "./access.js";
+import { isSpsCoreBaselineModeEnabled } from "../ui-branding.js";
 
 export type BuiltInAgentStatus = "not_provisioned" | "pending_approval" | "needs_setup" | "ready" | "paused";
 
@@ -1720,11 +1721,15 @@ export async function reconcileBuiltInAgentsOnStartup(db: Db) {
   let autoEnsured = 0;
   let pendingApprovals = 0;
   let defaultGrantsEnsured = 0;
-  for (const company of companyRows) {
-    const result = await svc.autoProvisionBundledAgents(company.id);
-    autoEnsured += result.autoEnsured;
-    pendingApprovals += result.pendingApprovals;
-    defaultGrantsEnsured += result.defaultGrantsEnsured;
+  // Preserve and reconcile explicitly provisioned legacy built-ins, but SPS
+  // baseline must never create them merely because the Host restarted.
+  if (!isSpsCoreBaselineModeEnabled()) {
+    for (const company of companyRows) {
+      const result = await svc.autoProvisionBundledAgents(company.id);
+      autoEnsured += result.autoEnsured;
+      pendingApprovals += result.pendingApprovals;
+      defaultGrantsEnsured += result.defaultGrantsEnsured;
+    }
   }
   const rows = await db
     .select({

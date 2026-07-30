@@ -1065,6 +1065,41 @@
       "when": 1784743200000,
       "tag": "0153_company_memory_provider_runtime",
       "breakpoints": true
+    },
+    {
+      "idx": 154,
+      "version": "7",
+      "when": 1785139200506,
+      "tag": "0154_workable_prism",
+      "breakpoints": true
+    },
+    {
+      "idx": 155,
+      "version": "7",
+      "when": 1785139975159,
+      "tag": "0155_kind_shadowcat",
+      "breakpoints": true
+    },
+    {
+      "idx": 156,
+      "version": "7",
+      "when": 1785311018703,
+      "tag": "0156_hot_living_mummy",
+      "breakpoints": true
+    },
+    {
+      "idx": 157,
+      "version": "7",
+      "when": 1785356400000,
+      "tag": "0157_sps_plugin_execution_grants",
+      "breakpoints": true
+    },
+    {
+      "idx": 158,
+      "version": "7",
+      "when": 1785702000000,
+      "tag": "0158_sps_plugin_artifacts",
+      "breakpoints": true
     }
   ]
 }

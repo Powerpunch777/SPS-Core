@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { HttpError } from "../errors.js";
-import { assertBoardOrgAccess, assertCompanyAccess, hasBoardOrgAccess } from "../routes/authz.js";
+import {
+  assertBoardOrgAccess,
+  assertCompanyAccess,
+  assertInstanceAdmin,
+  hasBoardOrgAccess,
+} from "../routes/authz.js";
 
 function makeReq(input: {
   method?: string;
@@ -241,5 +246,69 @@ describe("assertBoardOrgAccess", () => {
 
     expect(hasBoardOrgAccess(req)).toBe(false);
     expect(() => assertBoardOrgAccess(req)).toThrow("Company membership or instance admin access required");
+  });
+});
+
+describe("assertInstanceAdmin", () => {
+  it("keeps legacy instance-admin access outside the SPS Core baseline", () => {
+    const req = makeReq({
+      actor: {
+        type: "board",
+        userId: "admin-1",
+        source: "session",
+        isInstanceAdmin: true,
+      },
+    });
+
+    expect(() => assertInstanceAdmin(req)).not.toThrow();
+  });
+
+  it("allows only the physical SPS Host to manage Core settings in the baseline", () => {
+    const previous = process.env.SPS_CORE_BASELINE_MODE;
+    const previousToken = process.env.SPS_DESKTOP_ACCESS_TOKEN;
+    process.env.SPS_CORE_BASELINE_MODE = "true";
+    process.env.SPS_DESKTOP_ACCESS_TOKEN = "desktop-launch-token";
+    try {
+      const host = makeReq({
+        actor: {
+          type: "board",
+          userId: "host-1",
+          source: "local_implicit",
+          isInstanceAdmin: true,
+        },
+      });
+      const remoteLegacyAdmin = makeReq({
+        actor: {
+          type: "board",
+          userId: "member-1",
+          source: "session",
+          isInstanceAdmin: true,
+        },
+      });
+      const technicalHost = makeReq({
+        actor: {
+          type: "board",
+          userId: "host-1",
+          source: "session",
+          isInstanceAdmin: true,
+        },
+      });
+      technicalHost.header = ((name: string) => ({
+        host: "127.0.0.1:31310",
+        "x-sps-desktop-access": "desktop-launch-token",
+        "x-sps-desktop-owner-bootstrap": "desktop-launch-token",
+      })[name.toLowerCase()]) as Express.Request["header"];
+
+      expect(() => assertInstanceAdmin(host)).not.toThrow();
+      expect(() => assertInstanceAdmin(technicalHost)).not.toThrow();
+      expect(() => assertInstanceAdmin(remoteLegacyAdmin)).toThrow(
+        "Only the SPS Host can manage this Core setting",
+      );
+    } finally {
+      if (previous === undefined) delete process.env.SPS_CORE_BASELINE_MODE;
+      else process.env.SPS_CORE_BASELINE_MODE = previous;
+      if (previousToken === undefined) delete process.env.SPS_DESKTOP_ACCESS_TOKEN;
+      else process.env.SPS_DESKTOP_ACCESS_TOKEN = previousToken;
+    }
   });
 });

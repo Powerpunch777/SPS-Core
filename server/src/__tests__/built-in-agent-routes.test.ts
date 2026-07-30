@@ -166,6 +166,33 @@ describe("built-in agent routes", () => {
     expect(mockBuiltInAgentService.list).not.toHaveBeenCalled();
   });
 
+  it("keeps legacy built-in agent routes unavailable in SPS Baseline even when the old flag is enabled", async () => {
+    const originalBaselineMode = process.env.SPS_CORE_BASELINE_MODE;
+    process.env.SPS_CORE_BASELINE_MODE = "true";
+    try {
+      const app = await createApp({
+        type: "board",
+        userId: "board-user",
+        companyIds: [companyId],
+        source: "session",
+        isInstanceAdmin: false,
+      });
+
+      const res = await request(app).get(`/api/companies/${companyId}/built-in-agents`);
+
+      expect(res.status, JSON.stringify(res.body)).toBe(404);
+      expect(res.body.error).toContain("Built-in agents are not enabled");
+      expect(mockInstanceSettingsService.getExperimental).not.toHaveBeenCalled();
+      expect(mockBuiltInAgentService.list).not.toHaveBeenCalled();
+    } finally {
+      if (originalBaselineMode === undefined) {
+        delete process.env.SPS_CORE_BASELINE_MODE;
+      } else {
+        process.env.SPS_CORE_BASELINE_MODE = originalBaselineMode;
+      }
+    }
+  });
+
   it("provisions through the agents:create gate and passes optional adapter overrides", async () => {
     const app = await createApp({
       type: "board",

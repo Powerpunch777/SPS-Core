@@ -49,6 +49,7 @@ import { CompanySettingsPluginPage } from "./pages/CompanySettingsPluginPage";
 import { CompanyAccess, CompanyAccessLegacyRoute } from "./pages/CompanyAccess";
 import { CompanyInvites } from "./pages/CompanyInvites";
 import { SpsNodes } from "./pages/SpsNodes";
+import { CompanyProjectSources } from "./pages/CompanyProjectSources";
 import { CompanySkills } from "./pages/CompanySkills";
 import { SkillStudio } from "./pages/SkillStudio";
 import { Secrets } from "./pages/Secrets";
@@ -82,8 +83,40 @@ import {
 } from "./lib/onboarding-route";
 import { normalizeRememberedInstanceSettingsPath } from "./lib/instance-settings";
 import { isWorkplaneModeEnabled } from "./lib/workplane-mode";
+import { isSpsCoreBaselineModeEnabled } from "./lib/sps-core-baseline-mode";
+import { SpsCoreWorkspaceHome } from "./pages/SpsCoreWorkspaceHome";
+import { SpsCoreAssistantDetail } from "./pages/SpsCoreAssistantDetail";
+import { SpsCoreHostSettings } from "./pages/SpsCoreHostSettings";
+import { SpsCoreWorkspaceSources } from "./pages/SpsCoreWorkspaceSources";
+import { SpsCoreTeamAccess } from "./pages/SpsCoreTeamAccess";
+
+function coreBaselineRoutes() {
+  return (
+    <>
+      <Route index element={<Navigate to="dashboard" replace />} />
+      <Route path="dashboard" element={<SpsCoreWorkspaceHome />} />
+      <Route path="assistants/new" element={<NewAgent />} />
+      <Route path="assistants/:agentId" element={<SpsCoreAssistantDetail />} />
+      <Route path="assistants/:agentId/:tab" element={<SpsCoreAssistantDetail />} />
+      <Route path="company/settings" element={<SpsCoreHostSettings />} />
+      <Route path="company/settings/team" element={<SpsCoreTeamAccess />} />
+      <Route path="company/settings/nodes" element={<SpsNodes />} />
+      <Route path="company/settings/project-sources" element={<SpsCoreWorkspaceSources />} />
+      <Route path="company/settings/instance/plugins" element={<PluginManager />} />
+      <Route path="company/settings/instance/plugins/:pluginId" element={<PluginSettings />} />
+      <Route path="company/settings/:settingsRoutePath/*" element={<CompanySettingsPluginPage />} />
+      <Route path="plugins/:pluginId" element={<PluginPage />} />
+      <Route path=":pluginRoutePath" element={<PluginPage />} />
+      <Route path=":pluginRoutePath/*" element={<PluginPage />} />
+      <Route path="*" element={<Navigate to="/dashboard" replace />} />
+    </>
+  );
+}
 
 function boardRoutes() {
+  if (isSpsCoreBaselineModeEnabled()) {
+    return coreBaselineRoutes();
+  }
   return (
     <>
       <Route index element={<Navigate to="dashboard" replace />} />
@@ -100,6 +133,7 @@ function boardRoutes() {
       <Route path="company/settings/cloud-upstream" element={<CloudUpstream />} />
       <Route path="company/settings/invites" element={<CompanyInvites />} />
       <Route path="company/settings/nodes" element={<SpsNodes />} />
+      <Route path="company/settings/project-sources" element={<CompanyProjectSources />} />
       <Route path="company/export/*" element={<CompanyExport />} />
       <Route path="company/import" element={<CompanyImport />} />
       <Route path="company/settings/secrets" element={<Secrets />} />

@@ -125,6 +125,22 @@ describeEmbeddedPostgres("companyService", () => {
     expect(afterReconcileRows.filter((row) => readBuiltInAgentMarker(row.metadata)?.key === "reflection-coach")).toHaveLength(1);
   });
 
+  it("keeps a freshly created SPS baseline Workspace free of Paperclip built-ins", async () => {
+    const previous = process.env.SPS_CORE_BASELINE_MODE;
+    process.env.SPS_CORE_BASELINE_MODE = "true";
+    try {
+      const created = await companyService(db).create({ name: "SPS Empty Workspace" });
+      expect(await db.select().from(agents).where(eq(agents.companyId, created.id))).toEqual([]);
+
+      const reconciliation = await reconcileBuiltInAgentsOnStartup(db);
+      expect(reconciliation).toMatchObject({ autoEnsured: 0, pendingApprovals: 0, defaultGrantsEnsured: 0 });
+      expect(await db.select().from(agents).where(eq(agents.companyId, created.id))).toEqual([]);
+    } finally {
+      if (previous === undefined) delete process.env.SPS_CORE_BASELINE_MODE;
+      else process.env.SPS_CORE_BASELINE_MODE = previous;
+    }
+  });
+
   it("removes a company that contains a routine assigned to one of its agents", async () => {
     const created = await companyService(db).create({ name: "Removable Company" });
 

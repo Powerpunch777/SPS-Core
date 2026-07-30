@@ -729,6 +729,73 @@ export const pluginAgentPlatformDeclarationSchema = z.object({
 
 export type PluginAgentPlatformDeclarationInput = z.infer<typeof pluginAgentPlatformDeclarationSchema>;
 
+/**
+ * SPS Core primitives are workflow-neutral. A plugin may declare the
+ * Host-backed building blocks it expects without making Projects, Tasks,
+ * Rooms, or a role hierarchy into Core concepts.
+ *
+ * This is a compatibility and review declaration only. The Host mediates
+ * every resulting route, runtime, secret, artifact, and execution grant.
+ */
+export const SPS_CORE_PRIMITIVES = [
+  "workspace.sources.metadata",
+  "workspace.sources.route",
+  "runtimes.list",
+  "runtimes.dispatch",
+  "runs.observe",
+  "artifacts.write",
+  "secrets.use",
+] as const;
+
+export const SPS_CORE_PRIMITIVE_CAPABILITIES = {
+  "workspace.sources.metadata": ["sps.workspaceSources.read"],
+  "workspace.sources.route": ["sps.workspaceSources.read"],
+  "runtimes.list": ["sps.runtimes.read"],
+  "runtimes.dispatch": ["sps.runs.dispatch"],
+  "runs.observe": ["sps.runs.read"],
+  "artifacts.write": ["sps.artifacts.write"],
+  "secrets.use": ["secrets.read-ref"],
+} as const satisfies Record<(typeof SPS_CORE_PRIMITIVES)[number], readonly (typeof PLUGIN_CAPABILITIES)[number][]>;
+
+export const pluginSpsCoreDeclarationSchema = z.object({
+  contractVersion: z.string().min(1).regex(
+    /^2\.\d+(?:\.\d+)?$/,
+    "SPS Core contractVersion must use a compatible 2.x version such as 2.0",
+  ),
+  primitives: z.array(z.enum(SPS_CORE_PRIMITIVES)).max(SPS_CORE_PRIMITIVES.length).default([]),
+}).superRefine((value, ctx) => {
+  const duplicates = value.primitives.filter((primitive, index) => value.primitives.indexOf(primitive) !== index);
+  if (duplicates.length > 0) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: `Duplicate SPS Core primitives: ${[...new Set(duplicates)].join(", ")}`,
+      path: ["primitives"],
+    });
+  }
+  if (
+    value.primitives.includes("workspace.sources.route")
+    && !value.primitives.includes("workspace.sources.metadata")
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "workspace.sources.route requires workspace.sources.metadata",
+      path: ["primitives"],
+    });
+  }
+  if (
+    value.primitives.includes("runtimes.dispatch")
+    && !value.primitives.includes("runtimes.list")
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "runtimes.dispatch requires runtimes.list",
+      path: ["primitives"],
+    });
+  }
+});
+
+export type PluginSpsCoreDeclarationInput = z.infer<typeof pluginSpsCoreDeclarationSchema>;
+
 // ---------------------------------------------------------------------------
 // Plugin Manifest V1 schema
 // ---------------------------------------------------------------------------
@@ -815,6 +882,7 @@ export const pluginManifestV1Schema = z.object({
   objectReferences: z.array(pluginObjectReferenceProviderDeclarationSchema).optional(),
   memoryProvider: pluginMemoryProviderDeclarationSchema.optional(),
   agentPlatform: pluginAgentPlatformDeclarationSchema.optional(),
+  sps: pluginSpsCoreDeclarationSchema.optional(),
   launchers: z.array(pluginLauncherDeclarationSchema).optional(),
   ui: z.object({
     slots: z.array(pluginUiSlotDeclarationSchema).min(1).optional(),
@@ -844,6 +912,20 @@ export const pluginManifestV1Schema = z.object({
       message: "minimumHostVersion and minimumPaperclipVersion must match when both are declared",
       path: ["minimumHostVersion"],
     });
+  }
+
+  if (manifest.sps) {
+    for (const primitive of manifest.sps.primitives) {
+      for (const capability of SPS_CORE_PRIMITIVE_CAPABILITIES[primitive]) {
+        if (!manifest.capabilities.includes(capability)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: `SPS Core primitive '${primitive}' requires capability '${capability}'`,
+            path: ["capabilities"],
+          });
+        }
+      }
+    }
   }
 
   // ── Capability ↔ feature declaration consistency ───────────────────────

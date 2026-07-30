@@ -38,6 +38,76 @@ describe("plugin manifest validators", () => {
     expect(parsed.capabilities).toEqual(["ui.dashboardWidget.register"]);
   });
 
+  it("preserves a workflow-neutral SPS Core primitive declaration", () => {
+    const parsed = pluginManifestV1Schema.parse({
+      id: "sps.source-aware-plugin",
+      apiVersion: 1,
+      version: "0.1.0",
+      displayName: "Source-aware plugin",
+      description: "Uses Host-managed sources through opaque Core handles.",
+      author: "SPS",
+      categories: ["automation"],
+      capabilities: ["agent.tools.register", "sps.workspaceSources.read", "sps.runtimes.read"],
+      entrypoints: { worker: "./dist/worker.js" },
+      sps: {
+        contractVersion: "2.0",
+        primitives: ["workspace.sources.metadata", "workspace.sources.route", "runtimes.list"],
+      },
+    });
+
+    expect(parsed.sps).toEqual({
+      contractVersion: "2.0",
+      primitives: ["workspace.sources.metadata", "workspace.sources.route", "runtimes.list"],
+    });
+  });
+
+  it("rejects a source route declaration without source metadata", () => {
+    const parsed = pluginManifestV1Schema.safeParse({
+      id: "sps.invalid-source-plugin",
+      apiVersion: 1,
+      version: "0.1.0",
+      displayName: "Invalid source plugin",
+      description: "Invalid Core primitive ordering.",
+      author: "SPS",
+      categories: ["automation"],
+      capabilities: ["agent.tools.register"],
+      entrypoints: { worker: "./dist/worker.js" },
+      sps: {
+        contractVersion: "2.0",
+        primitives: ["workspace.sources.route"],
+      },
+    });
+
+    expect(parsed.success).toBe(false);
+    if (parsed.success) return;
+    expect(parsed.error.issues.some((issue) => issue.message.includes("workspace.sources.route requires"))).toBe(true);
+  });
+
+  it("rejects an SPS Core primitive without its matching runtime capability", () => {
+    const parsed = pluginManifestV1Schema.safeParse({
+      id: "sps.runtime-capability-gap",
+      apiVersion: 1,
+      version: "0.1.0",
+      displayName: "Runtime capability gap",
+      description: "Declares runtime discovery without requesting its Core capability.",
+      author: "SPS",
+      categories: ["automation"],
+      capabilities: ["agent.tools.register"],
+      entrypoints: { worker: "./dist/worker.js" },
+      sps: {
+        contractVersion: "2.0",
+        primitives: ["runtimes.list"],
+      },
+    });
+
+    expect(parsed.success).toBe(false);
+    if (parsed.success) return;
+    expect(parsed.error.issues.some((issue) => (
+      issue.message.includes("runtimes.list")
+      && issue.message.includes("sps.runtimes.read")
+    ))).toBe(true);
+  });
+
   it("accepts sandbox provider template config bindings", () => {
     const parsed = pluginManifestV1Schema.parse({
       id: "paperclip.template-provider",

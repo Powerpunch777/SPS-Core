@@ -271,4 +271,88 @@ describe("createHostClientHandlers invocation company scope", () => {
     await expect(allowedHandlers["agentTools.replaceDynamic"](params)).resolves.toEqual({ registered: 1 });
     expect(replaceDynamic).toHaveBeenCalledWith(params);
   });
+
+  it("gates workflow-neutral SPS runtime dispatch separately from Source discovery", async () => {
+    const listWorkspaceSources = vi.fn(async () => [{
+      id: "source-a",
+      displayName: "Host source",
+      status: "active",
+      routeStatus: "configured" as const,
+      createdAt: "2026-07-29T00:00:00.000Z",
+      updatedAt: "2026-07-29T00:00:00.000Z",
+    }]);
+    const dispatchRun = vi.fn(async () => ({ id: "run-a", status: "queued" }));
+    const services = {
+      sps: {
+        listWorkspaceSources,
+        dispatchRun,
+      },
+    } as unknown as HostServices;
+    const sourceParams = { companyId: "company-a" };
+    const dispatchParams = {
+      companyId: "company-a",
+      executionGrantId: "grant-a",
+      args: ["exec", "Implement the approved change."],
+    };
+
+    const sourceOnly = createHostClientHandlers({
+      pluginId: "sps.example-workplane",
+      capabilities: ["sps.workspaceSources.read"],
+      services,
+    });
+    await expect(sourceOnly["sps.workspaceSources.list"](sourceParams)).resolves.toHaveLength(1);
+    await expect(sourceOnly["sps.runs.dispatch"](dispatchParams)).rejects.toBeInstanceOf(CapabilityDeniedError);
+    expect(dispatchRun).not.toHaveBeenCalled();
+
+    const dispatchAllowed = createHostClientHandlers({
+      pluginId: "sps.example-workplane",
+      capabilities: ["sps.runs.dispatch"],
+      services,
+    });
+    await expect(dispatchAllowed["sps.runs.dispatch"](dispatchParams)).resolves.toMatchObject({ id: "run-a" });
+    expect(dispatchRun).toHaveBeenCalledWith(dispatchParams);
+  });
+
+  it("gates workflow-neutral artifact publication independently from run dispatch", async () => {
+    const publishArtifact = vi.fn(async () => ({
+      id: "artifact-a",
+      companyId: "company-a",
+      pluginKey: "sps.example-workplane",
+      subjectKey: "worker-a",
+      runId: null,
+      title: "Build report",
+      kind: "report",
+      referenceUrl: null,
+      summary: "Completed safely.",
+      data: {},
+      createdAt: "2026-07-29T00:00:00.000Z",
+      updatedAt: "2026-07-29T00:00:00.000Z",
+    }));
+    const services = {
+      sps: {
+        publishArtifact,
+      },
+    } as unknown as HostServices;
+    const params = {
+      companyId: "company-a",
+      subjectKey: "worker-a",
+      title: "Build report",
+      kind: "report",
+    };
+    const denied = createHostClientHandlers({
+      pluginId: "sps.example-workplane",
+      capabilities: ["sps.runs.dispatch"],
+      services,
+    });
+    await expect(denied["sps.artifacts.publish"](params)).rejects.toBeInstanceOf(CapabilityDeniedError);
+    expect(publishArtifact).not.toHaveBeenCalled();
+
+    const allowed = createHostClientHandlers({
+      pluginId: "sps.example-workplane",
+      capabilities: ["sps.artifacts.write"],
+      services,
+    });
+    await expect(allowed["sps.artifacts.publish"](params)).resolves.toMatchObject({ id: "artifact-a" });
+    expect(publishArtifact).toHaveBeenCalledWith(params);
+  });
 });

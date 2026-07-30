@@ -27,6 +27,7 @@ import {
   asString,
   parseObject,
 } from "@paperclipai/adapter-utils/server-utils";
+import { findAgentRuntimePackCommand } from "@paperclipai/adapter-utils/runtime-pack";
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 const packageRootDir = path.resolve(moduleDir, "../..");
@@ -253,6 +254,7 @@ async function resolveCodexAcpCommand(config: Record<string, unknown>): Promise<
   if (configured) return configured;
   return (
     (await findAncestorBin(packageRootDir, "codex-acp")) ??
+    (await findAgentRuntimePackCommand("codex-acp")) ??
     (await findCommandOnPath("codex-acp")) ??
     path.join(packageRootDir, "node_modules", ".bin", "codex-acp")
   );

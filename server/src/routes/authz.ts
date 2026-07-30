@@ -1,7 +1,9 @@
 import type { Request } from "express";
 import { forbidden, HttpError, unauthorized } from "../errors.js";
 import { logger } from "../middleware/logger.js";
+import { hasTrustedDesktopOwnerBootstrap } from "../middleware/desktop-local-access.js";
 import { responsibleUserAuthzShadowMode } from "../services/authorization.js";
+import { isSpsCoreBaselineModeEnabled } from "../ui-branding.js";
 
 function throwOrShadowResponsibleUserCompanyAccessDeny(
   req: Request,
@@ -34,11 +36,36 @@ export function assertBoard(req: Request) {
   }
 }
 
+/**
+ * SPS Core has one infrastructure authority: the local Desktop Host.  A
+ * legacy instance-admin database row is intentionally not a Core authority in
+ * the plugin-first baseline; remote members receive their workflow authority
+ * from the enabled plugin instead.
+ */
+export function hasSpsCoreHostAuthority(req: Request) {
+  if (req.actor.type !== "board") return false;
+  if (req.actor.source === "local_implicit") return true;
+  if (isSpsCoreBaselineModeEnabled()) {
+    return typeof req.header === "function" && hasTrustedDesktopOwnerBootstrap(req);
+  }
+  return Boolean(req.actor.isInstanceAdmin);
+}
+
+export function assertSpsCoreHostAuthority(req: Request) {
+  assertBoard(req);
+  if (hasSpsCoreHostAuthority(req)) return;
+  throw forbidden(
+    isSpsCoreBaselineModeEnabled()
+      ? "Only the SPS Host can manage this Core setting"
+      : "Instance admin access required",
+  );
+}
+
 export function hasBoardOrgAccess(req: Request) {
   if (req.actor.type !== "board") {
     return false;
   }
-  if (req.actor.source === "local_implicit" || req.actor.isInstanceAdmin) {
+  if (hasSpsCoreHostAuthority(req)) {
     return true;
   }
   return Array.isArray(req.actor.companyIds) && req.actor.companyIds.length > 0;
@@ -64,11 +91,7 @@ export function assertBoardOrAgent(req: Request) {
 }
 
 export function assertInstanceAdmin(req: Request) {
-  assertBoard(req);
-  if (req.actor.source === "local_implicit" || req.actor.isInstanceAdmin) {
-    return;
-  }
-  throw forbidden("Instance admin access required");
+  assertSpsCoreHostAuthority(req);
 }
 
 export function assertCompanyAccess(req: Request, companyId: string) {
@@ -107,7 +130,11 @@ export function assertCompanyAccess(req: Request, companyId: string) {
     }
     const method = typeof req.method === "string" ? req.method.toUpperCase() : "GET";
     const isSafeMethod = ["GET", "HEAD", "OPTIONS"].includes(method);
-    if (!isSafeMethod && !req.actor.isInstanceAdmin && Array.isArray(req.actor.memberships)) {
+    if (
+      !isSafeMethod
+      && (isSpsCoreBaselineModeEnabled() || !req.actor.isInstanceAdmin)
+      && Array.isArray(req.actor.memberships)
+    ) {
       const membership = req.actor.memberships.find((item) => item.companyId === companyId);
       if (!membership || membership.status !== "active") {
         throw forbidden("User does not have active company access");

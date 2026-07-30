@@ -20,6 +20,10 @@ const mockInstanceSettingsApi = vi.hoisted(() => ({
   getExperimental: vi.fn(),
 }));
 
+const mockAccessApi = vi.hoisted(() => ({
+  getCurrentBoardAccess: vi.fn(),
+}));
+
 vi.mock("@/lib/router", () => ({
   NavLink: ({ to, children, className, ...props }: {
     to: string;
@@ -76,6 +80,10 @@ vi.mock("../api/attention", () => ({
 
 vi.mock("../api/instanceSettings", () => ({
   instanceSettingsApi: mockInstanceSettingsApi,
+}));
+
+vi.mock("../api/access", () => ({
+  accessApi: mockAccessApi,
 }));
 
 vi.mock("../hooks/useInboxBadge", () => ({
@@ -148,6 +156,14 @@ describe("Sidebar", () => {
     document.body.appendChild(container);
     mockHeartbeatsApi.liveRunsForCompany.mockResolvedValue([]);
     mockAttentionApi.list.mockResolvedValue({ items: [] });
+    mockAccessApi.getCurrentBoardAccess.mockResolvedValue({
+      user: null,
+      userId: "host-1",
+      isInstanceAdmin: true,
+      companyIds: ["company-1"],
+      source: "local_implicit",
+      keyId: null,
+    });
     mockSidebar.isMobile = false;
     mockSidebar.collapsed = false;
     mockSidebar.peeking = false;
@@ -158,6 +174,7 @@ describe("Sidebar", () => {
     document.body.innerHTML = "";
     document.head.querySelector('meta[name="sps-basic-mode"]')?.remove();
     document.head.querySelector('meta[name="sps-workplane-mode"]')?.remove();
+    document.head.querySelector('meta[name="sps-core-baseline-mode"]')?.remove();
     vi.clearAllMocks();
   });
 
@@ -627,6 +644,64 @@ describe("Sidebar", () => {
 
     expect(container.querySelector('button[aria-label="Collapse sidebar"]')).toBeNull();
     expect(container.querySelector('button[aria-label="Keep sidebar expanded"]')).toBeNull();
+
+    flushSync(() => {
+      root.unmount();
+    });
+  });
+
+  it("uses the plugin-first Core baseline without built-in workplane navigation", async () => {
+    const basicMode = document.createElement("meta");
+    basicMode.name = "sps-basic-mode";
+    basicMode.content = "true";
+    document.head.appendChild(basicMode);
+    const coreBaselineMode = document.createElement("meta");
+    coreBaselineMode.name = "sps-core-baseline-mode";
+    coreBaselineMode.content = "true";
+    document.head.appendChild(coreBaselineMode);
+    mockInstanceSettingsApi.getExperimental.mockResolvedValue({ enableIsolatedWorkspaces: false });
+    const root = await renderSidebar();
+
+    const labels = [...container.querySelectorAll("nav a")].map((anchor) => anchor.textContent?.trim());
+    expect(labels).toContain("Workspace");
+    expect(labels).toContain("Host settings");
+    expect(labels).not.toContain("Tasks");
+    expect(labels).not.toContain("Projects");
+    expect(labels).not.toContain("Inbox");
+    expect(container.querySelector('[data-testid="sidebar-agents"]')).toBeNull();
+    expect(container.textContent).toContain("Plugin slot outlet");
+    expect(container.textContent).toContain("Plugin launcher outlet");
+
+    flushSync(() => {
+      root.unmount();
+    });
+  });
+
+  it("hides Host-only navigation from a technical Member in Core baseline mode", async () => {
+    const basicMode = document.createElement("meta");
+    basicMode.name = "sps-basic-mode";
+    basicMode.content = "true";
+    document.head.appendChild(basicMode);
+    const coreBaselineMode = document.createElement("meta");
+    coreBaselineMode.name = "sps-core-baseline-mode";
+    coreBaselineMode.content = "true";
+    document.head.appendChild(coreBaselineMode);
+    mockAccessApi.getCurrentBoardAccess.mockResolvedValue({
+      user: null,
+      userId: "member-1",
+      isInstanceAdmin: true,
+      companyIds: ["company-1"],
+      source: "session",
+      keyId: null,
+    });
+    mockInstanceSettingsApi.getExperimental.mockResolvedValue({ enableIsolatedWorkspaces: false });
+    const root = await renderSidebar();
+
+    const labels = [...container.querySelectorAll("nav a")].map((anchor) => anchor.textContent?.trim());
+    expect(labels).toContain("Workspace");
+    expect(labels).not.toContain("Host settings");
+    expect(labels).not.toContain("Plugins");
+    expect(container.textContent).toContain("Plugin slot outlet");
 
     flushSync(() => {
       root.unmount();

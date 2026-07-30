@@ -676,6 +676,7 @@ export type {
   PluginObjectReferenceProviderDeclaration,
   PluginMemoryProviderDeclaration,
   PluginAgentPlatformDeclaration,
+  PluginSpsCoreDeclaration,
   PaperclipPluginManifestV1,
   PluginRecord,
   PluginDatabaseNamespaceRecord,
