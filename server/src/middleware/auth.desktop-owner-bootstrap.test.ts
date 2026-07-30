@@ -21,9 +21,26 @@ describe("actorMiddleware Desktop Owner bootstrap", () => {
         [SPS_DESKTOP_OWNER_BOOTSTRAP_HEADER]: "desktop-launch-token",
       })[name.toLowerCase()],
     } as unknown as Request;
+    const selectRows = [
+      [{ id: "sps-owner", name: "SPS Owner", email: "owner@example.test" }],
+      [{ companyId: "company-1", membershipRole: "owner", status: "active" }],
+      [{ id: "instance-admin" }],
+    ];
+    const db = {
+      select: () => {
+        const rows = selectRows.shift() ?? [];
+        return {
+          from: () => ({
+            where: () => ({
+              then: async (resolve: (value: unknown) => unknown) => resolve(rows),
+            }),
+          }),
+        };
+      },
+    };
     const next = vi.fn();
     const claimDesktopBootstrapAdmin = vi.fn(async () => true);
-    const middleware = actorMiddleware({} as never, {
+    const middleware = actorMiddleware(db as never, {
       deploymentMode: "authenticated",
       resolveSession,
       claimDesktopBootstrapAdmin,
@@ -37,6 +54,8 @@ describe("actorMiddleware Desktop Owner bootstrap", () => {
       expect(request.actor).toMatchObject({
         type: "board",
         userId: "sps-owner",
+        companyIds: ["company-1"],
+        memberships: [{ companyId: "company-1", membershipRole: "owner", status: "active" }],
         isInstanceAdmin: true,
         source: "session",
       });

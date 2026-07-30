@@ -177,6 +177,11 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
           );
         }
         if (session?.user?.id) {
+          // Desktop bootstrap requests are still made by a real SPS account.
+          // Keep that account's active company membership on the actor so
+          // normal Workspace and plugin endpoints do not lose their scope
+          // merely because the two local Desktop proofs are present.
+          const access = await boardAuth.resolveBoardAccess(session.user.id);
           let isInstanceAdmin = false;
           try {
             isInstanceAdmin = await (opts.claimDesktopBootstrapAdmin
@@ -194,8 +199,8 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
             userId: session.user.id,
             userName: session.user.name ?? null,
             userEmail: session.user.email ?? null,
-            companyIds: [],
-            memberships: [],
+            companyIds: access.companyIds,
+            memberships: access.memberships,
             isInstanceAdmin,
             // This is a normal SPS Identity session. The two Desktop launch
             // proofs narrow its temporary instance-admin capability to the
