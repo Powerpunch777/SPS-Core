@@ -11,6 +11,7 @@ import {
   MonitorCog,
   Network,
   Puzzle,
+  ServerCog,
   Settings,
   Shield,
   SlidersHorizontal,
@@ -112,6 +113,7 @@ export function CompanySettingsSidebar() {
           <div className="px-3 pb-1 text-(length:--text-micro) font-semibold uppercase tracking-wide text-muted-foreground">Workspace</div>
           <div className="flex flex-col gap-0.5">
             <SidebarNavItem to="/company/settings" label="Overview" icon={SlidersHorizontal} end />
+            <SidebarNavItem to="/company/settings/sps-server" label="SPS Server" icon={ServerCog} end />
             <SidebarNavItem to="/company/settings/project-sources" label="Sources" icon={FolderCog} end />
             <SidebarNavItem to="/company/settings/nodes" label="Nodes" icon={Network} end />
           </div>
@@ -179,6 +181,7 @@ export function CompanySettingsSidebar() {
         </div>
         <div className="flex flex-col gap-0.5">
           <SidebarNavItem to="/company/settings" label={spsWorkplaneShell ? "기본 정보" : "General"} icon={SlidersHorizontal} end />
+          <SidebarNavItem to="/company/settings/sps-server" label="SPS Server" icon={ServerCog} end />
           {showCloudUpstream ? (
             <SidebarNavItem
               to="/company/settings/cloud-upstream"

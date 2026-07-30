@@ -49,6 +49,12 @@ function ExtensionRow({
 }) {
   const state = plugin.status === "ready" ? "Ready" : plugin.status;
   const companyEnabled = activation?.enabled ?? false;
+  const canChangeUse = plugin.status !== "upgrade_pending" && plugin.status !== "uninstalled";
+  const useLabel = companyEnabled
+    ? "Stop using"
+    : plugin.status === "ready"
+      ? "Use in this Workspace"
+      : "Start and use";
   return (
     <div className="flex items-start justify-between gap-4 px-4 py-4">
       <div className="min-w-0">
@@ -76,11 +82,11 @@ function ExtensionRow({
         <Button
           variant={companyEnabled ? "outline" : "default"}
           size="sm"
-          disabled={plugin.status !== "ready" || changing}
+          disabled={!canChangeUse || changing}
           onClick={onToggle}
         >
           <Power className="h-4 w-4" />
-          {companyEnabled ? "Disable" : "Enable"}
+          {useLabel}
         </Button>
         <Button variant="outline" size="sm" asChild>
           <Link to={`/company/settings/instance/plugins/${plugin.id}`}>
@@ -108,13 +114,28 @@ export function SpsExtensionsManager() {
     enabled: Boolean(selectedCompany?.id),
   });
   const activationMutation = useMutation({
-    mutationFn: ({ pluginId, enabled }: { pluginId: string; enabled: boolean }) =>
-      pluginsApi.setCompanyActivation(pluginId, selectedCompany!.id, enabled),
-    onSuccess: (_result, variables) => {
-      queryClient.invalidateQueries({ queryKey: queryKeys.plugins.companyActivation(selectedCompany!.id) });
-      queryClient.invalidateQueries({ queryKey: queryKeys.plugins.uiContributionsPrefix });
+    mutationFn: async ({ plugin, enabled }: { plugin: PluginRecord; enabled: boolean }) => {
+      // A Host installs a package once, while each Workspace chooses whether to
+      // use it. Keep that implementation detail behind one deliberate action:
+      // starting a paused package and enabling it for this Workspace happen as
+      // one operation. Stopping use only changes this Workspace; it never
+      // interrupts another Workspace that may rely on the same package.
+      if (enabled && plugin.status !== "ready") {
+        await pluginsApi.enable(plugin.id);
+      }
+      return await pluginsApi.setCompanyActivation(plugin.id, selectedCompany!.id, enabled);
+    },
+    onSuccess: async (_result, variables) => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.plugins.all }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.plugins.companyActivation(selectedCompany!.id) }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.plugins.uiContributionsPrefix }),
+      ]);
       pushToast({
-        title: variables.enabled ? "Extension enabled for this Company" : "Extension disabled for this Company",
+        title: variables.enabled ? "Extension ready in this Workspace" : "Extension stopped for this Workspace",
+        body: variables.enabled
+          ? "Its navigation and pages are now available without changing other Workspaces."
+          : "The package stays available on this Host for other Workspaces.",
         tone: variables.enabled ? "success" : "info",
       });
     },
@@ -156,8 +177,8 @@ export function SpsExtensionsManager() {
         plugin={plugin}
         activation={activation}
         builtIn={builtIn}
-        changing={activationMutation.isPending && activationMutation.variables?.pluginId === plugin.id}
-        onToggle={() => activationMutation.mutate({ pluginId: plugin.id, enabled: !activation?.enabled })}
+        changing={activationMutation.isPending && activationMutation.variables?.plugin.id === plugin.id}
+        onToggle={() => activationMutation.mutate({ plugin, enabled: !activation?.enabled })}
       />
     );
   };

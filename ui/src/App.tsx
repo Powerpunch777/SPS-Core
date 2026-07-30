@@ -89,6 +89,7 @@ import { SpsCoreAssistantDetail } from "./pages/SpsCoreAssistantDetail";
 import { SpsCoreHostSettings } from "./pages/SpsCoreHostSettings";
 import { SpsCoreWorkspaceSources } from "./pages/SpsCoreWorkspaceSources";
 import { SpsCoreTeamAccess } from "./pages/SpsCoreTeamAccess";
+import { SpsCoreServerSettings } from "./pages/SpsCoreServerSettings";
 
 function coreBaselineRoutes() {
   return (
@@ -99,6 +100,7 @@ function coreBaselineRoutes() {
       <Route path="assistants/:agentId" element={<SpsCoreAssistantDetail />} />
       <Route path="assistants/:agentId/:tab" element={<SpsCoreAssistantDetail />} />
       <Route path="company/settings" element={<SpsCoreHostSettings />} />
+      <Route path="company/settings/sps-server" element={<SpsCoreServerSettings />} />
       <Route path="company/settings/team" element={<SpsCoreTeamAccess />} />
       <Route path="company/settings/nodes" element={<SpsNodes />} />
       <Route path="company/settings/project-sources" element={<SpsCoreWorkspaceSources />} />
@@ -126,6 +128,7 @@ function boardRoutes() {
       <Route path="onboarding" element={<OnboardingRoutePage />} />
       <Route path="companies" element={<Companies />} />
       <Route path="company/settings" element={<CompanySettings />} />
+      <Route path="company/settings/sps-server" element={<SpsCoreServerSettings />} />
       <Route path="company/settings/environments" element={<Navigate to="/company/settings/instance/environments" replace />} />
       <Route path="company/settings/cloud-upstream" element={<CloudUpstream />} />
       <Route path="company/settings/members" element={<CompanyAccess />} />
