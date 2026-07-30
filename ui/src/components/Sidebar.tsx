@@ -161,22 +161,6 @@ export function Sidebar() {
             <SidebarNavItem to="/dashboard" label="Workspace" icon={LayoutDashboard} />
           </div>
 
-          <SidebarSection label="Plugins" collapsible={{ open: workOpen, onOpenChange: setWorkOpen }}>
-            <PluginSlotOutlet
-              slotTypes={["sidebar"]}
-              context={pluginContext}
-              className="flex flex-col gap-0.5"
-              itemClassName="text-(length:--text-compact) font-medium"
-              missingBehavior="placeholder"
-            />
-            <PluginLauncherOutlet
-              placementZones={["sidebar"]}
-              context={pluginContext}
-              className="flex flex-col gap-0.5"
-              itemClassName="text-(length:--text-compact) font-medium"
-            />
-          </SidebarSection>
-
           {canManageCoreHost ? (
             <SidebarSection label="Settings" collapsible={{ open: companyOpen, onOpenChange: setCompanyOpen }}>
               <SidebarNavItem to="/company/settings" label="Host settings" icon={Settings} />

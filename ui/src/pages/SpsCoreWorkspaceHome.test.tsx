@@ -5,17 +5,12 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SpsCoreWorkspaceHome } from "./SpsCoreWorkspaceHome";
 import { queryKeys } from "@/lib/queryKeys";
-
-const mockPluginsApi = vi.hoisted(() => ({
-  listForCompany: vi.fn(),
-}));
 const mockAgentsApi = vi.hoisted(() => ({
   list: vi.fn(),
 }));
 const mockSetBreadcrumbs = vi.hoisted(() => vi.fn());
 const mockNavigate = vi.hoisted(() => vi.fn());
 
-vi.mock("@/api/plugins", () => ({ pluginsApi: mockPluginsApi }));
 vi.mock("@/api/agents", () => ({ agentsApi: mockAgentsApi }));
 vi.mock("@/context/CompanyContext", () => ({
   useCompany: () => ({
@@ -57,39 +52,10 @@ describe("SpsCoreWorkspaceHome", () => {
     vi.clearAllMocks();
   });
 
-  it("shows only plugins enabled for the selected Workspace", async () => {
+  it("keeps the Workspace home neutral and directs plugin management to settings", async () => {
     mockAgentsApi.list.mockResolvedValue([
       { id: "assistant-1", name: "Workspace Assistant", title: "Initial Assistant", status: "idle", adapterType: "codex_local" },
     ]);
-    mockPluginsApi.listForCompany.mockResolvedValue({
-      companyId: "workspace-1",
-      plugins: [
-        {
-          id: "discovery",
-          pluginKey: "sps.plugin-discovery",
-          displayName: "Plugin Discovery & Builder",
-          version: "1.0.0",
-          status: "ready",
-          activation: { enabled: true },
-        },
-        {
-          id: "disabled-workplane",
-          pluginKey: "sps.room-workplane",
-          displayName: "Room Workplane",
-          version: "1.0.0",
-          status: "ready",
-          activation: { enabled: false },
-        },
-        {
-          id: "failed-plugin",
-          pluginKey: "sps.failed",
-          displayName: "Failed plugin",
-          version: "1.0.0",
-          status: "error",
-          activation: { enabled: true },
-        },
-      ],
-    });
     const root = createRoot(container);
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
 
@@ -103,14 +69,11 @@ describe("SpsCoreWorkspaceHome", () => {
     await flushReact();
     await flushReact();
 
-    expect(mockPluginsApi.listForCompany).toHaveBeenCalledWith("workspace-1");
     expect(mockAgentsApi.list).toHaveBeenCalledWith("workspace-1");
-    expect(container.textContent).toContain("Plugin Discovery & Builder");
     expect(container.textContent).toContain("Workspace Assistant");
-    expect(container.innerHTML).toContain('href="/discover"');
+    expect(container.innerHTML).toContain('href="/company/settings/instance/plugins"');
     expect(container.innerHTML).toContain('href="/assistants/assistant-1"');
-    expect(container.textContent).not.toContain("Room Workplane");
-    expect(container.textContent).not.toContain("Failed plugin");
+    expect(container.textContent).not.toContain("Enabled plugins");
     expect(mockSetBreadcrumbs).toHaveBeenCalledWith([{ label: "Prototype Workspace" }]);
 
     root.unmount();
@@ -118,7 +81,6 @@ describe("SpsCoreWorkspaceHome", () => {
 
   it("requires an initial Assistant before opening the Workspace", async () => {
     mockAgentsApi.list.mockResolvedValue([]);
-    mockPluginsApi.listForCompany.mockResolvedValue({ companyId: "workspace-1", plugins: [] });
     const root = createRoot(container);
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
 
@@ -142,7 +104,6 @@ describe("SpsCoreWorkspaceHome", () => {
     mockAgentsApi.list.mockReturnValue(new Promise((resolve) => {
       resolveAgents = resolve;
     }));
-    mockPluginsApi.listForCompany.mockResolvedValue({ companyId: "workspace-1", plugins: [] });
     const root = createRoot(container);
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     queryClient.setQueryData(queryKeys.agents.list("workspace-1"), []);
