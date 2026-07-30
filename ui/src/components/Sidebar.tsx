@@ -81,7 +81,11 @@ export function Sidebar() {
     enabled: spsCoreBaselineShell,
     retry: false,
   });
-  const canManageCoreHost = !spsCoreBaselineShell || boardAccess?.source === "local_implicit";
+  // A signed-in Desktop Host is represented by an SPS Identity session plus
+  // the Desktop-only Host proof. `isCoreHost` is verified by the server for
+  // this exact request; database roles and session source are deliberately
+  // not used as a proxy for possession of the physical Host.
+  const canManageCoreHost = !spsCoreBaselineShell || boardAccess?.isCoreHost === true;
   const liveRunsQueryKey = queryKeys.liveRuns(selectedCompanyId!);
   const sharedLiveRuns = useSharedPollingQuery({
     companyId: selectedCompanyId,

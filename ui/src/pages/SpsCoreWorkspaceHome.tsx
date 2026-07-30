@@ -22,6 +22,7 @@ export function SpsCoreWorkspaceHome() {
     data: assistants,
     isLoading: assistantsLoading,
     isSuccess: assistantsLoaded,
+    isFetching: assistantsFetching,
   } = useQuery({
     queryKey: queryKeys.agents.list(selectedCompanyId ?? ""),
     queryFn: () => agentsApi.list(selectedCompanyId!),
@@ -37,7 +38,9 @@ export function SpsCoreWorkspaceHome() {
   );
   const initialAssistant = (assistants ?? []).find((agent) => agent.status !== "terminated") ?? null;
 
-  if (assistantsLoaded && !initialAssistant) {
+  // Keep the setup route stable while a just-created Assistant replaces the
+  // cached empty list. Redirecting during that refetch reopens setup forever.
+  if (assistantsLoaded && !assistantsFetching && !initialAssistant) {
     return <Navigate to="/assistants/new" replace />;
   }
 
