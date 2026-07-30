@@ -640,6 +640,33 @@ export interface PluginSpsArtifact {
 }
 
 /**
+ * The finite Worker-to-Host operation set that forms SPS's public Runtime
+ * transport contract. It intentionally excludes general plugin RPC methods.
+ */
+export type PluginSpsRuntimeOperation =
+  | "sps.workspaceSources.list"
+  | "sps.runtimes.list"
+  | "sps.executionGrants.list"
+  | "sps.executionGrants.upsert"
+  | "sps.executionGrants.revoke"
+  | "sps.runs.dispatch"
+  | "sps.runs.get"
+  | "sps.runs.listEvents"
+  | "sps.artifacts.publish"
+  | "sps.artifacts.list";
+
+/**
+ * Public Runtime transport supplied by SPS Desktop to a plugin Worker.
+ *
+ * This is deliberately a narrow structural contract so the public
+ * `@sonparkserver/plugin-sdk/runtime` facade can consume it without importing
+ * private Core modules or receiving a general Worker RPC escape hatch.
+ */
+export interface PluginSpsRuntimeTransport {
+  request(operation: PluginSpsRuntimeOperation, input: Record<string, unknown>): Promise<unknown>;
+}
+
+/**
  * Workflow-neutral SPS infrastructure for plugins. `subjectKey` is owned by
  * the calling plugin; Core does not interpret it as an Agent, Task, or role.
  */
@@ -2172,6 +2199,12 @@ export interface PluginContext {
 
   /** Use Host-managed Workspace Sources and Node-local CLI runtimes. */
   sps: PluginSpsClient;
+
+  /**
+   * Finite public SPS Runtime transport. New portable plugins can pass this
+   * to `@sonparkserver/plugin-sdk/runtime`; `sps` remains for compatibility.
+   */
+  spsTransport: PluginSpsRuntimeTransport;
 
   /** Subscribe to and emit domain events. Requires `events.subscribe` / `events.emit`. */
   events: PluginEventsClient;

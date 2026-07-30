@@ -66,8 +66,8 @@ import { getRecentProjectIds, trackRecentProject } from "@/lib/recent-projects";
 /**
  * The global bridge registry shape.
  *
- * This is placed on `globalThis.__paperclipPluginBridge__` and consumed by
- * the plugin module loader to provide implementations for external imports.
+ * This is placed on `globalThis.__spsPluginBridge__` and exposed through the
+ * legacy Paperclip global for existing plugin bundles and the module loader.
  */
 export interface PluginBridgeRegistry {
   react: unknown;
@@ -76,6 +76,8 @@ export interface PluginBridgeRegistry {
 }
 
 declare global {
+  // eslint-disable-next-line no-var
+  var __spsPluginBridge__: PluginBridgeRegistry | undefined;
   // eslint-disable-next-line no-var
   var __paperclipPluginBridge__: PluginBridgeRegistry | undefined;
 }
@@ -660,8 +662,8 @@ class PluginSdkErrorBoundary extends Component<{ children: ReactNode; fallback?:
  * Initialize the plugin bridge global registry.
  *
  * Registers the host's React, ReactDOM, and SDK UI bridge implementations
- * on `globalThis.__paperclipPluginBridge__` so the plugin module loader
- * can provide them to plugin bundles.
+ * on the SPS global registry. The legacy Paperclip global remains an alias so
+ * previously bundled UI continues to receive the same registry.
  *
  * @param react - The host's React module
  * @param reactDom - The host's ReactDOM module
@@ -670,7 +672,7 @@ export function initPluginBridge(
   react: typeof import("react"),
   reactDom: typeof import("react-dom"),
 ): void {
-  globalThis.__paperclipPluginBridge__ = {
+  const registry: PluginBridgeRegistry = {
     react,
     reactDom,
     sdkUi: {
@@ -711,4 +713,6 @@ export function initPluginBridge(
       ManagedRoutinesList: HostManagedRoutinesList,
     },
   };
+  globalThis.__spsPluginBridge__ = registry;
+  globalThis.__paperclipPluginBridge__ = registry;
 }

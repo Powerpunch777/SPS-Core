@@ -60,6 +60,9 @@ import type {
 } from "./define-plugin.js";
 import type {
   PluginContext,
+  PluginSpsClient,
+  PluginSpsRuntimeOperation,
+  PluginSpsRuntimeTransport,
   PluginEvent,
   PluginJobContext,
   PluginLauncherRegistration,
@@ -421,6 +424,69 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
   // -----------------------------------------------------------------------
 
   function buildContext(): PluginContext {
+    const spsTransport: PluginSpsRuntimeTransport = Object.freeze({
+      request(operation: PluginSpsRuntimeOperation, input: Record<string, unknown>): Promise<unknown> {
+        switch (operation) {
+          case "sps.workspaceSources.list":
+          case "sps.runtimes.list":
+          case "sps.executionGrants.list":
+          case "sps.executionGrants.upsert":
+          case "sps.executionGrants.revoke":
+          case "sps.runs.dispatch":
+          case "sps.runs.get":
+          case "sps.runs.listEvents":
+          case "sps.artifacts.publish":
+          case "sps.artifacts.list":
+            return callHost(operation, input as never);
+          default:
+            return Promise.reject(new Error(`Unsupported SPS Runtime operation: ${String(operation)}`));
+        }
+      },
+    });
+
+    const sps: PluginSpsClient = {
+      workspaceSources: {
+        async list(companyId: string) {
+          return spsTransport.request("sps.workspaceSources.list", { companyId }) as Promise<ReturnType<PluginSpsClient["workspaceSources"]["list"]> extends Promise<infer T> ? T : never>;
+        },
+      },
+      runtimes: {
+        async list(companyId: string, options = {}) {
+          return spsTransport.request("sps.runtimes.list", { companyId, nodeId: options.nodeId }) as Promise<ReturnType<PluginSpsClient["runtimes"]["list"]> extends Promise<infer T> ? T : never>;
+        },
+      },
+      executionGrants: {
+        async list(companyId: string, options = {}) {
+          return spsTransport.request("sps.executionGrants.list", { companyId, subjectKey: options.subjectKey, includeRevoked: options.includeRevoked }) as Promise<ReturnType<PluginSpsClient["executionGrants"]["list"]> extends Promise<infer T> ? T : never>;
+        },
+        async upsert(input) {
+          return spsTransport.request("sps.executionGrants.upsert", input) as Promise<ReturnType<PluginSpsClient["executionGrants"]["upsert"]> extends Promise<infer T> ? T : never>;
+        },
+        async revoke(companyId: string, grantId: string) {
+          return spsTransport.request("sps.executionGrants.revoke", { companyId, grantId }) as Promise<ReturnType<PluginSpsClient["executionGrants"]["revoke"]> extends Promise<infer T> ? T : never>;
+        },
+      },
+      runs: {
+        async dispatch(input) {
+          return spsTransport.request("sps.runs.dispatch", input) as Promise<ReturnType<PluginSpsClient["runs"]["dispatch"]> extends Promise<infer T> ? T : never>;
+        },
+        async get(companyId: string, runId: string) {
+          return spsTransport.request("sps.runs.get", { companyId, runId }) as Promise<ReturnType<PluginSpsClient["runs"]["get"]> extends Promise<infer T> ? T : never>;
+        },
+        async listEvents(companyId: string, runId: string, options = {}) {
+          return spsTransport.request("sps.runs.listEvents", { companyId, runId, afterSequence: options.afterSequence }) as Promise<ReturnType<PluginSpsClient["runs"]["listEvents"]> extends Promise<infer T> ? T : never>;
+        },
+      },
+      artifacts: {
+        async publish(input) {
+          return spsTransport.request("sps.artifacts.publish", input) as Promise<ReturnType<PluginSpsClient["artifacts"]["publish"]> extends Promise<infer T> ? T : never>;
+        },
+        async list(companyId: string, options = {}) {
+          return spsTransport.request("sps.artifacts.list", { companyId, subjectKey: options.subjectKey, runId: options.runId, limit: options.limit }) as Promise<ReturnType<PluginSpsClient["artifacts"]["list"]> extends Promise<infer T> ? T : never>;
+        },
+      },
+    };
+
     const context = {
       get manifest() {
         if (!manifest) throw new Error("Plugin context accessed before initialization");
@@ -482,61 +548,9 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
         },
       },
 
-      sps: {
-        workspaceSources: {
-          async list(companyId: string) {
-            return callHost("sps.workspaceSources.list", { companyId });
-          },
-        },
-        runtimes: {
-          async list(companyId: string, options = {}) {
-            return callHost("sps.runtimes.list", { companyId, nodeId: options.nodeId });
-          },
-        },
-        executionGrants: {
-          async list(companyId: string, options = {}) {
-            return callHost("sps.executionGrants.list", {
-              companyId,
-              subjectKey: options.subjectKey,
-              includeRevoked: options.includeRevoked,
-            });
-          },
-          async upsert(input) {
-            return callHost("sps.executionGrants.upsert", input);
-          },
-          async revoke(companyId: string, grantId: string) {
-            return callHost("sps.executionGrants.revoke", { companyId, grantId });
-          },
-        },
-        runs: {
-          async dispatch(input) {
-            return callHost("sps.runs.dispatch", input);
-          },
-          async get(companyId: string, runId: string) {
-            return callHost("sps.runs.get", { companyId, runId });
-          },
-          async listEvents(companyId: string, runId: string, options = {}) {
-            return callHost("sps.runs.listEvents", {
-              companyId,
-              runId,
-              afterSequence: options.afterSequence,
-            });
-          },
-        },
-        artifacts: {
-          async publish(input) {
-            return callHost("sps.artifacts.publish", input);
-          },
-          async list(companyId: string, options = {}) {
-            return callHost("sps.artifacts.list", {
-              companyId,
-              subjectKey: options.subjectKey,
-              runId: options.runId,
-              limit: options.limit,
-            });
-          },
-        },
-      },
+      sps,
+
+      spsTransport,
 
       events: {
         on(

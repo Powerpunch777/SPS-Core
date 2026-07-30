@@ -397,3 +397,103 @@ describe("worker invocation scope propagation", () => {
     }
   });
 });
+
+describe("worker SPS Runtime transport", () => {
+  it("forwards only the public SPS operations and keeps ctx.sps compatible", async () => {
+    const hostToWorker = new PassThrough();
+    const workerToHost = new PassThrough();
+    const hostReadline = createInterface({ input: workerToHost });
+    const pending = new Map<string, (response: JsonRpcResponse) => void>();
+    const outboundMethods: string[] = [];
+    let nextRequestId = 1;
+
+    const plugin = definePlugin({
+      async setup(ctx) {
+        ctx.actions.register("transport", async () => {
+          const result = await ctx.spsTransport.request("sps.runtimes.list", {
+            companyId: "company-1",
+            nodeId: "node-1",
+          });
+          return { result };
+        });
+        ctx.actions.register("legacy", async () => ({
+          result: await ctx.sps.runtimes.list("company-1", { nodeId: "node-1" }),
+        }));
+        ctx.actions.register("unsupported", async () => {
+          const unsafeTransport = ctx.spsTransport as unknown as {
+            request(operation: string, input: Record<string, unknown>): Promise<unknown>;
+          };
+          return unsafeTransport.request("companies.list", {});
+        });
+      },
+    });
+    const worker = startWorkerRpcHost({ plugin, stdin: hostToWorker, stdout: workerToHost });
+
+    function callWorker(method: string, params: unknown) {
+      const id = `host-sps-runtime-${nextRequestId++}`;
+      const result = new Promise<unknown>((resolve, reject) => {
+        pending.set(id, (response) => {
+          if ("error" in response && response.error) {
+            reject(new Error(response.error.message));
+            return;
+          }
+          resolve((response as { result?: unknown }).result);
+        });
+      });
+      hostToWorker.write(serializeMessage(createRequest(method, params, id)));
+      return result;
+    }
+
+    hostReadline.on("line", (line) => {
+      const message = parseMessage(line);
+      if (isJsonRpcResponse(message)) {
+        pending.get(String(message.id))?.(message);
+        pending.delete(String(message.id));
+        return;
+      }
+      if (!isJsonRpcRequest(message)) return;
+      outboundMethods.push(message.method);
+      if (message.method === "sps.runtimes.list") {
+        hostToWorker.write(serializeMessage(createSuccessResponse(message.id, [{
+          id: "runtime-1",
+          nodeId: "node-1",
+        }])));
+      }
+    });
+
+    try {
+      await expect(callWorker("initialize", {
+        manifest: {
+          id: "sps.runtime-transport-test",
+          apiVersion: 1,
+          version: "1.0.0",
+          displayName: "SPS Runtime Transport Test",
+          description: "Test plugin",
+          author: "SPS",
+          categories: ["automation"],
+          capabilities: ["sps.runtimes.read"],
+          entrypoints: {},
+        },
+        config: {},
+        databaseNamespace: null,
+      })).resolves.toMatchObject({ ok: true });
+
+      await expect(callWorker("performAction", { key: "transport", params: {} })).resolves.toEqual({
+        result: [{ id: "runtime-1", nodeId: "node-1" }],
+      });
+      await expect(callWorker("performAction", { key: "legacy", params: {} })).resolves.toEqual({
+        result: [{ id: "runtime-1", nodeId: "node-1" }],
+      });
+      expect(outboundMethods).toEqual(["sps.runtimes.list", "sps.runtimes.list"]);
+
+      await expect(callWorker("performAction", { key: "unsupported", params: {} }))
+        .rejects.toThrow(/Unsupported SPS Runtime operation/);
+      expect(outboundMethods).toEqual(["sps.runtimes.list", "sps.runtimes.list"]);
+    } finally {
+      worker.stop();
+      hostReadline.close();
+      hostToWorker.destroy();
+      workerToHost.destroy();
+    }
+  });
+});

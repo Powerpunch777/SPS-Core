@@ -19,6 +19,7 @@ import {
   PluginBridgeContext,
   resolveHostNavigationHref,
   shouldHandleHostNavigationClick,
+  usePluginData,
   useHostNavigation,
   type PluginBridgeContextValue,
 } from "./bridge";
@@ -43,7 +44,19 @@ function clickEvent(
 }
 
 afterEach(() => {
+  delete globalThis.__spsPluginBridge__;
   delete globalThis.__paperclipPluginBridge__;
+});
+
+describe("plugin bridge registry globals", () => {
+  it("publishes the SPS global and retains the legacy global as the same registry", () => {
+    initPluginBridge(React, ReactDOM);
+
+    expect(globalThis.__spsPluginBridge__).toBe(globalThis.__paperclipPluginBridge__);
+    expect(globalThis.__spsPluginBridge__?.sdkUi.usePluginData).toBe(usePluginData);
+    // Existing legacy UI loaders still read this global directly.
+    expect(globalThis.__paperclipPluginBridge__?.sdkUi.useHostNavigation).toBe(useHostNavigation);
+  });
 });
 
 function act(callback: () => void) {

@@ -35,13 +35,16 @@ function makeTempPluginDir(): string {
   return dir;
 }
 
-function writePluginPackage(pluginDir: string): void {
+function writePluginPackage(
+  pluginDir: string,
+  metadataKey: "spsPlugin" | "paperclipPlugin" = "paperclipPlugin",
+): void {
   mkdirSync(path.join(pluginDir, "dist", "ui"), { recursive: true });
   writeFileSync(
     path.join(pluginDir, "package.json"),
     JSON.stringify({
       name: "@acme/example",
-      paperclipPlugin: {
+      [metadataKey]: {
         manifest: "./dist/manifest.js",
         worker: "./dist/worker.js",
         ui: "./dist/ui",
@@ -88,6 +91,29 @@ describe("resolvePluginWatchTargets", () => {
       { path: path.join(pluginDir, "dist", "worker.js"), recursive: false, kind: "file" },
       { path: path.join(pluginDir, "package.json"), recursive: false, kind: "file" },
     ]);
+  });
+
+  it("watches entrypoints declared with the SPS package key", () => {
+    const pluginDir = makeTempPluginDir();
+    writePluginPackage(pluginDir, "spsPlugin");
+
+    const targets = resolvePluginWatchTargets(pluginDir);
+
+    expect(targets.map((target) => target.path)).toContain(path.join(pluginDir, "dist", "worker.js"));
+    expect(targets.map((target) => target.path)).toContain(path.join(pluginDir, "dist", "ui", "index.js"));
+  });
+
+  it("rejects ambiguous dual package metadata", () => {
+    const pluginDir = makeTempPluginDir();
+    writePluginPackage(pluginDir, "spsPlugin");
+    const packageJsonPath = path.join(pluginDir, "package.json");
+    writeFileSync(packageJsonPath, JSON.stringify({
+      name: "@acme/example",
+      spsPlugin: { manifest: "./dist/manifest.js" },
+      paperclipPlugin: { manifest: "./dist/other-manifest.js" },
+    }));
+
+    expect(() => resolvePluginWatchTargets(pluginDir)).toThrow(/ambiguous/i);
   });
 
   it("falls back to dist when package metadata does not declare entrypoints", () => {

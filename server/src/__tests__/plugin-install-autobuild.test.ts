@@ -58,7 +58,11 @@ const standaloneRepoPluginRoot = path.join(repoPluginRoot, "sandbox-providers");
 
 async function createBundledPluginFixture(
   nameSuffix: string,
-  options: { rootDir?: string; buildDistImmediately?: boolean } = {},
+  options: {
+    rootDir?: string;
+    buildDistImmediately?: boolean;
+    metadataKey?: "spsPlugin" | "paperclipPlugin";
+  } = {},
 ): Promise<FixturePlugin> {
   const slug = `plugin-autobuild-${nameSuffix}-${randomUUID().slice(0, 8)}`;
   const packageName = `@paperclipai/${slug}`;
@@ -82,7 +86,7 @@ async function createBundledPluginFixture(
         ...(postinstallScript ? { postinstall: postinstallScript } : {}),
         build: "node ./scripts/build.mjs",
       },
-      paperclipPlugin: {
+      [options.metadataKey ?? "paperclipPlugin"]: {
         manifest: "./dist/manifest.js",
         worker: "./dist/worker.js",
         ui: "./dist/ui/",
@@ -211,6 +215,33 @@ describe("ensureLocalPluginBuilt", () => {
     );
 
     expect(execStub).not.toHaveBeenCalled();
+  });
+
+  it("auto-builds bundled plugins that declare SPS package metadata", async () => {
+    const fixture = await createBundledPluginFixture("sps-metadata", { metadataKey: "spsPlugin" });
+    cleanupPaths.add(fixture.packageRoot);
+
+    const execStub = vi.fn(async (_file: string, args: readonly string[]) => {
+      if (args.includes("build")) {
+        await mkdir(path.join(fixture.distDir, "ui"), { recursive: true });
+        await writeFile(path.join(fixture.distDir, "manifest.js"), "export default {};\n", "utf8");
+        await writeFile(path.join(fixture.distDir, "worker.js"), "export {};\n", "utf8");
+        await writeFile(path.join(fixture.distDir, "ui", "index.js"), "export default {};\n", "utf8");
+      }
+      return { stdout: "", stderr: "" };
+    });
+
+    await ensureLocalPluginBuilt(
+      fixture.packageRoot,
+      JSON.parse(await readFile(path.join(fixture.packageRoot, "package.json"), "utf8")) as Record<string, unknown>,
+      { execFileAsyncImpl: execStub },
+    );
+
+    expect(execStub).toHaveBeenCalledWith(
+      "pnpm",
+      ["--filter", fixture.packageName, "build"],
+      expect.objectContaining({ cwd: REPO_ROOT }),
+    );
   });
 
   it("bootstraps standalone bundled plugins before building them", async () => {
