@@ -345,6 +345,17 @@ export const queryKeys = {
     dashboard: (pluginId: string) => ["plugins", pluginId, "dashboard"] as const,
     logs: (pluginId: string) => ["plugins", pluginId, "logs"] as const,
   },
+  workspaceSurfaces: {
+    shell: (companyId: string) => ["workspace-surfaces", companyId, "shell"] as const,
+    shellProviders: (companyId: string) =>
+      ["workspace-surfaces", companyId, "shell-providers"] as const,
+    dashboard: (companyId: string) =>
+      ["workspace-surfaces", companyId, "dashboard"] as const,
+    inbox: (companyId: string, archived = false) =>
+      ["workspace-surfaces", companyId, "inbox", archived ? "with-archived" : "active"] as const,
+    inboxPrefix: (companyId: string) =>
+      ["workspace-surfaces", companyId, "inbox"] as const,
+  },
   adapters: {
     all: ["adapters"] as const,
   },

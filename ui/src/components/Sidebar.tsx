@@ -23,7 +23,7 @@ import {
   MessagesSquare,
   GanttChartSquare,
 } from "lucide-react";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { NavLink } from "@/lib/router";
 import { SidebarSection } from "./SidebarSection";
@@ -38,6 +38,7 @@ import { attentionApi } from "../api/attention";
 import { heartbeatsApi } from "../api/heartbeats";
 import { instanceSettingsApi } from "../api/instanceSettings";
 import { accessApi } from "../api/access";
+import { workspaceSurfacesApi } from "../api/workspace-surfaces";
 import { queryKeys } from "../lib/queryKeys";
 import { attentionBadgeCount } from "../lib/attention";
 import { useInboxBadge } from "../hooks/useInboxBadge";
@@ -45,7 +46,7 @@ import { usePublishSharedQueryData, useSharedPollingQuery } from "../hooks/useSh
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn, SIDEBAR_RAIL_HIDDEN_LABEL } from "../lib/utils";
-import { PluginSlotOutlet } from "@/plugins/slots";
+import { PluginSlotOutlet, usePluginSlots } from "@/plugins/slots";
 import { PluginLauncherOutlet } from "@/plugins/launchers";
 import { SidebarCompanyMenu } from "./SidebarCompanyMenu";
 import { ProductBrand } from "./ProductBrand";
@@ -80,6 +81,17 @@ export function Sidebar() {
     queryFn: () => accessApi.getCurrentBoardAccess(),
     enabled: spsCoreBaselineShell,
     retry: false,
+  });
+  const { data: workspaceShell } = useQuery({
+    queryKey: queryKeys.workspaceSurfaces.shell(selectedCompanyId ?? ""),
+    queryFn: () => workspaceSurfacesApi.getShell(selectedCompanyId!),
+    enabled: spsCoreBaselineShell && Boolean(selectedCompanyId),
+  });
+  const { data: workspaceInbox } = useQuery({
+    queryKey: queryKeys.workspaceSurfaces.inbox(selectedCompanyId ?? ""),
+    queryFn: () => workspaceSurfacesApi.listInbox(selectedCompanyId!),
+    enabled: spsCoreBaselineShell && Boolean(selectedCompanyId),
+    refetchInterval: 15_000,
   });
   // A signed-in Desktop Host is represented by an SPS Identity session plus
   // the Desktop-only Host proof. `isCoreHost` is verified by the server for
@@ -134,6 +146,31 @@ export function Sidebar() {
     companyId: selectedCompanyId,
     companyPrefix: selectedCompany?.issuePrefix ?? null,
   };
+  const { slots: workspacePluginPageSlots } = usePluginSlots({
+    slotTypes: ["page"],
+    companyId: selectedCompanyId,
+    enabled: spsCoreBaselineShell && !!selectedCompanyId,
+  });
+  const workspacePluginPages = useMemo(
+    () => workspacePluginPageSlots
+      .filter((slot) => Boolean(slot.routePath && selectedCompany?.issuePrefix))
+      .sort((left, right) => (left.order ?? 0) - (right.order ?? 0)),
+    [selectedCompany?.issuePrefix, workspacePluginPageSlots],
+  );
+  const shellNavigation = useMemo(
+    () => [...(workspaceShell?.shell?.navigation ?? [])]
+      .filter((item) => item.target !== "/dashboard" && item.target !== "/inbox")
+      .sort((left, right) => (
+        (left.order ?? Number.MAX_SAFE_INTEGER) - (right.order ?? Number.MAX_SAFE_INTEGER)
+        || left.displayName.localeCompare(right.displayName)
+      )),
+    [workspaceShell?.shell?.navigation],
+  );
+  const shellNavigationTargets = useMemo(
+    () => new Set(shellNavigation.map((item) => item.target.replace(/\/+$/, ""))),
+    [shellNavigation],
+  );
+  const workspaceUnreadCount = workspaceInbox?.items.filter((item) => item.unread).length ?? 0;
 
   if (spsCoreBaselineShell) {
     return (
@@ -159,12 +196,37 @@ export function Sidebar() {
           <div className="flex flex-col gap-0.5">
             <SidebarCompanyMenu />
             <SidebarNavItem to="/dashboard" label="Workspace" icon={LayoutDashboard} />
+            <SidebarNavItem
+              to="/inbox"
+              label="Inbox"
+              icon={Inbox}
+              badge={workspaceUnreadCount}
+              badgeLabel="unread"
+            />
+            {shellNavigation.map((item) => (
+              <SidebarNavItem
+                key={`workspace-shell:${item.id}`}
+                to={item.target}
+                label={item.displayName}
+                icon={Puzzle}
+                end
+              />
+            ))}
+            {workspacePluginPages.map((slot) => (
+              shellNavigationTargets.has(`/${slot.routePath}`.replace(/\/+$/, "")) ? null :
+              <SidebarNavItem
+                key={`${slot.pluginKey}:${slot.id}`}
+                to={`/${selectedCompany!.issuePrefix}/${slot.routePath}`}
+                label={slot.displayName}
+                icon={Puzzle}
+                end
+              />
+            ))}
           </div>
 
           {canManageCoreHost ? (
             <SidebarSection label="Settings" collapsible={{ open: companyOpen, onOpenChange: setCompanyOpen }}>
               <SidebarNavItem to="/company/settings" label="Host settings" icon={Settings} />
-              <SidebarNavItem to="/company/settings/instance/plugins" label="Plugins" icon={Puzzle} />
             </SidebarSection>
           ) : null}
         </nav>

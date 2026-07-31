@@ -1222,6 +1222,32 @@ export interface PluginToolsClient {
   ): Promise<{ registered: number }>;
 }
 
+export interface PluginInboxItemInput {
+  companyId: string;
+  externalId: string;
+  targetUserId?: string | null;
+  category: string;
+  severity?: "info" | "success" | "warning" | "error";
+  title: string;
+  summary: string;
+  navigationTarget?: string | null;
+  actionIds?: string[];
+  opaqueReference?: Record<string, unknown>;
+}
+
+/**
+ * Publish compact workflow-neutral summaries into the Core Inbox. The source
+ * plugin remains the owner of the full business record.
+ */
+export interface PluginInboxClient {
+  /** Requires `inbox.items.publish`. */
+  publish(input: PluginInboxItemInput): Promise<{ id: string; externalId: string }>;
+  /** Requires `inbox.items.update`; updates an existing stable external id. */
+  update(input: PluginInboxItemInput): Promise<{ id: string; externalId: string }>;
+  /** Requires `inbox.items.update`; hides the summary without deleting plugin data. */
+  withdraw(input: { companyId: string; externalId: string }): Promise<void>;
+}
+
 /**
  * Structured lifecycle input accepted by the Core memory control plane.
  *
@@ -2232,6 +2258,9 @@ export interface PluginContext {
 
   /** Read and write scoped plugin state. Requires `plugin.state.read` / `plugin.state.write`. */
   state: PluginStateClient;
+
+  /** Publish and update workflow-neutral Core Inbox summaries. */
+  inbox: PluginInboxClient;
 
   /** Create and query plugin-owned entity records. */
   entities: PluginEntitiesClient;

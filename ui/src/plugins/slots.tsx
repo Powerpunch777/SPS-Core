@@ -32,6 +32,7 @@ import {
 import * as ReactModule from "react";
 import { useQuery } from "@tanstack/react-query";
 import type {
+  PluginDashboardWidgetDeclaration,
   PluginLauncherDeclaration,
   PluginUiSlotDeclaration,
   PluginUiSlotEntityType,
@@ -43,6 +44,7 @@ import { queryKeys } from "@/lib/queryKeys";
 import { cn } from "@/lib/utils";
 import {
   PluginBridgeContext,
+  usePluginData,
   type PluginHostContext,
 } from "./bridge";
 
@@ -908,6 +910,169 @@ export function PluginSlotMount({
         context={context}
         className={className}
       />
+    </PluginSlotErrorBoundary>
+  );
+}
+
+export type PluginDashboardWidgetMountProps = {
+  pluginId: string;
+  pluginKey: string;
+  pluginDisplayName: string;
+  pluginVersion: string;
+  widget: PluginDashboardWidgetDeclaration;
+  context: PluginSlotContext;
+  className?: string;
+};
+
+type PluginDashboardWidgetComponentProps = {
+  widget: PluginDashboardWidgetDeclaration;
+  context: PluginSlotContext;
+  data: unknown;
+  loading: boolean;
+  error: { code: string; message: string; details?: unknown } | null;
+  refresh(): void;
+};
+
+function dashboardWidgetSlot(
+  props: PluginDashboardWidgetMountProps,
+): ResolvedPluginSlot {
+  return {
+    id: `dashboard:${props.widget.id}`,
+    type: "page",
+    displayName: props.widget.displayName,
+    exportName: props.widget.exportName,
+    pluginId: props.pluginId,
+    pluginKey: props.pluginKey,
+    pluginDisplayName: props.pluginDisplayName,
+    pluginVersion: props.pluginVersion,
+  };
+}
+
+function PluginDashboardWebComponent({
+  tagName,
+  widget,
+  context,
+  result,
+  className,
+}: {
+  tagName: string;
+  widget: PluginDashboardWidgetDeclaration;
+  context: PluginSlotContext;
+  result: ReturnType<typeof usePluginData>;
+  className?: string;
+}) {
+  const ref = useRef<HTMLElement | null>(null);
+
+  useEffect(() => {
+    if (!ref.current) return;
+    const element = ref.current as HTMLElement & PluginDashboardWidgetComponentProps;
+    element.widget = widget;
+    element.context = context;
+    element.data = result.data;
+    element.loading = result.loading;
+    element.error = result.error;
+    element.refresh = result.refresh;
+  }, [context, result.data, result.error, result.loading, result.refresh, widget]);
+
+  return createElement(tagName, { ref, className });
+}
+
+function PluginDashboardWidgetBody({
+  component,
+  widget,
+  context,
+  className,
+}: {
+  component: RegisteredPluginComponent;
+  widget: PluginDashboardWidgetDeclaration;
+  context: PluginSlotContext;
+  className?: string;
+}) {
+  const result = usePluginData(widget.dataAction, {
+    companyId: context.companyId ?? undefined,
+  });
+
+  if (result.loading) {
+    return (
+      <div className={cn("flex min-h-24 items-center justify-center text-sm text-muted-foreground", className)}>
+        Loading {widget.displayName}...
+      </div>
+    );
+  }
+  if (result.error) {
+    return (
+      <div className={cn("rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive", className)}>
+        {widget.displayName}: {result.error.message}
+      </div>
+    );
+  }
+
+  if (component.kind === "react") {
+    return createElement(
+      component.component as unknown as ComponentType<PluginDashboardWidgetComponentProps>,
+      {
+        widget,
+        context,
+        data: result.data,
+        loading: result.loading,
+        error: result.error,
+        refresh: result.refresh,
+      },
+    );
+  }
+
+  return (
+    <PluginDashboardWebComponent
+      tagName={component.tagName}
+      widget={widget}
+      context={context}
+      result={result}
+      className={className}
+    />
+  );
+}
+
+/**
+ * Renders one manifest-declared Dashboard widget with the same module loader,
+ * bridge scope, and failure isolation used by regular plugin slots.
+ */
+export function PluginDashboardWidgetMount(props: PluginDashboardWidgetMountProps) {
+  usePluginRegistrySubscription();
+  const [, forceRerender] = useState(0);
+  const slot = useMemo(() => dashboardWidgetSlot(props), [props]);
+  const component = resolveRegisteredComponent(slot);
+
+  useEffect(() => {
+    if (component) return;
+    const inflight = inflightImports.get(props.pluginId);
+    if (!inflight) return;
+    let cancelled = false;
+    void inflight.finally(() => {
+      if (!cancelled) forceRerender((tick) => tick + 1);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [component, props.pluginId]);
+
+  if (!component) {
+    return (
+      <div className={cn("rounded-md border border-dashed border-border px-3 py-3 text-sm text-muted-foreground", props.className)}>
+        {props.pluginDisplayName}: {props.widget.displayName} is unavailable
+      </div>
+    );
+  }
+
+  return (
+    <PluginSlotErrorBoundary slot={slot} className={props.className}>
+      <PluginBridgeScope pluginId={props.pluginId} context={props.context}>
+        <PluginDashboardWidgetBody
+          component={component}
+          widget={props.widget}
+          context={props.context}
+          className={props.className}
+        />
+      </PluginBridgeScope>
     </PluginSlotErrorBoundary>
   );
 }

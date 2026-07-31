@@ -1080,6 +1080,60 @@ export interface WorkerToHostMethods {
     result: void,
   ];
 
+  // Workflow-neutral SPS Inbox
+  "inbox.publish": [
+    params: {
+      companyId: string;
+      externalId: string;
+      targetUserId?: string | null;
+      category: string;
+      severity?: "info" | "success" | "warning" | "error";
+      title: string;
+      summary: string;
+      navigationTarget?: string | null;
+      actionIds?: string[];
+      opaqueReference?: Record<string, unknown>;
+    },
+    result: {
+      id: string;
+      companyId: string;
+      sourcePluginKey: string;
+      externalId: string;
+      updatedAt: Date;
+    },
+  ];
+  "inbox.update": [
+    params: {
+      companyId: string;
+      externalId: string;
+      targetUserId?: string | null;
+      category: string;
+      severity?: "info" | "success" | "warning" | "error";
+      title: string;
+      summary: string;
+      navigationTarget?: string | null;
+      actionIds?: string[];
+      opaqueReference?: Record<string, unknown>;
+    },
+    result: {
+      id: string;
+      companyId: string;
+      sourcePluginKey: string;
+      externalId: string;
+      updatedAt: Date;
+    },
+  ];
+  "inbox.withdraw": [
+    params: { companyId: string; externalId: string },
+    result: {
+      id: string;
+      companyId: string;
+      sourcePluginKey: string;
+      externalId: string;
+      withdrawnAt: Date | null;
+    },
+  ];
+
   // Restricted plugin database namespace
   "db.namespace": [
     params: Record<string, never>,

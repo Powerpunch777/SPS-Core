@@ -18,6 +18,7 @@ export { dashboardRoutes } from "./dashboard.js";
 export { attentionRoutes } from "./attention.js";
 export { sidebarBadgeRoutes } from "./sidebar-badges.js";
 export { sidebarPreferenceRoutes } from "./sidebar-preferences.js";
+export { spsWorkspaceSurfaceRoutes } from "./sps-workspace-surfaces.js";
 export { resourceMembershipRoutes } from "./resource-memberships.js";
 export { inboxDismissalRoutes } from "./inbox-dismissals.js";
 export { llmRoutes } from "./llms.js";

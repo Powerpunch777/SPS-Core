@@ -1030,6 +1030,12 @@ export const PLUGIN_CAPABILITIES = [
   "ui.dashboardWidget.register",
   "ui.commentAnnotation.register",
   "ui.action.register",
+  // SPS workspace surfaces
+  "ui.workspaceShell.provide",
+  "ui.dashboard.contribute",
+  "inbox.items.publish",
+  "inbox.items.update",
+  "inbox.actions.register",
 ] as const;
 export type PluginCapability = (typeof PLUGIN_CAPABILITIES)[number];
 
