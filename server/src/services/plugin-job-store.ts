@@ -30,7 +30,7 @@
  * @see PLUGIN_SPEC.md §21.3 — `plugin_jobs` / `plugin_job_runs` tables
  */
 
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, isNull, or } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { plugins, pluginJobs, pluginJobRuns } from "@paperclipai/db";
 import type {
@@ -62,6 +62,8 @@ export interface CreateJobRunInput {
   pluginId: string;
   /** What triggered this run. */
   trigger: PluginJobRunTrigger;
+  /** Company/workspace scope. Host jobs must pass null. */
+  companyId?: string | null;
 }
 
 /**
@@ -174,6 +176,12 @@ export function pluginJobStore(db: Db) {
           if (existing.schedule !== schedule) {
             updates.schedule = schedule;
           }
+          // Legacy declarations intentionally remain Host-scoped. New
+          // manifests must opt into workspace execution explicitly.
+          const scope = decl.scope ?? "host";
+          if (existing.scope !== scope) {
+            updates.scope = scope;
+          }
           if (existing.status === "paused") {
             updates.status = "active";
           }
@@ -188,6 +196,7 @@ export function pluginJobStore(db: Db) {
             pluginId,
             jobKey: decl.jobKey,
             schedule,
+            scope: decl.scope ?? "host",
             status: "active",
           });
         }
@@ -356,6 +365,7 @@ export function pluginJobStore(db: Db) {
         .values({
           jobId: input.jobId,
           pluginId: input.pluginId,
+          companyId: input.companyId ?? null,
           trigger: input.trigger,
           status: "queued",
         })
@@ -369,28 +379,30 @@ export function pluginJobStore(db: Db) {
      *
      * @param runId - UUID of the run row
      */
-    async markRunning(runId: string): Promise<void> {
-      await db
+    async markRunning(runId: string): Promise<boolean> {
+      // A cancellation is state-level/best-effort because worker RPC does not
+      // expose cooperative cancellation. Conditional transitions ensure a
+      // late worker completion can never resurrect a cancelled run.
+      const rows = await db
         .update(pluginJobRuns)
         .set({
           status: "running" as PluginJobRunStatus,
           startedAt: new Date(),
         })
-        .where(eq(pluginJobRuns.id, runId));
+        .where(and(eq(pluginJobRuns.id, runId), eq(pluginJobRuns.status, "queued")))
+        .returning({ id: pluginJobRuns.id });
+      return rows.length > 0;
     },
 
-    /**
-     * Complete a run — set its final status, error, duration, and
-     * `finishedAt` timestamp.
-     *
-     * @param runId - UUID of the run row
-     * @param input - Completion details
-     */
     async completeRun(
       runId: string,
       input: CompleteJobRunInput,
-    ): Promise<void> {
-      await db
+    ): Promise<boolean> {
+      const terminalStatuses = ["succeeded", "failed", "cancelled"] as const;
+      if (!terminalStatuses.includes(input.status as typeof terminalStatuses[number])) {
+        throw new Error(`Job run completion must be terminal; got ${input.status}`);
+      }
+      const rows = await db
         .update(pluginJobRuns)
         .set({
           status: input.status,
@@ -398,15 +410,69 @@ export function pluginJobStore(db: Db) {
           durationMs: input.durationMs ?? null,
           finishedAt: new Date(),
         })
-        .where(eq(pluginJobRuns.id, runId));
+        .where(and(
+          eq(pluginJobRuns.id, runId),
+          or(
+            eq(pluginJobRuns.status, "queued"),
+            eq(pluginJobRuns.status, "running"),
+          ),
+        ))
+        .returning({ id: pluginJobRuns.id });
+      return rows.length > 0;
     },
 
-    /**
-     * Get a run by its primary key.
-     *
-     * @param runId - UUID of the run row
-     * @returns The run row, or `null` if not found
-     */
+    /** Cancel a queued/running run. This is idempotent and does not stop an
+     * already executing worker RPC; its later result is ignored. */
+    async cancelRun(runId: string, reason: string): Promise<boolean> {
+      const rows = await db
+        .update(pluginJobRuns)
+        .set({ status: "cancelled", error: reason, finishedAt: new Date() })
+        .where(and(
+          eq(pluginJobRuns.id, runId),
+          or(
+            eq(pluginJobRuns.status, "queued"),
+            eq(pluginJobRuns.status, "running"),
+          ),
+        ))
+        .returning({ id: pluginJobRuns.id });
+      return rows.length > 0;
+    },
+
+    /** Cancel stale queued/running runs left by a process restart. */
+    async recoverStaleRuns(reason: string): Promise<number> {
+      const rows = await db
+        .update(pluginJobRuns)
+        .set({ status: "cancelled", error: reason, finishedAt: new Date() })
+        .where(or(
+          eq(pluginJobRuns.status, "queued"),
+          eq(pluginJobRuns.status, "running"),
+        ))
+        .returning({ id: pluginJobRuns.id });
+      return rows.length;
+    },
+
+    async listRunsByJob(
+      jobId: string,
+      limit = 50,
+      companyId?: string | null,
+    ): Promise<(typeof pluginJobRuns.$inferSelect)[]> {
+      const conditions = [eq(pluginJobRuns.jobId, jobId)];
+      if (companyId !== undefined) conditions.push(companyId === null ? isNull(pluginJobRuns.companyId) : eq(pluginJobRuns.companyId, companyId));
+      return db.select().from(pluginJobRuns).where(and(...conditions)).orderBy(desc(pluginJobRuns.createdAt)).limit(limit);
+    },
+
+    async listRunsByPlugin(
+      pluginId: string,
+      status?: PluginJobRunStatus,
+      limit = 50,
+      companyId?: string | null,
+    ): Promise<(typeof pluginJobRuns.$inferSelect)[]> {
+      const conditions = [eq(pluginJobRuns.pluginId, pluginId)];
+      if (status) conditions.push(eq(pluginJobRuns.status, status));
+      if (companyId !== undefined) conditions.push(companyId === null ? isNull(pluginJobRuns.companyId) : eq(pluginJobRuns.companyId, companyId));
+      return db.select().from(pluginJobRuns).where(and(...conditions)).orderBy(desc(pluginJobRuns.createdAt)).limit(limit);
+    },
+
     async getRunById(
       runId: string,
     ): Promise<(typeof pluginJobRuns.$inferSelect) | null> {
@@ -415,48 +481,6 @@ export function pluginJobStore(db: Db) {
         .from(pluginJobRuns)
         .where(eq(pluginJobRuns.id, runId));
       return rows[0] ?? null;
-    },
-
-    /**
-     * List runs for a specific job, ordered by creation time descending.
-     *
-     * @param jobId - UUID of the job
-     * @param limit - Maximum number of rows to return (default: 50)
-     */
-    async listRunsByJob(
-      jobId: string,
-      limit = 50,
-    ): Promise<(typeof pluginJobRuns.$inferSelect)[]> {
-      return db
-        .select()
-        .from(pluginJobRuns)
-        .where(eq(pluginJobRuns.jobId, jobId))
-        .orderBy(desc(pluginJobRuns.createdAt))
-        .limit(limit);
-    },
-
-    /**
-     * List runs for a plugin, optionally filtered by status.
-     *
-     * @param pluginId - UUID of the owning plugin
-     * @param status - Optional status filter
-     * @param limit - Maximum number of rows to return (default: 50)
-     */
-    async listRunsByPlugin(
-      pluginId: string,
-      status?: PluginJobRunStatus,
-      limit = 50,
-    ): Promise<(typeof pluginJobRuns.$inferSelect)[]> {
-      const conditions = [eq(pluginJobRuns.pluginId, pluginId)];
-      if (status) {
-        conditions.push(eq(pluginJobRuns.status, status));
-      }
-      return db
-        .select()
-        .from(pluginJobRuns)
-        .where(and(...conditions))
-        .orderBy(desc(pluginJobRuns.createdAt))
-        .limit(limit);
     },
   };
 }

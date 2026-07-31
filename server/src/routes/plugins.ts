@@ -3203,6 +3203,19 @@ export function pluginRoutes(
       return;
     }
 
+    const companyId = typeof req.query.companyId === "string" ? req.query.companyId : undefined;
+    if (job.scope === "workspace") {
+      if (!companyId) {
+        res.status(400).json({ error: "companyId is required for workspace job history" });
+        return;
+      }
+      assertCompanyAccess(req, companyId);
+      await assertCompanyPluginEnabled(plugin, companyId);
+    } else if (companyId !== undefined) {
+      res.status(400).json({ error: "Host job history does not accept companyId" });
+      return;
+    }
+
     const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 25;
     if (isNaN(limit) || limit < 1 || limit > 500) {
       res.status(400).json({ error: "limit must be a number between 1 and 500" });
@@ -3210,7 +3223,7 @@ export function pluginRoutes(
     }
 
     try {
-      const runs = await jobDeps.jobStore.listRunsByJob(jobId, limit);
+      const runs = await jobDeps.jobStore.listRunsByJob(jobId, limit, job.scope === "workspace" ? companyId : null);
       res.json(runs);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -3232,6 +3245,10 @@ export function pluginRoutes(
    * - 400 if job not found, not active, already running, or worker unavailable
    */
   router.post("/plugins/:pluginId/jobs/:jobId/trigger", async (req, res) => {
+    // Manual scheduling is a Host control. Workspace scope chooses the
+    // target Company, but does not turn this low-level lifecycle route into a
+    // general Member action; plugins can expose narrower Member actions via
+    // their own typed UI/action contracts.
     assertInstanceAdmin(req);
     if (!jobDeps) {
       res.status(501).json({ error: "Job scheduling is not enabled" });
@@ -3251,13 +3268,59 @@ export function pluginRoutes(
       return;
     }
 
+    const companyId = typeof req.body?.companyId === "string" ? req.body.companyId : undefined;
+    if (job.scope === "workspace") {
+      if (!companyId) {
+        res.status(400).json({ error: "companyId is required for workspace jobs" });
+        return;
+      }
+      await assertCompanyPluginEnabled(plugin, companyId);
+    } else {
+      if (companyId !== undefined) {
+        res.status(400).json({ error: "Host jobs do not accept companyId" });
+        return;
+      }
+    }
+
     try {
-      const result = await jobDeps.scheduler.triggerJob(jobId, "manual");
+      const result = job.scope === "workspace"
+        ? await jobDeps.scheduler.triggerJob(jobId, "manual", companyId)
+        : await jobDeps.scheduler.triggerJob(jobId, "manual");
       res.json(result);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       res.status(400).json({ error: message });
     }
+  });
+
+  router.post("/plugins/:pluginId/jobs/:jobId/runs/:runId/cancel", async (req, res) => {
+    assertInstanceAdmin(req);
+    if (!jobDeps) return void res.status(501).json({ error: "Job scheduling is not enabled" });
+    const plugin = await resolvePlugin(registry, req.params.pluginId);
+    if (!plugin) return void res.status(404).json({ error: "Plugin not found" });
+    const job = await jobDeps.jobStore.getJobByIdForPlugin(plugin.id, req.params.jobId);
+    const run = await jobDeps.jobStore.getRunById(req.params.runId);
+    if (!job || !run || run.jobId !== job.id) return void res.status(404).json({ error: "Job run not found" });
+    if (job.scope === "workspace") {
+      if (!run.companyId) return void res.status(409).json({ error: "Workspace run is missing company scope" });
+    }
+    res.json({ cancelled: await jobDeps.scheduler.cancelRun(run.id) });
+  });
+
+  router.post("/plugins/:pluginId/jobs/:jobId/runs/:runId/retry", async (req, res) => {
+    assertInstanceAdmin(req);
+    if (!jobDeps) return void res.status(501).json({ error: "Job scheduling is not enabled" });
+    const plugin = await resolvePlugin(registry, req.params.pluginId);
+    if (!plugin) return void res.status(404).json({ error: "Plugin not found" });
+    const job = await jobDeps.jobStore.getJobByIdForPlugin(plugin.id, req.params.jobId);
+    const run = await jobDeps.jobStore.getRunById(req.params.runId);
+    if (!job || !run || run.jobId !== job.id) return void res.status(404).json({ error: "Job run not found" });
+    if (job.scope === "workspace") {
+      if (!run.companyId) return void res.status(409).json({ error: "Workspace run is missing company scope" });
+      await assertCompanyPluginEnabled(plugin, run.companyId);
+    }
+    try { res.json(await jobDeps.scheduler.retryRun(run.id)); }
+    catch (err) { res.status(400).json({ error: err instanceof Error ? err.message : String(err) }); }
   });
 
   // ===========================================================================

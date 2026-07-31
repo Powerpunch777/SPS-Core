@@ -85,6 +85,15 @@ export interface PluginJobDeclaration {
   description?: string;
   /** Cron expression for the schedule (e.g. "star/15 star star star star" or "0 * * * *"). */
   schedule?: string;
+  /**
+   * Execution boundary for this job. Workspace jobs run once for every
+   * Company where the plugin is enabled. Host jobs run once for the instance.
+   *
+   * Omitted by legacy manifests means `host`. This preserves historical
+   * instance-wide scheduling and is deprecated for new manifests: new jobs
+   * should declare their scope explicitly.
+   */
+  scope?: "workspace" | "host";
 }
 
 /**
@@ -1062,6 +1071,8 @@ export interface PluginJobRecord {
   jobKey: string;
   /** Cron expression for the schedule. */
   schedule: string;
+  /** Execution boundary declared by the plugin manifest. */
+  scope: "workspace" | "host";
   /** Current job status. */
   status: "active" | "paused" | "failed";
   /** Last time the job was executed. */
@@ -1088,6 +1099,8 @@ export interface PluginJobRunRecord {
   jobId: string;
   /** FK to `plugins.id`. */
   pluginId: string;
+  /** Company/workspace execution scope; null for Host jobs. */
+  companyId: string | null;
   /** What triggered this run. */
   trigger: "schedule" | "manual" | "retry";
   /** Current run status. */
