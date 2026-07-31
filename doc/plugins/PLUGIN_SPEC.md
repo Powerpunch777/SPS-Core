@@ -622,6 +622,7 @@ The host provides:
 - trigger source
 - run id
 - schedule metadata
+- `companyId` for a workspace-scoped run (absent for a Host run)
 
 ### 13.7 `handleWebhook`
 
@@ -1048,14 +1049,12 @@ Job rules:
 
 1. Each job has a stable `job_key`.
 2. The host is the scheduler of record.
-3. The host prevents overlapping execution of the same plugin/job combination unless explicitly allowed later.
-4. Every job run is recorded in Postgres.
-5. Failed jobs are retryable.
-6. For recurring business workflows that should create visible Paperclip work, prefer managed routines and managed resources over jobs. Jobs remain useful for private plugin-runtime maintenance tasks.
-7. Declared schedules are Host-global. A job must not infer a Company target
-   from Company activation; Company-specific work must receive an explicit
-   Company context through a user action, event, or a future targeted-job
-   contract.
+3. A declaration explicitly chooses `scope: "workspace" | "host"`. Workspace jobs run once per enabled Company; Host jobs run once per SPS instance. Omitted legacy scope remains Host-scoped for compatibility and is deprecated for new manifests.
+4. The host prevents overlapping execution of the same plugin/job/Company combination. Different Companies may run independently within the bounded global concurrency limit.
+5. Every job run is recorded in Postgres with its Company scope (`NULL` for Host runs).
+6. Failed and cancelled jobs are retryable; cancellation is state-level/best-effort because the worker RPC protocol has no cooperative cancellation method. A late worker result cannot overwrite a terminal cancellation.
+7. For recurring business workflows that should create visible Paperclip work, prefer managed routines and managed resources over jobs. Jobs remain useful for private plugin-runtime maintenance tasks.
+8. Scheduled workspace targets are resolved from Company activation for every due occurrence. No installation or activation is performed automatically.
 
 ## 18. Webhooks
 
@@ -1423,6 +1422,7 @@ Constraints:
 - `id` uuid pk
 - `plugin_job_id` uuid fk `plugin_jobs.id` not null
 - `plugin_id` uuid fk `plugins.id` not null
+- `company_id` uuid fk `companies.id` null (`NULL` for Host runs)
 - `status` enum: `queued | running | succeeded | failed | cancelled`
 - `trigger` enum: `schedule | manual | retry`
 - `started_at` timestamptz null
