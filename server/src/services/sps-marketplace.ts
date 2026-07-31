@@ -16,11 +16,15 @@ export interface MarketplacePluginSummary {
   capabilities: string[];
   publisher: string;
   trust: MarketplaceTrust;
-  compatibility: Record<string, string>;
+  compatibility: {
+    sps: string | null;
+    pluginApi: number | null;
+    extensionProfile: string | null;
+  };
 }
 
 export interface MarketplacePluginDetail extends MarketplacePluginSummary {
-  description: string | null;
+  description: string;
   permissions: string[];
   adapterRequirements: string[];
   documentationUrl: string | null;
@@ -42,7 +46,7 @@ export interface MarketplaceSearchResult {
 
 interface RawCatalog {
   schemaVersion?: unknown;
-  plugins?: unknown;
+  releases?: unknown;
   source?: unknown;
   refreshedAt?: unknown;
 }
@@ -81,37 +85,41 @@ function trustValue(value: unknown): MarketplaceTrust {
   return value === "official" || value === "verified" || value === "local" ? value : "local";
 }
 
-function compatibilityValue(value: unknown): Record<string, string> {
+function compatibilityValue(value: unknown): MarketplacePluginSummary["compatibility"] {
   const source = record(value);
-  const result: Record<string, string> = {};
-  for (const key of ["spsCore", "desktop", "node", "os"]) {
-    const item = stringValue(source[key]);
-    if (item) result[key] = item;
-  }
-  return result;
+  const pluginApi = typeof source.pluginApi === "number" && Number.isSafeInteger(source.pluginApi)
+    ? source.pluginApi
+    : null;
+  return {
+    sps: stringValue(source.sps) || null,
+    pluginApi,
+    extensionProfile: stringValue(source.extensionProfile) || null,
+  };
 }
 
-function normalizePlugin(value: unknown): MarketplacePluginDetail | null {
+function normalizePlugin(value: unknown, catalogTrust: MarketplaceTrust): MarketplacePluginDetail | null {
   const source = record(value);
-  const id = stringValue(source.id);
-  const name = stringValue(source.displayName, stringValue(source.name));
+  const catalog = record(source.catalog);
+  const publisherProfile = record(source.publisherProfile);
+  const id = stringValue(source.pluginId, stringValue(source.id));
+  const name = stringValue(catalog.displayName, stringValue(source.displayName, stringValue(source.name)));
   const version = stringValue(source.version);
-  const summary = stringValue(source.summary, stringValue(source.description));
+  const summary = stringValue(catalog.summary, stringValue(source.summary, stringValue(source.description)));
   if (!id || !name || !version || !summary) return null;
   return {
     pluginId: id,
     displayName: name,
     version,
     summary,
-    description: stringValue(source.description) || null,
-    categories: stringList(source.categories ?? source.category),
+    description: stringValue(catalog.description, stringValue(source.description, summary)),
+    categories: stringList(catalog.categories ?? catalog.category ?? source.categories ?? source.category),
     capabilities: stringList(source.capabilities),
-    publisher: stringValue(source.publisher, "Unknown publisher"),
-    trust: trustValue(source.trust),
+    publisher: stringValue(publisherProfile.displayName, stringValue(source.publisherId, stringValue(source.publisher, "Unknown publisher"))),
+    trust: source.trust === undefined ? catalogTrust : trustValue(source.trust),
     compatibility: compatibilityValue(source.compatibility),
     permissions: stringList(source.permissions),
-    adapterRequirements: stringList(source.adapterRequirements),
-    documentationUrl: publicUrl(source.documentationUrl),
+    adapterRequirements: stringList(catalog.adapterRequirements ?? source.adapterRequirements),
+    documentationUrl: publicUrl(catalog.documentationUrl ?? source.documentationUrl),
   };
 }
 
@@ -150,16 +158,17 @@ async function loadCatalog(): Promise<LoadedCatalog> {
   } catch {
     throw new HttpError(503, "Marketplace catalog is unavailable");
   }
-  if (parsed.schemaVersion !== CATALOG_SCHEMA_VERSION || !Array.isArray(parsed.plugins)) {
+  if (parsed.schemaVersion !== CATALOG_SCHEMA_VERSION || !Array.isArray(parsed.releases)) {
     throw new HttpError(503, "Marketplace catalog has an unsupported schema");
   }
-  const plugins = parsed.plugins
-    .map(normalizePlugin)
-    .filter((plugin): plugin is MarketplacePluginDetail => plugin !== null)
-    .sort(comparePlugins);
   const sourceRecord = record(parsed.source);
   const sourceId = stringValue(sourceRecord.id);
   const sourceDisplayName = stringValue(sourceRecord.displayName);
+  const catalogTrust: MarketplaceTrust = sourceId === "io.sps.official" ? "official" : "verified";
+  const plugins = parsed.releases
+    .map((release) => normalizePlugin(release, catalogTrust))
+    .filter((plugin): plugin is MarketplacePluginDetail => plugin !== null)
+    .sort(comparePlugins);
   const refreshedAt = stringValue(parsed.refreshedAt) || null;
   return {
     plugins,
