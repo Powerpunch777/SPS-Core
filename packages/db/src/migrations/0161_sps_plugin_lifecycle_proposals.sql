@@ -23,7 +23,7 @@ CREATE INDEX "plugin_lifecycle_proposals_status_idx" ON "plugin_lifecycle_propos
 --> statement-breakpoint
 CREATE TABLE "plugin_lifecycle_proposal_events" (
   "id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
-  "proposal_id" uuid NOT NULL REFERENCES "plugin_lifecycle_proposals"("id") ON DELETE restrict,
+  "proposal_id" uuid NOT NULL REFERENCES "plugin_lifecycle_proposals"("id") ON DELETE cascade,
   "company_id" uuid NOT NULL REFERENCES "companies"("id") ON DELETE cascade,
   "event_type" text NOT NULL,
   "actor_type" text NOT NULL,

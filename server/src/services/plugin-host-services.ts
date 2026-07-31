@@ -1131,7 +1131,7 @@ export function buildHostServices(
         }, {
           riskSummary: {
             capabilityDelta: { status: targetPlugin ? "known" : "unknown", added: [], removed: [] },
-            compatibility: targetPlugin && targetPlugin.pluginKey === params.target.pluginKey
+            compatibility: targetPlugin && targetPlugin.manifestJson.id === params.target.pluginKey
               ? { status: "known" }
               : { status: "unknown", reason: "Target package metadata is not available to the worker." },
             dependency: { status: "unknown" },

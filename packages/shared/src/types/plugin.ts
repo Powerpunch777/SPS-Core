@@ -877,7 +877,6 @@ export type PluginLifecycleProposalOperation = (typeof PLUGIN_LIFECYCLE_PROPOSAL
 
 export const PLUGIN_LIFECYCLE_PROPOSAL_STATUSES = [
   "pending",
-  "executing",
   "accepted",
   "rejected",
   "failed",

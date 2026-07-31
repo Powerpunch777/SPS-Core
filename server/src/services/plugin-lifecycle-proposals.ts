@@ -7,10 +7,9 @@ import type {
   PluginLifecycleProposalRiskSummary,
   PluginLifecycleProposalStatus,
 } from "@paperclipai/shared";
-import { createPluginLifecycleProposalSchema } from "@paperclipai/shared";
 
 export interface PluginLifecycleProposalActor {
-  actorType: "plugin" | "agent" | "user" | "system";
+  actorType: "plugin" | "user" | "system";
   actorId: string;
   pluginId?: string | null;
   agentId?: string | null;
@@ -19,8 +18,6 @@ export interface PluginLifecycleProposalActor {
 export interface PluginLifecycleProposalRiskInput {
   riskSummary: PluginLifecycleProposalRiskSummary;
 }
-
-type DbWriter = Pick<Db, "insert">;
 
 function toRecord(row: typeof pluginLifecycleProposals.$inferSelect): PluginLifecycleProposalRecord {
   return {
@@ -48,14 +45,14 @@ function toRecord(row: typeof pluginLifecycleProposals.$inferSelect): PluginLife
  * intentionally owned by the authenticated Host routes, never by a worker.
  */
 export function createPluginLifecycleProposalService(db: Db) {
-  async function appendEvent(writer: DbWriter, input: {
+  async function appendEvent(input: {
     proposalId: string;
     companyId: string;
     eventType: string;
     actor: PluginLifecycleProposalActor;
     details?: Record<string, unknown>;
   }) {
-    await writer.insert(pluginLifecycleProposalEvents).values({
+    await db.insert(pluginLifecycleProposalEvents).values({
       proposalId: input.proposalId,
       companyId: input.companyId,
       eventType: input.eventType,
@@ -67,31 +64,26 @@ export function createPluginLifecycleProposalService(db: Db) {
 
   return {
     async create(input: CreatePluginLifecycleProposal & { companyId: string }, actor: PluginLifecycleProposalActor, risk: PluginLifecycleProposalRiskInput) {
-      const parsed = createPluginLifecycleProposalSchema.safeParse(input);
-      if (!parsed.success) throw new Error("Invalid plugin lifecycle proposal");
-      const proposalInput = parsed.data;
-      return db.transaction(async (tx) => {
-        const [row] = await tx.insert(pluginLifecycleProposals).values({
-          companyId: input.companyId,
-          operation: proposalInput.operation,
-          targetJson: {
-            ...proposalInput.target,
-            pluginId: proposalInput.target.pluginId ?? null,
-            packageName: proposalInput.target.packageName ?? null,
-            version: proposalInput.target.version ?? null,
-            registryStageId: proposalInput.target.registryStageId ?? null,
-          },
-          rationale: proposalInput.rationale,
-          authoringSessionId: proposalInput.authoringSessionId,
-          evidenceRefs: proposalInput.evidenceRefs,
-          riskSummary: risk.riskSummary,
-          createdByPluginId: actor.pluginId ?? null,
-          createdByAgentId: actor.agentId ?? null,
-        }).returning();
-        if (!row) throw new Error("Failed to create plugin lifecycle proposal");
-        await appendEvent(tx, { proposalId: row.id, companyId: row.companyId, eventType: "created", actor, details: { operation: row.operation, target: row.targetJson } });
-        return toRecord(row);
-      });
+      const [row] = await db.insert(pluginLifecycleProposals).values({
+        companyId: input.companyId,
+        operation: input.operation,
+        targetJson: {
+          ...input.target,
+          pluginId: input.target.pluginId ?? null,
+          packageName: input.target.packageName ?? null,
+          version: input.target.version ?? null,
+          registryStageId: input.target.registryStageId ?? null,
+        },
+        rationale: input.rationale,
+        authoringSessionId: input.authoringSessionId,
+        evidenceRefs: input.evidenceRefs,
+        riskSummary: risk.riskSummary,
+        createdByPluginId: actor.pluginId ?? null,
+        createdByAgentId: actor.agentId ?? null,
+      }).returning();
+      if (!row) throw new Error("Failed to create plugin lifecycle proposal");
+      await appendEvent({ proposalId: row.id, companyId: row.companyId, eventType: "created", actor, details: { operation: row.operation, target: row.targetJson } });
+      return toRecord(row);
     },
 
     async get(companyId: string, proposalId: string) {
@@ -119,90 +111,33 @@ export function createPluginLifecycleProposalService(db: Db) {
       executed?: boolean;
       details?: Record<string, unknown>;
     }) {
-      const expectedStatus = input.status === "rejected" ? "pending" : "executing";
       const existing = await this.get(input.companyId, input.proposalId);
       if (!existing) return null;
-      if (existing.status !== expectedStatus) return { conflict: existing };
-      return db.transaction(async (tx) => {
-        const now = new Date();
-        const [row] = await tx.update(pluginLifecycleProposals)
-          .set({
-            status: input.status,
-            decisionByUserId: input.userId ?? null,
-            decisionReason: input.reason ?? null,
-            executedAt: input.executed ? now : null,
-            updatedAt: now,
-          })
-          .where(and(
-            eq(pluginLifecycleProposals.id, input.proposalId),
-            eq(pluginLifecycleProposals.companyId, input.companyId),
-            eq(pluginLifecycleProposals.status, expectedStatus),
-          ))
-          .returning();
-        if (!row) return { conflict: await this.get(input.companyId, input.proposalId) };
-        await appendEvent(tx, {
-          proposalId: row.id,
-          companyId: row.companyId,
-          eventType: input.status,
-          actor: input.actor,
-          details: input.details,
-        });
-        return { proposal: toRecord(row) };
+      if (existing.status !== "pending") return { conflict: existing };
+      const now = new Date();
+      const [row] = await db.update(pluginLifecycleProposals)
+        .set({
+          status: input.status,
+          decisionByUserId: input.userId ?? null,
+          decisionReason: input.reason ?? null,
+          executedAt: input.executed ? now : null,
+          updatedAt: now,
+        })
+        .where(and(
+          eq(pluginLifecycleProposals.id, input.proposalId),
+          eq(pluginLifecycleProposals.companyId, input.companyId),
+          eq(pluginLifecycleProposals.status, "pending"),
+        ))
+        .returning();
+      if (!row) return { conflict: await this.get(input.companyId, input.proposalId) };
+      await appendEvent({
+        proposalId: row.id,
+        companyId: row.companyId,
+        eventType: input.status,
+        actor: input.actor,
+        details: input.details,
       });
-    },
-
-    async beginDecision(input: {
-      companyId: string;
-      proposalId: string;
-      actor: PluginLifecycleProposalActor;
-      userId: string;
-    }) {
-      return db.transaction(async (tx) => {
-        const [row] = await tx.update(pluginLifecycleProposals)
-          .set({ status: "executing", decisionByUserId: input.userId, updatedAt: new Date() })
-          .where(and(
-            eq(pluginLifecycleProposals.id, input.proposalId),
-            eq(pluginLifecycleProposals.companyId, input.companyId),
-            eq(pluginLifecycleProposals.status, "pending"),
-          ))
-          .returning();
-        if (!row) return { conflict: await this.get(input.companyId, input.proposalId) };
-        await appendEvent(tx, {
-          proposalId: row.id,
-          companyId: row.companyId,
-          eventType: "executing",
-          actor: input.actor,
-          details: { reason: "Host decision claimed for execution" },
-        });
-        return { proposal: toRecord(row) };
-      });
-    },
-
-    async releaseDecision(input: {
-      companyId: string;
-      proposalId: string;
-      actor: PluginLifecycleProposalActor;
-      reason: string;
-    }) {
-      return db.transaction(async (tx) => {
-        const [row] = await tx.update(pluginLifecycleProposals)
-          .set({ status: "pending", decisionReason: input.reason, updatedAt: new Date() })
-          .where(and(
-            eq(pluginLifecycleProposals.id, input.proposalId),
-            eq(pluginLifecycleProposals.companyId, input.companyId),
-            eq(pluginLifecycleProposals.status, "executing"),
-          ))
-          .returning();
-        if (!row) return { conflict: await this.get(input.companyId, input.proposalId) };
-        await appendEvent(tx, {
-          proposalId: row.id,
-          companyId: row.companyId,
-          eventType: "decision_released",
-          actor: input.actor,
-          details: { reason: input.reason },
-        });
-        return { proposal: toRecord(row) };
-      });
+      return { proposal: toRecord(row) };
     },
 
     async listEvents(companyId: string, proposalId: string) {

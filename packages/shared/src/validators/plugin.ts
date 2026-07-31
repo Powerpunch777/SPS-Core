@@ -1578,30 +1578,13 @@ export const uninstallPluginSchema = z.object({
 export type UninstallPlugin = z.infer<typeof uninstallPluginSchema>;
 
 const lifecycleProposalTargetSchema = z.object({
-  pluginKey: z.string().trim().min(1).max(200)
-    .refine((value) => !value.startsWith("/") && !value.startsWith("\\") && !/^[A-Za-z]:[\\/]/.test(value) && !value.includes(".."), {
-      message: "Plugin keys must not contain filesystem paths.",
-    }),
+  pluginKey: z.string().trim().min(1).max(200),
   pluginId: z.string().uuid().nullable().optional(),
-  packageName: z.string().trim().min(1).max(300).nullable().optional()
-    .refine((value) => value === null || value === undefined || (!value.startsWith("/") && !value.startsWith("\\") && !/^[A-Za-z]:[\\/]/.test(value) && !value.startsWith("file:") && !value.includes("..")), {
-      message: "Package names must not contain local filesystem paths.",
-    }),
+  packageName: z.string().trim().min(1).max(300).nullable().optional(),
   version: z.string().trim().min(1).max(100).nullable().optional(),
   registryStageId: z.string().uuid().nullable().optional(),
   scope: z.enum(["company", "host"]),
 });
-
-const lifecycleProposalEvidenceRefSchema = z.string()
-  .trim()
-  .min(1)
-  .max(500)
-  .refine((value) => !value.startsWith("/") && !value.startsWith("\\") && !/^[A-Za-z]:[\\/]/.test(value), {
-    message: "Evidence references must not contain absolute filesystem paths.",
-  })
-  .refine((value) => !/^[a-z][a-z0-9+.-]*:\/\//i.test(value), {
-    message: "Evidence references must not contain URLs.",
-  });
 
 export const createPluginLifecycleProposalSchema = z.object({
   operation: z.enum(["install", "activate", "update", "disable", "remove"]),
@@ -1610,7 +1593,7 @@ export const createPluginLifecycleProposalSchema = z.object({
   authoringSessionId: z.string().trim().min(1).max(200),
   evidenceRefs: z.array(z.object({
     kind: z.string().trim().min(1).max(80),
-    ref: lifecycleProposalEvidenceRefSchema,
+    ref: z.string().trim().min(1).max(500),
   })).max(50).default([]),
 }).superRefine((input, ctx) => {
   if (input.target.scope === "company" && !["activate", "disable"].includes(input.operation)) {

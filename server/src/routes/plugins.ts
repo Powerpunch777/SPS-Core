@@ -1005,7 +1005,7 @@ export function pluginRoutes(
    * create them; only a Host user may decide them below.
    */
   router.post("/plugins/companies/:companyId/lifecycle-proposals", async (req, res) => {
-    assertBoardOrAgent(req);
+    assertBoard(req);
     const { companyId } = req.params;
     assertCompanyAccess(req, companyId);
     const parsed = createPluginLifecycleProposalSchema.safeParse(req.body);
@@ -1020,7 +1020,7 @@ export function pluginRoutes(
     const actor = getActorInfo(req);
     const risk = await proposalRiskFor(companyId, parsed.data);
     const proposal = await lifecycleProposals.create({ ...parsed.data, companyId }, {
-      actorType: actor.actorType,
+      actorType: "user",
       actorId: actor.actorId,
       agentId: actor.agentId,
     }, { riskSummary: risk.riskSummary });
@@ -1043,7 +1043,7 @@ export function pluginRoutes(
     const { companyId } = req.params;
     assertCompanyAccess(req, companyId);
     const status = typeof req.query.status === "string" ? req.query.status : undefined;
-    if (status && !["pending", "executing", "accepted", "rejected", "failed"].includes(status)) {
+    if (status && !["pending", "accepted", "rejected", "failed"].includes(status)) {
       res.status(400).json({ error: "Invalid lifecycle proposal status." });
       return;
     }
@@ -1079,17 +1079,9 @@ export function pluginRoutes(
     const { companyId, proposalId } = req.params;
     assertCompanyAccess(req, companyId);
     if (req.actor.type === "agent" || !req.actor.userId) return void res.status(403).json({ error: "Only a Host user can accept a lifecycle proposal." });
-    const pending = await lifecycleProposals.get(companyId, proposalId);
-    if (!pending) return void res.status(404).json({ error: "Lifecycle proposal not found" });
-    if (pending.status !== "pending") return void res.status(409).json({ error: "Lifecycle proposal is no longer pending.", proposal: pending });
-    const claim = await lifecycleProposals.beginDecision({
-      companyId,
-      proposalId,
-      actor: { actorType: "user", actorId: req.actor.userId },
-      userId: req.actor.userId,
-    });
-    if (!claim || "conflict" in claim) return void res.status(409).json({ error: "Lifecycle proposal changed while it was being accepted.", proposal: claim && "conflict" in claim ? claim.conflict : pending });
-    const proposal = claim.proposal;
+    const proposal = await lifecycleProposals.get(companyId, proposalId);
+    if (!proposal) return void res.status(404).json({ error: "Lifecycle proposal not found" });
+    if (proposal.status !== "pending") return void res.status(409).json({ error: "Lifecycle proposal is no longer pending.", proposal });
     const current = await proposalRiskFor(companyId, proposal);
     const incomplete = current.riskSummary.capabilityDelta.status === "unknown"
       || current.riskSummary.compatibility.status === "unknown"
@@ -1097,25 +1089,13 @@ export function pluginRoutes(
       || current.riskSummary.migration.status === "unknown"
       || current.riskSummary.secrets.status === "unknown";
     if (incomplete || !current.plugin) {
-      const released = await lifecycleProposals.releaseDecision({
-        companyId,
-        proposalId,
-        actor: { actorType: "user", actorId: req.actor.userId },
-        reason: "Host review data is incomplete; proposal remains pending.",
-      });
-      return void res.status(409).json({ error: "The exact lifecycle target or its risk data is no longer sufficient for Host execution.", proposal: released && "proposal" in released ? released.proposal : proposal, riskSummary: current.riskSummary });
+      return void res.status(409).json({ error: "The exact lifecycle target or its risk data is no longer sufficient for Host execution.", proposal, riskSummary: current.riskSummary });
     }
     const target = current.plugin;
     const report = current.riskSummary.dependency;
     if ((proposal.operation === "activate" && report.available === false)
       || ((proposal.operation === "disable" || proposal.operation === "remove") && (report.affectedPluginIds?.length ?? 0) > 0)) {
-      const released = await lifecycleProposals.releaseDecision({
-        companyId,
-        proposalId,
-        actor: { actorType: "user", actorId: req.actor.userId },
-        reason: "The current dependency graph blocks this lifecycle proposal.",
-      });
-      return void res.status(409).json({ error: "The current dependency graph blocks this lifecycle proposal.", proposal: released && "proposal" in released ? released.proposal : proposal, riskSummary: current.riskSummary });
+      return void res.status(409).json({ error: "The current dependency graph blocks this lifecycle proposal.", proposal, riskSummary: current.riskSummary });
     }
     try {
       if (proposal.target.scope === "company") {
@@ -1129,10 +1109,8 @@ export function pluginRoutes(
       } else {
         return void res.status(409).json({ error: "Install and update proposals require a reviewed Registry candidate and remain pending.", proposal });
       }
-    } catch {
-      // Loader errors may include local paths or provider details. Keep those
-      // out of durable proposal data and responses.
-      const message = "Lifecycle execution failed; inspect server diagnostics.";
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
       const failed = await lifecycleProposals.decide({
         companyId, proposalId, status: "failed", actor: { actorType: "user", actorId: req.actor.userId }, userId: req.actor.userId, reason: message, details: { code: "LIFECYCLE_EXECUTION_FAILED" },
       });
