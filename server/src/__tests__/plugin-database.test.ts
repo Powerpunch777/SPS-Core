@@ -669,6 +669,7 @@ describeEmbeddedPostgres("plugin database namespaces", () => {
       .where(eq(plugins.id, pluginId));
 
     const workerManager = {
+      isRunning: vi.fn().mockReturnValue(false),
       startWorker: vi.fn().mockResolvedValue(undefined),
       stopAll: vi.fn().mockResolvedValue(undefined),
     };

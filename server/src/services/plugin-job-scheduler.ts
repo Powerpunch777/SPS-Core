@@ -41,6 +41,7 @@ import type { PluginJobStore } from "./plugin-job-store.js";
 import type { PluginWorkerManager } from "./plugin-worker-manager.js";
 import { parseCron, nextCronTick, validateCron } from "./cron.js";
 import { logger } from "../middleware/logger.js";
+import { analyzePluginDependencies, isPluginDependencyAvailable } from "./plugin-dependencies.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -276,7 +277,27 @@ export function createPluginJobScheduler(
       .from(companies)
       .leftJoin(pluginCompanySettings, and(eq(pluginCompanySettings.companyId, companies.id), eq(pluginCompanySettings.pluginId, pluginId)))
       .where(eq(companies.status, "active"));
-    return rows.filter((row) => row.enabled ?? defaultEnabled).map((row) => row.id);
+    const enabled = rows.filter((row) => row.enabled ?? defaultEnabled).map((row) => row.id);
+    const available = await Promise.all(enabled.map(async (companyId) => ({ companyId, available: await pluginDependencyAvailable(pluginId, companyId) })));
+    return available.filter((entry) => entry.available).map((entry) => entry.companyId);
+  }
+
+  async function pluginDependencyAvailable(pluginId: string, companyId: string | null): Promise<boolean> {
+    const records = companyId
+      ? await db.select({ plugin: plugins, enabled: pluginCompanySettings.enabled })
+        .from(plugins)
+        .leftJoin(pluginCompanySettings, and(eq(pluginCompanySettings.pluginId, plugins.id), eq(pluginCompanySettings.companyId, companyId)))
+      : (await db.select({ plugin: plugins }).from(plugins)).map((row) => ({ ...row, enabled: undefined }));
+    const target = records.find((row) => row.plugin.id === pluginId)?.plugin;
+    if (!target || target.status !== "ready") return false;
+    const report = analyzePluginDependencies(records.map((row) => ({
+      id: row.plugin.id,
+      version: row.plugin.version,
+      manifest: row.plugin.manifestJson,
+      available: row.plugin.status === "ready",
+      active: row.plugin.status === "ready" && (companyId === null || (row.enabled ?? row.plugin.manifestJson.companyActivation?.defaultEnabled ?? true)),
+    })));
+    return isPluginDependencyAvailable(report, target.manifestJson.id);
   }
 
   // -----------------------------------------------------------------------
@@ -354,6 +375,10 @@ export function createPluginJobScheduler(
         const targets = job.scope === "workspace"
           ? await enabledCompanyIds(job.pluginId)
           : [null];
+        if (job.scope === "host" && !await pluginDependencyAvailable(job.pluginId, null)) {
+          await advanceSchedulePointer(job);
+          continue;
+        }
         if (targets.length === 0) {
           await advanceSchedulePointer(job);
           continue;
@@ -516,6 +541,9 @@ export function createPluginJobScheduler(
     }
     if (job.scope === "workspace" && !(await enabledCompanyIds(job.pluginId)).includes(effectiveCompanyId!)) {
       throw new Error(`Plugin is disabled or Company is unavailable for "${job.jobKey}"`);
+    }
+    if (!await pluginDependencyAvailable(job.pluginId, effectiveCompanyId)) {
+      throw new Error(`Plugin dependency graph is blocked for "${job.jobKey}"`);
     }
     const activeKey = executionKey(jobId, effectiveCompanyId);
     if (activeJobs.has(activeKey)) {

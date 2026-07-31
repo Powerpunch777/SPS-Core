@@ -27,7 +27,7 @@ describeDb("workspace-scoped plugin jobs", () => {
   });
   afterAll(async () => { await temp.cleanup(); });
 
-  async function seed() {
+  async function seed(dependencyBlocked = false) {
     const pluginId = randomUUID();
     const companyA = randomUUID();
     const companyB = randomUUID();
@@ -40,7 +40,7 @@ describeDb("workspace-scoped plugin jobs", () => {
     await db.insert(plugins).values({
       id: pluginId, pluginKey: "sps.jobs-test", packageName: "jobs-test", version: "1.0.0", apiVersion: 1,
       categories: ["automation"], status: "ready", installOrder: 1,
-      manifestJson: { id: "sps.jobs-test", apiVersion: 1, version: "1.0.0", displayName: "Jobs", description: "Jobs", author: "SPS", categories: ["automation"], capabilities: [], entrypoints: { worker: "./worker.js" } },
+      manifestJson: { id: "sps.jobs-test", apiVersion: 1, version: "1.0.0", displayName: "Jobs", description: "Jobs", author: "SPS", categories: ["automation"], capabilities: [], entrypoints: { worker: "./worker.js" }, ...(dependencyBlocked ? { requiredDependencies: [{ id: "sps.unavailable" }] } : {}) },
     });
     await db.insert(pluginCompanySettings).values({ pluginId, companyId: companyB, enabled: false, settingsJson: {} });
     const workspaceJobId = randomUUID();
@@ -68,6 +68,15 @@ describeDb("workspace-scoped plugin jobs", () => {
     expect(worker.call.mock.calls.some(([, , input]) => input.job.companyId === seedData.companyA)).toBe(true);
     expect(worker.call.mock.calls.some(([, , input]) => input.job.companyId === seedData.companyC)).toBe(true);
     expect(worker.call.mock.calls.some(([, , input]) => input.job.companyId === seedData.companyB)).toBe(false);
+  });
+
+  it("skips workspace job targets whose Company dependency graph is blocked", async () => {
+    const seedData = await seed(true);
+    const scheduler = createPluginJobScheduler({ db, jobStore: pluginJobStore(db), workerManager: worker });
+    await scheduler.tick();
+    const runs = await db.select().from(pluginJobRuns);
+    expect(runs.filter((run) => run.jobId === seedData.workspaceJobId)).toHaveLength(0);
+    expect(worker.call).not.toHaveBeenCalled();
   });
 
   it("requires workspace scope for manual triggers and preserves it on retry", async () => {
