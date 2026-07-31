@@ -11291,6 +11291,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const taskSessionDecodedParams = normalizeSessionParams(
       sessionCodec.deserialize(taskSession?.sessionParamsJson ?? null),
     );
+    // Adapter codecs may intentionally discard SPS-owned metadata. Freshness
+    // checks must inspect the persisted envelope before decoding runtime params.
+    const taskSessionPersistedParams = normalizeSessionParams(taskSession?.sessionParamsJson ?? null);
     const explicitResumeSessionParams = normalizeResumeParamsForAdapter(
       agent.adapterType,
       sessionCodec.deserialize(parseObject(context.resumeSessionParams)),
@@ -11708,7 +11711,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const sessionConfigFreshness = resolveTaskSessionConfigFreshness({
       hasTaskSession: taskSession != null,
       configuredModel,
-      taskSessionParams: taskSessionDecodedParams,
+      taskSessionParams: taskSessionPersistedParams,
       configMetadata: sessionConfigMetadata,
       wakeResetReason: wakeSessionResetReason,
       preserveLegacySessionWithoutConfigMetadata: acceptedPlanContinuationWake && !acceptedPlanWakeRoutingDecision,
