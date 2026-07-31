@@ -6,6 +6,8 @@ import { pluginManifestV1Schema, type PaperclipPluginManifestV1 } from "@papercl
 const mockRegistry = vi.hoisted(() => ({
   getById: vi.fn(),
   getByKey: vi.fn(),
+  listInstalled: vi.fn(),
+  getCompanySettings: vi.fn(),
 }));
 
 const mockLifecycle = vi.hoisted(() => ({
@@ -71,6 +73,8 @@ async function createApp(input: {
 
   mockRegistry.getById.mockResolvedValue(input.plugin ?? null);
   mockRegistry.getByKey.mockResolvedValue(input.plugin ?? null);
+  mockRegistry.listInstalled.mockResolvedValue(input.plugin ? [input.plugin] : []);
+  mockRegistry.getCompanySettings.mockResolvedValue(null);
 
   const app = express();
   app.use(express.json());

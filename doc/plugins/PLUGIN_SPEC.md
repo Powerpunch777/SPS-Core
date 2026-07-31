@@ -230,6 +230,34 @@ it only controls whether that Company can use the plugin's Company-scoped UI,
 tools, bridge/API calls, and provider surfaces. A disabled plugin can still
 retain its Company settings so it can be configured before it is re-enabled.
 
+### Dependency availability
+
+Plugin dependencies are declarative and workflow-neutral. A manifest may
+declare `requiredDependencies`, `optionalDependencies`, `conflicts`, and
+`services`. Required dependencies use inclusive `minVersion`/`maxVersion`
+bounds. Optional plugin and service discovery is reported but never blocks a
+plugin. Conflicts and required-dependency cycles block the affected plugin.
+
+Core accepts the same plugin id alphabet used by existing manifests, including
+`_`, in dependency references. This preserves compatibility with installed
+legacy plugins.
+
+The Host package lifecycle and Company product lifecycle stay separate:
+
+- Installing or preparing a Host package never installs or activates a
+  dependency automatically.
+- A Company activation is rejected only when the plugin being enabled is
+  dependency-blocked. An unrelated broken active plugin does not prevent the
+  requested activation.
+- Company-scoped bridge/API/tool execution rechecks dependency availability,
+  so a later dependency loss becomes a structured blocked state.
+- Host jobs evaluate the Host-ready graph. Workspace jobs evaluate each
+  Company's effective activation graph and skip only blocked targets.
+- Before a Host disable/delete or Company deactivation would break active
+  required dependents, Core returns a deterministic impact review id. The
+  caller must repeat the same mutation with that id. Core never cascades
+  disable, uninstall, or activation changes automatically.
+
 The Core treats omitted `companyActivation` as `defaultEnabled: true` so older
 plugins keep their existing behavior. New optional SPS workplanes and providers
 should declare `defaultEnabled: false` explicitly.
@@ -244,10 +272,9 @@ Examples:
 - one global git plugin install
 - per-project workspace state stored under `project_workspace`
 
-Host-global scheduled jobs remain Host-global in this contract. They must not
-assume they run once for every activated Company. A future Company-targeted job
-contract will add an explicit Company target instead of inferring one from
-activation state.
+Scheduled jobs declare their scope explicitly. Host jobs run once for the
+prepared Host graph; workspace jobs run once for each enabled Company whose
+dependency graph is available. See §17 for scheduling and overlap rules.
 
 ## 8.1 On-Disk Layout
 
@@ -357,6 +384,24 @@ export interface PaperclipPluginManifestV1 {
     /** Omitted means true for legacy compatibility. */
     defaultEnabled?: boolean;
   };
+  requiredDependencies?: Array<{
+    id: string;
+    minVersion?: string;
+    maxVersion?: string;
+  }>;
+  optionalDependencies?: Array<{
+    /** Exactly one of id or service. */
+    id?: string;
+    service?: string;
+    minVersion?: string;
+    maxVersion?: string;
+  }>;
+  conflicts?: Array<{
+    id: string;
+    minVersion?: string;
+    maxVersion?: string;
+  }>;
+  services?: Array<{ id: string }>;
   instanceConfigSchema?: JsonSchema;
   jobs?: PluginJobDeclaration[];
   webhooks?: PluginWebhookDeclaration[];

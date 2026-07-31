@@ -56,6 +56,11 @@ import {
   resolvePluginCompanyActivation,
   setPluginCompanyActivation,
 } from "../services/plugin-company-activation.js";
+import {
+  analyzePluginDependencies,
+  isPluginDependencyAvailable,
+  type PluginDependencyReport,
+} from "../services/plugin-dependencies.js";
 import { listReadyAgentPlatformExtensions } from "../services/agent-platform-extensions.js";
 import { pluginLifecycleManager, type PluginLifecycleManager } from "../services/plugin-lifecycle.js";
 import { spsWorkspaceSurfaceService } from "../services/sps-workspace-surfaces.js";
@@ -905,6 +910,34 @@ export function pluginRoutes(
     return await resolvePluginCompanyActivation(registry, plugin, companyId);
   }
 
+  async function dependencyReportForCompany(
+    companyId: string,
+    target?: { action: "enable" | "disable" | "delete"; pluginId: string },
+  ): Promise<PluginDependencyReport> {
+    const installed = await registry.listInstalled();
+    const candidates = await Promise.all(installed.map(async (candidate) => ({
+      id: candidate.id,
+      version: candidate.version,
+      manifest: candidate.manifestJson,
+      available: candidate.status === "ready",
+      active: candidate.status === "ready" && (await resolveCompanyPluginActivation(candidate, companyId)).enabled,
+    })));
+    return analyzePluginDependencies(candidates, target);
+  }
+
+  async function dependencyReportForHost(
+    target?: { action: "enable" | "disable" | "delete"; pluginId: string },
+  ): Promise<PluginDependencyReport> {
+    const installed = await registry.listInstalled();
+    return analyzePluginDependencies(installed.map((candidate) => ({
+      id: candidate.id,
+      version: candidate.version,
+      manifest: candidate.manifestJson,
+      available: candidate.status === "ready",
+      active: candidate.status === "ready",
+    })), target);
+  }
+
   async function assertCompanyPluginEnabled(
     plugin: { id: string; pluginKey: string; manifestJson: PaperclipPluginManifestV1 },
     companyId: string,
@@ -912,6 +945,10 @@ export function pluginRoutes(
     const activation = await resolveCompanyPluginActivation(plugin, companyId);
     if (!activation.enabled) {
       throw forbidden(`Plugin \"${plugin.pluginKey}\" is disabled for this Company.`);
+    }
+    const report = await dependencyReportForCompany(companyId);
+    if (!isPluginDependencyAvailable(report, plugin.manifestJson.id)) {
+      throw forbidden(`Plugin \"${plugin.pluginKey}\" is blocked by its dependency graph. ${report.recovery.join(" ")}`);
     }
     return activation;
   }
@@ -1040,6 +1077,28 @@ export function pluginRoutes(
     res.json({ companyId, plugins: rows });
   });
 
+  /** Returns the read-only dependency graph for a plugin in one Company. */
+  router.get("/plugins/:pluginId/companies/:companyId/dependencies", async (req, res) => {
+    const { pluginId, companyId } = req.params;
+    assertBoardOrgAccess(req);
+    assertCompanyAccess(req, companyId);
+    const plugin = await resolvePlugin(registry, pluginId);
+    if (!plugin) return void res.status(404).json({ error: "Plugin not found" });
+    const report = await dependencyReportForCompany(companyId);
+    res.json({ pluginId: plugin.id, pluginKey: plugin.pluginKey, companyId, available: isPluginDependencyAvailable(report, plugin.manifestJson.id), report });
+  });
+
+  /** Host-only preview for a global disable/delete; this endpoint never mutates state. */
+  router.get("/plugins/:pluginId/dependency-impact", async (req, res) => {
+    assertInstanceAdmin(req);
+    const plugin = await resolvePlugin(registry, req.params.pluginId);
+    if (!plugin) return void res.status(404).json({ error: "Plugin not found" });
+    const action = req.query.action;
+    if (action !== "disable" && action !== "delete") return void res.status(400).json({ error: '"action" must be disable or delete.' });
+    const report = await dependencyReportForHost({ action, pluginId: plugin.manifestJson.id });
+    res.json({ pluginId: plugin.id, pluginKey: plugin.pluginKey, report });
+  });
+
   /**
    * Stores an explicit Company-level activation override. It never installs,
    * upgrades, unloads, or restarts the Host-wide plugin package.
@@ -1047,7 +1106,8 @@ export function pluginRoutes(
   router.put("/plugins/:pluginId/companies/:companyId/activation", async (req, res) => {
     const { pluginId, companyId } = req.params;
     await assertPluginCompanyAdministrator(req, companyId);
-    const enabled = (req.body as { enabled?: unknown } | undefined)?.enabled;
+    const body = req.body as { enabled?: unknown; impactReviewId?: unknown } | undefined;
+    const enabled = body?.enabled;
     if (typeof enabled !== "boolean") {
       res.status(400).json({ error: '"enabled" must be a boolean.' });
       return;
@@ -1055,6 +1115,20 @@ export function pluginRoutes(
     const plugin = await resolvePlugin(registry, pluginId);
     if (!plugin) {
       res.status(404).json({ error: "Plugin not found" });
+      return;
+    }
+    if (enabled && plugin.status !== "ready") {
+      const report = await dependencyReportForCompany(companyId, { action: "enable", pluginId: plugin.manifestJson.id });
+      res.status(409).json({ error: "Plugin activation requires a ready Host package.", report, recovery: ["Enable or repair the Host plugin package before enabling it for this Company."] });
+      return;
+    }
+    const review = await dependencyReportForCompany(companyId, { action: enabled ? "enable" : "disable", pluginId: plugin.manifestJson.id });
+    if (enabled && !isPluginDependencyAvailable(review, plugin.manifestJson.id)) {
+      res.status(409).json({ error: "Plugin activation is blocked by its dependency graph.", report: review, recovery: review.recovery });
+      return;
+    }
+    if (!enabled && review.impact!.affectedPluginIds.length > 0 && body?.impactReviewId !== review.impact!.reviewId) {
+      res.status(409).json({ error: "This change would break active required dependents. Review the impact and repeat with impactReviewId.", report: review, impactReviewId: review.impact!.reviewId });
       return;
     }
     const activation = await setPluginCompanyActivation(registry, plugin, companyId, enabled);
@@ -2440,10 +2514,19 @@ export function pluginRoutes(
     const { pluginId } = req.params;
     const purge = req.query.purge === "true";
     const deleteInboxSummaries = req.query.deleteInboxSummaries === "true";
+    const impactReviewId = typeof (req.body as { impactReviewId?: unknown } | undefined)?.impactReviewId === "string"
+      ? (req.body as { impactReviewId: string }).impactReviewId
+      : undefined;
 
     const plugin = await resolvePlugin(registry, pluginId);
     if (!plugin) {
       res.status(404).json({ error: "Plugin not found" });
+      return;
+    }
+
+    const dependencyImpact = await dependencyReportForHost({ action: "delete", pluginId: plugin.manifestJson.id });
+    if (dependencyImpact.impact && dependencyImpact.impact.affectedPluginIds.length > 0 && impactReviewId !== dependencyImpact.impact.reviewId) {
+      res.status(409).json({ error: "This uninstall would break active required dependents. Review the impact and repeat with impactReviewId.", report: dependencyImpact, impactReviewId: dependencyImpact.impact.reviewId });
       return;
     }
 
@@ -2521,12 +2604,18 @@ export function pluginRoutes(
   router.post("/plugins/:pluginId/disable", async (req, res) => {
     assertInstanceAdmin(req);
     const { pluginId } = req.params;
-    const body = req.body as { reason?: string } | undefined;
+    const body = req.body as { reason?: string; impactReviewId?: string } | undefined;
     const reason = body?.reason;
 
     const plugin = await resolvePlugin(registry, pluginId);
     if (!plugin) {
       res.status(404).json({ error: "Plugin not found" });
+      return;
+    }
+
+    const dependencyImpact = await dependencyReportForHost({ action: "disable", pluginId: plugin.manifestJson.id });
+    if (dependencyImpact.impact && dependencyImpact.impact.affectedPluginIds.length > 0 && body?.impactReviewId !== dependencyImpact.impact.reviewId) {
+      res.status(409).json({ error: "This disable would break active required dependents. Review the impact and repeat with impactReviewId.", report: dependencyImpact, impactReviewId: dependencyImpact.impact.reviewId });
       return;
     }
 
@@ -2562,7 +2651,6 @@ export function pluginRoutes(
       res.status(404).json({ error: "Plugin not found" });
       return;
     }
-
     try {
       await lifecycle.restartWorker(plugin.id);
       res.json({ pluginId: plugin.id, restarted: true });
