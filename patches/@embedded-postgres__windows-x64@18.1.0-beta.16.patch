@@ -1,0 +1,18 @@
+diff --git a/dist/index.js b/dist/index.js
+index 0d2cbdb..c76fdab 100644
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -1,6 +1,10 @@
+ import path from 'path';
+ import { fileURLToPath } from 'url';
+ const __dirname = path.dirname(fileURLToPath(import.meta.url));
+-export const pg_ctl = path.resolve(__dirname, '..', 'native', 'bin', 'pg_ctl.exe');
+-export const initdb = path.resolve(__dirname, '..', 'native', 'bin', 'initdb.exe');
+-export const postgres = path.resolve(__dirname, '..', 'native', 'bin', 'postgres.exe');
++const configuredBinDir = process.env.SPS_EMBEDDED_POSTGRES_BINARY_DIR;
++const binDir = configuredBinDir && path.isAbsolute(configuredBinDir)
++    ? configuredBinDir
++    : path.resolve(__dirname, '..', 'native', 'bin');
++export const pg_ctl = path.join(binDir, 'pg_ctl.exe');
++export const initdb = path.join(binDir, 'initdb.exe');
++export const postgres = path.join(binDir, 'postgres.exe');

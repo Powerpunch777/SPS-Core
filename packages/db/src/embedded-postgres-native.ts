@@ -215,6 +215,9 @@ export async function prepareEmbeddedPostgresNativeRuntime(): Promise<void> {
   if (!packageRoot) return;
 
   if (process.platform === "win32") {
+    // Never trust an inherited value. This variable is consumed by the
+    // patched native package only when this process derives it locally.
+    delete process.env.SPS_EMBEDDED_POSTGRES_BINARY_DIR;
     const nativeRoot = path.resolve(packageRoot, "..", "@embedded-postgres", "windows-x64", "native");
     const binDir = path.join(nativeRoot, "bin");
     const runtimeBinDir = resolveWindowsNativeRuntimePath(binDir);
