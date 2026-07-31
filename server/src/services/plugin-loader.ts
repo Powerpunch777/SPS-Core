@@ -2385,6 +2385,19 @@ export function pluginLoader(
       instanceInfo,
     } = runtimeServices;
 
+    // Bundled plugins may be installed and activated immediately before the
+    // startup loadAll() pass. Treat that already-running runtime as a successful
+    // activation instead of attempting to register the same worker twice and
+    // incorrectly moving a healthy plugin into the error state.
+    if (workerManager.isRunning(pluginId)) {
+      registered.worker = true;
+      log.info(
+        { pluginId, pluginKey, version: plugin.version },
+        "plugin-loader: plugin worker is already active; skipping duplicate activation",
+      );
+      return { plugin, success: true, registered };
+    }
+
     try {
       log.info(
         { pluginId, pluginKey, version: plugin.version },
