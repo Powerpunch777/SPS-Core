@@ -141,7 +141,10 @@ export function secretsCheck(config: PaperclipConfig, configPath?: string): Chec
     };
   }
 
-  const keyMode = fs.statSync(keyFilePath).mode & 0o777;
+  // Windows reports a synthesized POSIX mode that does not represent the
+  // file's ACL. Emitting chmod guidance there is both unactionable and makes
+  // a correctly repaired SPS Owner Vault look unhealthy.
+  const keyMode = process.platform === "win32" ? 0o600 : fs.statSync(keyFilePath).mode & 0o777;
   const permissionWarning =
     (keyMode & 0o077) !== 0
       ? `; key file permissions are ${keyMode.toString(8)} (run chmod 600 ${keyFilePath})`

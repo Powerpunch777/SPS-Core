@@ -60,12 +60,10 @@ export async function doctor(opts: {
     return printSummary(results);
   }
 
-  // 2. Deployment/auth mode check
-  const deploymentAuthResult = deploymentAuthCheck(config);
-  results.push(deploymentAuthResult);
-  printResult(deploymentAuthResult);
-
-  // 3. Agent JWT check
+  // 2. Agent JWT check. This repair must run before deployment/auth because
+  // authenticated mode accepts the generated Agent JWT secret as its local
+  // auth secret. Evaluating deployment first leaves a stale blocking failure
+  // in the summary even though this check repairs the dependency immediately.
   results.push(
     await runRepairableCheck({
       run: () => agentJwtSecretCheck(opts.config),
@@ -73,6 +71,11 @@ export async function doctor(opts: {
       opts,
     }),
   );
+
+  // 3. Deployment/auth mode check
+  const deploymentAuthResult = deploymentAuthCheck(config);
+  results.push(deploymentAuthResult);
+  printResult(deploymentAuthResult);
 
   // 4. Secrets adapter check
   results.push(
