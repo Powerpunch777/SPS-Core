@@ -95,9 +95,11 @@ import { SpsCoreTeamAccess } from "./pages/SpsCoreTeamAccess";
 import { SpsCoreServerSettings } from "./pages/SpsCoreServerSettings";
 import { workspaceSurfacesApi } from "./api/workspace-surfaces";
 import { queryKeys } from "./lib/queryKeys";
+import { workspaceShellRoute } from "./lib/workspace-shell-route";
 
 function CoreBaselineIndexRedirect() {
-  const { selectedCompanyId } = useCompany();
+  const { selectedCompanyId, selectedCompany } = useCompany();
+  const { companyPrefix } = useParams<{ companyPrefix?: string }>();
   const { data: shell, isLoading } = useQuery({
     queryKey: queryKeys.workspaceSurfaces.shell(selectedCompanyId ?? ""),
     queryFn: () => workspaceSurfacesApi.getShell(selectedCompanyId!),
@@ -105,9 +107,10 @@ function CoreBaselineIndexRedirect() {
   });
 
   if (isLoading) return null;
-  const target = shell?.mode === "plugin" && shell.shell?.defaultRoute
-    ? shell.shell.defaultRoute
-    : "/dashboard";
+  const target = workspaceShellRoute(
+    shell?.mode === "plugin" ? shell.shell?.defaultRoute : null,
+    companyPrefix ?? selectedCompany?.issuePrefix,
+  );
   return <Navigate to={target} replace />;
 }
 
@@ -455,10 +458,11 @@ function CompanyRootRedirect() {
     return <NoCompaniesStartPage />;
   }
 
-  const target = shell?.mode === "plugin" && shell.shell?.defaultRoute
-    ? shell.shell.defaultRoute
-    : "/dashboard";
-  return <Navigate to={`/${targetCompany.issuePrefix}${target}`} replace />;
+  const target = workspaceShellRoute(
+    shell?.mode === "plugin" ? shell.shell?.defaultRoute : null,
+    targetCompany.issuePrefix,
+  );
+  return <Navigate to={target} replace />;
 }
 
 function UnprefixedBoardRedirect() {
