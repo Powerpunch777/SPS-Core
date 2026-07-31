@@ -12,6 +12,20 @@ import { useCompany } from "@/context/CompanyContext";
 import { queryKeys } from "@/lib/queryKeys";
 import { Link } from "@/lib/router";
 import { useToastActions } from "@/context/ToastContext";
+import { SpsMarketplacePanel } from "@/components/SpsMarketplacePanel";
+
+type DesktopPluginRegistryBridge = {
+  openPluginRegistries: () => Promise<{ opened?: boolean }>;
+};
+
+function getDesktopPluginRegistryBridge(): DesktopPluginRegistryBridge | null {
+  if (typeof window === "undefined") return null;
+  const candidate = (window as Window & { spsDesktopWorkspace?: Partial<DesktopPluginRegistryBridge> })
+    .spsDesktopWorkspace;
+  return candidate && typeof candidate.openPluginRegistries === "function"
+    ? candidate as DesktopPluginRegistryBridge
+    : null;
+}
 
 const SPS_BUNDLED_EXTENSION_IDS = new Set([
   "sps.default-memory",
@@ -70,7 +84,7 @@ function ExtensionRow({
             {state}
           </Badge>
           <Badge variant={companyEnabled ? "default" : "secondary"} className={companyEnabled ? "bg-blue-600 hover:bg-blue-700" : undefined}>
-            {companyEnabled ? "Enabled in this Company" : "Disabled in this Company"}
+            {companyEnabled ? "Enabled in this Workspace" : "Disabled in this Workspace"}
           </Badge>
         </div>
         <p className="mt-1 text-sm text-muted-foreground">
@@ -119,6 +133,9 @@ export function SpsExtensionsManager() {
   const { setBreadcrumbs } = useBreadcrumbs();
   const queryClient = useQueryClient();
   const { pushToast } = useToastActions();
+  const [activeSection, setActiveSection] = useState<"installed" | "marketplace">("installed");
+  const [registryOpening, setRegistryOpening] = useState(false);
+  const [registryError, setRegistryError] = useState<string | null>(null);
   const [uninstallPlugin, setUninstallPlugin] = useState<PluginRecord | null>(null);
   const { data: plugins, isLoading, error } = useQuery({
     queryKey: queryKeys.plugins.all,
@@ -156,7 +173,7 @@ export function SpsExtensionsManager() {
       });
     },
     onError: (error: Error) => {
-      pushToast({ title: "Could not change Company extension", body: error.message, tone: "error" });
+      pushToast({ title: "Could not change Workspace extension", body: error.message, tone: "error" });
     },
   });
   const uninstallMutation = useMutation({
@@ -195,9 +212,9 @@ export function SpsExtensionsManager() {
 
   if (isLoading) return <div className="p-4 text-sm text-muted-foreground">Loading SPS extensions...</div>;
   if (error) return <div className="p-4 text-sm text-destructive">Failed to load SPS extensions.</div>;
-  if (!selectedCompany) return <div className="p-4 text-sm text-muted-foreground">Select a Company to manage its extensions.</div>;
-  if (companyPluginsQuery.isLoading) return <div className="p-4 text-sm text-muted-foreground">Loading Company extensions...</div>;
-  if (companyPluginsQuery.error) return <div className="p-4 text-sm text-destructive">Failed to load Company extension settings.</div>;
+  if (!selectedCompany) return <div className="p-4 text-sm text-muted-foreground">Select a Workspace to manage its extensions.</div>;
+  if (companyPluginsQuery.isLoading) return <div className="p-4 text-sm text-muted-foreground">Loading Workspace extensions...</div>;
+  if (companyPluginsQuery.error) return <div className="p-4 text-sm text-destructive">Failed to load Workspace extension settings.</div>;
 
   const renderExtension = (plugin: PluginRecord, builtIn: boolean) => {
     const activation = activationByPluginId.get(plugin.id) ?? null;
@@ -215,20 +232,72 @@ export function SpsExtensionsManager() {
     );
   };
 
+  const sectionTabs = (
+    <div className="flex w-fit gap-1 rounded-md border bg-muted/40 p-1" role="tablist" aria-label="Plugin sections">
+      <Button type="button" size="sm" variant={activeSection === "installed" ? "secondary" : "ghost"} role="tab" aria-selected={activeSection === "installed"} onClick={() => setActiveSection("installed")}>Installed</Button>
+      <Button type="button" size="sm" variant={activeSection === "marketplace" ? "secondary" : "ghost"} role="tab" aria-selected={activeSection === "marketplace"} onClick={() => setActiveSection("marketplace")}>Marketplace</Button>
+    </div>
+  );
+
+  async function openSecureInstallReview() {
+    const bridge = getDesktopPluginRegistryBridge();
+    if (!bridge) return;
+    setRegistryError(null);
+    setRegistryOpening(true);
+    try {
+      const result = await bridge.openPluginRegistries();
+      if (result?.opened !== true) throw new Error("SPS Desktop did not open the plugin review window.");
+    } catch (error) {
+      setRegistryError(error instanceof Error ? error.message : "Could not open the plugin review window.");
+    } finally {
+      setRegistryOpening(false);
+    }
+  }
+
   return (
-    <div className="max-w-4xl space-y-6">
-      <header className="flex items-start gap-3">
-        <div className="rounded-md border bg-muted/40 p-2">
-          <Puzzle className="h-5 w-5 text-muted-foreground" />
+    <div className="max-w-6xl space-y-6">
+      <header className="flex flex-wrap items-start justify-between gap-3">
+        <div className="flex items-start gap-3">
+          <div className="rounded-md border bg-muted/40 p-2">
+            <Puzzle className="h-5 w-5 text-muted-foreground" />
+          </div>
+          <div>
+            <h1 className="text-xl font-semibold">SPS Plugins</h1>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Browse verified packages, then choose which installed extensions this Workspace uses.
+            </p>
+          </div>
         </div>
-        <div>
-          <h1 className="text-xl font-semibold">SPS Extensions</h1>
-          <p className="mt-1 text-sm text-muted-foreground">
-            Packages are installed once on this Host. Enable only the extensions this Company should use.
-          </p>
-        </div>
+        {sectionTabs}
       </header>
 
+      {activeSection === "marketplace" ? (
+        <>
+          <Card className="border-blue-500/20 bg-blue-500/[0.035]">
+            <CardContent className="flex flex-wrap items-center justify-between gap-4 py-4">
+              <div className="flex min-w-0 gap-3">
+                <ShieldCheck className="mt-0.5 h-5 w-5 shrink-0 text-blue-700 dark:text-blue-300" />
+                <div className="space-y-1 text-sm">
+                  <p className="font-medium">Host-controlled installation</p>
+                  <p className="text-muted-foreground">
+                    Marketplace search and Assistant recommendations never install code. The Host must stage, review, and apply an exact signed version.
+                  </p>
+                  {registryError ? <p role="alert" className="text-destructive">{registryError}</p> : null}
+                </div>
+              </div>
+              {getDesktopPluginRegistryBridge() ? (
+                <Button type="button" onClick={() => void openSecureInstallReview()} disabled={registryOpening}>
+                  {registryOpening ? "Opening review..." : "Open secure install review"}
+                </Button>
+              ) : (
+                <Badge variant="secondary">Host Desktop required to install</Badge>
+              )}
+            </CardContent>
+          </Card>
+          <SpsMarketplacePanel companyId={selectedCompany.id} />
+        </>
+      ) : (
+        <>
       <Card className="border-blue-500/20 bg-blue-500/[0.035]">
         <CardContent className="flex gap-3 py-4">
           <ShieldCheck className="mt-0.5 h-5 w-5 shrink-0 text-blue-700 dark:text-blue-300" />
@@ -261,7 +330,7 @@ export function SpsExtensionsManager() {
         <Card className="py-0">
           {custom.length ? <div className="divide-y">{custom.map((plugin) => renderExtension(plugin, false))}</div> : (
             <CardContent className="py-5 text-sm text-muted-foreground">
-              No Registry extensions are installed. Open the SPS Desktop menu and choose <strong>Manage Plugin Registries...</strong> to review a trusted source.
+              No Registry extensions are installed. Open Marketplace, then use <strong>Open secure install review</strong> to stage a trusted release.
             </CardContent>
           )}
         </Card>
@@ -279,6 +348,8 @@ export function SpsExtensionsManager() {
           });
         }}
       />
+        </>
+      )}
     </div>
   );
 }

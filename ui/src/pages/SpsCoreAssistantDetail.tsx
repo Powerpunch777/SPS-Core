@@ -71,7 +71,7 @@ export function SpsCoreAssistantDetail() {
         <div>
           <h2 className="text-base font-medium">Runtime configuration</h2>
           <p className="mt-1 text-sm text-muted-foreground">
-            Configure the runtime used by Plugin Discovery & Builder. Workflow roles and permissions belong to plugins.
+            Configure the runtime used by Marketplace Assistant and AI-enabled plugins. Workflow roles and permissions belong to plugins.
           </p>
         </div>
         <AgentConfigForm

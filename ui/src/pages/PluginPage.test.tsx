@@ -265,6 +265,35 @@ describe("PluginPage", () => {
     });
   });
 
+  it("uses Workspace chrome instead of plugin-settings chrome for a Core baseline plugin page", async () => {
+    mockParams.pluginRoutePath = "discover";
+    document.head.insertAdjacentHTML(
+      "beforeend",
+      '<meta name="sps-basic-mode" content="true"><meta name="sps-core-baseline-mode" content="true">',
+    );
+    mockPluginsApi.listUiContributions.mockResolvedValue([
+      pageContribution({
+        slots: [{
+          type: "page",
+          id: "plugin-discovery-page",
+          displayName: "Discovery & Builder",
+          exportName: "DiscoveryPage",
+          routePath: "discover",
+        }],
+      }),
+    ]);
+
+    const root = await renderPage(container);
+
+    expect(mockSetBreadcrumbs).toHaveBeenCalledWith([{ label: "Discovery & Builder" }]);
+    expect(container.textContent).not.toContain("Back");
+    expect(container.querySelector('a[href="/PAP/dashboard"]')).toBeNull();
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
   it("uses the selected plugin page path as the route-sidebar title", async () => {
     mockParams.pluginRoutePath = "wiki";
     mockParams["*"] = "page/templates%3A%3Aindex.md";

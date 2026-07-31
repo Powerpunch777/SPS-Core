@@ -32,7 +32,6 @@ import { useToastActions } from "@/context/ToastContext";
 import { cn } from "@/lib/utils";
 import { isSpsBasicModeEnabled } from "@/lib/sps-basic-mode";
 import { isSpsCoreBaselineModeEnabled } from "@/lib/sps-core-baseline-mode";
-import { isWorkplaneModeEnabled } from "@/lib/workplane-mode";
 import { SpsExtensionsManager } from "./SpsExtensionsManager";
 import { SpsMarketplacePanel } from "@/components/SpsMarketplacePanel";
 
@@ -92,7 +91,7 @@ function ExperimentalBadge() {
  * @see doc/plugins/PLUGIN_SPEC.md §3 — Plugin Lifecycle for status semantics.
  */
 export function PluginManager() {
-  if (isSpsBasicModeEnabled() && isWorkplaneModeEnabled()) {
+  if (isSpsBasicModeEnabled()) {
     return <SpsExtensionsManager />;
   }
 
