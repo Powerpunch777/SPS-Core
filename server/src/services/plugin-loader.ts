@@ -80,6 +80,24 @@ function npmInvocation(args: string[]) {
   return { file: "npm", args };
 }
 
+function pnpmInvocation(args: readonly string[], processEnv: NodeJS.ProcessEnv) {
+  const pnpmCli = processEnv["SPS_PNPM_CLI"]?.trim()
+    || (processEnv["npm_execpath"]?.toLowerCase().includes("pnpm")
+      ? processEnv["npm_execpath"]?.trim()
+      : "");
+  const nodeCommand = processEnv["SPS_PLUGIN_NODE_COMMAND"]?.trim() || process.execPath;
+  if (
+    pnpmCli
+    && path.isAbsolute(pnpmCli)
+    && existsSync(pnpmCli)
+    && path.isAbsolute(nodeCommand)
+    && existsSync(nodeCommand)
+  ) {
+    return { file: nodeCommand, args: [pnpmCli, ...args] };
+  }
+  return { file: "pnpm", args: [...args] };
+}
+
 async function runNpm(args: string[], options: { timeout: number }) {
   const invocation = npmInvocation(args);
   return await execFileAsync(invocation.file, invocation.args, options);
@@ -957,6 +975,13 @@ export async function ensureLocalPluginBuilt(
   if (typeof packageName !== "string" || packageName.trim().length === 0 || !manualBuildCommand) return;
 
   const runExecFileAsync = options.execFileAsyncImpl ?? execFileAsync;
+  const resolveBuildInvocation = options.execFileAsyncImpl
+    ? (command: LocalPluginBuildCommand) => command
+    : (command: LocalPluginBuildCommand) => (
+      command.file === "pnpm"
+        ? { ...command, ...pnpmInvocation(command.args, processEnv) }
+        : command
+    );
   const buildCommands = buildLocalPluginBuildCommands(packageRoot, pkgJson, {
     repoRoot: options.repoRoot,
     needsBuild: missingEntrypoints.length > 0,
@@ -965,9 +990,10 @@ export async function ensureLocalPluginBuilt(
 
   try {
     for (const command of buildCommands) {
+      const invocation = resolveBuildInvocation(command);
       await runExecFileAsync(
-        command.file,
-        command.args,
+        invocation.file,
+        invocation.args,
         { cwd: command.cwd, timeout: LOCAL_PLUGIN_AUTOBUILD_TIMEOUT_MS },
       );
     }
