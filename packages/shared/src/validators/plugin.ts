@@ -1577,6 +1577,38 @@ export const uninstallPluginSchema = z.object({
 
 export type UninstallPlugin = z.infer<typeof uninstallPluginSchema>;
 
+const lifecycleProposalTargetSchema = z.object({
+  pluginKey: z.string().trim().min(1).max(200),
+  pluginId: z.string().uuid().nullable().optional(),
+  packageName: z.string().trim().min(1).max(300).nullable().optional(),
+  version: z.string().trim().min(1).max(100).nullable().optional(),
+  registryStageId: z.string().uuid().nullable().optional(),
+  scope: z.enum(["company", "host"]),
+});
+
+export const createPluginLifecycleProposalSchema = z.object({
+  operation: z.enum(["install", "activate", "update", "disable", "remove"]),
+  target: lifecycleProposalTargetSchema,
+  rationale: z.string().trim().min(1).max(4000),
+  authoringSessionId: z.string().trim().min(1).max(200),
+  evidenceRefs: z.array(z.object({
+    kind: z.string().trim().min(1).max(80),
+    ref: z.string().trim().min(1).max(500),
+  })).max(50).default([]),
+}).superRefine((input, ctx) => {
+  if (input.target.scope === "company" && !["activate", "disable"].includes(input.operation)) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Company-scoped proposals only support activate or disable.", path: ["target", "scope"] });
+  }
+  if (input.operation === "install" && (!input.target.packageName || !input.target.version)) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Install proposals require target.packageName and target.version.", path: ["target"] });
+  }
+  if (input.operation === "update" && !input.target.version) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Update proposals require target.version.", path: ["target", "version"] });
+  }
+});
+
+export type CreatePluginLifecycleProposal = z.infer<typeof createPluginLifecycleProposalSchema>;
+
 // ---------------------------------------------------------------------------
 // Plugin state (key-value storage) schemas
 // ---------------------------------------------------------------------------

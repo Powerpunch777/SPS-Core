@@ -863,6 +863,69 @@ export interface PluginRecord {
 }
 
 // ---------------------------------------------------------------------------
+// Plugin lifecycle proposals v1
+// ---------------------------------------------------------------------------
+
+export const PLUGIN_LIFECYCLE_PROPOSAL_OPERATIONS = [
+  "install",
+  "activate",
+  "update",
+  "disable",
+  "remove",
+] as const;
+export type PluginLifecycleProposalOperation = (typeof PLUGIN_LIFECYCLE_PROPOSAL_OPERATIONS)[number];
+
+export const PLUGIN_LIFECYCLE_PROPOSAL_STATUSES = [
+  "pending",
+  "accepted",
+  "rejected",
+  "failed",
+] as const;
+export type PluginLifecycleProposalStatus = (typeof PLUGIN_LIFECYCLE_PROPOSAL_STATUSES)[number];
+
+export interface PluginLifecycleProposalTarget {
+  pluginKey: string;
+  pluginId?: string | null;
+  packageName?: string | null;
+  version?: string | null;
+  registryStageId?: string | null;
+  scope: "company" | "host";
+}
+
+export interface PluginLifecycleProposalEvidenceRef {
+  kind: string;
+  ref: string;
+}
+
+export interface PluginLifecycleProposalRiskSummary {
+  capabilityDelta: { status: "known" | "unknown"; added: string[]; removed: string[] };
+  compatibility: { status: "known" | "unknown"; reason?: string };
+  dependency: { status: "known" | "unknown"; available?: boolean; affectedPluginIds?: string[] };
+  migration: { status: "none" | "unknown"; reason?: string };
+  secrets: { status: "none" | "unknown"; reason?: string };
+  hostScope: "none" | "required";
+}
+
+export interface PluginLifecycleProposalRecord {
+  id: string;
+  companyId: string;
+  operation: PluginLifecycleProposalOperation;
+  status: PluginLifecycleProposalStatus;
+  target: PluginLifecycleProposalTarget;
+  rationale: string;
+  authoringSessionId: string;
+  evidenceRefs: PluginLifecycleProposalEvidenceRef[];
+  riskSummary: PluginLifecycleProposalRiskSummary;
+  createdByPluginId: string | null;
+  createdByAgentId: string | null;
+  decisionByUserId: string | null;
+  decisionReason: string | null;
+  executedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+// ---------------------------------------------------------------------------
 // Canonical plugin diagnostics
 // ---------------------------------------------------------------------------
 

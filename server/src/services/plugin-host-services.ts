@@ -81,6 +81,7 @@ import { sanitizeRecord } from "../redaction.js";
 import { isCoreManagedMemoryLifecycleSubscription } from "./memory-providers.js";
 import { spsPluginExecutionService } from "./sps-plugin-execution.js";
 import { spsWorkspaceSurfaceService } from "./sps-workspace-surfaces.js";
+import { createPluginLifecycleProposalService } from "./plugin-lifecycle-proposals.js";
 
 // ---------------------------------------------------------------------------
 // SSRF protection for plugin HTTP fetch
@@ -525,6 +526,7 @@ export function buildHostServices(
   } = {},
 ): HostServices & { dispose(): void } {
   const registry = pluginRegistryService(db);
+  const lifecycleProposals = createPluginLifecycleProposalService(db);
   const stateStore = pluginStateStore(db);
   const pluginDb = pluginDatabaseService(db);
   const secretsHandler = createPluginSecretsHandler({ db, pluginId });
@@ -1110,6 +1112,56 @@ export function buildHostServices(
       async get() {
         const configRow = await registry.getConfig(pluginId);
         return configRow?.configJson ?? {};
+      },
+    },
+
+    lifecycleProposals: {
+      async create(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        const targetPlugin = await registry.getByKey(params.target.pluginKey);
+        const proposal = await lifecycleProposals.create({
+          ...params,
+          companyId,
+          evidenceRefs: params.evidenceRefs ?? [],
+        }, {
+          actorType: "plugin",
+          actorId: pluginId,
+          pluginId,
+        }, {
+          riskSummary: {
+            capabilityDelta: { status: targetPlugin ? "known" : "unknown", added: [], removed: [] },
+            compatibility: targetPlugin && targetPlugin.manifestJson.id === params.target.pluginKey
+              ? { status: "known" }
+              : { status: "unknown", reason: "Target package metadata is not available to the worker." },
+            dependency: { status: "unknown" },
+            migration: { status: "unknown", reason: "Migration inspection is Host-only." },
+            secrets: { status: "unknown", reason: "Secret scope inspection is Host-only." },
+            hostScope: params.target.scope === "host" ? "required" : "none",
+          },
+        });
+        await logPluginActivity({
+          companyId,
+          action: "plugin.lifecycle_proposal.created",
+          entityType: "plugin_lifecycle_proposal",
+          entityId: proposal.id,
+          details: {
+            operation: proposal.operation,
+            target: proposal.target,
+            authoringSessionId: proposal.authoringSessionId,
+          },
+        });
+        return proposal;
+      },
+      async list(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        return lifecycleProposals.list(companyId, params.status);
+      },
+      async get(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        return lifecycleProposals.get(companyId, params.proposalId);
       },
     },
 

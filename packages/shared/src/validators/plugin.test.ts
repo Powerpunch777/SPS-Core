@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { PLUGIN_CAPABILITIES } from "../constants.js";
-import { pluginJobDeclarationSchema, pluginManagedRoutineDeclarationSchema, pluginManifestV1Schema, pluginUiSlotDeclarationSchema } from "./plugin.js";
+import { createPluginLifecycleProposalSchema, pluginJobDeclarationSchema, pluginManagedRoutineDeclarationSchema, pluginManifestV1Schema, pluginUiSlotDeclarationSchema } from "./plugin.js";
 
 describe("plugin capability constants", () => {
   it("exposes each capability once", () => {
@@ -9,6 +9,28 @@ describe("plugin capability constants", () => {
 });
 
 describe("plugin manifest validators", () => {
+  it("accepts only explicit, bounded lifecycle proposal targets", () => {
+    const valid = createPluginLifecycleProposalSchema.safeParse({
+      operation: "activate",
+      target: { pluginKey: "sps.discovery", pluginId: "dbba0a99-a5a8-4b00-8c0c-27c619889939", scope: "company" },
+      rationale: "The company requested the discovery workflow.",
+      authoringSessionId: "session-42",
+      evidenceRefs: [{ kind: "artifact", ref: "artifact-1" }],
+    });
+    expect(valid.success).toBe(true);
+    expect(createPluginLifecycleProposalSchema.safeParse({
+      operation: "install",
+      target: { pluginKey: "sps.discovery", scope: "company" },
+      rationale: "nope",
+      authoringSessionId: "session-42",
+    }).success).toBe(false);
+    expect(createPluginLifecycleProposalSchema.safeParse({
+      operation: "install",
+      target: { pluginKey: "sps.discovery", packageName: "@sps/discovery", version: "1.0.0", scope: "host" },
+      rationale: "install the reviewed package",
+      authoringSessionId: "session-42",
+    }).success).toBe(true);
+  });
   it("validates dependency declarations, inclusive bounds, and legacy underscore ids", () => {
     const base = {
       id: "sps_legacy.plugin", apiVersion: 1 as const, version: "1.0.0", displayName: "Dependency test", description: "Dependency test", author: "SPS", categories: ["automation"] as const, capabilities: ["jobs.schedule"] as const, entrypoints: { worker: "./worker.js" },

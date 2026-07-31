@@ -103,6 +103,13 @@ export interface HostServices {
     get(): Promise<Record<string, unknown>>;
   };
 
+  /** Durable, non-mutating plugin lifecycle proposal service. */
+  lifecycleProposals?: {
+    create(params: WorkerToHostMethods["pluginLifecycleProposals.create"][0]): Promise<WorkerToHostMethods["pluginLifecycleProposals.create"][1]>;
+    list(params: WorkerToHostMethods["pluginLifecycleProposals.list"][0]): Promise<WorkerToHostMethods["pluginLifecycleProposals.list"][1]>;
+    get(params: WorkerToHostMethods["pluginLifecycleProposals.get"][0]): Promise<WorkerToHostMethods["pluginLifecycleProposals.get"][1]>;
+  };
+
   /** Registers runtime-discovered tools for connector-style plugins. */
   agentTools?: {
     replaceDynamic(
@@ -391,6 +398,9 @@ export type HostClientHandlers = {
 const METHOD_CAPABILITY_MAP: Record<WorkerToHostMethodName, PluginCapability | null> = {
   // Config — always allowed
   "config.get": null,
+  "pluginLifecycleProposals.create": "plugin.lifecycle.proposals.create",
+  "pluginLifecycleProposals.list": "plugin.lifecycle.proposals.read",
+  "pluginLifecycleProposals.get": "plugin.lifecycle.proposals.read",
   "agentTools.replaceDynamic": "agent.tools.dynamic.register",
 
   // Trusted local folders
@@ -687,6 +697,19 @@ export function createHostClientHandlers(
     // Config
     "config.get": gated("config.get", async () => {
       return services.config.get();
+    }),
+
+    "pluginLifecycleProposals.create": gated("pluginLifecycleProposals.create", async (params) => {
+      if (!services.lifecycleProposals) throw new Error("This SPS host does not expose plugin lifecycle proposals");
+      return services.lifecycleProposals.create(params);
+    }),
+    "pluginLifecycleProposals.list": gated("pluginLifecycleProposals.list", async (params) => {
+      if (!services.lifecycleProposals) throw new Error("This SPS host does not expose plugin lifecycle proposals");
+      return services.lifecycleProposals.list(params);
+    }),
+    "pluginLifecycleProposals.get": gated("pluginLifecycleProposals.get", async (params) => {
+      if (!services.lifecycleProposals) throw new Error("This SPS host does not expose plugin lifecycle proposals");
+      return services.lifecycleProposals.get(params);
     }),
 
     "agentTools.replaceDynamic": gated("agentTools.replaceDynamic", async (params) => {

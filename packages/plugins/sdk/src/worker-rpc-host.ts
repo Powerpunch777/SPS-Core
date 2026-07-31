@@ -548,6 +548,18 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
         },
       },
 
+      lifecycleProposals: {
+        async create(input) {
+          return callHost("pluginLifecycleProposals.create", input);
+        },
+        async list(companyId: string, options = {}) {
+          return callHost("pluginLifecycleProposals.list", { companyId, status: options.status });
+        },
+        async get(companyId: string, proposalId: string) {
+          return callHost("pluginLifecycleProposals.get", { companyId, proposalId });
+        },
+      },
+
       sps,
 
       spsTransport,

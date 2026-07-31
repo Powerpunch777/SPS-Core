@@ -845,6 +845,17 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
         return status;
       },
     },
+    lifecycleProposals: {
+      async create() {
+        throw new Error("Plugin lifecycle proposals are not implemented in the test harness");
+      },
+      async list() {
+        return [];
+      },
+      async get() {
+        return null;
+      },
+    },
     spsTransport: {
       async request() {
         throw new Error("The in-memory plugin test harness does not provide SPS Node infrastructure");

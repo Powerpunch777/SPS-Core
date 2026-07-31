@@ -1010,6 +1010,10 @@ export const PLUGIN_CAPABILITIES = [
   // Read the Host-provided verified plugin registry catalog. The catalog is
   // public metadata; this does not grant package lifecycle control.
   "registry.catalog.read",
+  // Lifecycle proposals are non-mutating change requests. They intentionally
+  // do not grant package install, activation, or lifecycle control.
+  "plugin.lifecycle.proposals.create",
+  "plugin.lifecycle.proposals.read",
   "host.local_api.access",
   "secrets.read-ref",
   "environment.drivers.register",
