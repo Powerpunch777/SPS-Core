@@ -127,12 +127,35 @@ export interface AdapterInvocationMeta {
   context?: Record<string, unknown>;
 }
 
+/**
+ * A Core-owned ACP MCP stdio server that may be injected for one execution.
+ * Identity and revision are supplied by Core and are deliberately separate
+ * from the process configuration so runtime caches can track tool changes
+ * without exposing credentials in logs or session metadata.
+ */
+export interface AdapterMcpStdioServerSpec {
+  readonly kind: "stdio";
+  readonly name: string;
+  readonly command: string;
+  readonly args: readonly string[];
+  readonly env?: readonly { readonly name: string; readonly value: string }[];
+  readonly identity: string;
+  readonly revision: string;
+}
+
+export interface AdapterExternalToolContext {
+  /** Core-provided MCP servers for this execution. Omit for ordinary runs. */
+  readonly mcpServers?: readonly AdapterMcpStdioServerSpec[];
+}
+
 export interface AdapterExecutionContext {
   runId: string;
   agent: AdapterAgent;
   runtime: AdapterRuntime;
   config: Record<string, unknown>;
   context: Record<string, unknown>;
+  /** Optional Core-owned external tool bridge configuration. */
+  externalTools?: AdapterExternalToolContext | null;
   runtimeCommandSpec?: AdapterRuntimeCommandSpec | null;
   executionTarget?: AdapterExecutionTarget | null;
   /**
@@ -362,6 +385,8 @@ export interface AcpTargetDescriptor {
     nodeRange?: string;
     packages?: string[];
   };
+  /** Whether the ACP target accepts Core-provided MCP stdio servers. */
+  supportsMcpStdio?: boolean;
 }
 
 export interface ServerAdapterModule {
@@ -369,6 +394,8 @@ export interface ServerAdapterModule {
   execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult>;
   testEnvironment(ctx: AdapterEnvironmentTestContext): Promise<AdapterEnvironmentTestResult>;
   acp?: AcpTargetDescriptor;
+  /** Whether this adapter can consume Core-provided external tools. */
+  supportsExternalTools?: boolean;
   listSkills?: (ctx: AdapterSkillContext) => Promise<AdapterSkillSnapshot>;
   syncSkills?: (ctx: AdapterSkillContext, desiredSkills: string[]) => Promise<AdapterSkillSnapshot>;
   sessionCodec?: AdapterSessionCodec;

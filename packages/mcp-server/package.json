@@ -13,7 +13,8 @@
   },
   "type": "module",
   "bin": {
-    "sps-mcp-server": "./dist/stdio.js"
+    "sps-mcp-server": "./dist/stdio.js",
+    "sps-marketplace-assistant-mcp": "./dist/marketplace-assistant-stdio.js"
   },
   "exports": {
     ".": "./src/index.ts"
@@ -21,7 +22,8 @@
   "publishConfig": {
     "access": "public",
     "bin": {
-      "sps-mcp-server": "./dist/stdio.js"
+      "sps-mcp-server": "./dist/stdio.js",
+      "sps-marketplace-assistant-mcp": "./dist/marketplace-assistant-stdio.js"
     },
     "exports": {
       ".": {

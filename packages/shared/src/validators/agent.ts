@@ -160,15 +160,22 @@ export const skillTestAgentKeyScopeSchema = z.object({
   issueId: z.string().uuid(),
 }).strict();
 
+export const marketplaceAssistantAgentKeyScopeSchema = z.object({
+  kind: z.literal("marketplace_assistant"),
+  sessionId: z.string().uuid(),
+}).strict();
+
 export const agentApiKeyScopeSchema = z.union([
   standardAgentKeyScopeSchema,
   taskBridgeAgentKeyScopeSchema,
   skillTestAgentKeyScopeSchema,
+  marketplaceAssistantAgentKeyScopeSchema,
 ]);
 
 export type AgentApiKeyScope = z.infer<typeof agentApiKeyScopeSchema>;
 export type TaskBridgeAgentKeyScope = z.infer<typeof taskBridgeAgentKeyScopeSchema>;
 export type SkillTestAgentKeyScope = z.infer<typeof skillTestAgentKeyScopeSchema>;
+export type MarketplaceAssistantAgentKeyScope = z.infer<typeof marketplaceAssistantAgentKeyScopeSchema>;
 
 export function normalizeAgentApiKeyScope(value: unknown): AgentApiKeyScope {
   const parsed = agentApiKeyScopeSchema.safeParse(value);
@@ -177,7 +184,9 @@ export function normalizeAgentApiKeyScope(value: unknown): AgentApiKeyScope {
 
 export const createAgentKeySchema = z.object({
   name: z.string().min(1).default("default"),
-  scope: agentApiKeyScopeSchema.optional().default({ kind: "standard" }),
+  scope: z.union([standardAgentKeyScopeSchema, taskBridgeAgentKeyScopeSchema])
+    .optional()
+    .default({ kind: "standard" }),
 });
 
 export type CreateAgentKey = z.infer<typeof createAgentKeySchema>;

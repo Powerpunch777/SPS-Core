@@ -3,6 +3,7 @@ import path from "node:path";
 import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
 import { createHash, randomUUID } from "node:crypto";
+import { fileURLToPath } from "node:url";
 import { and, asc, desc, eq, getTableColumns, gt, gte, inArray, isNull, lt, lte, notInArray, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
@@ -65,6 +66,7 @@ import { conflict, HttpError, notFound } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { publishLiveEvent } from "./live-events.js";
 import { normalizeResponsibleUserDenialCode } from "./responsible-user-denial-run-outcomes.js";
+import { createSpsMarketplaceAssistantService } from "./sps-marketplace-assistant.js";
 import { getRunLogStore, type RunLogHandle } from "./run-log-store.js";
 import { getServerAdapter, listAdapterModelProfiles, runningProcesses } from "../adapters/index.js";
 import type {
@@ -5009,6 +5011,30 @@ function isTruthyRuntimeEnvValue(value: string | undefined) {
   return value === "true" || value === "1" || value === "yes" || value === "on";
 }
 
+type MarketplaceAssistantRunContext = {
+  sessionId: string;
+  userId: string;
+  message: string;
+};
+
+function readMarketplaceAssistantRunContext(
+  contextSnapshot: Record<string, unknown> | null | undefined,
+): MarketplaceAssistantRunContext | null {
+  const value = parseObject(contextSnapshot?.spsMarketplaceAssistant);
+  const sessionId = readNonEmptyString(value.sessionId);
+  const userId = readNonEmptyString(value.userId);
+  const message = readNonEmptyString(value.message);
+  return sessionId && userId && message ? { sessionId, userId, message } : null;
+}
+
+function resolveMarketplaceAssistantMcpEntryPath() {
+  const servicesDir = path.dirname(fileURLToPath(import.meta.url));
+  return path.resolve(
+    servicesDir,
+    "../../node_modules/@sps/mcp-server/dist/marketplace-assistant-stdio.js",
+  );
+}
+
 export function assertSpsNodeBindingRequiredForAdapter(input: {
   requireSpsNodeExecution: boolean;
   adapterType: string;
@@ -5100,6 +5126,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
   const secretsSvc = secretService(db);
   const companySkills = companySkillService(db);
   const issuesSvc = issueService(db);
+  const marketplaceAssistantSvc = createSpsMarketplaceAssistantService(db);
   const issueReportsSvc = issueReportService(db);
   const treeControlSvc = issueTreeControlService(db);
   const executionWorkspacesSvc = executionWorkspaceService(db);
@@ -5851,6 +5878,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     agentId: string,
     adapterType: string,
     taskKey: string,
+    userId?: string | null,
   ) {
     return db
       .select()
@@ -5861,6 +5889,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           eq(agentTaskSessions.agentId, agentId),
           eq(agentTaskSessions.adapterType, adapterType),
           eq(agentTaskSessions.taskKey, taskKey),
+          userId ? eq(agentTaskSessions.userId, userId) : isNull(agentTaskSessions.userId),
         ),
       )
       .then((rows) => rows[0] ?? null);
@@ -7071,6 +7100,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     agentId: string;
     adapterType: string;
     taskKey: string;
+    userId?: string | null;
     sessionParamsJson: Record<string, unknown> | null;
     sessionDisplayId: string | null;
     lastRunId: string | null;
@@ -7081,6 +7111,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       input.agentId,
       input.adapterType,
       input.taskKey,
+      input.userId,
     );
     if (existing) {
       return db
@@ -7102,6 +7133,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       .values({
         companyId: input.companyId,
         agentId: input.agentId,
+        userId: input.userId ?? null,
         adapterType: input.adapterType,
         taskKey: input.taskKey,
         sessionParamsJson: input.sessionParamsJson,
@@ -11079,6 +11111,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
     const runtime = await ensureRuntimeState(agent);
     const context = parseObject(run.contextSnapshot);
+    const marketplaceAssistantContext = readMarketplaceAssistantRunContext(context);
     const taskKey = deriveTaskKeyWithHeartbeatFallback(context, null);
     const sessionCodec = getAdapterSessionCodec(agent.adapterType);
     const issueId = readNonEmptyString(context.issueId);
@@ -11247,7 +11280,13 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     });
     const config = parseObject(agent.adapterConfig);
     const taskSession = taskKey
-      ? await getTaskSession(agent.companyId, agent.id, agent.adapterType, taskKey)
+      ? await getTaskSession(
+          agent.companyId,
+          agent.id,
+          agent.adapterType,
+          taskKey,
+          marketplaceAssistantContext?.userId,
+        )
       : null;
     const taskSessionDecodedParams = normalizeSessionParams(
       sessionCodec.deserialize(taskSession?.sessionParamsJson ?? null),
@@ -11387,6 +11426,20 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       context.paperclipTaskMarkdown = taskMarkdown;
     } else {
       delete context.paperclipTaskMarkdown;
+    }
+    if (marketplaceAssistantContext) {
+      context.paperclipTaskMarkdown = [
+        "# SPS Marketplace Assistant",
+        "",
+        "Help the user discover and compare SPS plugins.",
+        "Use the provided read-only Marketplace tools when catalog facts are needed.",
+        "Do not claim that a plugin was installed, enabled, updated, disabled, or removed.",
+        "The Host performs plugin lifecycle actions manually in Settings > Plugins.",
+        "",
+        "## User message",
+        marketplaceAssistantContext.message,
+      ].join("\n");
+      context.skipIssueComment = true;
     }
     const requestedExecutionWorkspaceId = readNonEmptyString(issueRef?.executionWorkspaceId);
     const existingExecutionWorkspace =
@@ -11581,6 +11634,15 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       ...effectiveResolvedConfig,
       paperclipRuntimeSkills: runtimeSkillEntries,
     };
+    if (marketplaceAssistantContext) {
+      runtimeConfig = {
+        ...runtimeConfig,
+        engine: "acp",
+        mode: "persistent",
+        permissionMode: "approve-reads",
+        nonInteractivePermissions: "deny",
+      };
+    }
     const latestAgentConfigRevision = await getLatestAgentConfigRevision(agent.companyId, agent.id);
     const sessionConfigMetadata = await buildEffectiveRunSessionConfigMetadata({
       adapterType: agent.adapterType,
@@ -12630,8 +12692,18 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       };
 
       const adapter = getServerAdapter(agent.adapterType);
+      if (
+        marketplaceAssistantContext &&
+        (!adapter.supportsExternalTools || !adapter.acp?.supportsMcpStdio)
+      ) {
+        throw new Error(
+          `Adapter ${agent.adapterType} cannot run the SPS Marketplace Assistant read-only tool bridge.`,
+        );
+      }
       const localAgentJwtScope =
-        issueRef?.workMode === "skill_test"
+        marketplaceAssistantContext
+          ? { kind: "marketplace_assistant" as const, sessionId: marketplaceAssistantContext.sessionId }
+          : issueRef?.workMode === "skill_test"
           ? { kind: "skill_test" as const, issueId: issueRef.id }
           : { kind: "standard" as const };
       const authToken = adapter.supportsLocalAgentJwt
@@ -12654,6 +12726,30 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           },
           "local agent jwt secret missing or invalid; running without injected PAPERCLIP_API_KEY",
         );
+      }
+      if (marketplaceAssistantContext && !authToken) {
+        throw new Error("Marketplace Assistant requires a scoped local Agent token.");
+      }
+      const externalTools = marketplaceAssistantContext && authToken
+        ? {
+            mcpServers: [{
+              kind: "stdio" as const,
+              name: "sps-marketplace",
+              command: process.execPath,
+              args: [resolveMarketplaceAssistantMcpEntryPath()],
+              env: [
+                { name: "SPS_API_BASE_URL", value: runtimeEnv.PAPERCLIP_API_URL ?? "" },
+                { name: "SPS_SCOPED_BEARER_TOKEN", value: authToken },
+                { name: "SPS_RUN_ID", value: run.id },
+                { name: "SPS_COMPANY_ID", value: agent.companyId },
+              ],
+              identity: "sps.marketplace.readonly",
+              revision: "1",
+            }],
+          }
+        : undefined;
+      if (marketplaceAssistantContext && !runtimeEnv.PAPERCLIP_API_URL?.trim()) {
+        throw new Error("Marketplace Assistant requires PAPERCLIP_API_URL.");
       }
       let adapterFinalizeOutcome: "succeeded" | "failed" | null = null;
       const inspectFinalizeWorkspaceBranch = async () => {
@@ -12841,6 +12937,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           runtime: runtimeForAdapter,
           config: runtimeConfig,
           context,
+          externalTools,
           runtimeCommandSpec: adapter.getRuntimeCommandSpec?.(runtimeConfig) ?? null,
           executionTarget,
           executionTransport: remoteExecution
@@ -13262,6 +13359,23 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           agent,
         );
 
+        if (marketplaceAssistantContext) {
+          const assistantContent = readNonEmptyString(adapterResult.summary)
+            ?? (outcome === "succeeded"
+              ? "The Marketplace Assistant completed without a text response."
+              : `Marketplace Assistant failed: ${runErrorMessage ?? "unknown error"}`);
+          await marketplaceAssistantSvc.appendMessage({
+            sessionId: marketplaceAssistantContext.sessionId,
+            runId: finalizedRun.id,
+            idempotencyKey: `${outcome === "succeeded" ? "assistant" : "system"}:${finalizedRun.id}`,
+            role: outcome === "succeeded" ? "assistant" : "system",
+            content: assistantContent,
+            metadata: { outcome },
+          }).catch((error) => {
+            logger.warn({ error, runId: finalizedRun.id }, "failed to persist Marketplace Assistant response");
+          });
+        }
+
         // Dependency wake re-check: if this run's issue was marked done mid-run,
         // the route-time `issue_blockers_resolved` wake may have been gated by
         // workspace finalization or merged into this run. Reuse the level-triggered
@@ -13297,14 +13411,29 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         }, normalizedUsage);
         if (taskKey) {
           if (adapterResult.clearSession || (!nextSessionState.params && !nextSessionState.displayId)) {
-            await clearTaskSessions(agent.companyId, agent.id, {
-              taskKey,
-              adapterType: agent.adapterType,
-            });
+            if (marketplaceAssistantContext) {
+              await upsertTaskSession({
+                companyId: agent.companyId,
+                agentId: agent.id,
+                userId: marketplaceAssistantContext.userId,
+                adapterType: agent.adapterType,
+                taskKey,
+                sessionParamsJson: null,
+                sessionDisplayId: null,
+                lastRunId: finalizedRun.id,
+                lastError: outcome === "succeeded" ? null : (adapterResult.errorMessage ?? "run_failed"),
+              });
+            } else {
+              await clearTaskSessions(agent.companyId, agent.id, {
+                taskKey,
+                adapterType: agent.adapterType,
+              });
+            }
           } else {
             await upsertTaskSession({
               companyId: agent.companyId,
               agentId: agent.id,
+              userId: marketplaceAssistantContext?.userId,
               adapterType: agent.adapterType,
               taskKey,
               sessionParamsJson: attachPaperclipSessionMetadataToSessionParams(
@@ -13438,6 +13567,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             agentId: agent.id,
             adapterType: agent.adapterType,
             taskKey,
+            userId: marketplaceAssistantContext?.userId,
             sessionParamsJson: attachPaperclipSessionMetadataToSessionParams(
               previousSessionParams,
               configuredModel,
@@ -13446,6 +13576,18 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             sessionDisplayId: previousSessionDisplayId,
             lastRunId: failedRun.id,
             lastError: message,
+          });
+        }
+        if (marketplaceAssistantContext) {
+          await marketplaceAssistantSvc.appendMessage({
+            sessionId: marketplaceAssistantContext.sessionId,
+            runId: failedRun.id,
+            idempotencyKey: `system:${failedRun.id}`,
+            role: "system",
+            content: `Marketplace Assistant failed: ${message}`,
+            metadata: { outcome: "failed", errorCode: failureErrorCode },
+          }).catch((error) => {
+            logger.warn({ error, runId: failedRun.id }, "failed to persist Marketplace Assistant failure");
           });
         }
       }
@@ -13512,6 +13654,21 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
               message,
             }).catch(() => undefined);
             const livenessRun = await classifyAndPersistRunLiveness(failedRun).catch(() => failedRun);
+            const failedMarketplaceContext = readMarketplaceAssistantRunContext(
+              parseObject(livenessRun.contextSnapshot),
+            );
+            if (failedMarketplaceContext) {
+              await marketplaceAssistantSvc.appendMessage({
+                sessionId: failedMarketplaceContext.sessionId,
+                runId: livenessRun.id,
+                idempotencyKey: `system:${livenessRun.id}`,
+                role: "system",
+                content: `Marketplace Assistant could not start: ${message}`,
+                metadata: { outcome: "failed", errorCode: setupFailureErrorCode },
+              }).catch((error) => {
+                logger.warn({ error, runId: livenessRun.id }, "failed to persist Marketplace Assistant setup failure");
+              });
+            }
             const setupFailureIssueId = readNonEmptyString(parseObject(livenessRun.contextSnapshot).issueId);
             if (setupFailureIssueId) {
               await completeSkillTestRunForHeartbeatOutcome({

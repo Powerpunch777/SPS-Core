@@ -191,11 +191,13 @@ const claudeLocalAdapter: ServerAdapterModule = {
   acp: {
     agentId: "claude",
     skillsMode: "ephemeral",
+    supportsMcpStdio: true,
     prerequisites: {
       nodeRange: ">=22.12.0",
       packages: ["@agentclientprotocol/claude-agent-acp"],
     },
   },
+  supportsExternalTools: true,
   listSkills: listClaudeSkills,
   syncSkills: syncClaudeSkills,
   sessionCodec: claudeSessionCodec,
@@ -264,11 +266,13 @@ const codexLocalAdapter: ServerAdapterModule = {
   acp: {
     agentId: "codex",
     skillsMode: "ephemeral",
+    supportsMcpStdio: true,
     prerequisites: {
       nodeRange: ">=22.13.0",
       packages: ["@agentclientprotocol/codex-acp"],
     },
   },
+  supportsExternalTools: true,
   listSkills: listCodexSkills,
   syncSkills: syncCodexSkills,
   sessionCodec: codexSessionCodec,
@@ -328,11 +332,13 @@ const geminiLocalAdapter: ServerAdapterModule = {
   acp: {
     agentId: "gemini",
     skillsMode: "ephemeral",
+    supportsMcpStdio: true,
     prerequisites: {
       nodeRange: ">=20.0.0",
       packages: ["@google/gemini-cli"],
     },
   },
+  supportsExternalTools: true,
   listSkills: listGeminiSkills,
   syncSkills: syncGeminiSkills,
   sessionCodec: geminiSessionCodec,

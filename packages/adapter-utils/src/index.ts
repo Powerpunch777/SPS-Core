@@ -7,6 +7,8 @@ export type {
   AdapterExecutionResult,
   AdapterInvocationMeta,
   AdapterExecutionContext,
+  AdapterExternalToolContext,
+  AdapterMcpStdioServerSpec,
   AdapterEnvironmentCheckLevel,
   AdapterEnvironmentCheck,
   AdapterEnvironmentTestStatus,
