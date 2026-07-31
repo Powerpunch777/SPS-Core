@@ -766,6 +766,9 @@ importers:
       '@paperclipai/skills-catalog':
         specifier: workspace:*
         version: link:../packages/skills-catalog
+      '@sps/mcp-server':
+        specifier: workspace:*
+        version: link:../packages/mcp-server
       ajv:
         specifier: ^8.20.0
         version: 8.20.0

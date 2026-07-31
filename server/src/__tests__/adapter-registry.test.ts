@@ -257,6 +257,19 @@ describe("server adapter registry", () => {
     expect(adapter!.supportsLocalAgentJwt).toBe(true);
   });
 
+  it("limits Core external tool injection to ACP-capable built-in adapters", () => {
+    for (const adapterType of ["claude_local", "codex_local", "gemini_local"]) {
+      const adapter = findActiveServerAdapter(adapterType);
+      expect(adapter, adapterType).not.toBeNull();
+      expect(adapter!.supportsExternalTools, adapterType).toBe(true);
+      expect(adapter!.acp?.supportsMcpStdio, adapterType).toBe(true);
+      expect(adapter!.supportsLocalAgentJwt, adapterType).toBe(true);
+    }
+
+    expect(findActiveServerAdapter("cursor")?.supportsExternalTools).not.toBe(true);
+    expect(findActiveServerAdapter("process")?.supportsExternalTools).not.toBe(true);
+  });
+
   it("built-in local adapters declare cheap model profile defaults where supported", async () => {
     await expect(listAdapterModelProfiles("claude_local")).resolves.toEqual([
       expect.objectContaining({

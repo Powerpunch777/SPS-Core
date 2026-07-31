@@ -1114,6 +1114,13 @@
       "when": 1785960000000,
       "tag": "0160_sps_workspace_plugin_jobs",
       "breakpoints": true
+    },
+    {
+      "idx": 161,
+      "version": "7",
+      "when": 1786046400000,
+      "tag": "0161_sps_marketplace_assistant_sessions",
+      "breakpoints": true
     }
   ]
 }

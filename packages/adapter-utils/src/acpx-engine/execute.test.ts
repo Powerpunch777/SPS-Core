@@ -113,6 +113,7 @@ async function runExecutor(
   config: Record<string, unknown>,
   options: {
     context?: Record<string, unknown>;
+    externalTools?: Record<string, unknown>;
     executionTransport?: Record<string, unknown>;
     authToken?: string;
     executionTarget?: Record<string, unknown>;
@@ -137,6 +138,7 @@ async function runExecutor(
       runtime: {},
       config,
       context: options.context ?? {},
+      externalTools: options.externalTools,
       executionTransport: options.executionTransport,
       authToken: options.authToken,
       executionTarget: options.executionTarget,
@@ -153,6 +155,108 @@ async function runExecutor(
 }
 
 describe("shared ACPX engine runtime behavior", () => {
+  it("maps Core MCP stdio servers into ACPX runtime options", async () => {
+    const root = await makeTempRoot();
+    const { runtimeOptions } = await runExecutor(
+      { agent: "custom", agentCommand: "node ./fake-acp.js", stateDir: path.join(root, "state") },
+      {
+        externalTools: {
+          mcpServers: [
+            {
+              kind: "stdio",
+              name: "sps-marketplace",
+              command: "node",
+              args: ["bridge.mjs"],
+              env: [{ name: "SPS_RUN_ID", value: "run-1" }],
+              identity: "core.marketplace",
+              revision: "2026-07-31.1",
+            },
+          ],
+        },
+      },
+    );
+
+    expect(runtimeOptions[0]?.mcpServers).toEqual([
+      {
+        name: "sps-marketplace",
+        command: "node",
+        args: ["bridge.mjs"],
+        env: [{ name: "SPS_RUN_ID", value: "run-1" }],
+      },
+    ]);
+  });
+
+  it("separates warm session fingerprints when MCP identity or revision changes", async () => {
+    const root = await makeTempRoot();
+    const config = { agent: "custom", agentCommand: "node ./fake-acp.js", stateDir: path.join(root, "state") };
+    const first = await runExecutor(config, {
+      externalTools: {
+        mcpServers: [
+          { kind: "stdio", name: "bridge", command: "node", args: ["bridge.mjs"], identity: "market", revision: "1" },
+        ],
+      },
+    });
+    const second = await runExecutor(config, {
+      externalTools: {
+        mcpServers: [
+          { kind: "stdio", name: "bridge", command: "node", args: ["bridge.mjs"], identity: "market", revision: "2" },
+        ],
+      },
+    });
+
+    expect(first.result.sessionParams?.configFingerprint).not.toBe(second.result.sessionParams?.configFingerprint);
+  });
+
+  it("keeps the provider session fingerprint stable when only run-scoped MCP credentials change", async () => {
+    const root = await makeTempRoot();
+    const config = { agent: "custom", agentCommand: "node ./fake-acp.js", stateDir: path.join(root, "state") };
+    const run = async (token: string) => runExecutor(config, {
+      externalTools: {
+        mcpServers: [{
+          kind: "stdio",
+          name: "bridge",
+          command: "node",
+          args: ["bridge.mjs"],
+          env: [{ name: "SPS_SCOPED_BEARER_TOKEN", value: token }],
+          identity: "market",
+          revision: "1",
+        }],
+      },
+    });
+
+    const first = await run("token-1");
+    const second = await run("token-2");
+    expect(first.result.sessionParams?.configFingerprint).toBe(second.result.sessionParams?.configFingerprint);
+  });
+
+  it("rejects malformed Core MCP server specs before creating an ACP runtime", async () => {
+    const root = await makeTempRoot();
+    const runtimeOptions: unknown[] = [];
+    const execute = createAcpxEngineExecutor({
+      createRuntime: (options) => {
+        runtimeOptions.push(options);
+        return buildRuntime() as never;
+      },
+    });
+
+    await expect(
+      execute({
+        runId: "run-1",
+        agent: { id: "agent-1", companyId: "company-1" },
+        runtime: {},
+        config: { agent: "custom", agentCommand: "node ./fake-acp.js", stateDir: path.join(root, "state") },
+        context: {},
+        externalTools: {
+          mcpServers: [
+            { kind: "stdio", name: "bridge\u0000", command: "node", args: [], identity: "market", revision: "1" },
+          ],
+        },
+        onLog: async () => {},
+      } as never),
+    ).rejects.toThrow("without NUL bytes");
+    expect(runtimeOptions).toHaveLength(0);
+  });
+
   it("merges Codex model controls into startup config without session config calls", async () => {
     const root = await makeTempRoot();
     const codexHome = path.join(root, "codex-home");
