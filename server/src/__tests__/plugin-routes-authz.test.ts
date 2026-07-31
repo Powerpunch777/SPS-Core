@@ -63,6 +63,7 @@ async function createApp(
     jobDeps?: unknown;
     toolDeps?: unknown;
     bridgeDeps?: unknown;
+    diagnosticsDeps?: unknown;
     captureJsonContext?: (context: unknown, body: unknown) => void;
   } = {},
 ) {
@@ -99,6 +100,10 @@ async function createApp(
     undefined,
     routeOverrides.toolDeps as never,
     routeOverrides.bridgeDeps as never,
+    undefined,
+    undefined,
+    undefined,
+    routeOverrides.diagnosticsDeps as never,
   ));
   app.use(errorHandler);
 
@@ -1489,5 +1494,37 @@ describe.sequential("plugin tool and bridge authz", () => {
     expect(res.status).toBe(403);
     expect(res.body.error).toContain("own run");
     expect(executeTool).not.toHaveBeenCalled();
+  });
+
+  it("passes only the Host or Member audience to canonical diagnostics", async () => {
+    readyPlugin();
+    const snapshot = {
+      schemaVersion: "sps-plugin-diagnostic/v1",
+      pluginId,
+      pluginKey: "paperclip.example",
+      generatedAt: new Date().toISOString(),
+      facts: [],
+      runtime: { lifecycleStatus: "ready", declaredCapabilities: [], worker: null, scheduler: null },
+    };
+    const diagnostics = { snapshot: vi.fn().mockResolvedValue(snapshot) };
+    const { app } = await createApp(boardActor({ source: "local_implicit", companyIds: [] }), {}, { diagnosticsDeps: { diagnostics } });
+    const hostResponse = await request(app).get(`/api/plugins/${pluginId}/diagnostics`);
+    expect(hostResponse.status).toBe(200);
+    expect(diagnostics.snapshot).toHaveBeenLastCalledWith(pluginId, "host");
+
+    const memberDiagnostics = { snapshot: vi.fn().mockResolvedValue(snapshot) };
+    const member = await createApp(boardActor(), {}, { diagnosticsDeps: { diagnostics: memberDiagnostics } });
+    const memberResponse = await request(member.app).get(`/api/plugins/${pluginId}/diagnostics`);
+    expect(memberResponse.status).toBe(200);
+    expect(memberDiagnostics.snapshot).toHaveBeenLastCalledWith(pluginId, "member");
+  });
+
+  it("rejects Agent credentials before canonical diagnostics are resolved", async () => {
+    readyPlugin();
+    const diagnostics = { snapshot: vi.fn() };
+    const { app } = await createApp(agentActor(), {}, { diagnosticsDeps: { diagnostics } });
+    const response = await request(app).get(`/api/plugins/${pluginId}/diagnostics`);
+    expect(response.status).toBe(403);
+    expect(diagnostics.snapshot).not.toHaveBeenCalled();
   });
 });
