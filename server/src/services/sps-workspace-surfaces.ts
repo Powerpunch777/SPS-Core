@@ -498,6 +498,21 @@ export function spsWorkspaceSurfaceService(db: Db) {
     return record;
   }
 
+  /**
+   * Removes every persisted Inbox summary published by one plugin identity.
+   *
+   * The plugin key is deliberately used instead of sourcePluginId. A hard
+   * plugin uninstall sets sourcePluginId to NULL through its foreign key, but
+   * a Host may still explicitly choose to remove the summaries afterwards.
+   * Inbox user-state rows cascade with their parent summaries.
+   */
+  async function deleteInboxSummariesBySourcePluginKey(pluginKey: string): Promise<number> {
+    const deleted = await db.delete(spsPluginInboxItems)
+      .where(eq(spsPluginInboxItems.sourcePluginKey, pluginKey))
+      .returning({ id: spsPluginInboxItems.id });
+    return deleted.length;
+  }
+
   async function listInbox(input: {
     companyId: string;
     userId: string;
@@ -629,6 +644,7 @@ export function spsWorkspaceSurfaceService(db: Db) {
     publishInboxItem,
     updateInboxItem,
     withdrawInboxItem,
+    deleteInboxSummariesBySourcePluginKey,
     listInbox,
     setInboxUserState,
     resolveInboxAction,

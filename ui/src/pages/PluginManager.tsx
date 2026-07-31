@@ -27,6 +27,7 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
+import { PluginUninstallDialog, type PluginUninstallOptions } from "@/components/PluginUninstallDialog";
 import { useToastActions } from "@/context/ToastContext";
 import { cn } from "@/lib/utils";
 import { isSpsBasicModeEnabled } from "@/lib/sps-basic-mode";
@@ -149,7 +150,8 @@ function GenericPluginManager() {
   });
 
   const uninstallMutation = useMutation({
-    mutationFn: (pluginId: string) => pluginsApi.uninstall(pluginId),
+    mutationFn: ({ pluginId, options }: { pluginId: string; options: PluginUninstallOptions }) =>
+      pluginsApi.uninstall(pluginId, options),
     onSuccess: () => {
       invalidatePluginQueries();
       pushToast({ title: "Plugin uninstalled successfully", tone: "success" });
@@ -511,35 +513,18 @@ function GenericPluginManager() {
         )}
       </section>
 
-      <Dialog
+      <PluginUninstallDialog
         open={uninstallPluginId !== null}
+        pluginName={uninstallPluginName}
+        pending={uninstallMutation.isPending}
         onOpenChange={(open) => { if (!open) setUninstallPluginId(null); }}
-      >
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Uninstall Plugin</DialogTitle>
-            <DialogDescription>
-              Are you sure you want to uninstall <strong>{uninstallPluginName}</strong>? This action cannot be undone.
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setUninstallPluginId(null)}>Cancel</Button>
-            <Button
-              variant="destructive"
-              disabled={uninstallMutation.isPending}
-              onClick={() => {
-                if (uninstallPluginId) {
-                  uninstallMutation.mutate(uninstallPluginId, {
-                    onSettled: () => setUninstallPluginId(null),
-                  });
-                }
-              }}
-            >
-              {uninstallMutation.isPending ? "Uninstalling..." : "Uninstall"}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+        onConfirm={(options) => {
+          if (!uninstallPluginId) return;
+          uninstallMutation.mutate({ pluginId: uninstallPluginId, options }, {
+            onSettled: () => setUninstallPluginId(null),
+          });
+        }}
+      />
 
       <Dialog
         open={errorDetailsPlugin !== null}

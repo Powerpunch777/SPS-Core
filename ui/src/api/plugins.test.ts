@@ -4,6 +4,7 @@ const mockApi = vi.hoisted(() => ({
   get: vi.fn(),
   post: vi.fn(),
   put: vi.fn(),
+  delete: vi.fn(),
 }));
 
 vi.mock("./client", () => ({
@@ -17,9 +18,11 @@ describe("pluginsApi local folders", () => {
     mockApi.get.mockReset();
     mockApi.post.mockReset();
     mockApi.put.mockReset();
+    mockApi.delete.mockReset();
     mockApi.get.mockResolvedValue({});
     mockApi.post.mockResolvedValue({});
     mockApi.put.mockResolvedValue({});
+    mockApi.delete.mockResolvedValue({});
   });
 
   it("lists company-scoped local folders for a plugin", async () => {
@@ -93,6 +96,20 @@ describe("pluginsApi local folders", () => {
     );
     expect(mockApi.get).toHaveBeenCalledWith(
       "/plugins/companies/company-1/memory-provider/deliveries?limit=12",
+    );
+  });
+
+  it("uses explicit uninstall options and preserves Inbox summaries by default", async () => {
+    await pluginsApi.uninstall("plugin-1");
+    await pluginsApi.uninstall("plugin-2", { purge: true, deleteInboxSummaries: true });
+
+    expect(mockApi.delete).toHaveBeenNthCalledWith(
+      1,
+      "/plugins/plugin-1?purge=false&deleteInboxSummaries=false",
+    );
+    expect(mockApi.delete).toHaveBeenNthCalledWith(
+      2,
+      "/plugins/plugin-2?purge=true&deleteInboxSummaries=true",
     );
   });
 });
