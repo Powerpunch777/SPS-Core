@@ -17,6 +17,7 @@ const mockLifecycle = vi.hoisted(() => ({
   unload: vi.fn(),
   enable: vi.fn(),
   disable: vi.fn(),
+  restartWorker: vi.fn(),
 }));
 
 const mockAccess = vi.hoisted(() => ({
@@ -343,6 +344,51 @@ describe.sequential("plugin install and upgrade authz", () => {
     expect(mockLifecycle.enable).not.toHaveBeenCalled();
     expect(mockLifecycle.disable).not.toHaveBeenCalled();
   }, 20_000);
+
+  it("allows only the SPS Host to restart a ready plugin worker", async () => {
+    readyPlugin();
+    mockLifecycle.restartWorker.mockResolvedValue(undefined);
+    const { app } = await createApp(boardActor({ source: "local_implicit" }));
+
+    const res = await request(app)
+      .post(`/api/plugins/${pluginId}/worker/restart`)
+      .send({});
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ pluginId, restarted: true });
+    expect(mockLifecycle.restartWorker).toHaveBeenCalledWith(pluginId);
+  });
+
+  it("rejects non-Host users before resolving a plugin worker restart", async () => {
+    const { app } = await createApp(boardActor({ isInstanceAdmin: false }));
+
+    const res = await request(app)
+      .post(`/api/plugins/${pluginId}/worker/restart`)
+      .send({});
+
+    expect(res.status).toBe(403);
+    expect(mockRegistry.getById).not.toHaveBeenCalled();
+    expect(mockLifecycle.restartWorker).not.toHaveBeenCalled();
+  });
+
+  it("returns lifecycle readiness failures without duplicating worker state rules", async () => {
+    mockRegistry.getById.mockResolvedValue({
+      id: pluginId,
+      pluginKey: "paperclip.example",
+      status: "installed",
+      manifestJson: {},
+    });
+    mockLifecycle.restartWorker.mockRejectedValue(new Error("Plugin must be ready before restarting its worker"));
+    const { app } = await createApp(boardActor({ source: "local_implicit" }));
+
+    const res = await request(app)
+      .post(`/api/plugins/${pluginId}/worker/restart`)
+      .send({});
+
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: "Plugin must be ready before restarting its worker" });
+    expect(mockLifecycle.restartWorker).toHaveBeenCalledWith(pluginId);
+  });
 
   it("resolves plugin keys without probing the UUID id column for core plugin actions", async () => {
     const pluginKey = "paperclipqa.hello-plugin";

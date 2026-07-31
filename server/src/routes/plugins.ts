@@ -2539,6 +2539,33 @@ export function pluginRoutes(
   });
 
   /**
+   * POST /api/plugins/:pluginId/worker/restart
+   *
+   * Restart the running worker without changing the installed plugin package
+   * or reloading its UI contribution. This is intentionally Host-only: a
+   * worker restart has process-level side effects on the local SPS Host.
+   *
+   * The lifecycle manager owns readiness and transition validation so this
+   * route does not duplicate lifecycle state rules.
+   */
+  router.post("/plugins/:pluginId/worker/restart", async (req, res) => {
+    assertSpsCoreHostAuthority(req);
+    const plugin = await resolvePlugin(registry, req.params.pluginId);
+    if (!plugin) {
+      res.status(404).json({ error: "Plugin not found" });
+      return;
+    }
+
+    try {
+      await lifecycle.restartWorker(plugin.id);
+      res.json({ pluginId: plugin.id, restarted: true });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      res.status(400).json({ error: message });
+    }
+  });
+
+  /**
    * GET /api/plugins/:pluginId/health
    *
    * Run health diagnostics on a plugin.

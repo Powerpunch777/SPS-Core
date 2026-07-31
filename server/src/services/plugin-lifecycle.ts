@@ -484,6 +484,86 @@ export function pluginLifecycleManager(
     await stopWorkerIfRunning(pluginId, pluginKey);
   }
 
+  async function restoreUpgradeSnapshot(
+    snapshot: PluginRecord,
+    reactivateReadyRuntime: boolean,
+    unloadCandidateRuntime: boolean,
+  ): Promise<void> {
+    const restoreErrors: string[] = [];
+
+    // A failing loader can have registered routes, tools, jobs, or a worker
+    // before it reports activation failure. Unload while the candidate record
+    // still points at that artifact; restoring the old registry entry first
+    // would make this cleanup target ambiguous.
+    if (unloadCandidateRuntime) {
+      try {
+        await deactivatePluginRuntime(snapshot.id, snapshot.pluginKey);
+      } catch (error) {
+        restoreErrors.push(`candidate runtime cleanup failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    try {
+      const restored = await registry.update(snapshot.id, {
+        packageName: snapshot.packageName,
+        packagePath: snapshot.packagePath,
+        version: snapshot.version,
+        manifest: snapshot.manifestJson as PaperclipPluginManifestV1,
+      });
+      if (!restored) {
+        restoreErrors.push("plugin registry record was not found while restoring the previous artifact");
+      }
+    } catch (error) {
+      restoreErrors.push(`registry restore failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+
+    try {
+      const current = await requirePlugin(snapshot.id);
+      if (current.status !== snapshot.status || current.lastError !== snapshot.lastError) {
+        await transition(snapshot.id, snapshot.status, snapshot.lastError ?? null, current);
+      }
+    } catch (error) {
+      restoreErrors.push(`status restore failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+
+    if (reactivateReadyRuntime) {
+      try {
+        await activateReadyPlugin(snapshot.id);
+      } catch (error) {
+        restoreErrors.push(`previous runtime reactivation failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    if (restoreErrors.length > 0) {
+      throw new Error(`Upgrade rollback incomplete: ${restoreErrors.join("; ")}`);
+    }
+  }
+
+  async function failUpgradeWithRollback(
+    error: unknown,
+    snapshot: PluginRecord,
+    reactivateReadyRuntime: boolean,
+    unloadCandidateRuntime: boolean,
+  ): Promise<never> {
+    const originalMessage = error instanceof Error ? error.message : String(error);
+    try {
+      await restoreUpgradeSnapshot(snapshot, reactivateReadyRuntime, unloadCandidateRuntime);
+    } catch (rollbackError) {
+      const rollbackMessage = rollbackError instanceof Error ? rollbackError.message : String(rollbackError);
+      log.error(
+        { pluginId: snapshot.id, pluginKey: snapshot.pluginKey, originalMessage, rollbackMessage },
+        "plugin lifecycle: upgrade failed and rollback was incomplete",
+      );
+      throw new Error(`Plugin upgrade failed: ${originalMessage}. ${rollbackMessage}`);
+    }
+
+    log.warn(
+      { pluginId: snapshot.id, pluginKey: snapshot.pluginKey, originalMessage },
+      "plugin lifecycle: upgrade failed and the previous plugin was restored",
+    );
+    throw error instanceof Error ? error : new Error(originalMessage);
+  }
+
   // -----------------------------------------------------------------------
   // Public API
   // -----------------------------------------------------------------------
@@ -690,6 +770,12 @@ export function pluginLifecycleManager(
       input: string | PluginLifecycleUpgradeOptions = {},
     ): Promise<PluginRecord> {
       const plugin = await requirePlugin(pluginId);
+      // Keep an immutable rollback target. Registry implementations normally
+      // return fresh records, but lifecycle safety must not depend on that.
+      const originalPlugin: PluginRecord = {
+        ...plugin,
+        manifestJson: structuredClone(plugin.manifestJson),
+      };
       const options: PluginLifecycleUpgradeOptions = typeof input === "string"
         ? { version: input }
         : input;
@@ -714,9 +800,8 @@ export function pluginLifecycleManager(
         "plugin lifecycle: upgrade requested",
       );
 
-      await deactivatePluginRuntime(pluginId, plugin.pluginKey);
-
-      // 1. Download and validate new package via loader
+      // 1. Download and validate the candidate before touching a healthy
+      // runtime. The loader stages package artifacts outside the active path.
       const { oldManifest, newManifest, discovered } =
         await pluginLoaderInstance.prepareUpgrade(pluginId, options);
 
@@ -755,7 +840,6 @@ export function pluginLifecycleManager(
           { pluginId, pluginKey: plugin.pluginKey, addedCaps },
           "plugin lifecycle: new capabilities detected, transitioning to upgrade_pending",
         );
-        // Skip the inner stopWorkerIfRunning since we already stopped above
         const reviewReasons = [
           `target version: ${newManifest.version}`,
           ...(needsCapabilityApproval ? [`new capabilities: ${addedCaps.join(", ")}`] : []),
@@ -763,17 +847,31 @@ export function pluginLifecycleManager(
             ? [`data migration plan: ${migrationPlan!.reviewHash}`]
             : []),
         ];
-        const result = await transition(
-          pluginId,
-          "upgrade_pending",
-          `Upgrade review required: ${reviewReasons.join("; ")}`,
-          plugin,
-        );
-        emitDomain("plugin.upgrade_pending", {
-          pluginId,
-          pluginKey: result.pluginKey,
-        });
-        return result;
+        let attemptedReadyRuntimeTeardown = false;
+        try {
+          if (plugin.status === "ready") {
+            attemptedReadyRuntimeTeardown = true;
+            await deactivatePluginRuntime(pluginId, plugin.pluginKey);
+          }
+          const result = await transition(
+            pluginId,
+            "upgrade_pending",
+            `Upgrade review required: ${reviewReasons.join("; ")}`,
+            plugin,
+          );
+          emitDomain("plugin.upgrade_pending", {
+            pluginId,
+            pluginKey: result.pluginKey,
+          });
+          return result;
+        } catch (error) {
+          return await failUpgradeWithRollback(
+            error,
+            originalPlugin,
+            originalPlugin.status === "ready" && attemptedReadyRuntimeTeardown,
+            false,
+          );
+        }
       } else {
         if (migrationPlan?.requiresHostApproval) {
           if (!databaseBackupService) {
@@ -795,31 +893,47 @@ export function pluginLifecycleManager(
             "plugin lifecycle: created Host backup before approved data migration",
           );
         }
-        await pluginLoaderInstance.commitPreparedUpgrade(pluginId, {
-          oldManifest,
-          newManifest,
-          discovered,
-        });
-        const result = await transition(pluginId, "ready", null, {
-          ...plugin,
-          version: discovered.version,
-          manifestJson: newManifest,
-        } as PluginRecord);
-        await activateReadyPlugin(
-          pluginId,
-          migrationPlan?.requiresHostApproval ? migrationPlan.reviewHash : undefined,
-        );
+        let attemptedReadyRuntimeTeardown = false;
+        let candidateRuntimeMayBeActive = false;
+        try {
+          if (plugin.status === "ready") {
+            attemptedReadyRuntimeTeardown = true;
+            await deactivatePluginRuntime(pluginId, plugin.pluginKey);
+          }
+          await pluginLoaderInstance.commitPreparedUpgrade(pluginId, {
+            oldManifest,
+            newManifest,
+            discovered,
+          });
+          const result = await transition(pluginId, "ready", null, {
+            ...plugin,
+            version: discovered.version,
+            manifestJson: newManifest,
+          } as PluginRecord);
+          candidateRuntimeMayBeActive = true;
+          await activateReadyPlugin(
+            pluginId,
+            migrationPlan?.requiresHostApproval ? migrationPlan.reviewHash : undefined,
+          );
 
-        emitDomain("plugin.loaded", {
-          pluginId,
-          pluginKey: result.pluginKey,
-        });
-        emitDomain("plugin.enabled", {
-          pluginId,
-          pluginKey: result.pluginKey,
-        });
+          emitDomain("plugin.loaded", {
+            pluginId,
+            pluginKey: result.pluginKey,
+          });
+          emitDomain("plugin.enabled", {
+            pluginId,
+            pluginKey: result.pluginKey,
+          });
 
-        return result;
+          return result;
+        } catch (error) {
+          return await failUpgradeWithRollback(
+            error,
+            originalPlugin,
+            originalPlugin.status === "ready" && attemptedReadyRuntimeTeardown,
+            candidateRuntimeMayBeActive,
+          );
+        }
       }
     },
 
