@@ -343,6 +343,10 @@ export async function createApp(
       },
     },
   );
+  // Lifecycle and Loader depend on one another. Complete the composition with
+  // the runtime-capable Loader so plugins installed after startup launch their
+  // workers instead of becoming state-only `ready` records.
+  lifecycle.attachRuntimeLoader(loader);
   api.use(
     pluginRoutes(
       db,

@@ -343,7 +343,7 @@ describeEmbeddedPostgres("plugin install auto-build route", () => {
       .post("/api/plugins/install")
       .send({ packageName: fixture.packageRoot, isLocalPath: true });
 
-    expect(res.status).toBe(200);
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
     expect(res.body.packageName).toBe(fixture.packageName);
     expect(res.body.pluginKey).toBe(fixture.pluginKey);
     expect(existsSync(path.join(fixture.distDir, "manifest.js"))).toBe(true);
@@ -364,7 +364,7 @@ describeEmbeddedPostgres("plugin install auto-build route", () => {
       .post("/api/plugins/install")
       .send({ packageName: fixture.packageRoot, isLocalPath: true });
 
-    expect(res.status).toBe(200);
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
     expect(res.body.packageName).toBe(fixture.packageName);
     expect(res.body.pluginKey).toBe(fixture.pluginKey);
     expect(existsSync(path.join(fixture.distDir, "manifest.js"))).toBe(true);
@@ -389,7 +389,7 @@ describeEmbeddedPostgres("plugin install auto-build route", () => {
       .post("/api/plugins/install")
       .send({ packageName: fixture.packageRoot, isLocalPath: true });
 
-    expect(res.status).toBe(200);
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
     expect(res.body.packageName).toBe(fixture.packageName);
     expect(res.body.pluginKey).toBe(fixture.pluginKey);
     expect(existsSync(path.join(fixture.packageRoot, "node_modules", "@paperclipai", "plugin-sdk"))).toBe(true);

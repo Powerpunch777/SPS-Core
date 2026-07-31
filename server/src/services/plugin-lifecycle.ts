@@ -148,6 +148,13 @@ type LifecycleEventPayload<K extends LifecycleEventName> = PluginLifecycleEvents
 
 export interface PluginLifecycleManager {
   /**
+   * Attach the runtime-capable loader after the lifecycle and loader finish
+   * their circular server composition. This may be called only once unless the
+   * same loader instance is supplied again.
+   */
+  attachRuntimeLoader(loader: PluginLoader): void;
+
+  /**
    * Load a newly installed plugin – transitions `installed` → `ready`.
    *
    * This is called after the registry has persisted the initial install record.
@@ -344,7 +351,8 @@ export function pluginLifecycleManager(
   }
 
   const registry = pluginRegistryService(db);
-  const pluginLoaderInstance = loaderArg ?? pluginLoader(db);
+  let pluginLoaderInstance = loaderArg ?? pluginLoader(db);
+  let runtimeLoaderAttached = Boolean(loaderArg);
   const emitter = new EventEmitter();
   emitter.setMaxListeners(100); // plugins may have many listeners; 100 is a safe upper bound
 
@@ -481,6 +489,15 @@ export function pluginLifecycleManager(
   // -----------------------------------------------------------------------
 
   return {
+    attachRuntimeLoader(loader: PluginLoader): void {
+      if (pluginLoaderInstance === loader) return;
+      if (runtimeLoaderAttached) {
+        throw new Error("Plugin lifecycle runtime loader is already attached.");
+      }
+      pluginLoaderInstance = loader;
+      runtimeLoaderAttached = true;
+    },
+
     // -- load -------------------------------------------------------------
     /**
      * load — Transitions a plugin to 'ready' status and starts its worker.
