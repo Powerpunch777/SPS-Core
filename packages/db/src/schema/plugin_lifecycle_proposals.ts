@@ -46,7 +46,7 @@ export const pluginLifecycleProposalEvents = pgTable(
   "plugin_lifecycle_proposal_events",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    proposalId: uuid("proposal_id").notNull().references(() => pluginLifecycleProposals.id, { onDelete: "cascade" }),
+    proposalId: uuid("proposal_id").notNull().references(() => pluginLifecycleProposals.id, { onDelete: "restrict" }),
     companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
     eventType: text("event_type").notNull(),
     actorType: text("actor_type").notNull(),

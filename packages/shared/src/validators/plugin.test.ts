@@ -30,6 +30,20 @@ describe("plugin manifest validators", () => {
       rationale: "install the reviewed package",
       authoringSessionId: "session-42",
     }).success).toBe(true);
+    expect(createPluginLifecycleProposalSchema.safeParse({
+      operation: "activate",
+      target: { pluginKey: "sps.discovery", scope: "host" },
+      rationale: "path must not be persisted",
+      authoringSessionId: "session-42",
+      evidenceRefs: [{ kind: "file", ref: "C:\\Users\\young\\secret.txt" }],
+    }).success).toBe(false);
+    expect(createPluginLifecycleProposalSchema.safeParse({
+      operation: "activate",
+      target: { pluginKey: "sps.discovery", scope: "host" },
+      rationale: "url must not be persisted",
+      authoringSessionId: "session-42",
+      evidenceRefs: [{ kind: "url", ref: "https://example.invalid/secret" }],
+    }).success).toBe(false);
   });
   it("validates dependency declarations, inclusive bounds, and legacy underscore ids", () => {
     const base = {

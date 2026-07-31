@@ -1121,6 +1121,13 @@
       "when": 1786046400000,
       "tag": "0161_sps_plugin_lifecycle_proposals",
       "breakpoints": true
+    },
+    {
+      "idx": 162,
+      "version": "7",
+      "when": 1786132800000,
+      "tag": "0162_sps_plugin_lifecycle_audit_retention",
+      "breakpoints": true
     }
   ]
 }
