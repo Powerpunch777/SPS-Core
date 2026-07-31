@@ -223,7 +223,7 @@ export function NewAgent() {
         <h1 className="text-lg font-semibold">{initialAssistantMode ? "Add initial Assistant" : "New Agent"}</h1>
         <p className="text-sm text-muted-foreground mt-1">
           {initialAssistantMode
-            ? "Choose the runtime that will answer in Plugin Discovery & Builder. Workflow roles belong to the plugins you enable later."
+            ? "Choose the runtime used by Marketplace Assistant and AI-enabled plugins. Workflow roles belong to the plugins you enable later."
             : "Advanced agent configuration"}
         </p>
       </div>

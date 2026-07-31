@@ -23,6 +23,7 @@ import { timeAgo } from "../lib/timeAgo";
 import { cn, formatCents } from "../lib/utils";
 import { ArrowRight, Bot, CircleDot, DollarSign, FolderOpen, LayoutDashboard, ListChecks, MessagesSquare, PauseCircle, ShieldCheck, type LucideIcon } from "lucide-react";
 import { ActiveAgentsPanel } from "../components/ActiveAgentsPanel";
+import { SpsCoreDashboard } from "../components/SpsCoreDashboard";
 import { ChartCard, RunActivityChart, PriorityChart, IssueStatusChart, SuccessRateChart } from "../components/ActivityCharts";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { Card } from "@/components/ui/card";
@@ -382,7 +383,7 @@ export function Dashboard() {
     return (
       <div className="space-y-6">
         {error && <p className="text-sm text-destructive">{error.message}</p>}
-        <SpsWorkplaneDashboard
+        <SpsCoreDashboard
           data={data}
           projects={projects ?? []}
           recentIssues={recentIssues}
