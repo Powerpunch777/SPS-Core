@@ -28,32 +28,27 @@ describe("SPS Marketplace service", () => {
   it("returns the standardized bounded public list shape", async () => {
     await useCatalog({
       schemaVersion: 1,
-      source: { id: "official", displayName: "SPS Marketplace" },
+      source: { id: "io.sps.official", displayName: "SPS Marketplace" },
       refreshedAt: "2026-07-31T00:00:00.000Z",
-      plugins: [
+      releases: [
         {
-          id: "zeta",
-          name: "Zeta",
+          pluginId: "zeta",
           version: "1.0.0",
-          summary: "A game workflow",
-          category: "games",
+          catalog: { displayName: "Zeta", summary: "A game workflow", category: "games" },
           capabilities: ["art", "qa"],
-          publisher: "SPS",
-          trust: "official",
-          compatibility: { spsCore: "0.1", localPath: "must-not-leak" },
+          publisherId: "sps",
+          publisherProfile: { displayName: "SPS" },
+          compatibility: { sps: ">=0.4.0", pluginApi: 1, extensionProfile: "2.0", localPath: "must-not-leak" },
           artifactUrl: "https://example.invalid/artifact.zip",
           installCommand: "npm install zeta",
         },
         {
-          id: "alpha",
-          displayName: "Alpha",
+          pluginId: "alpha",
           version: "2.0.0",
-          summary: "A web workflow",
-          categories: ["web"],
+          catalog: { displayName: "Alpha", summary: "A web workflow", categories: ["web"] },
           capabilities: ["qa"],
-          publisher: "Community",
-          trust: "verified",
-          compatibility: { os: "windows" },
+          publisherProfile: { displayName: "Community" },
+          compatibility: { sps: ">=0.4.0", pluginApi: 1, extensionProfile: "2.0" },
         },
       ],
     });
@@ -68,11 +63,11 @@ describe("SPS Marketplace service", () => {
         categories: ["web"],
         capabilities: ["qa"],
         publisher: "Community",
-        trust: "verified",
-        compatibility: { os: "windows" },
+        trust: "official",
+        compatibility: { sps: ">=0.4.0", pluginApi: 1, extensionProfile: "2.0" },
       }],
       total: 2,
-      source: { id: "official", displayName: "SPS Marketplace" },
+      source: { id: "io.sps.official", displayName: "SPS Marketplace" },
       refreshedAt: "2026-07-31T00:00:00.000Z",
     });
     expect(JSON.stringify(result)).not.toMatch(/artifact|localPath|installCommand|release|mutation|lifecycle/i);
@@ -81,18 +76,13 @@ describe("SPS Marketplace service", () => {
   it("returns a wrapped detail and rejects unknown plugins", async () => {
     await useCatalog({
       schemaVersion: 1,
-      plugins: [{
-        id: "plugin.one",
-        displayName: "Plugin One",
+      releases: [{
+        pluginId: "plugin.one",
         version: "1.2.3",
-        summary: "Useful plugin",
-        description: "Public description",
-        categories: ["tools"],
+        catalog: { displayName: "Plugin One", summary: "Useful plugin", description: "Public description", categories: ["tools"], adapterRequirements: ["codex"], documentationUrl: "https://example.invalid/docs" },
         capabilities: ["search"],
-        publisher: "Author",
+        publisherProfile: { displayName: "Author" },
         permissions: ["workspace.read"],
-        adapterRequirements: ["codex"],
-        documentationUrl: "https://example.invalid/docs",
       }],
     });
     expect(await getMarketplacePlugin("plugin.one")).toEqual({
@@ -102,7 +92,7 @@ describe("SPS Marketplace service", () => {
   });
 
   it("fails closed for missing or unsupported catalog snapshots", async () => {
-    await useCatalog({ schemaVersion: 2, plugins: [] });
+    await useCatalog({ schemaVersion: 2, releases: [] });
     await expect(searchMarketplacePlugins()).rejects.toMatchObject({ status: 503 });
   });
 

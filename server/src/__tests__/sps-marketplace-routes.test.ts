@@ -14,16 +14,13 @@ async function createApp(actor: Record<string, unknown>) {
   const catalogPath = path.join(directory, "catalog.json");
   await writeFile(catalogPath, JSON.stringify({
     schemaVersion: 1,
-    source: { id: "official", displayName: "SPS Marketplace" },
-    plugins: [{
-      id: "plugin.one",
-      displayName: "Plugin One",
+    source: { id: "io.sps.official", displayName: "SPS Marketplace" },
+    releases: [{
+      pluginId: "plugin.one",
       version: "1.0.0",
-      summary: "A plugin",
-      categories: ["tools"],
+      catalog: { displayName: "Plugin One", summary: "A plugin", categories: ["tools"] },
       capabilities: ["search"],
-      publisher: "SPS",
-      trust: "official",
+      publisherProfile: { displayName: "SPS" },
       compatibility: {},
     }],
   }), "utf8");
@@ -63,7 +60,7 @@ describe("SPS Marketplace routes", () => {
       .get("/api/companies/company-1/marketplace/plugins?q=plugin&limit=200");
     expect(response.status).toBe(200);
     expect(response.body.plugins[0]).toMatchObject({ pluginId: "plugin.one" });
-    expect(response.body).toHaveProperty("source.id", "official");
+    expect(response.body).toHaveProperty("source.id", "io.sps.official");
     expect(response.body).not.toHaveProperty("artifactUrl");
 
     const denied = await request(app).get("/api/companies/other/marketplace/plugins");
