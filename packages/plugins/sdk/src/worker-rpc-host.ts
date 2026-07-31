@@ -702,6 +702,20 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
         },
       },
 
+      inbox: {
+        async publish(input) {
+          const result = await callHost("inbox.publish", input);
+          return { id: result.id, externalId: result.externalId };
+        },
+        async update(input) {
+          const result = await callHost("inbox.update", input);
+          return { id: result.id, externalId: result.externalId };
+        },
+        async withdraw(input) {
+          await callHost("inbox.withdraw", input);
+        },
+      },
+
       entities: {
         async upsert(input) {
           return callHost("entities.upsert", {

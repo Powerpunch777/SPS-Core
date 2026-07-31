@@ -52,6 +52,8 @@ describe("plugin slot export registration", () => {
           uiEntryFile: "index.js",
           slots: [{ type: "companySettingsPage", id: "organization", displayName: "Organization", exportName: "OrganizationSettingsPage" }],
           launchers: [],
+          workspaceShell: null,
+          dashboardWidgets: [],
         },
         {
           pluginId: "memory-sidecar",
@@ -61,6 +63,8 @@ describe("plugin slot export registration", () => {
           uiEntryFile: "index.js",
           slots: [{ type: "detailTab", id: "memory", displayName: "Memory", exportName: "MemoryTab", entityTypes: ["project"] }],
           launchers: [],
+          workspaceShell: null,
+          dashboardWidgets: [],
         },
       ],
       new Set(["companySettingsPage"]),

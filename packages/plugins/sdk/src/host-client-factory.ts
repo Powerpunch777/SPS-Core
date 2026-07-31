@@ -142,6 +142,13 @@ export interface HostServices {
     delete(params: WorkerToHostMethods["state.delete"][0]): Promise<void>;
   };
 
+  /** Provides workflow-neutral SPS Inbox publication. */
+  inbox?: {
+    publish(params: WorkerToHostMethods["inbox.publish"][0]): Promise<WorkerToHostMethods["inbox.publish"][1]>;
+    update(params: WorkerToHostMethods["inbox.update"][0]): Promise<WorkerToHostMethods["inbox.update"][1]>;
+    withdraw(params: WorkerToHostMethods["inbox.withdraw"][0]): Promise<WorkerToHostMethods["inbox.withdraw"][1]>;
+  };
+
   /** Provides restricted plugin database namespace methods. */
   db: {
     namespace(params: WorkerToHostMethods["db.namespace"][0]): Promise<WorkerToHostMethods["db.namespace"][1]>;
@@ -411,6 +418,9 @@ const METHOD_CAPABILITY_MAP: Record<WorkerToHostMethodName, PluginCapability | n
   "state.get": "plugin.state.read",
   "state.set": "plugin.state.write",
   "state.delete": "plugin.state.write",
+  "inbox.publish": "inbox.items.publish",
+  "inbox.update": "inbox.items.update",
+  "inbox.withdraw": "inbox.items.update",
 
   "db.namespace": "database.namespace.read",
   "db.query": "database.namespace.read",
@@ -758,6 +768,19 @@ export function createHostClientHandlers(
     }),
     "state.delete": gated("state.delete", async (params) => {
       return services.state.delete(params);
+    }),
+
+    "inbox.publish": gated("inbox.publish", async (params) => {
+      if (!services.inbox) throw new Error("This SPS host does not expose the Core Inbox");
+      return services.inbox.publish(params);
+    }),
+    "inbox.update": gated("inbox.update", async (params) => {
+      if (!services.inbox) throw new Error("This SPS host does not expose the Core Inbox");
+      return services.inbox.update(params);
+    }),
+    "inbox.withdraw": gated("inbox.withdraw", async (params) => {
+      if (!services.inbox) throw new Error("This SPS host does not expose the Core Inbox");
+      return services.inbox.withdraw(params);
     }),
 
     "db.namespace": gated("db.namespace", async (params) => {

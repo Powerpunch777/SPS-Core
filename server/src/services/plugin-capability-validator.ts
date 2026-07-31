@@ -122,6 +122,9 @@ const OPERATION_CAPABILITIES: Record<string, readonly PluginCapability[]> = {
   "webhooks.receive": ["webhooks.receive"],
   "http.request": ["http.outbound"],
   "secrets.resolve": ["secrets.read-ref"],
+  "inbox.items.publish": ["inbox.items.publish"],
+  "inbox.items.update": ["inbox.items.update"],
+  "inbox.actions.dispatch": ["inbox.actions.register"],
 
   // Agent tools
   "agent.tools.register": ["agent.tools.register"],
@@ -479,6 +482,24 @@ export function pluginCapabilityValidator(): PluginCapabilityValidator {
 
       if (manifest.memoryProvider && !declared.has("memory.providers.register")) {
         allMissing.push("memory.providers.register");
+      }
+
+      if (manifest.ui?.workspaceShell && !declared.has("ui.workspaceShell.provide")) {
+        allMissing.push("ui.workspaceShell.provide");
+      }
+
+      if (
+        (manifest.ui?.dashboardWidgets?.length ?? 0) > 0
+        && !declared.has("ui.dashboard.contribute")
+      ) {
+        allMissing.push("ui.dashboard.contribute");
+      }
+
+      if (
+        (manifest.inbox?.actions?.length ?? 0) > 0
+        && !declared.has("inbox.actions.register")
+      ) {
+        allMissing.push("inbox.actions.register");
       }
 
       // Check UI slots → required capabilities

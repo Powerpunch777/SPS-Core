@@ -14,6 +14,8 @@ import type {
   PluginLauncherDeclaration,
   PluginLauncherRenderContextSnapshot,
   PluginUiSlotDeclaration,
+  PluginWorkspaceShellDeclaration,
+  PluginDashboardWidgetDeclaration,
   PluginLocalFolderDeclaration,
   PluginRecord,
   PluginConfig,
@@ -43,6 +45,8 @@ export type PluginUiContribution = {
   uiEntryFile: string;
   slots: PluginUiSlotDeclaration[];
   launchers: PluginLauncherDeclaration[];
+  workspaceShell: PluginWorkspaceShellDeclaration | null;
+  dashboardWidgets: PluginDashboardWidgetDeclaration[];
 };
 
 export interface CompanyPluginActivation {

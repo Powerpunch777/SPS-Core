@@ -496,6 +496,8 @@ export interface PluginUiContributionMetadata {
   uiEntryFile: string;
   slots: PluginUiSlotDeclaration[];
   launchers: PluginLauncherDeclaration[];
+  workspaceShell: NonNullable<PaperclipPluginManifestV1["ui"]>["workspaceShell"] | null;
+  dashboardWidgets: NonNullable<PaperclipPluginManifestV1["ui"]>["dashboardWidgets"];
 }
 
 /**
@@ -1119,7 +1121,10 @@ export function getPluginUiContributionMetadata(
     ...(manifest.ui?.launchers ?? []),
   ];
 
-  if (slots.length === 0 && launchers.length === 0) {
+  const workspaceShell = manifest.ui?.workspaceShell ?? null;
+  const dashboardWidgets = manifest.ui?.dashboardWidgets ?? [];
+
+  if (slots.length === 0 && launchers.length === 0 && !workspaceShell && dashboardWidgets.length === 0) {
     return null;
   }
 
@@ -1127,6 +1132,8 @@ export function getPluginUiContributionMetadata(
     uiEntryFile: "index.js",
     slots,
     launchers,
+    workspaceShell,
+    dashboardWidgets,
   };
 }
 

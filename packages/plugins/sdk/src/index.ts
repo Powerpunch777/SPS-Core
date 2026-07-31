@@ -275,6 +275,8 @@ export type {
   PluginActivityClient,
   PluginActivityLogEntry,
   PluginStateClient,
+  PluginInboxItemInput,
+  PluginInboxClient,
   PluginEntitiesClient,
   PluginProjectsClient,
   PluginExecutionWorkspacesClient,

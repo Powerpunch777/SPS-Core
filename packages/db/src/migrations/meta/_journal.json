@@ -1100,6 +1100,13 @@
       "when": 1785702000000,
       "tag": "0158_sps_plugin_artifacts",
       "breakpoints": true
+    },
+    {
+      "idx": 159,
+      "version": "7",
+      "when": 1785788400000,
+      "tag": "0159_sps_workspace_surfaces",
+      "breakpoints": true
     }
   ]
 }

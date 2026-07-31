@@ -1,4 +1,5 @@
 import { Navigate, Outlet, Route, Routes, useLocation, useParams } from "@/lib/router";
+import { useQuery } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { useTranslation } from "@/i18n";
 import { Layout } from "./components/Layout";
@@ -85,21 +86,42 @@ import { normalizeRememberedInstanceSettingsPath } from "./lib/instance-settings
 import { isWorkplaneModeEnabled } from "./lib/workplane-mode";
 import { isSpsCoreBaselineModeEnabled } from "./lib/sps-core-baseline-mode";
 import { SpsCoreWorkspaceHome } from "./pages/SpsCoreWorkspaceHome";
+import { SpsWorkspaceInbox } from "./pages/SpsWorkspaceInbox";
 import { SpsCoreAssistantDetail } from "./pages/SpsCoreAssistantDetail";
 import { SpsCoreHostSettings } from "./pages/SpsCoreHostSettings";
+import { SpsCoreWorkspaceAppearance } from "./pages/SpsCoreWorkspaceAppearance";
 import { SpsCoreWorkspaceSources } from "./pages/SpsCoreWorkspaceSources";
 import { SpsCoreTeamAccess } from "./pages/SpsCoreTeamAccess";
 import { SpsCoreServerSettings } from "./pages/SpsCoreServerSettings";
+import { workspaceSurfacesApi } from "./api/workspace-surfaces";
+import { queryKeys } from "./lib/queryKeys";
+
+function CoreBaselineIndexRedirect() {
+  const { selectedCompanyId } = useCompany();
+  const { data: shell, isLoading } = useQuery({
+    queryKey: queryKeys.workspaceSurfaces.shell(selectedCompanyId ?? ""),
+    queryFn: () => workspaceSurfacesApi.getShell(selectedCompanyId!),
+    enabled: Boolean(selectedCompanyId),
+  });
+
+  if (isLoading) return null;
+  const target = shell?.mode === "plugin" && shell.shell?.defaultRoute
+    ? shell.shell.defaultRoute
+    : "/dashboard";
+  return <Navigate to={target} replace />;
+}
 
 function coreBaselineRoutes() {
   return (
     <>
-      <Route index element={<Navigate to="dashboard" replace />} />
+      <Route index element={<CoreBaselineIndexRedirect />} />
       <Route path="dashboard" element={<SpsCoreWorkspaceHome />} />
+      <Route path="inbox" element={<SpsWorkspaceInbox />} />
       <Route path="assistants/new" element={<NewAgent />} />
       <Route path="assistants/:agentId" element={<SpsCoreAssistantDetail />} />
       <Route path="assistants/:agentId/:tab" element={<SpsCoreAssistantDetail />} />
       <Route path="company/settings" element={<SpsCoreHostSettings />} />
+      <Route path="company/settings/workspace-appearance" element={<SpsCoreWorkspaceAppearance />} />
       <Route path="company/settings/sps-server" element={<SpsCoreServerSettings />} />
       <Route path="company/settings/team" element={<SpsCoreTeamAccess />} />
       <Route path="company/settings/nodes" element={<SpsNodes />} />
@@ -409,12 +431,18 @@ function OnboardingRoutePage() {
 function CompanyRootRedirect() {
   const { companies, selectedCompany, loading } = useCompany();
   const location = useLocation();
+  const targetCompany = selectedCompany ?? companies[0] ?? null;
+  const coreBaseline = isSpsCoreBaselineModeEnabled();
+  const { data: shell, isLoading: shellLoading } = useQuery({
+    queryKey: queryKeys.workspaceSurfaces.shell(targetCompany?.id ?? ""),
+    queryFn: () => workspaceSurfacesApi.getShell(targetCompany!.id),
+    enabled: coreBaseline && Boolean(targetCompany),
+  });
 
-  if (loading) {
+  if (loading || (coreBaseline && shellLoading)) {
     return <div className="mx-auto max-w-xl py-10 text-sm text-muted-foreground">Loading...</div>;
   }
 
-  const targetCompany = selectedCompany ?? companies[0] ?? null;
   if (!targetCompany) {
     if (
       shouldRedirectCompanylessRouteToOnboarding({
@@ -427,7 +455,10 @@ function CompanyRootRedirect() {
     return <NoCompaniesStartPage />;
   }
 
-  return <Navigate to={`/${targetCompany.issuePrefix}/dashboard`} replace />;
+  const target = shell?.mode === "plugin" && shell.shell?.defaultRoute
+    ? shell.shell.defaultRoute
+    : "/dashboard";
+  return <Navigate to={`/${targetCompany.issuePrefix}${target}`} replace />;
 }
 
 function UnprefixedBoardRedirect() {

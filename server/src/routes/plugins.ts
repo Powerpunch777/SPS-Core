@@ -128,6 +128,8 @@ type PluginUiContribution = {
   uiEntryFile: string;
   slots: PluginUiSlotDeclaration[];
   launchers: PluginLauncherDeclaration[];
+  workspaceShell: NonNullable<PaperclipPluginManifestV1["ui"]>["workspaceShell"] | null;
+  dashboardWidgets: NonNullable<PaperclipPluginManifestV1["ui"]>["dashboardWidgets"];
 };
 
 /** Request body for POST /api/plugins/install */
@@ -1214,6 +1216,8 @@ export function pluginRoutes(
           uiEntryFile: uiMetadata.uiEntryFile,
           slots: uiMetadata.slots,
           launchers: uiMetadata.launchers,
+          workspaceShell: uiMetadata.workspaceShell,
+          dashboardWidgets: uiMetadata.dashboardWidgets,
         };
       })
       .filter((item): item is PluginUiContribution => item !== null);
