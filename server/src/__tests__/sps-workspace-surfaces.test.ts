@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { eq } from "drizzle-orm";
 import {
   companies,
   createDb,
@@ -284,6 +285,43 @@ describeEmbeddedPostgres("SPS workspace surfaces", () => {
       plugin: seeded.plugin,
       item: { ...item, title: "Review updated" },
     })).resolves.toMatchObject({ title: "Review updated" });
+  });
+
+  it("preserves summaries through soft and hard unloads, then deletes hard-purge orphans by plugin key", async () => {
+    const seeded = await seed();
+    const surfaces = spsWorkspaceSurfaceService(db);
+    const item = await surfaces.publishInboxItem({
+      companyId: seeded.companyId,
+      plugin: seeded.plugin,
+      item: {
+        externalId: "keep-until-host-deletes",
+        category: "report",
+        title: "Keep this summary",
+        summary: "The Host has not chosen to delete this history.",
+      },
+    });
+
+    // A normal lifecycle unload changes plugin state but does not remove the
+    // operational history by default.
+    await db.update(plugins)
+      .set({ status: "uninstalled" })
+      .where(eq(plugins.id, seeded.pluginId));
+    expect(await surfaces.listInbox({ companyId: seeded.companyId, userId: "owner-user" }))
+      .toMatchObject([{ id: item.id }]);
+
+    // A hard purge clears the FK. The explicit cleanup must still identify
+    // every summary through the immutable plugin key.
+    await db.delete(plugins).where(eq(plugins.id, seeded.pluginId));
+    const [orphan] = await db.select({ sourcePluginId: spsPluginInboxItems.sourcePluginId })
+      .from(spsPluginInboxItems)
+      .where(eq(spsPluginInboxItems.id, item.id));
+    expect(orphan?.sourcePluginId).toBeNull();
+    expect(await surfaces.listInbox({ companyId: seeded.companyId, userId: "owner-user" }))
+      .toMatchObject([{ id: item.id }]);
+
+    expect(await surfaces.deleteInboxSummariesBySourcePluginKey(seeded.plugin.pluginKey)).toBe(1);
+    expect(await db.select().from(spsPluginInboxItems)).toEqual([]);
+    expect(await db.select().from(spsPluginInboxUserStates)).toEqual([]);
   });
 
   it("refuses unsafe Inbox navigation and actions not declared by the plugin", async () => {

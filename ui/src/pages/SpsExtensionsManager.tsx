@@ -1,8 +1,9 @@
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { PluginRecord } from "@paperclipai/shared";
-import { CheckCircle2, Power, Puzzle, Settings, ShieldCheck, Store } from "lucide-react";
+import { CheckCircle2, Power, Puzzle, Settings, ShieldCheck, Store, Trash } from "lucide-react";
 import { pluginsApi, type CompanyPluginActivation } from "@/api/plugins";
+import { PluginUninstallDialog, type PluginUninstallOptions } from "@/components/PluginUninstallDialog";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -39,13 +40,17 @@ function ExtensionRow({
   activation,
   builtIn = false,
   changing = false,
+  uninstalling = false,
   onToggle,
+  onUninstall,
 }: {
   plugin: PluginRecord;
   activation: CompanyPluginActivation | null;
   builtIn?: boolean;
   changing?: boolean;
+  uninstalling?: boolean;
   onToggle: () => void;
+  onUninstall: () => void;
 }) {
   const state = plugin.status === "ready" ? "Ready" : plugin.status;
   const companyEnabled = activation?.enabled ?? false;
@@ -94,6 +99,16 @@ function ExtensionRow({
             {plugin.status === "upgrade_pending" ? "Review update" : "Settings"}
           </Link>
         </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+          disabled={!canChangeUse || uninstalling}
+          onClick={onUninstall}
+        >
+          <Trash className="h-4 w-4" />
+          Uninstall
+        </Button>
       </div>
     </div>
   );
@@ -104,6 +119,7 @@ export function SpsExtensionsManager() {
   const { setBreadcrumbs } = useBreadcrumbs();
   const queryClient = useQueryClient();
   const { pushToast } = useToastActions();
+  const [uninstallPlugin, setUninstallPlugin] = useState<PluginRecord | null>(null);
   const { data: plugins, isLoading, error } = useQuery({
     queryKey: queryKeys.plugins.all,
     queryFn: () => pluginsApi.list(),
@@ -143,6 +159,20 @@ export function SpsExtensionsManager() {
       pushToast({ title: "Could not change Company extension", body: error.message, tone: "error" });
     },
   });
+  const uninstallMutation = useMutation({
+    mutationFn: ({ pluginId, options }: { pluginId: string; options: PluginUninstallOptions }) =>
+      pluginsApi.uninstall(pluginId, options),
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.plugins.all }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.plugins.uiContributionsPrefix }),
+      ]);
+      pushToast({ title: "Extension uninstalled", tone: "success" });
+    },
+    onError: (error: Error) => {
+      pushToast({ title: "Could not uninstall extension", body: error.message, tone: "error" });
+    },
+  });
 
   useEffect(() => {
     setBreadcrumbs([
@@ -178,7 +208,9 @@ export function SpsExtensionsManager() {
         activation={activation}
         builtIn={builtIn}
         changing={activationMutation.isPending && activationMutation.variables?.plugin.id === plugin.id}
+        uninstalling={uninstallMutation.isPending && uninstallMutation.variables?.pluginId === plugin.id}
         onToggle={() => activationMutation.mutate({ plugin, enabled: !activation?.enabled })}
+        onUninstall={() => setUninstallPlugin(plugin)}
       />
     );
   };
@@ -234,6 +266,19 @@ export function SpsExtensionsManager() {
           )}
         </Card>
       </section>
+
+      <PluginUninstallDialog
+        open={uninstallPlugin !== null}
+        pluginName={uninstallPlugin ? extensionName(uninstallPlugin) : ""}
+        pending={uninstallMutation.isPending}
+        onOpenChange={(open) => { if (!open) setUninstallPlugin(null); }}
+        onConfirm={(options) => {
+          if (!uninstallPlugin) return;
+          uninstallMutation.mutate({ pluginId: uninstallPlugin.id, options }, {
+            onSettled: () => setUninstallPlugin(null),
+          });
+        }}
+      />
     </div>
   );
 }

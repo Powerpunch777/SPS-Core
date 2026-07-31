@@ -11,6 +11,7 @@ const listPlugins = vi.hoisted(() => vi.fn());
 const listForCompany = vi.hoisted(() => vi.fn());
 const enablePlugin = vi.hoisted(() => vi.fn());
 const setCompanyActivation = vi.hoisted(() => vi.fn());
+const uninstallPlugin = vi.hoisted(() => vi.fn());
 const setBreadcrumbs = vi.hoisted(() => vi.fn());
 const pushToast = vi.hoisted(() => vi.fn());
 
@@ -20,6 +21,7 @@ vi.mock("@/api/plugins", () => ({
     listForCompany: (companyId: string) => listForCompany(companyId),
     enable: (pluginId: string) => enablePlugin(pluginId),
     setCompanyActivation: (pluginId: string, companyId: string, enabled: boolean) => setCompanyActivation(pluginId, companyId, enabled),
+    uninstall: (pluginId: string, options: { deleteInboxSummaries?: boolean }) => uninstallPlugin(pluginId, options),
   },
 }));
 vi.mock("@/context/CompanyContext", () => ({
@@ -57,6 +59,7 @@ describe("SpsExtensionsManager", () => {
     });
     enablePlugin.mockResolvedValue({ ok: true });
     setCompanyActivation.mockResolvedValue({ activation: { enabled: true } });
+    uninstallPlugin.mockResolvedValue({ ok: true });
   });
 
   afterEach(() => {
@@ -82,6 +85,39 @@ describe("SpsExtensionsManager", () => {
     expect(enablePlugin).toHaveBeenCalledWith("workplane-plugin");
     expect(setCompanyActivation).toHaveBeenCalledWith("workplane-plugin", "workspace-1", true);
     expect(pushToast).toHaveBeenCalledWith(expect.objectContaining({ title: "Extension ready in this Workspace", tone: "success" }));
+
+    await act(async () => { root.unmount(); });
+  });
+
+  it("keeps Inbox summaries by default and only deletes them after the Host checks the option", async () => {
+    const root = createRoot(container);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    await act(async () => {
+      root.render(<MemoryRouter><QueryClientProvider client={queryClient}><SpsExtensionsManager /></QueryClientProvider></MemoryRouter>);
+    });
+    await flushReact();
+    await flushReact();
+
+    const uninstall = Array.from(container.querySelectorAll("button"))
+      .find((button) => button.textContent?.includes("Uninstall"));
+    await act(async () => { uninstall?.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    await flushReact();
+
+    const keep = Array.from(document.body.querySelectorAll("button"))
+      .find((button) => button.textContent === "Uninstall and keep summaries");
+    await act(async () => { keep?.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    await flushReact();
+    expect(uninstallPlugin).toHaveBeenCalledWith("workplane-plugin", { deleteInboxSummaries: false });
+
+    await act(async () => { uninstall?.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    await flushReact();
+    const checkbox = document.body.querySelector('[aria-label="Delete Inbox summaries"]');
+    await act(async () => { checkbox?.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    const deleteSummaries = Array.from(document.body.querySelectorAll("button"))
+      .find((button) => button.textContent === "Uninstall and delete summaries");
+    await act(async () => { deleteSummaries?.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
+    await flushReact();
+    expect(uninstallPlugin).toHaveBeenLastCalledWith("workplane-plugin", { deleteInboxSummaries: true });
 
     await act(async () => { root.unmount(); });
   });
