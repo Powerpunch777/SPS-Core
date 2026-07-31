@@ -5035,6 +5035,44 @@ function resolveMarketplaceAssistantMcpEntryPath() {
   );
 }
 
+export function createMarketplaceAssistantExternalTools(input: {
+  apiBaseUrl: string;
+  scopedToken: string;
+  runId: string;
+  companyId: string;
+  remoteNode: boolean;
+}) {
+  return {
+    mcpServers: [{
+      kind: "stdio" as const,
+      name: "sps-marketplace",
+      // A remote SPS Node cannot execute the Hub computer's absolute MCP
+      // entry path. Desktop prepends its bundled Node to PATH and injects the
+      // local entry path. Node imports that path directly so a shell never
+      // sits between the Agent and the stdio MCP protocol.
+      command: input.remoteNode ? "node.exe" : process.execPath,
+      args: input.remoteNode
+        ? [
+            "--input-type=module",
+            "--eval",
+            "import { pathToFileURL } from 'node:url'; await import(pathToFileURL(process.env.SPS_MARKETPLACE_MCP_ENTRY).href);",
+          ]
+        : [resolveMarketplaceAssistantMcpEntryPath()],
+      env: [
+        { name: "SPS_API_BASE_URL", value: input.apiBaseUrl },
+        { name: "SPS_SCOPED_BEARER_TOKEN", value: input.scopedToken },
+        { name: "SPS_RUN_ID", value: input.runId },
+        { name: "SPS_COMPANY_ID", value: input.companyId },
+        ...(input.remoteNode
+          ? [{ name: "ELECTRON_RUN_AS_NODE", value: "1" }]
+          : []),
+      ],
+      identity: "sps.marketplace.readonly",
+      revision: input.remoteNode ? "3-node-local-runtime" : "1",
+    }],
+  };
+}
+
 export function assertSpsNodeBindingRequiredForAdapter(input: {
   requireSpsNodeExecution: boolean;
   adapterType: string;
@@ -12734,22 +12772,13 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         throw new Error("Marketplace Assistant requires a scoped local Agent token.");
       }
       const externalTools = marketplaceAssistantContext && authToken
-        ? {
-            mcpServers: [{
-              kind: "stdio" as const,
-              name: "sps-marketplace",
-              command: process.execPath,
-              args: [resolveMarketplaceAssistantMcpEntryPath()],
-              env: [
-                { name: "SPS_API_BASE_URL", value: runtimeEnv.PAPERCLIP_API_URL ?? "" },
-                { name: "SPS_SCOPED_BEARER_TOKEN", value: authToken },
-                { name: "SPS_RUN_ID", value: run.id },
-                { name: "SPS_COMPANY_ID", value: agent.companyId },
-              ],
-              identity: "sps.marketplace.readonly",
-              revision: "1",
-            }],
-          }
+        ? createMarketplaceAssistantExternalTools({
+            apiBaseUrl: runtimeEnv.PAPERCLIP_API_URL ?? "",
+            scopedToken: authToken,
+            runId: run.id,
+            companyId: agent.companyId,
+            remoteNode: Boolean(spsNodeExecutionTarget),
+          })
         : undefined;
       if (marketplaceAssistantContext && !runtimeEnv.PAPERCLIP_API_URL?.trim()) {
         throw new Error("Marketplace Assistant requires PAPERCLIP_API_URL.");
