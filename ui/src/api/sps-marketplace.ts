@@ -30,6 +30,45 @@ export interface SpsMarketplaceListResponse {
   refreshedAt: string | null;
 }
 
+export interface SpsMarketplaceAssistantAgent {
+  id: string;
+  name: string;
+  title: string | null;
+  icon: string | null;
+  adapterType: string;
+  status: string;
+}
+
+export interface SpsMarketplaceAssistantSession {
+  id: string;
+  companyId: string;
+  userId: string;
+  agentId: string;
+  adapterType: string;
+  taskKey: string;
+  sessionDisplayId: string | null;
+  status: "active" | "closed";
+  createdAt: string;
+  updatedAt: string;
+  closedAt: string | null;
+}
+
+export interface SpsMarketplaceAssistantMessage {
+  id: string;
+  sessionId: string;
+  runId: string;
+  idempotencyKey: string;
+  role: "user" | "assistant" | "system" | "tool";
+  content: string;
+  metadata: Record<string, unknown>;
+  createdAt: string;
+}
+
+export interface SpsMarketplaceAssistantMessagesResponse {
+  messages: SpsMarketplaceAssistantMessage[];
+  nextCursor: string | null;
+}
+
 function searchParams(input: { query?: string; category?: string; capability?: string; limit?: number }) {
   const params = new URLSearchParams();
   if (input.query?.trim()) params.set("q", input.query.trim());
@@ -48,5 +87,28 @@ export const spsMarketplaceApi = {
   get: (companyId: string, pluginId: string) =>
     api.get<{ plugin: SpsMarketplacePluginDetail }>(
       `/companies/${encodeURIComponent(companyId)}/marketplace/plugins/${encodeURIComponent(pluginId)}`,
+    ),
+  listAssistantAgents: (companyId: string) =>
+    api.get<{ agents: SpsMarketplaceAssistantAgent[] }>(
+      `/companies/${encodeURIComponent(companyId)}/marketplace/assistant/agents`,
+    ),
+  openAssistantSession: (companyId: string, agentId: string) =>
+    api.post<{ session: SpsMarketplaceAssistantSession }>(
+      `/companies/${encodeURIComponent(companyId)}/marketplace/assistant/sessions`,
+      { agentId },
+    ),
+  listAssistantMessages: (companyId: string, sessionId: string, after?: string) =>
+    api.get<SpsMarketplaceAssistantMessagesResponse>(
+      `/companies/${encodeURIComponent(companyId)}/marketplace/assistant/sessions/${encodeURIComponent(sessionId)}/messages${after ? `?after=${encodeURIComponent(after)}` : ""}`,
+    ),
+  sendAssistantMessage: (companyId: string, sessionId: string, content: string, idempotencyKey: string) =>
+    api.post<{ message: SpsMarketplaceAssistantMessage; run: { id: string; status: string } }>(
+      `/companies/${encodeURIComponent(companyId)}/marketplace/assistant/sessions/${encodeURIComponent(sessionId)}/messages`,
+      { content, idempotencyKey },
+    ),
+  closeAssistantSession: (companyId: string, sessionId: string) =>
+    api.post<{ session: SpsMarketplaceAssistantSession }>(
+      `/companies/${encodeURIComponent(companyId)}/marketplace/assistant/sessions/${encodeURIComponent(sessionId)}/close`,
+      {},
     ),
 };
