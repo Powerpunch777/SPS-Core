@@ -20,6 +20,7 @@ import type {
   PluginRecord,
   PluginConfig,
   PluginStatus,
+  PluginDiagnosticsSnapshotV1,
 } from "@paperclipai/shared";
 import { api } from "./client";
 
@@ -404,6 +405,9 @@ export const pluginsApi = {
    */
   health: (pluginId: string) =>
     api.get<PluginHealthCheckResult>(`/plugins/${pluginId}/health`),
+
+  diagnostics: (pluginId: string) =>
+    api.get<PluginDiagnosticsSnapshotV1>(`/plugins/${pluginId}/diagnostics`),
 
   /**
    * Fetch aggregated health dashboard data for a plugin.

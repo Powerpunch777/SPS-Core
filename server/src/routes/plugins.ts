@@ -78,6 +78,7 @@ import type { PluginJobStore } from "../services/plugin-job-store.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
 import type { PluginStreamBus } from "../services/plugin-stream-bus.js";
 import type { PluginToolDispatcher } from "../services/plugin-tool-dispatcher.js";
+import type { PluginCanonicalDiagnostics } from "../services/plugin-canonical-diagnostics.js";
 import type { PluginPerformActionActorContext, ToolRunContext } from "@paperclipai/plugin-sdk";
 import { JsonRpcCallError, PLUGIN_RPC_ERROR_CODES } from "@paperclipai/plugin-sdk";
 import {
@@ -450,6 +451,11 @@ export interface PluginRouteRegistryStagingDeps {
   stagingRoot: string;
 }
 
+/** Canonical, bounded diagnostics owned by the Core runtime. */
+export interface PluginRouteDiagnosticsDeps {
+  diagnostics: PluginCanonicalDiagnostics;
+}
+
 interface PluginScopedApiRequest {
   routeKey: string;
   method: string;
@@ -539,6 +545,7 @@ export function pluginRoutes(
   memoryDeps?: PluginRouteMemoryDeps,
   registryStagingDeps?: PluginRouteRegistryStagingDeps,
   lifecycleManager?: PluginLifecycleManager,
+  diagnosticsDeps?: PluginRouteDiagnosticsDeps,
 ) {
   const router = Router();
   const registry = pluginRegistryService(db);
@@ -2633,6 +2640,33 @@ export function pluginRoutes(
     };
 
     res.json(result);
+  });
+
+  /**
+   * GET /api/plugins/:pluginId/diagnostics
+   *
+   * Returns canonical diagnostic evidence using the public
+   * `sps-plugin-diagnostic/v1` shape. The Core selects the audience from the
+   * authenticated request: only the SPS Host receives host-governed facts.
+   */
+  router.get("/plugins/:pluginId/diagnostics", async (req, res) => {
+    assertBoardOrgAccess(req);
+    if (!diagnosticsDeps) {
+      res.status(501).json({ error: "Canonical plugin diagnostics are unavailable" });
+      return;
+    }
+    const plugin = await resolvePlugin(registry, req.params.pluginId);
+    if (!plugin) {
+      res.status(404).json({ error: "Plugin not found" });
+      return;
+    }
+    const audience = hasSpsCoreHostAuthority(req) ? "host" : "member";
+    const snapshot = await diagnosticsDeps.diagnostics.snapshot(plugin.id, audience);
+    if (!snapshot) {
+      res.status(404).json({ error: "Plugin not found" });
+      return;
+    }
+    res.json(snapshot);
   });
 
   /**

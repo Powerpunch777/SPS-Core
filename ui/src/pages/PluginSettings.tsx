@@ -84,6 +84,13 @@ export function PluginSettings() {
     refetchInterval: 30000,
   });
 
+  const { data: diagnosticsData } = useQuery({
+    queryKey: queryKeys.plugins.diagnostics(pluginId!),
+    queryFn: () => pluginsApi.diagnostics(pluginId!),
+    enabled: !!pluginId,
+    refetchInterval: 30000,
+  });
+
   const { data: dashboardData } = useQuery({
     queryKey: queryKeys.plugins.dashboard(pluginId!),
     queryFn: () => pluginsApi.dashboard(pluginId!),
@@ -318,6 +325,31 @@ export function PluginSettings() {
         <TabsContent value="status" className="space-y-6">
           <div className="grid gap-6 xl:grid-cols-(--gtc-39)">
             <div className="space-y-6">
+              <Card>
+                <CardHeader>
+                  <CardTitle className="text-base flex items-center gap-1.5">
+                    <ActivitySquare className="h-4 w-4" />
+                    Canonical Diagnostics
+                  </CardTitle>
+                  <CardDescription>Safe runtime facts for your current access level</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  {diagnosticsData ? (
+                    <div className="max-h-64 space-y-2 overflow-y-auto text-sm">
+                      {diagnosticsData.facts.length > 0 ? diagnosticsData.facts.map((fact) => (
+                        <div key={fact.id} className="rounded-md border border-border/60 px-2.5 py-2">
+                          <div className="flex items-center justify-between gap-2">
+                            <Badge variant={fact.level === "error" ? "destructive" : fact.level === "warn" ? "secondary" : "outline"}>{fact.category}</Badge>
+                            <span className="font-mono text-(length:--text-nano) text-muted-foreground">{fact.code}</span>
+                          </div>
+                          <p className="mt-1 text-xs text-muted-foreground">{fact.message}</p>
+                        </div>
+                      )) : <p className="text-sm text-muted-foreground italic">No diagnostic facts recorded yet.</p>}
+                    </div>
+                  ) : <p className="text-sm text-muted-foreground">Canonical diagnostics are unavailable right now.</p>}
+                </CardContent>
+              </Card>
+
               <Card>
                 <CardHeader>
                   <CardTitle className="text-base flex items-center gap-1.5">

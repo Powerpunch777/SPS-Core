@@ -8,6 +8,7 @@ import { PluginSettings } from "./PluginSettings";
 
 const mockPluginsApi = vi.hoisted(() => ({
   get: vi.fn(),
+  diagnostics: vi.fn(),
   health: vi.fn(),
   dashboard: vi.fn(),
   logs: vi.fn(),
@@ -50,7 +51,18 @@ vi.mock("@/plugins/slots", () => ({
 }));
 
 vi.mock("@/components/PageTabBar", () => ({
-  PageTabBar: () => null,
+  PageTabBar: ({ items, onValueChange }: {
+    items: Array<{ value: string; label: string }>;
+    onValueChange: (value: string) => void;
+  }) => (
+    <div>
+      {items.map((item) => (
+        <button key={item.value} type="button" onClick={() => onValueChange(item.value)}>
+          {item.label}
+        </button>
+      ))}
+    </div>
+  ),
 }));
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -147,6 +159,29 @@ describe("PluginSettings", () => {
     document.body.appendChild(container);
 
     mockPluginsApi.get.mockResolvedValue(basePlugin());
+    mockPluginsApi.diagnostics.mockResolvedValue({
+      schemaVersion: "sps-plugin-diagnostic/v1",
+      pluginId: "plugin-1",
+      pluginKey: "paperclip.e2b-sandbox-provider",
+      generatedAt: "2026-07-31T00:00:00.000Z",
+      facts: [{
+        schemaVersion: "sps-plugin-diagnostic/v1",
+        id: "plugin-ready",
+        occurredAt: "2026-07-31T00:00:00.000Z",
+        origin: "core",
+        level: "info",
+        category: "worker",
+        code: "SPS_PLUGIN_RUNTIME_READY",
+        message: "Plugin runtime is ready.",
+        details: {},
+      }],
+      runtime: {
+        lifecycleStatus: "ready",
+        declaredCapabilities: [],
+        worker: null,
+        scheduler: null,
+      },
+    });
     mockPluginsApi.dashboard.mockResolvedValue(null);
     mockPluginsApi.health.mockResolvedValue({ pluginId: "plugin-1", status: "ready", healthy: true, checks: [] });
     mockPluginsApi.logs.mockResolvedValue([]);
@@ -174,6 +209,26 @@ describe("PluginSettings", () => {
     expect(container.textContent).toContain("secret bindings still resolve through the selected company context");
     const link = container.querySelector('a[href="/company/settings/instance/environments"]');
     expect(link?.textContent).toContain("Open Environments");
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it("renders canonical safe diagnostics without requiring a console", async () => {
+    const root = await renderSettings(container);
+    const statusButton = Array.from(container.querySelectorAll("button"))
+      .find((button) => button.textContent === "Status");
+
+    await act(async () => {
+      statusButton?.click();
+      await Promise.resolve();
+    });
+    await flushReact();
+
+    expect(container.textContent).toContain("Canonical Diagnostics");
+    expect(container.textContent).toContain("SPS_PLUGIN_RUNTIME_READY");
+    expect(container.textContent).toContain("Plugin runtime is ready.");
 
     await act(async () => {
       root.unmount();

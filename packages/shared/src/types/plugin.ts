@@ -825,6 +825,78 @@ export interface PluginRecord {
   updatedAt: Date;
 }
 
+// ---------------------------------------------------------------------------
+// Canonical plugin diagnostics
+// ---------------------------------------------------------------------------
+
+/** The public, cross-host diagnostic event schema. */
+export type PluginDiagnosticOriginV1 = "core" | "desktop" | "plugin";
+export type PluginDiagnosticLevelV1 = "debug" | "info" | "warn" | "error";
+export type PluginDiagnosticCategoryV1 =
+  | "manifest"
+  | "compatibility"
+  | "capability"
+  | "worker"
+  | "tool"
+  | "event"
+  | "job"
+  | "run"
+  | "stream"
+  | "ui"
+  | "connector"
+  | "mcp"
+  | "migration"
+  | "backup"
+  | "rollback"
+  | "visibility";
+export type PluginDiagnosticValueV1 = null | boolean | number | string | PluginDiagnosticValueV1[] | {
+  [key: string]: PluginDiagnosticValueV1;
+};
+
+/**
+ * A bounded, product-neutral fact emitted by the Core or a plugin.
+ *
+ * This is deliberately not a log format: it contains stable codes and safe
+ * structured details only. Credentials, absolute host paths, and raw process
+ * output are rejected or redacted before a fact becomes observable.
+ */
+export interface PluginDiagnosticFactV1 {
+  schemaVersion: "sps-plugin-diagnostic/v1";
+  id: string;
+  occurredAt: string;
+  origin: PluginDiagnosticOriginV1;
+  level: PluginDiagnosticLevelV1;
+  category: PluginDiagnosticCategoryV1;
+  code: string;
+  message: string;
+  /** Safe, bounded JSON-like metadata. */
+  details: Record<string, PluginDiagnosticValueV1>;
+}
+
+/** The Core read contract consumed by SDK tooling and any product shell. */
+export interface PluginDiagnosticsSnapshotV1 {
+  schemaVersion: "sps-plugin-diagnostic/v1";
+  pluginId: string;
+  pluginKey: string;
+  generatedAt: string;
+  facts: PluginDiagnosticFactV1[];
+  runtime: {
+    lifecycleStatus: PluginStatus;
+    declaredCapabilities: string[];
+    worker: {
+      status: string;
+      running: boolean;
+      consecutiveCrashes: number;
+      totalCrashes: number;
+      pendingRequests: number;
+    } | null;
+    scheduler: {
+      running: boolean;
+      activeJobCount: number;
+    } | null;
+  };
+}
+
 export interface PluginDatabaseNamespaceRecord {
   id: string;
   pluginId: string;
