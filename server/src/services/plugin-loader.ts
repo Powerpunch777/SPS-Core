@@ -25,8 +25,9 @@
  * @see PLUGIN_SPEC.md §12 — Process Model
  */
 import { existsSync } from "node:fs";
-import { readdir, readFile, rm, stat } from "node:fs/promises";
+import { cp, mkdir, readdir, readFile, rm, stat } from "node:fs/promises";
 import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -1594,22 +1595,57 @@ export function pluginLoader(
       "plugin-loader: preparing plugin upgrade",
     );
 
-    const discovered = await fetchAndValidate({
-      ...upgradeOptions,
-      packageName,
-      localPath,
-      version,
-      installDir: localPluginDir,
-    });
-    const newManifest = discovered.manifest!;
+    // An upgrade candidate must never overwrite the active artifact while it
+    // is still being parsed, imported, and capability-checked. Keep both npm
+    // and local development candidates in a private staging directory until
+    // the lifecycle commits the replacement.
+    const stagingDir = path.join(
+      localPluginDir,
+      ".upgrade-staging",
+      pluginId,
+      randomUUID(),
+    );
+    let stagedLocalPath: string | undefined;
 
-    if (newManifest.id !== oldManifest.id) {
-      throw new Error(
-        `Upgrade failed: new manifest ID '${newManifest.id}' does not match existing plugin ID '${oldManifest.id}'`,
-      );
+    try {
+      if (localPath) {
+        const sourcePath = path.resolve(localPath);
+        stagedLocalPath = path.join(stagingDir, "package");
+        await mkdir(stagingDir, { recursive: true });
+        await cp(sourcePath, stagedLocalPath, {
+          recursive: true,
+          // Symlink targets must remain outside the candidate boundary only
+          // when the package itself explicitly uses a symlink. Do not resolve
+          // them while copying so validation observes the package faithfully.
+          dereference: false,
+          force: true,
+          errorOnExist: true,
+        });
+      }
+
+      const discovered = await fetchAndValidate({
+        ...upgradeOptions,
+        packageName,
+        localPath: stagedLocalPath,
+        version,
+        installDir: stagingDir,
+      });
+      const newManifest = discovered.manifest!;
+
+      if (newManifest.id !== oldManifest.id) {
+        throw new Error(
+          `Upgrade failed: new manifest ID '${newManifest.id}' does not match existing plugin ID '${oldManifest.id}'`,
+        );
+      }
+
+      return { oldManifest, newManifest, discovered };
+    } catch (error) {
+      // A rejected candidate is not part of the installed plugin state.
+      // Removing only this UUID-scoped staging directory cannot affect the
+      // active package, which remains at its pre-upgrade packagePath.
+      await rm(stagingDir, { recursive: true, force: true });
+      throw error;
     }
-
-    return { oldManifest, newManifest, discovered };
   }
 
   async function commitPreparedPluginUpgrade(
