@@ -49,7 +49,6 @@ import type {
   ExternalObjectMentionSourceKind,
   PermissionKey,
   PluginToolDeclaration,
-  PluginLifecycleProposalRecord,
 } from "@paperclipai/shared";
 export type { PluginLauncherRenderContextSnapshot } from "@paperclipai/shared";
 
@@ -953,29 +952,7 @@ export const HOST_TO_WORKER_OPTIONAL_METHODS: readonly HostToWorkerMethodName[] 
  */
 export interface WorkerToHostMethods {
   // Config
-    "config.get": [params: Record<string, never>, result: Record<string, unknown>];
-
-    // Non-mutating lifecycle proposal workflow. Host acceptance is deliberately
-    // not present in this worker protocol.
-    "pluginLifecycleProposals.create": [
-      params: {
-        companyId: string;
-        operation: "install" | "activate" | "update" | "disable" | "remove";
-        target: { pluginKey: string; pluginId?: string | null; packageName?: string | null; version?: string | null; registryStageId?: string | null; scope: "company" | "host" };
-        rationale: string;
-        authoringSessionId: string;
-        evidenceRefs?: Array<{ kind: string; ref: string }>;
-      },
-      result: PluginLifecycleProposalRecord,
-    ];
-    "pluginLifecycleProposals.list": [
-      params: { companyId: string; status?: "pending" | "accepted" | "rejected" | "failed" },
-      result: PluginLifecycleProposalRecord[],
-    ];
-    "pluginLifecycleProposals.get": [
-      params: { companyId: string; proposalId: string },
-      result: PluginLifecycleProposalRecord | null,
-    ];
+  "config.get": [params: Record<string, never>, result: Record<string, unknown>];
 
   // Runtime-discovered agent tools
   "agentTools.replaceDynamic": [

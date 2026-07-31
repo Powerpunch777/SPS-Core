@@ -41,13 +41,10 @@ import type {
   PaperclipPluginManifestV1,
   PluginBridgeErrorCode,
   PluginLauncherRenderContextSnapshot,
-  PluginRecord,
 } from "@paperclipai/shared";
 import {
   PLUGIN_STATUSES,
   PERMISSION_KEYS,
-  createPluginLifecycleProposalSchema,
-  type PluginLifecycleProposalRiskSummary,
 } from "@paperclipai/shared";
 import { pluginRegistryService } from "../services/plugin-registry.js";
 import { registryStagingService, type RegistryStagedPluginRecord } from "../services/registry-staging.js";
@@ -66,7 +63,6 @@ import {
 } from "../services/plugin-dependencies.js";
 import { listReadyAgentPlatformExtensions } from "../services/agent-platform-extensions.js";
 import { pluginLifecycleManager, type PluginLifecycleManager } from "../services/plugin-lifecycle.js";
-import { createPluginLifecycleProposalService } from "../services/plugin-lifecycle-proposals.js";
 import { spsWorkspaceSurfaceService } from "../services/sps-workspace-surfaces.js";
 import {
   getPluginUiContributionMetadata,
@@ -566,7 +562,6 @@ export function pluginRoutes(
   const issuesSvc = issueService(db);
   const accessSvc = accessService(db);
   const toolAccess = createPluginToolAccessService(db);
-  const lifecycleProposals = createPluginLifecycleProposalService(db);
   const registryStages = registryStagingDeps
     ? registryStagingService(registryStagingDeps.stagingRoot)
     : null;
@@ -943,48 +938,6 @@ export function pluginRoutes(
     })), target);
   }
 
-  async function proposalRiskFor(companyId: string, input: { operation: "install" | "activate" | "update" | "disable" | "remove"; target: { pluginKey: string; pluginId?: string | null; version?: string | null; scope: "company" | "host" } }): Promise<{ plugin: PluginRecord | null; riskSummary: PluginLifecycleProposalRiskSummary }> {
-    const plugin = input.target.pluginId
-      ? await resolvePlugin(registry, input.target.pluginId)
-      : await registry.getByKey(input.target.pluginKey);
-    const exactPlugin = plugin && plugin.pluginKey === input.target.pluginKey
-      && (!input.target.pluginId || plugin.id === input.target.pluginId)
-      ? plugin
-      : null;
-    const report = exactPlugin
-      ? input.target.scope === "company"
-        ? await dependencyReportForCompany(companyId, input.operation === "activate" || input.operation === "disable"
-          ? { action: input.operation === "activate" ? "enable" : "disable", pluginId: exactPlugin.manifestJson.id }
-          : undefined)
-        : await dependencyReportForHost(input.operation === "activate" || input.operation === "disable" || input.operation === "remove"
-          ? { action: input.operation === "activate" ? "enable" : input.operation === "remove" ? "delete" : "disable", pluginId: exactPlugin.manifestJson.id }
-          : undefined)
-      : null;
-    const available = exactPlugin && report ? isPluginDependencyAvailable(report, exactPlugin.manifestJson.id) : undefined;
-    const targetVersionMatches = !input.target.version || exactPlugin?.version === input.target.version;
-    return {
-      plugin: exactPlugin ?? null,
-      riskSummary: {
-        capabilityDelta: input.operation === "install" || input.operation === "update"
-          ? { status: "unknown", added: [], removed: [] }
-          : { status: exactPlugin ? "known" : "unknown", added: [], removed: [] },
-        compatibility: exactPlugin && targetVersionMatches
-          ? { status: "known" }
-          : { status: "unknown", reason: "The exact target package state cannot be verified." },
-        dependency: report
-          ? { status: "known", available, affectedPluginIds: report.impact?.affectedPluginIds ?? [] }
-          : { status: "unknown" },
-        migration: input.operation === "install" || input.operation === "update"
-          ? { status: "unknown", reason: "Candidate migration metadata requires a Host-reviewed Registry stage." }
-          : { status: "none" },
-        secrets: exactPlugin?.manifestJson.capabilities.includes("secrets.read-ref")
-          ? { status: "unknown", reason: "Secret scope is intentionally not exposed in a proposal." }
-          : { status: "none" },
-        hostScope: input.target.scope === "host" ? "required" : "none",
-      },
-    };
-  }
-
   async function assertCompanyPluginEnabled(
     plugin: { id: string; pluginKey: string; manifestJson: PaperclipPluginManifestV1 },
     companyId: string,
@@ -999,132 +952,6 @@ export function pluginRoutes(
     }
     return activation;
   }
-
-  /**
-   * Durable, non-mutating lifecycle proposals. Agents and plugin workers may
-   * create them; only a Host user may decide them below.
-   */
-  router.post("/plugins/companies/:companyId/lifecycle-proposals", async (req, res) => {
-    assertBoard(req);
-    const { companyId } = req.params;
-    assertCompanyAccess(req, companyId);
-    const parsed = createPluginLifecycleProposalSchema.safeParse(req.body);
-    if (!parsed.success) {
-      res.status(400).json({ error: "Invalid lifecycle proposal", details: parsed.error.flatten() });
-      return;
-    }
-    if (parsed.data.target.scope === "company" && !["activate", "disable"].includes(parsed.data.operation)) {
-      res.status(400).json({ error: "Company-scoped proposals only support activate or disable." });
-      return;
-    }
-    const actor = getActorInfo(req);
-    const risk = await proposalRiskFor(companyId, parsed.data);
-    const proposal = await lifecycleProposals.create({ ...parsed.data, companyId }, {
-      actorType: "user",
-      actorId: actor.actorId,
-      agentId: actor.agentId,
-    }, { riskSummary: risk.riskSummary });
-    await logActivity(db, {
-      companyId,
-      actorType: actor.actorType,
-      actorId: actor.actorId,
-      agentId: actor.agentId,
-      runId: actor.runId,
-      action: "plugin.lifecycle_proposal.created",
-      entityType: "plugin_lifecycle_proposal",
-      entityId: proposal.id,
-      details: { operation: proposal.operation, target: proposal.target, authoringSessionId: proposal.authoringSessionId },
-    });
-    res.status(201).json(proposal);
-  });
-
-  router.get("/plugins/companies/:companyId/lifecycle-proposals", async (req, res) => {
-    assertBoard(req);
-    const { companyId } = req.params;
-    assertCompanyAccess(req, companyId);
-    const status = typeof req.query.status === "string" ? req.query.status : undefined;
-    if (status && !["pending", "accepted", "rejected", "failed"].includes(status)) {
-      res.status(400).json({ error: "Invalid lifecycle proposal status." });
-      return;
-    }
-    res.json(await lifecycleProposals.list(companyId, status as any));
-  });
-
-  router.get("/plugins/companies/:companyId/lifecycle-proposals/:proposalId", async (req, res) => {
-    assertBoard(req);
-    const { companyId, proposalId } = req.params;
-    assertCompanyAccess(req, companyId);
-    const proposal = await lifecycleProposals.get(companyId, proposalId);
-    if (!proposal) return void res.status(404).json({ error: "Lifecycle proposal not found" });
-    res.json({ proposal, events: await lifecycleProposals.listEvents(companyId, proposalId) });
-  });
-
-  router.post("/plugins/companies/:companyId/lifecycle-proposals/:proposalId/reject", async (req, res) => {
-    assertInstanceAdmin(req);
-    const { companyId, proposalId } = req.params;
-    assertCompanyAccess(req, companyId);
-    if (req.actor.type === "agent" || !req.actor.userId) return void res.status(403).json({ error: "Only a Host user can reject a lifecycle proposal." });
-    const reason = typeof req.body?.reason === "string" ? req.body.reason.trim().slice(0, 4000) : null;
-    const outcome = await lifecycleProposals.decide({
-      companyId, proposalId, status: "rejected", actor: { actorType: "user", actorId: req.actor.userId }, userId: req.actor.userId, reason,
-    });
-    if (!outcome) return void res.status(404).json({ error: "Lifecycle proposal not found" });
-    if ("conflict" in outcome) return void res.status(409).json({ error: "Lifecycle proposal is no longer pending.", proposal: outcome.conflict });
-    await logActivity(db, { companyId, actorType: "user", actorId: req.actor.userId, action: "plugin.lifecycle_proposal.rejected", entityType: "plugin_lifecycle_proposal", entityId: proposalId, details: { reason } });
-    res.json(outcome.proposal);
-  });
-
-  router.post("/plugins/companies/:companyId/lifecycle-proposals/:proposalId/accept", async (req, res) => {
-    assertInstanceAdmin(req);
-    const { companyId, proposalId } = req.params;
-    assertCompanyAccess(req, companyId);
-    if (req.actor.type === "agent" || !req.actor.userId) return void res.status(403).json({ error: "Only a Host user can accept a lifecycle proposal." });
-    const proposal = await lifecycleProposals.get(companyId, proposalId);
-    if (!proposal) return void res.status(404).json({ error: "Lifecycle proposal not found" });
-    if (proposal.status !== "pending") return void res.status(409).json({ error: "Lifecycle proposal is no longer pending.", proposal });
-    const current = await proposalRiskFor(companyId, proposal);
-    const incomplete = current.riskSummary.capabilityDelta.status === "unknown"
-      || current.riskSummary.compatibility.status === "unknown"
-      || current.riskSummary.dependency.status === "unknown"
-      || current.riskSummary.migration.status === "unknown"
-      || current.riskSummary.secrets.status === "unknown";
-    if (incomplete || !current.plugin) {
-      return void res.status(409).json({ error: "The exact lifecycle target or its risk data is no longer sufficient for Host execution.", proposal, riskSummary: current.riskSummary });
-    }
-    const target = current.plugin;
-    const report = current.riskSummary.dependency;
-    if ((proposal.operation === "activate" && report.available === false)
-      || ((proposal.operation === "disable" || proposal.operation === "remove") && (report.affectedPluginIds?.length ?? 0) > 0)) {
-      return void res.status(409).json({ error: "The current dependency graph blocks this lifecycle proposal.", proposal, riskSummary: current.riskSummary });
-    }
-    try {
-      if (proposal.target.scope === "company") {
-        await setPluginCompanyActivation(registry, target, companyId, proposal.operation === "activate");
-      } else if (proposal.operation === "activate") {
-        await lifecycle.enable(target.id);
-      } else if (proposal.operation === "disable") {
-        await lifecycle.disable(target.id, `Accepted lifecycle proposal ${proposal.id}`);
-      } else if (proposal.operation === "remove") {
-        await lifecycle.unload(target.id, false);
-      } else {
-        return void res.status(409).json({ error: "Install and update proposals require a reviewed Registry candidate and remain pending.", proposal });
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      const failed = await lifecycleProposals.decide({
-        companyId, proposalId, status: "failed", actor: { actorType: "user", actorId: req.actor.userId }, userId: req.actor.userId, reason: message, details: { code: "LIFECYCLE_EXECUTION_FAILED" },
-      });
-      return void res.status(409).json({ error: "Lifecycle execution failed.", proposal: failed && "proposal" in failed ? failed.proposal : proposal });
-    }
-    const outcome = await lifecycleProposals.decide({
-      companyId, proposalId, status: "accepted", actor: { actorType: "user", actorId: req.actor.userId }, userId: req.actor.userId, executed: true,
-      details: { operation: proposal.operation, target: proposal.target },
-    });
-    if (!outcome || "conflict" in outcome) return void res.status(409).json({ error: "Lifecycle proposal changed while it was being accepted." });
-    await logActivity(db, { companyId, actorType: "user", actorId: req.actor.userId, action: "plugin.lifecycle_proposal.accepted", entityType: "plugin_lifecycle_proposal", entityId: proposalId, details: { operation: proposal.operation, target: proposal.target } });
-    publishGlobalLiveEvent({ type: "plugin.ui.updated", payload: { pluginId: target.id, companyId, action: "lifecycle-proposal-accepted" } });
-    res.json(outcome.proposal);
-  });
 
   /**
    * GET /api/plugins

@@ -9,31 +9,6 @@ import {
 import { PLUGIN_RPC_ERROR_CODES } from "../src/protocol.js";
 
 describe("createHostClientHandlers invocation company scope", () => {
-  it("allows only explicitly capable workers to create non-mutating lifecycle proposals", async () => {
-    const create = vi.fn(async () => ({ id: "proposal-1", status: "pending" }));
-    const services = { lifecycleProposals: { create, list: vi.fn(), get: vi.fn() } } as unknown as HostServices;
-    const params = {
-      companyId: "company-a",
-      operation: "activate" as const,
-      target: { pluginKey: "sps.discovery", scope: "company" as const },
-      rationale: "The company needs the discovery workflow.",
-      authoringSessionId: "session-1",
-    };
-
-    const denied = createHostClientHandlers({ pluginId: "sps.worker", capabilities: [], services });
-    await expect(denied["pluginLifecycleProposals.create"](params)).rejects.toBeInstanceOf(CapabilityDeniedError);
-    expect(create).not.toHaveBeenCalled();
-
-    const allowed = createHostClientHandlers({
-      pluginId: "sps.worker",
-      capabilities: ["plugin.lifecycle.proposals.create"],
-      services,
-    });
-    await expect(allowed["pluginLifecycleProposals.create"](params)).resolves.toMatchObject({ status: "pending" });
-    expect(create).toHaveBeenCalledWith(params);
-    expect(Object.keys(allowed)).not.toContain("pluginLifecycleProposals.accept");
-  });
-
   it("gates Core memory lifecycle publication and preserves the invocation company", async () => {
     const publishLifecycle = vi.fn(async () => {});
     const services = { memory: { publishLifecycle } } as unknown as HostServices;

@@ -52,8 +52,7 @@ import type {
   MembershipStatus,
   PermissionKey,
   PrincipalPermissionGrant,
-    PrincipalType,
-    PluginLifecycleProposalRecord,
+  PrincipalType,
 } from "@paperclipai/shared";
 import type { PluginPerformActionContext } from "./protocol.js";
 
@@ -461,42 +460,16 @@ export interface PluginExecutionWorkspaceMetadata {
  * @see PLUGIN_SPEC.md §13.3 — `validateConfig`
  * @see PLUGIN_SPEC.md §13.4 — `configChanged`
  */
-  export interface PluginConfigClient {
+export interface PluginConfigClient {
   /**
    * Returns the resolved operator configuration for this plugin instance.
    * Values are validated against the plugin's `instanceConfigSchema` by the
    * host before being passed to the worker.
    */
   get(): Promise<Record<string, unknown>>;
-  }
+}
 
-  export interface PluginLifecycleProposalTargetInput {
-    pluginKey: string;
-    pluginId?: string | null;
-    packageName?: string | null;
-    version?: string | null;
-    registryStageId?: string | null;
-    scope: "company" | "host";
-  }
-
-  /**
-   * Creates an auditable, non-mutating lifecycle change request. Workers never
-   * receive an accept/reject method; only a Host user can execute a proposal.
-   */
-  export interface PluginLifecycleProposalsClient {
-    create(input: {
-      companyId: string;
-      operation: "install" | "activate" | "update" | "disable" | "remove";
-      target: PluginLifecycleProposalTargetInput;
-      rationale: string;
-      authoringSessionId: string;
-      evidenceRefs?: Array<{ kind: string; ref: string }>;
-    }): Promise<PluginLifecycleProposalRecord>;
-    list(companyId: string, options?: { status?: "pending" | "accepted" | "rejected" | "failed" }): Promise<PluginLifecycleProposalRecord[]>;
-    get(companyId: string, proposalId: string): Promise<PluginLifecycleProposalRecord | null>;
-  }
-
-  export interface PluginLocalFolderProblem {
+export interface PluginLocalFolderProblem {
   code:
     | "not_configured"
     | "not_absolute"
@@ -2247,10 +2220,7 @@ export interface PluginContext {
   manifest: PaperclipPluginManifestV1;
 
   /** Read resolved operator configuration. */
-    config: PluginConfigClient;
-
-    /** Propose lifecycle changes for a Host user to review. Never executes them. */
-    lifecycleProposals: PluginLifecycleProposalsClient;
+  config: PluginConfigClient;
 
   /** Configure and safely access trusted company-scoped local folders. */
   localFolders: PluginLocalFoldersClient;

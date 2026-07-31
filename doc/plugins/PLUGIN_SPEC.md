@@ -1827,37 +1827,6 @@ This spec directly supports the following plugin types:
 
 ## 29. Compatibility And Versioning
 
-## 28.1 Plugin Lifecycle Proposals v1
-
-`ctx.lifecycleProposals` is a provider-neutral change-request surface. It is
-for a Worker or AI to record a typed proposal, not for a plugin to alter the
-Host. The only worker methods are `create`, `list`, and `get`.
-
-A proposal is company-scoped and records an exact target (`pluginKey`, optional
-database id, package/version/stage where applicable, and `company` or `host`
-scope), rationale, `authoringSessionId`, evidence references, and a Core-owned
-risk summary. Valid operations are `install`, `activate`, `update`, `disable`,
-and `remove`.
-
-- `plugin.lifecycle.proposals.create` is required to create a proposal.
-- `plugin.lifecycle.proposals.read` is required to list or retrieve one.
-- Existing plugins receive neither capability implicitly.
-- Worker RPC intentionally has no accept, reject, install, enable, update,
-  disable, or remove method.
-- Only an authenticated SPS Host instance administrator may accept or reject.
-  Agent actors are rejected even when they authored the proposal.
-
-The Core persists `pending`, `accepted`, `rejected`, and `failed` proposal
-states plus an append-only event trail. It recalculates target identity,
-installed state, company activation, dependency impact, capability delta,
-migration/secret uncertainty, and Host scope at acceptance time. Unknown or
-changed risk data returns `409` and leaves the proposal pending; no package
-operation is inferred from text. Host acceptance invokes the existing
-lifecycle or company-activation service only after those checks pass.
-
-Risk responses intentionally exclude local package paths, filesystem paths,
-secret values, and secret-reference locations.
-
 ### 29.1 API Version Rules
 
 1. Host supports one or more explicit plugin API versions.
