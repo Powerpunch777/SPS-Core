@@ -5035,6 +5035,20 @@ function resolveMarketplaceAssistantMcpEntryPath() {
   );
 }
 
+export function markMarketplaceAssistantNodeRuntime(
+  runtimeConfig: Record<string, unknown>,
+  required: boolean,
+) {
+  if (!required) return runtimeConfig;
+  return {
+    ...runtimeConfig,
+    env: {
+      ...parseObject(runtimeConfig.env),
+      SPS_MARKETPLACE_MCP_REQUIRED: "1",
+    },
+  };
+}
+
 export function createMarketplaceAssistantExternalTools(input: {
   apiBaseUrl: string;
   scopedToken: string;
@@ -12202,6 +12216,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     // dispatched only to the approved member computer.
     const executionTarget = spsNodeExecutionTarget ?? realizationResult.executionTarget;
     const remoteExecution = spsNodeExecutionTarget ? null : realizationResult.remoteExecution;
+    runtimeConfig = markMarketplaceAssistantNodeRuntime(
+      runtimeConfig,
+      Boolean(marketplaceAssistantContext && spsNodeExecutionTarget),
+    );
     if (!executionTarget || executionTarget.kind === "local") {
       try {
         runScratch = await prepareHeartbeatRunScratch({

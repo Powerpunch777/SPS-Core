@@ -12,6 +12,7 @@ const bridge = {
   chooseHostWorkspaceSource: vi.fn(),
   renameHostWorkspaceSource: vi.fn(),
   removeHostWorkspaceSource: vi.fn(),
+  manageHostWorkspaceSource: vi.fn(),
 };
 
 vi.mock("@/context/CompanyContext", () => ({
@@ -37,7 +38,10 @@ describe("SpsCoreWorkspaceSources", () => {
   beforeEach(() => {
     container = document.createElement("div");
     document.body.appendChild(container);
-    bridge.listHostWorkspaceSources.mockResolvedValue({ privateTeamAccessEnabled: true, sources: [source] });
+    bridge.listHostWorkspaceSources.mockResolvedValue({
+      privateTeamAccessEnabled: true,
+      sources: [{ ...source, memberNodes: [{ id: "node-1", sourceAccess: "granted" }] }],
+    });
     (window as Window & { spsDesktopWorkspace?: typeof bridge }).spsDesktopWorkspace = bridge;
   });
 
@@ -60,6 +64,7 @@ describe("SpsCoreWorkspaceSources", () => {
     expect((container.querySelector("input") as HTMLInputElement | null)?.value).toBe("Client");
     expect(container.textContent).toContain("C:\\Projects\\client");
     expect(container.textContent).toContain("Removing it removes the SPS handle, never the folder or its files.");
+    expect(container.textContent).toContain("Member access (1)");
     expect(mockSetBreadcrumbs).toHaveBeenCalledWith([
       { label: "Prototype Workspace", href: "/dashboard" },
       { label: "Host settings", href: "/company/settings" },
