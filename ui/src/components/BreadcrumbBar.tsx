@@ -15,6 +15,9 @@ import {
 import { Fragment, useMemo } from "react";
 import { PluginSlotOutlet, usePluginSlots } from "@/plugins/slots";
 import { PluginLauncherOutlet, usePluginLaunchers } from "@/plugins/launchers";
+import { isSpsBasicModeEnabled } from "@/lib/sps-basic-mode";
+import { isSpsCoreBaselineModeEnabled } from "@/lib/sps-core-baseline-mode";
+import { isWorkplaneModeEnabled } from "@/lib/workplane-mode";
 
 type GlobalToolbarContext = { companyId: string | null; companyPrefix: string | null };
 
@@ -37,6 +40,9 @@ export function BreadcrumbBar() {
   const { breadcrumbs, mobileToolbar } = useBreadcrumbs();
   const { toggleSidebar, isMobile } = useSidebar();
   const { selectedCompanyId, selectedCompany } = useCompany();
+  const showSpsWorkbenchRuntime = isSpsBasicModeEnabled()
+    && isSpsCoreBaselineModeEnabled()
+    && !isWorkplaneModeEnabled();
 
   const globalToolbarSlotContext = useMemo(
     () => ({
@@ -50,7 +56,7 @@ export function BreadcrumbBar() {
 
   if (isMobile && mobileToolbar) {
     return (
-      <div className="border-b border-app-border bg-app-panel px-2 h-12 shrink-0 flex items-center">
+      <div className="sps-workbench-topbar border-b border-app-border bg-app-panel px-2 h-12 shrink-0 flex items-center">
         {mobileToolbar}
       </div>
     );
@@ -58,7 +64,7 @@ export function BreadcrumbBar() {
 
   if (breadcrumbs.length === 0) {
     return (
-      <div className="border-b border-app-border bg-app-panel px-4 md:px-6 h-12 shrink-0 flex items-center justify-end">
+      <div className="sps-workbench-topbar border-b border-app-border bg-app-panel px-4 md:px-6 h-12 shrink-0 flex items-center justify-end">
         {globalToolbarSlots}
       </div>
     );
@@ -79,7 +85,7 @@ export function BreadcrumbBar() {
   // Single breadcrumb = page title (uppercase)
   if (breadcrumbs.length === 1) {
     return (
-      <div className="border-b border-app-border bg-app-panel px-4 md:px-6 h-12 shrink-0 flex items-center">
+      <div className="sps-workbench-topbar border-b border-app-border bg-app-panel px-4 md:px-6 h-12 shrink-0 flex items-center">
         {menuButton}
         <div className="min-w-0 overflow-hidden flex-1">
           {breadcrumbs[0].leading ? (
@@ -93,6 +99,13 @@ export function BreadcrumbBar() {
             </h1>
           )}
         </div>
+        {showSpsWorkbenchRuntime && selectedCompany ? (
+          <div className="sps-workbench-runtime" aria-label={`${selectedCompany.name} Workspace is live`}>
+            <span aria-hidden="true" />
+            <b>{selectedCompany.name}</b>
+            <small>Live</small>
+          </div>
+        ) : null}
         {globalToolbarSlots}
       </div>
     );
@@ -100,7 +113,7 @@ export function BreadcrumbBar() {
 
   // Multiple breadcrumbs = breadcrumb trail
   return (
-    <div className="border-b border-app-border bg-app-panel px-4 md:px-6 h-12 shrink-0 flex items-center">
+    <div className="sps-workbench-topbar border-b border-app-border bg-app-panel px-4 md:px-6 h-12 shrink-0 flex items-center">
       {menuButton}
       <div className="min-w-0 overflow-hidden flex-1">
         <Breadcrumb className="min-w-0 overflow-hidden">
@@ -139,6 +152,13 @@ export function BreadcrumbBar() {
           </BreadcrumbList>
         </Breadcrumb>
       </div>
+      {showSpsWorkbenchRuntime && selectedCompany ? (
+        <div className="sps-workbench-runtime" aria-label={`${selectedCompany.name} Workspace is live`}>
+          <span aria-hidden="true" />
+          <b>{selectedCompany.name}</b>
+          <small>Live</small>
+        </div>
+      ) : null}
       {globalToolbarSlots}
     </div>
   );

@@ -75,8 +75,8 @@ function ExtensionRow({
       ? "Use in this Workspace"
       : "Start and use";
   return (
-    <div className="flex items-start justify-between gap-4 px-4 py-4">
-      <div className="min-w-0">
+    <div className="sps-extension-row flex items-start justify-between gap-4 px-4 py-4">
+      <div className="sps-extension-row-main min-w-0">
         <div className="flex flex-wrap items-center gap-2">
           <strong className="truncate">{extensionName(plugin)}</strong>
           <Badge variant="outline">{builtIn ? "SPS built-in" : "Custom"}</Badge>
@@ -97,7 +97,7 @@ function ExtensionRow({
           </p>
         ) : null}
       </div>
-      <div className="flex shrink-0 items-center gap-2">
+      <div className="sps-extension-row-actions flex shrink-0 items-center gap-2">
         <Button
           variant={companyEnabled ? "outline" : "default"}
           size="sm"
@@ -233,7 +233,7 @@ export function SpsExtensionsManager() {
   };
 
   const sectionTabs = (
-    <div className="flex w-fit gap-1 rounded-md border bg-muted/40 p-1" role="tablist" aria-label="Plugin sections">
+    <div className="sps-extension-tabs flex w-fit gap-1 rounded-md border bg-muted/40 p-1" role="tablist" aria-label="Plugin sections">
       <Button type="button" size="sm" variant={activeSection === "installed" ? "secondary" : "ghost"} role="tab" aria-selected={activeSection === "installed"} onClick={() => setActiveSection("installed")}>Installed</Button>
       <Button type="button" size="sm" variant={activeSection === "marketplace" ? "secondary" : "ghost"} role="tab" aria-selected={activeSection === "marketplace"} onClick={() => setActiveSection("marketplace")}>Marketplace</Button>
     </div>
@@ -255,8 +255,8 @@ export function SpsExtensionsManager() {
   }
 
   return (
-    <main data-sps-surface-owner="core" className="max-w-6xl space-y-6">
-      <header className="flex flex-wrap items-end justify-between gap-4 border-b border-border pb-5">
+    <main data-sps-surface-owner="core" className="sps-extension-manager max-w-6xl space-y-6">
+      <header className="sps-extension-header flex flex-wrap items-end justify-between gap-4 border-b border-border pb-5">
         <div className="max-w-3xl space-y-2">
           <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-primary">
             <Puzzle className="h-4 w-4" aria-hidden="true" />
@@ -272,7 +272,7 @@ export function SpsExtensionsManager() {
         {sectionTabs}
       </header>
 
-      <section className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-muted/40 px-4 py-3 text-sm">
+      <section className="sps-extension-owner-note flex flex-wrap items-center gap-2 rounded-md border border-border bg-muted/40 px-4 py-3 text-sm">
         <Badge variant="secondary">Core surface</Badge>
         <p className="text-muted-foreground">
           Installed plugins remain plugin-owned surfaces and appear only while they are active in this Workspace.
@@ -318,7 +318,7 @@ export function SpsExtensionsManager() {
         </CardContent>
       </Card>
 
-      <section className="space-y-3">
+      <section className="sps-extension-section space-y-3">
         <div className="flex items-center gap-2">
           <CheckCircle2 className="h-5 w-5 text-muted-foreground" />
           <h2 className="text-base font-semibold">Built-in SPS components</h2>
@@ -330,7 +330,7 @@ export function SpsExtensionsManager() {
         )}
       </section>
 
-      <section className="space-y-3">
+      <section className="sps-extension-section space-y-3">
         <div className="flex items-center gap-2">
           <Store className="h-5 w-5 text-muted-foreground" />
           <h2 className="text-base font-semibold">Registry extensions</h2>
