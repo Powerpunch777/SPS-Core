@@ -195,7 +195,7 @@ export function SpsCoreWorkspaceHome() {
             </div>
           </div>
           <Button variant="outline" size="sm" asChild>
-            <Link to="/company/settings/workspace-appearance">Choose Shell</Link>
+            <Link to="/company/settings/instance/plugins">Review plugins</Link>
           </Button>
         </section>
       ) : null}

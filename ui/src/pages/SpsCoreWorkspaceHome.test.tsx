@@ -128,7 +128,8 @@ describe("SpsCoreWorkspaceHome", () => {
 
     expect(container.textContent).toContain("Neutral Shell restored");
     expect(container.textContent).toContain("The selected shell is no longer active.");
-    expect(container.innerHTML).toContain('href="/company/settings/workspace-appearance"');
+    expect(container.innerHTML).toContain('href="/company/settings/instance/plugins"');
+    expect(container.innerHTML).not.toContain("workspace-appearance");
   });
 
   it("mounts plugin widgets and persists an explicit layout change", async () => {

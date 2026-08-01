@@ -89,7 +89,6 @@ import { SpsCoreWorkspaceHome } from "./pages/SpsCoreWorkspaceHome";
 import { SpsWorkspaceInbox } from "./pages/SpsWorkspaceInbox";
 import { SpsCoreAssistantDetail } from "./pages/SpsCoreAssistantDetail";
 import { SpsCoreHostSettings } from "./pages/SpsCoreHostSettings";
-import { SpsCoreWorkspaceAppearance } from "./pages/SpsCoreWorkspaceAppearance";
 import { SpsCoreWorkspaceSources } from "./pages/SpsCoreWorkspaceSources";
 import { SpsCoreTeamAccess } from "./pages/SpsCoreTeamAccess";
 import { SpsCoreServerSettings } from "./pages/SpsCoreServerSettings";
@@ -124,7 +123,7 @@ function coreBaselineRoutes() {
       <Route path="assistants/:agentId" element={<SpsCoreAssistantDetail />} />
       <Route path="assistants/:agentId/:tab" element={<SpsCoreAssistantDetail />} />
       <Route path="company/settings" element={<SpsCoreHostSettings />} />
-      <Route path="company/settings/workspace-appearance" element={<SpsCoreWorkspaceAppearance />} />
+      <Route path="company/settings/workspace-appearance" element={<Navigate to="/company/settings/instance/plugins" replace />} />
       <Route path="company/settings/sps-server" element={<SpsCoreServerSettings />} />
       <Route path="company/settings/team" element={<SpsCoreTeamAccess />} />
       <Route path="company/settings/nodes" element={<SpsNodes />} />

@@ -7,7 +7,6 @@ import {
   FlaskConical,
   FolderCog,
   KeyRound,
-  LayoutTemplate,
   MailPlus,
   MonitorCog,
   Network,
@@ -114,7 +113,6 @@ export function CompanySettingsSidebar() {
           <div className="px-3 pb-1 text-(length:--text-micro) font-semibold uppercase tracking-wide text-muted-foreground">Workspace</div>
           <div className="flex flex-col gap-0.5">
             <SidebarNavItem to="/company/settings" label="Overview" icon={SlidersHorizontal} end />
-            <SidebarNavItem to="/company/settings/workspace-appearance" label="Workspace appearance" icon={LayoutTemplate} end />
             <SidebarNavItem to="/company/settings/sps-server" label="SPS Server" icon={ServerCog} end />
             <SidebarNavItem to="/company/settings/team" label="Team access" icon={Users} end />
             <SidebarNavItem to="/company/settings/project-sources" label="Sources" icon={FolderCog} end />
