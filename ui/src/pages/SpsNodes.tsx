@@ -75,7 +75,7 @@ export function canManageSpsNodes(
   spsCoreBaseline: boolean,
 ) {
   if (!companyId || !access) return null;
-  if (spsCoreBaseline) return access.source === "local_implicit";
+  if (spsCoreBaseline) return access.isCoreHost === true || access.source === "local_implicit";
   if (access.isInstanceAdmin || access.source === "local_implicit") return true;
   const membership = access.memberships?.find((item) => item.companyId === companyId && item.status === "active");
   return membership?.membershipRole === "owner" || membership?.membershipRole === "admin";
@@ -112,7 +112,7 @@ export function SpsNodes() {
   const agentsQuery = useQuery({
     queryKey: queryKeys.agents.list(selectedCompanyId ?? ""),
     queryFn: () => agentsApi.list(selectedCompanyId!),
-    enabled: !!selectedCompanyId && canManageNodes === true && !spsCoreBaseline,
+    enabled: !!selectedCompanyId && canManageNodes === true,
   });
 
   const refreshNodes = async () => {
@@ -206,7 +206,7 @@ export function SpsNodes() {
       </div>
     );
   }
-  if (nodesQuery.isLoading || (!spsCoreBaseline && agentsQuery.isLoading)) {
+  if (nodesQuery.isLoading || agentsQuery.isLoading) {
     return <div className="text-sm text-muted-foreground">Loading SPS Nodes...</div>;
   }
   if (nodesQuery.error) {
@@ -333,7 +333,7 @@ export function SpsNodes() {
                     )}
                   </div>
 
-                  {!spsCoreBaseline ? <div className="space-y-3 border-t border-border pt-5">
+                  <div className="space-y-3 border-t border-border pt-5">
                     <div>
                       <h3 className="text-sm font-semibold">Agent execution access</h3>
                       <p className="text-sm text-muted-foreground">Only granted Agents can use this computer. The picker lists only Agents whose adapter has been discovered on this Node. A new Agent grant includes currently compatible Runner Profiles; later policy can narrow that access to a selected local profile. The first approved Node granted to an Agent becomes its primary execution Node. Later grants are available for reassignment and leave the current primary unchanged.</p>
@@ -397,7 +397,7 @@ export function SpsNodes() {
                     ) : (
                       <p className="text-sm text-muted-foreground">No Agent has execution access to this Node.</p>
                     )}
-                  </div> : null}
+                  </div>
                 </div>
               </section>
             );
