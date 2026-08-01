@@ -82,6 +82,8 @@ describe("SpsExtensionsManager", () => {
     await flushReact();
     await flushReact();
 
+    expect(container.querySelector('[data-sps-surface-owner="core"]')).not.toBeNull();
+    expect(container.textContent).toContain("Installed plugins remain plugin-owned surfaces");
     const action = Array.from(container.querySelectorAll("button")).find((button) => button.textContent?.includes("Start and use"));
     expect(action).toBeTruthy();
     await act(async () => { action?.dispatchEvent(new MouseEvent("click", { bubbles: true })); });

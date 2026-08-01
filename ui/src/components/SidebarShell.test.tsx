@@ -63,6 +63,9 @@ describe("SidebarShell", () => {
     expect(panel().style.width).toBe("320px");
     expect(panel().getAttribute("data-sidebar-overlay")).toBeNull();
     expect(handle()?.getAttribute("aria-valuenow")).toBe("320");
+    expect(panel().className).toContain("bg-app-panel");
+    expect(panel().className).toContain("border-app-border");
+    expect(panel().className).toContain("rounded-pane");
   });
 
   it("resizes by dragging and persists the new width", () => {
@@ -180,7 +183,7 @@ describe("SidebarShell", () => {
     expect(spacer().style.width).toBe(`${SIDEBAR_RAIL_WIDTH}px`);
     expect(panel().style.width).toBe("300px");
     expect(panel().getAttribute("data-sidebar-overlay")).toBe("");
-    expect(panel().className).toContain("shadow-lg");
+    expect(panel().className).toContain("shadow-panel");
     expect(panel().className).toContain("z-30");
   });
 

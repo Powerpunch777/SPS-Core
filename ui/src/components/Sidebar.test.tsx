@@ -676,7 +676,7 @@ describe("Sidebar", () => {
     const root = await renderSidebar();
 
     const labels = [...container.querySelectorAll("nav a")].map((anchor) => anchor.textContent?.trim());
-    expect(labels).toContain("Workspace");
+    expect(labels).toContain("Dashboard");
     expect(labels).toContain("Host settings");
     expect(labels).not.toContain("Tasks");
     expect(labels).not.toContain("Projects");
@@ -741,7 +741,7 @@ describe("Sidebar", () => {
     const root = await renderSidebar();
 
     const labels = [...container.querySelectorAll("nav a")].map((anchor) => anchor.textContent?.trim());
-    expect(labels).toContain("Workspace");
+    expect(labels).toContain("Dashboard");
     expect(labels).toContain("Host settings");
     expect(labels).not.toContain("Plugins");
     expect(container.textContent).not.toContain("Plugin slot outlet");
@@ -773,7 +773,7 @@ describe("Sidebar", () => {
     const root = await renderSidebar();
 
     const labels = [...container.querySelectorAll("nav a")].map((anchor) => anchor.textContent?.trim());
-    expect(labels).toContain("Workspace");
+    expect(labels).toContain("Dashboard");
     expect(labels).not.toContain("Host settings");
     expect(labels).not.toContain("Plugins");
     expect(container.textContent).not.toContain("Plugin slot outlet");
