@@ -27,6 +27,7 @@ const mockPino = vi.hoisted(() => {
   (fn as any).transport = mockTransport;
   return fn;
 });
+const mockPinoHttp = vi.hoisted(() => vi.fn(() => vi.fn()));
 
 // Mock fs so the module-level mkdirSync call is a no-op in tests.
 vi.mock("node:fs", async (importOriginal) => {
@@ -38,7 +39,7 @@ vi.mock("pino", () => ({
   default: mockPino,
 }));
 vi.mock("pino-http", () => ({
-  pinoHttp: vi.fn(() => vi.fn()),
+  pinoHttp: mockPinoHttp,
 }));
 vi.mock("../config-file.js", () => ({
   readConfigFile: vi.fn(() => null),
@@ -63,6 +64,19 @@ describe("logger translateTime respects TZ environment variable", () => {
     for (const target of targets) {
       expect(target.options.translateTime).toBe("SYS:HH:MM:ss");
     }
+
+    const httpOptions = mockPinoHttp.mock.calls[0][0] as {
+      customLogLevel: (
+        req: { method: string; url: string; originalUrl?: string },
+        res: { statusCode: number },
+        err?: Error,
+      ) => string;
+    };
+    expect(httpOptions.customLogLevel({
+      method: "POST",
+      url: "/session",
+      originalUrl: "/api/sps-identity/session",
+    }, { statusCode: 201 })).toBe("silent");
   });
 
   it("SYS: prefix produces timezone-sensitive output: UTC epoch formats differently under UTC vs UTC+8", () => {
