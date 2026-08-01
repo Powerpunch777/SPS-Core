@@ -1,6 +1,6 @@
-# Paperclip Design Principles
+# SPS Design Principles
 
-**Status:** v0.3 — anchor document for design-language simplification. Governs structure, not brand. Brand values (color, type, iconography) are intentionally unspecified: they are being redesigned and will land as token values only. Nothing in `ui/` may hardcode them. Spacing/radius scales are likewise TBD pending the token audit (see Principle 3).
+**Status:** v0.4 — source of truth for the SPS desktop design language. Brand values, spacing, radii, typography, and shell surfaces are expressed through tokens in `ui/src/index.css`; feature components must not hardcode them.
 
 Changes from v0.2: token layer location corrected to the repo's real source (`ui/src/index.css`); existing token tiers inventoried; snapshot-coverage scope bounded for Run 1; the issue→task copy rename moved out of the zero-visual-change run.
 
@@ -10,7 +10,9 @@ Agents and humans modifying `ui/` treat this file as the source of truth for des
 
 ## Product stance
 
-Paperclip is an operational control plane: org charts, tasks, heartbeat runs, budgets, approvals, audit logs. The user is an operator scanning state and making decisions. Every screen should answer, in order: *what is happening, does it need me, what do I do about it.* Density in service of scanning beats whitespace in service of aesthetics — but density comes from information, never from chrome.
+SPS is a local-first desktop platform for building custom AI workspaces. Core owns identity, Host lifecycle, Workspace isolation, plugin lifecycle, recovery paths, and a stable application shell. Plugins own workflow-specific navigation, dashboards, pages, and behavior. Every screen must make its owner clear: Core surfaces remain available for recovery, while plugin surfaces disappear when their provider is disabled.
+
+The desktop shell uses cool neutral surfaces, restrained SPS blue accents, compact information density, and independently scrolling panes. Rounded framing clarifies containment without turning every section into a card. The approved reference is the SPS Workbench Open Design project and its `SPS-UI-DESIGN-SPEC.md`.
 
 ## The token layer (where visual values live)
 
@@ -47,9 +49,9 @@ Existing tiers already in index.css (~80+ tokens) — extraction maps to these o
 
 Aspirational (NOT gating this run): no duplicate components; every component has exactly one story covering its variants; all UI copy says "task".
 
-## Out of scope (do not do during simplification)
+## Change boundary
 
-No visual redesign, no new colors or typefaces, no layout restructuring, no new dependencies beyond snapshot tooling, no component consolidation/merges (audit + recommend only), no copy renames, no changes to server code or app logic. Simplification means fewer parts, same product.
+Visual changes must preserve Core/plugin ownership, keyboard access, mobile behavior, and independent scroll regions. A Core component may style a generic extension outlet but must not name, route, or activate a specific workflow plugin. Intentional redesigns require focused interaction tests plus desktop screenshots at the supported minimum and reference sizes.
 
 ## Prior art (read before auditing)
 

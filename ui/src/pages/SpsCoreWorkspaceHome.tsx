@@ -24,6 +24,7 @@ import { queryKeys } from "@/lib/queryKeys";
 import { cn } from "@/lib/utils";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
 import {
   Select,
   SelectContent,
@@ -164,26 +165,44 @@ export function SpsCoreWorkspaceHome() {
   }
 
   return (
-    <main className="mx-auto w-full max-w-7xl space-y-6 px-1 py-2">
-      <header className="flex flex-col gap-3 border-b border-border pb-5 sm:flex-row sm:items-end sm:justify-between">
-        <div className="space-y-1">
-          <div className="flex items-center gap-2">
-            <Blocks className="h-5 w-5 text-muted-foreground" />
-            <h1 className="text-xl font-semibold">{selectedCompany?.name ?? "Workspace"}</h1>
+    <main data-sps-surface-owner="core" className="mx-auto w-full max-w-7xl space-y-6 px-1 py-2">
+      <header className="flex flex-col gap-4 border-b border-border pb-5 sm:flex-row sm:items-end sm:justify-between">
+        <div className="max-w-3xl space-y-2">
+          <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-primary">
+            <Blocks className="h-4 w-4" aria-hidden="true" />
+            Core Workspace
           </div>
-          <p className="max-w-2xl text-sm text-muted-foreground">
-            {shell?.mode === "plugin" && shell.shell
-              ? `${shell.shell.displayName} organizes this Workspace. Core recovery paths remain available.`
-              : "Neutral Workspace shows Core status and contributions from every active plugin."}
+          <div className="space-y-1">
+            <h1 className="text-2xl font-semibold tracking-tight">{selectedCompany?.name ?? "Workspace"}</h1>
+            <p className="text-sm leading-6 text-muted-foreground">
+              {shell?.mode === "plugin" && shell.shell
+                ? `${shell.shell.displayName} organizes this Workspace. Core recovery paths remain available.`
+                : "Core keeps the Workspace available while active plugins contribute their own navigation, dashboards, and work surfaces."}
+            </p>
+          </div>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <Badge variant="outline">Core surface</Badge>
+          <Button variant="outline" size="sm" asChild>
+            <Link to="/company/settings/instance/plugins">
+              <Puzzle className="h-4 w-4" />
+              Manage plugins
+            </Link>
+          </Button>
+        </div>
+      </header>
+
+      <section className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-border bg-muted/40 px-4 py-3 text-sm">
+        <div className="flex min-w-0 items-center gap-2">
+          <Badge variant="secondary">Core contract</Badge>
+          <p className="text-muted-foreground">
+            Plugins own their workflow UI. Disabling one removes its contributed surfaces without removing this Workspace.
           </p>
         </div>
-        <Button variant="outline" size="sm" asChild>
-          <Link to="/company/settings/instance/plugins">
-            <Puzzle className="h-4 w-4" />
-            Manage plugins
-          </Link>
-        </Button>
-      </header>
+        <span className="font-mono text-xs text-muted-foreground">
+          {shell?.mode === "plugin" ? "Plugin shell active" : "Neutral shell"}
+        </span>
+      </section>
 
       {shell?.fallbackReason ? (
         <section className="flex items-start justify-between gap-4 rounded-md border border-amber-500/35 bg-amber-500/10 px-4 py-3">

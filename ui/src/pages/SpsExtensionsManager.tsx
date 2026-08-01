@@ -194,8 +194,8 @@ export function SpsExtensionsManager() {
   useEffect(() => {
     setBreadcrumbs([
       { label: selectedCompany?.name ?? "SPS" , href: "/dashboard" },
-      { label: "Server settings", href: "/company/settings" },
-      { label: "Extensions" },
+      { label: "Host settings", href: "/company/settings" },
+      { label: "Plugins" },
     ]);
   }, [selectedCompany?.name, setBreadcrumbs]);
 
@@ -255,21 +255,29 @@ export function SpsExtensionsManager() {
   }
 
   return (
-    <div className="max-w-6xl space-y-6">
-      <header className="flex flex-wrap items-start justify-between gap-3">
-        <div className="flex items-start gap-3">
-          <div className="rounded-md border bg-muted/40 p-2">
-            <Puzzle className="h-5 w-5 text-muted-foreground" />
+    <main data-sps-surface-owner="core" className="max-w-6xl space-y-6">
+      <header className="flex flex-wrap items-end justify-between gap-4 border-b border-border pb-5">
+        <div className="max-w-3xl space-y-2">
+          <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-primary">
+            <Puzzle className="h-4 w-4" aria-hidden="true" />
+            Core Platform
           </div>
           <div>
-            <h1 className="text-xl font-semibold">SPS Plugins</h1>
-            <p className="mt-1 text-sm text-muted-foreground">
-              Browse verified packages, then choose which installed extensions this Workspace uses.
+            <h1 className="text-2xl font-semibold tracking-tight">Plugins</h1>
+            <p className="mt-1 text-sm leading-6 text-muted-foreground">
+              Core controls package review and lifecycle. Each Workspace chooses which installed plugins contribute UI and behavior.
             </p>
           </div>
         </div>
         {sectionTabs}
       </header>
+
+      <section className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-muted/40 px-4 py-3 text-sm">
+        <Badge variant="secondary">Core surface</Badge>
+        <p className="text-muted-foreground">
+          Installed plugins remain plugin-owned surfaces and appear only while they are active in this Workspace.
+        </p>
+      </section>
 
       {activeSection === "marketplace" ? (
         <>
@@ -350,6 +358,6 @@ export function SpsExtensionsManager() {
       />
         </>
       )}
-    </div>
+    </main>
   );
 }

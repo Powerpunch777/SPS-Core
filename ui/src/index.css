@@ -20,7 +20,7 @@
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {
-  --font-sans: "InterVariable", "Inter", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-sans: "InterVariable", "Inter", "Pretendard Variable", "Pretendard", "Noto Sans KR", "Malgun Gothic", "Segoe UI Variable", "Segoe UI", ui-sans-serif, system-ui, sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
   --color-background: var(--background);
   --color-foreground: var(--foreground);
@@ -54,6 +54,19 @@
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-ring: var(--sidebar-ring);
+  --color-app-canvas: var(--app-canvas);
+  --color-app-surface: var(--app-surface);
+  --color-app-panel: var(--app-panel);
+  --color-app-border: var(--app-border);
+  --color-app-accent: var(--app-accent);
+  --color-app-accent-soft: var(--app-accent-soft);
+  --radius-pane: var(--radius-pane);
+  --radius-card: var(--radius-card);
+  --radius-control: var(--radius-control);
+  --radius-compact: var(--radius-compact);
+  --shadow-panel: var(--shadow-panel);
+  --scale-brand-logo: 1.72;
+  --text-micro: 0.625rem;
   /* Multiplicative radius ladder (modern shadcn/Tailwind v4 mapping):
      sm/md/lg/xl/2xl/3xl/4xl = 0.6/0.8/1.0/1.4/1.8/2.2/2.6 x the single
      --radius knob (base anchor 0.5rem = 8px; rounded-lg IS the anchor).
@@ -72,6 +85,17 @@
 :root {
   color-scheme: light;
   --radius: 0.5rem;
+  --radius-pane: 0.75rem;
+  --radius-card: 0.625rem;
+  --radius-control: 0.5rem;
+  --radius-compact: 0.375rem;
+  --app-canvas: oklch(0.968 0.012 245);
+  --app-surface: oklch(0.985 0.008 245);
+  --app-panel: oklch(1 0 0);
+  --app-border: oklch(0.9 0.018 245);
+  --app-accent: oklch(0.56 0.18 258);
+  --app-accent-soft: oklch(0.95 0.035 258);
+  --shadow-panel: 0 1px 2px color-mix(in oklab, var(--foreground) 5%, transparent), 0 8px 24px color-mix(in oklab, var(--foreground) 4%, transparent);
   --background: oklch(1 0 0);
   --foreground: oklch(0.145 0 0);
   --card: oklch(1 0 0);
@@ -185,6 +209,13 @@
 }
 
 .dark {
+  --app-canvas: oklch(0.12 0.012 245);
+  --app-surface: oklch(0.16 0.014 245);
+  --app-panel: oklch(0.19 0.016 245);
+  --app-border: oklch(0.28 0.02 245);
+  --app-accent: oklch(0.7 0.16 258);
+  --app-accent-soft: oklch(0.25 0.05 258);
+  --shadow-panel: 0 1px 2px color-mix(in oklab, black 20%, transparent), 0 8px 24px color-mix(in oklab, black 18%, transparent);
   --background: oklch(0.145 0 0);
   --foreground: oklch(0.985 0 0);
   --card: oklch(0.205 0 0);
@@ -274,7 +305,7 @@
     @apply font-sans;
   }
   body {
-    @apply antialiased bg-background text-foreground;
+    @apply antialiased bg-app-canvas text-foreground;
     font-family: var(--font-sans);
     height: 100%;
     overflow: hidden;

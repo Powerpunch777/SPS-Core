@@ -50,7 +50,7 @@ export function BreadcrumbBar() {
 
   if (isMobile && mobileToolbar) {
     return (
-      <div className="border-b border-border px-2 h-12 shrink-0 flex items-center">
+      <div className="border-b border-app-border bg-app-panel px-2 h-12 shrink-0 flex items-center">
         {mobileToolbar}
       </div>
     );
@@ -58,7 +58,7 @@ export function BreadcrumbBar() {
 
   if (breadcrumbs.length === 0) {
     return (
-      <div className="border-b border-border px-4 md:px-6 h-12 shrink-0 flex items-center justify-end">
+      <div className="border-b border-app-border bg-app-panel px-4 md:px-6 h-12 shrink-0 flex items-center justify-end">
         {globalToolbarSlots}
       </div>
     );
@@ -79,7 +79,7 @@ export function BreadcrumbBar() {
   // Single breadcrumb = page title (uppercase)
   if (breadcrumbs.length === 1) {
     return (
-      <div className="border-b border-border px-4 md:px-6 h-12 shrink-0 flex items-center">
+      <div className="border-b border-app-border bg-app-panel px-4 md:px-6 h-12 shrink-0 flex items-center">
         {menuButton}
         <div className="min-w-0 overflow-hidden flex-1">
           {breadcrumbs[0].leading ? (
@@ -100,7 +100,7 @@ export function BreadcrumbBar() {
 
   // Multiple breadcrumbs = breadcrumb trail
   return (
-    <div className="border-b border-border px-4 md:px-6 h-12 shrink-0 flex items-center">
+    <div className="border-b border-app-border bg-app-panel px-4 md:px-6 h-12 shrink-0 flex items-center">
       {menuButton}
       <div className="min-w-0 overflow-hidden flex-1">
         <Breadcrumb className="min-w-0 overflow-hidden">
