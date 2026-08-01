@@ -1,24 +1,31 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { FolderCog, FolderOpen, FolderPlus, LockKeyhole, Pencil, RefreshCw, Trash2 } from "lucide-react";
+import { FolderCog, FolderOpen, FolderPlus, LockKeyhole, Pencil, RefreshCw, Trash2, UsersRound } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { useBreadcrumbs } from "@/context/BreadcrumbContext";
 import { useCompany } from "@/context/CompanyContext";
 
-type WorkspaceSource = { id: string; name: string; sourcePath: string };
+type WorkspaceSource = {
+  id: string;
+  name: string;
+  sourcePath: string;
+  routeStatus?: "ready" | "unavailable";
+  memberNodes?: Array<{ id: string; sourceAccess: "granted" | "not_granted" }>;
+};
 type WorkspaceSourcesSnapshot = { privateTeamAccessEnabled: boolean; sources: WorkspaceSource[] };
 type WorkspaceSourcesBridge = {
   listHostWorkspaceSources: () => Promise<WorkspaceSourcesSnapshot>;
   chooseHostWorkspaceSource: () => Promise<WorkspaceSourcesSnapshot>;
   renameHostWorkspaceSource: (input: { sourceId: string; name: string }) => Promise<WorkspaceSourcesSnapshot>;
   removeHostWorkspaceSource: (input: { sourceId: string }) => Promise<WorkspaceSourcesSnapshot>;
+  manageHostWorkspaceSource: (input: { sourceId: string }) => Promise<unknown>;
 };
 
 function getWorkspaceSourcesBridge(): WorkspaceSourcesBridge | null {
   if (typeof window === "undefined") return null;
   const candidate = (window as Window & { spsDesktopWorkspace?: Partial<WorkspaceSourcesBridge> }).spsDesktopWorkspace;
-  if (!candidate || typeof candidate.listHostWorkspaceSources !== "function" || typeof candidate.chooseHostWorkspaceSource !== "function" || typeof candidate.renameHostWorkspaceSource !== "function" || typeof candidate.removeHostWorkspaceSource !== "function") return null;
+  if (!candidate || typeof candidate.listHostWorkspaceSources !== "function" || typeof candidate.chooseHostWorkspaceSource !== "function" || typeof candidate.renameHostWorkspaceSource !== "function" || typeof candidate.removeHostWorkspaceSource !== "function" || typeof candidate.manageHostWorkspaceSource !== "function") return null;
   return candidate as WorkspaceSourcesBridge;
 }
 
@@ -92,6 +99,16 @@ export function SpsCoreWorkspaceSources() {
     } catch (caught) { setError(errorMessage(caught, "The source could not be removed.")); }
     finally { setBusy(null); }
   };
+  const manageMemberAccess = async (source: WorkspaceSource) => {
+    if (!bridge || busy) return;
+    setBusy(source.id); setError(null); setNotice(null);
+    try {
+      await bridge.manageHostWorkspaceSource({ sourceId: source.id });
+      await reload();
+      setNotice("Member Source access updated.");
+    } catch (caught) { setError(errorMessage(caught, "Member Source access could not be updated.")); }
+    finally { setBusy(null); }
+  };
 
   if (!bridge) return (
     <div className="max-w-3xl space-y-6">
@@ -118,7 +135,8 @@ export function SpsCoreWorkspaceSources() {
       <div className="space-y-3">{sources.map((source) => {
         const pendingName = (drafts[source.id] ?? source.name).trim();
         const folderLabel = source.sourcePath || "No local folder mapping on this Host";
-        return <Card key={source.id} className="py-0"><CardHeader className="gap-3 py-4"><div className="flex flex-wrap items-center gap-2"><Input aria-label={`${source.name} source name`} className="h-8 max-w-xs" value={drafts[source.id] ?? source.name} onChange={(event) => setDrafts((current) => ({ ...current, [source.id]: event.target.value }))} disabled={busy !== null} /><Button type="button" variant="outline" size="sm" onClick={() => void renameSource(source)} disabled={busy !== null || !pendingName || pendingName === source.name}><Pencil className="mr-1.5 h-3.5 w-3.5" />Rename</Button></div><CardDescription className="flex items-start gap-2 break-all font-mono text-xs"><FolderOpen className="mt-0.5 h-3.5 w-3.5 shrink-0" />{folderLabel}</CardDescription></CardHeader><CardContent className="flex justify-end pb-4"><Button type="button" variant="ghost" size="sm" onClick={() => void removeSource(source)} disabled={busy !== null}><Trash2 className="mr-1.5 h-3.5 w-3.5" />Remove from SPS</Button></CardContent></Card>;
+        const grantedCount = (source.memberNodes ?? []).filter((node) => node.sourceAccess === "granted").length;
+        return <Card key={source.id} className="py-0"><CardHeader className="gap-3 py-4"><div className="flex flex-wrap items-center gap-2"><Input aria-label={`${source.name} source name`} className="h-8 max-w-xs" value={drafts[source.id] ?? source.name} onChange={(event) => setDrafts((current) => ({ ...current, [source.id]: event.target.value }))} disabled={busy !== null} /><Button type="button" variant="outline" size="sm" onClick={() => void renameSource(source)} disabled={busy !== null || !pendingName || pendingName === source.name}><Pencil className="mr-1.5 h-3.5 w-3.5" />Rename</Button></div><CardDescription className="flex items-start gap-2 break-all font-mono text-xs"><FolderOpen className="mt-0.5 h-3.5 w-3.5 shrink-0" />{folderLabel}</CardDescription></CardHeader><CardContent className="flex flex-wrap items-center justify-between gap-2 pb-4"><Button type="button" variant="outline" size="sm" onClick={() => void manageMemberAccess(source)} disabled={busy !== null || !snapshot?.privateTeamAccessEnabled}><UsersRound className="mr-1.5 h-3.5 w-3.5" />Member access{grantedCount > 0 ? ` (${grantedCount})` : ""}</Button><Button type="button" variant="ghost" size="sm" onClick={() => void removeSource(source)} disabled={busy !== null}><Trash2 className="mr-1.5 h-3.5 w-3.5" />Remove from SPS</Button></CardContent></Card>;
       })}</div>
     </div>
   );
