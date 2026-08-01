@@ -253,3 +253,12 @@ describe("Plugin page routes", () => {
     expect(appSource.indexOf(rootRoute)).toBeLessThan(appSource.indexOf(childRoute));
   });
 });
+
+describe("SPS Core legacy settings routes", () => {
+  it("redirects the retired Workspace Appearance route to Plugins", () => {
+    expect(appSource).toContain(
+      'path="company/settings/workspace-appearance" element={<Navigate to="/company/settings/instance/plugins" replace />}',
+    );
+    expect(appSource).not.toContain('import { SpsCoreWorkspaceAppearance }');
+  });
+});

@@ -1,17 +1,11 @@
 import { useEffect } from "react";
-import { FolderCog, LayoutTemplate, Network, Puzzle, ServerCog, UsersRound } from "lucide-react";
+import { FolderCog, Network, Puzzle, ServerCog, UsersRound } from "lucide-react";
 import { Link } from "@/lib/router";
 import { useCompany } from "@/context/CompanyContext";
 import { useBreadcrumbs } from "@/context/BreadcrumbContext";
 import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 
 const settings = [
-  {
-    to: "/company/settings/workspace-appearance",
-    title: "Workspace appearance",
-    description: "Explicitly choose Neutral Core Shell or an active plugin Shell for this Workspace.",
-    icon: LayoutTemplate,
-  },
   {
     to: "/company/settings/sps-server",
     title: "SPS Server",
