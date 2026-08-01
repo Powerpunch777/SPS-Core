@@ -5,6 +5,7 @@ import { pinoHttp } from "pino-http";
 import { readConfigFile } from "../config-file.js";
 import { resolveDefaultLogsDir, resolveHomeAwarePath } from "../home-paths.js";
 import { shouldSilenceHttpSuccessLog } from "./http-log-policy.js";
+import { resolveServerLogMaxBytes, rotateServerLogIfOversize } from "./log-retention.js";
 import { redactSensitive } from "./redact-sensitive.js";
 
 function resolveServerLogDir(): string {
@@ -21,6 +22,15 @@ const logDir = resolveServerLogDir();
 fs.mkdirSync(logDir, { recursive: true });
 
 const logFile = path.join(logDir, "server.log");
+
+try {
+  const maxLogBytes = resolveServerLogMaxBytes(
+    process.env.SPS_SERVER_LOG_MAX_BYTES ?? process.env.PAPERCLIP_LOG_MAX_BYTES,
+  );
+  rotateServerLogIfOversize(logFile, maxLogBytes);
+} catch (error) {
+  console.warn("SPS could not apply server log retention.", error);
+}
 
 const sharedOpts = {
   translateTime: "SYS:HH:MM:ss",
