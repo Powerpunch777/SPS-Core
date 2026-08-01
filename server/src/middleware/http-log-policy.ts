@@ -1,5 +1,11 @@
 const SILENCED_SUCCESS_METHODS = new Set(["GET", "HEAD"]);
 
+const SILENCED_SUCCESS_POST_API_PATHS = [
+  /^\/api\/sps-identity\/session(?:\/|$)/,
+  /^\/api\/sps-nodes\/[^/]+\/commands\/claim-next(?:\/|$)/,
+  /^\/api\/sps-nodes\/[^/]+\/plugin-runs\/claim-next(?:\/|$)/,
+];
+
 const SILENCED_SUCCESS_API_PATHS = [
   /^\/api\/health(?:\/|$)/,
   /^\/api\/companies\/[^/]+\/activity(?:\/|$)/,
@@ -41,9 +47,13 @@ export function shouldSilenceHttpSuccessLog(method: string | undefined, url: str
   if (statusCode >= 400) return false;
   if (statusCode === 304) return true;
   if (!method || !url) return false;
-  if (!SILENCED_SUCCESS_METHODS.has(method.toUpperCase())) return false;
 
   const pathname = normalizePath(url);
+  const normalizedMethod = method.toUpperCase();
+  if (normalizedMethod === "POST") {
+    return SILENCED_SUCCESS_POST_API_PATHS.some((pattern) => pattern.test(pathname));
+  }
+  if (!SILENCED_SUCCESS_METHODS.has(normalizedMethod)) return false;
   if (SILENCED_SUCCESS_STATIC_PATHS.has(pathname)) return true;
   if (SILENCED_SUCCESS_STATIC_PREFIXES.some((prefix) => pathname.startsWith(prefix))) return true;
   return SILENCED_SUCCESS_API_PATHS.some((pattern) => pattern.test(pathname));
