@@ -338,7 +338,7 @@ export function createPluginJobScheduler(
         return;
       }
 
-      log.debug({ count: dueJobs.length }, "found due jobs");
+      log.trace({ count: dueJobs.length }, "found due jobs");
 
       // Dispatch each due job (respecting concurrency limits)
       const dispatches: Promise<void>[] = [];
@@ -448,7 +448,7 @@ export function createPluginJobScheduler(
       });
       runId = run.id;
 
-      jobLog.info({ runId }, "dispatching scheduled job");
+      jobLog.trace({ runId }, "dispatching scheduled job");
 
       // 2. Mark run as running
       if (!await jobStore.markRunning(runId)) return;
@@ -476,7 +476,7 @@ export function createPluginJobScheduler(
         durationMs,
       });
 
-      jobLog.info({ runId, durationMs }, "job completed successfully");
+      jobLog.trace({ runId, durationMs }, "job completed successfully");
     } catch (err) {
       const durationMs = Date.now() - startedAt;
       const errorMessage = err instanceof Error ? err.message : String(err);
