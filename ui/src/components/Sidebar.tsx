@@ -208,6 +208,12 @@ export function Sidebar() {
             />
           </SidebarSection>
 
+          {canManageCoreHost ? (
+            <SidebarSection label="Core Platform" collapsible={{ open: companyOpen, onOpenChange: setCompanyOpen }}>
+              <SidebarNavItem to="/company/settings" label="Host settings" icon={Settings} />
+            </SidebarSection>
+          ) : null}
+
           {shellNavigation.length > 0 || workspacePluginPages.length > 0 ? (
             <SidebarSection label="Workspace Plugins">
               {shellNavigation.map((item) => (
@@ -229,12 +235,6 @@ export function Sidebar() {
                   end
                 />
               ))}
-            </SidebarSection>
-          ) : null}
-
-          {canManageCoreHost ? (
-            <SidebarSection label="Core Platform" collapsible={{ open: companyOpen, onOpenChange: setCompanyOpen }}>
-              <SidebarNavItem to="/company/settings" label="Host settings" icon={Settings} />
             </SidebarSection>
           ) : null}
         </nav>
