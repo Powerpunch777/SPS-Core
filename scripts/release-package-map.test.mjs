@@ -52,6 +52,15 @@ test("release package configuration validates successfully", () => {
   assert.doesNotThrow(() => checkConfiguration());
 });
 
+test("server publish lifecycle keeps ui-dist available through payload collection", () => {
+  const server = buildReleasePackagePlan().find(
+    (pkg) => pkg.name === "@paperclipai/server",
+  );
+
+  assert.ok(server);
+  assert.equal(server.pkg.scripts?.postpack, undefined);
+});
+
 test("guard flags a publishFromCi:true package depending on a publishFromCi:false package", () => {
   const problems = findUnpublishableWorkspaceEdges([
     pkg("@paperclipai/server", {
