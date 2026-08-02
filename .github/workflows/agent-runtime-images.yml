@@ -2,7 +2,7 @@ name: Agent runtime images
 
 on:
   push:
-    branches: [master]
+    branches: [main]
     paths:
       - "docker/agent-runtime/**"
       - "tools/agent-shim/**"
