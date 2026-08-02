@@ -137,7 +137,44 @@ function readPackageJson(pkgDir) {
   );
 }
 
-async function runCaptured(command, args, cwd, log) {
+export function resolvePackageManagerInvocation(
+  env = process.env,
+  platform = process.platform,
+) {
+  const npmExecPath = env.npm_execpath;
+  if (npmExecPath && /\.(?:cjs|mjs|js)$/i.test(npmExecPath)) {
+    return { command: process.execPath, argsPrefix: [npmExecPath] };
+  }
+
+  return {
+    command: platform === "win32" ? "pnpm.cmd" : "pnpm",
+    argsPrefix: [],
+  };
+}
+
+function formatCommand(command, args) {
+  return [command, ...args]
+    .map((part) => (/^[\w./:@=-]+$/.test(part) ? part : JSON.stringify(part)))
+    .join(" ");
+}
+
+function formatExecutionFailure(error, command, args, cwd) {
+  const exitCode =
+    error.exitCode ??
+    error.status ??
+    (typeof error.code === "number" ? error.code : "unknown");
+  const errorCode =
+    typeof error.code === "string" ? error.code : error.errno ?? "unknown";
+  return [
+    `Command: ${formatCommand(command, args)}`,
+    `Working directory: ${cwd}`,
+    `Exit code: ${exitCode}`,
+    `Error code: ${errorCode}`,
+    `Message: ${error.message}`,
+  ].join("\n");
+}
+
+export async function runCaptured(command, args, cwd, log) {
   try {
     const { stdout, stderr } = await execFileAsync(command, args, {
       cwd,
@@ -152,7 +189,9 @@ async function runCaptured(command, args, cwd, log) {
   } catch (error) {
     if (error.stdout?.toString().trim()) log(error.stdout.toString().trimEnd());
     if (error.stderr?.toString().trim()) log(error.stderr.toString().trimEnd());
-    throw error;
+    throw new Error(formatExecutionFailure(error, command, args, cwd), {
+      cause: error,
+    });
   }
 }
 
@@ -189,7 +228,13 @@ async function prepareAndBuildPackage(pkg) {
         // Standalone packages intentionally avoid committed lockfile churn in the repo.
       ];
 
-    await runCaptured("pnpm", installArgs, pkgDir, log);
+    const packageManager = resolvePackageManagerInvocation();
+    await runCaptured(
+      packageManager.command,
+      [...packageManager.argsPrefix, ...installArgs],
+      pkgDir,
+      log,
+    );
 
     // The fresh install above wipes node_modules and no longer fires a
     // per-plugin postinstall (removed for supply-chain safety), so link the
@@ -197,7 +242,12 @@ async function prepareAndBuildPackage(pkg) {
     linkSdkInto(pkgDir);
 
     if (pkgJson.scripts?.build) {
-      await runCaptured("pnpm", ["run", "build"], pkgDir, log);
+      await runCaptured(
+        packageManager.command,
+        [...packageManager.argsPrefix, "run", "build"],
+        pkgDir,
+        log,
+      );
     } else {
       log("    i No build script; skipped build");
     }
@@ -258,8 +308,11 @@ export async function runWithConcurrency(items, limit, worker) {
 
   if (failures.length > 0) {
     failures.sort((a, b) => a.index - b.index);
+    const details = failures
+      .map(({ index, error }) => `  [${index}] ${error.message}`)
+      .join("\n");
     const aggregate = new Error(
-      `${failures.length} standalone package build(s) failed`,
+      `${failures.length} standalone package build(s) failed\n${details}`,
     );
     aggregate.failures = failures;
     throw aggregate;

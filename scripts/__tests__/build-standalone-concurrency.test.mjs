@@ -4,8 +4,53 @@ import test from "node:test";
 import {
   createStandaloneWorkspacePolicy,
   resolveConcurrency,
+  resolvePackageManagerInvocation,
+  runCaptured,
   runWithConcurrency,
 } from "../build-standalone-public-packages.mjs";
+
+test("runs the package manager through Node when npm_execpath is a JS entrypoint", () => {
+  assert.deepEqual(
+    resolvePackageManagerInvocation(
+      { npm_execpath: "C:/tools/pnpm.cjs" },
+      "win32",
+    ),
+    { command: process.execPath, argsPrefix: ["C:/tools/pnpm.cjs"] },
+  );
+});
+
+test("uses an explicit platform executable when npm_execpath is a command shim", () => {
+  assert.deepEqual(
+    resolvePackageManagerInvocation(
+      { npm_execpath: "C:/tools/pnpm.cmd" },
+      "win32",
+    ),
+    { command: "pnpm.cmd", argsPrefix: [] },
+  );
+  assert.deepEqual(
+    resolvePackageManagerInvocation({}, "linux"),
+    { command: "pnpm", argsPrefix: [] },
+  );
+});
+
+test("includes command, working directory, and exit details when execution fails", async () => {
+  await assert.rejects(
+    () =>
+      runCaptured(
+        process.execPath,
+        ["-e", "process.exitCode = 7"],
+        process.cwd(),
+        () => {},
+      ),
+    (error) => {
+      assert.match(error.message, /Command:/);
+      assert.match(error.message, /Working directory:/);
+      assert.match(error.message, /Exit code: 7/);
+      assert.match(error.message, /Error code:/);
+      return true;
+    },
+  );
+});
 
 test("copies the root allowBuilds policy to standalone projects", () => {
   const policy = createStandaloneWorkspacePolicy(`packages:\n  - packages/*\n\nallowBuilds:\n  esbuild: true\n  protobufjs: true\n`);
@@ -81,6 +126,7 @@ test("aggregates failures and still runs remaining items", async () => {
       assert.equal(error.failures.length, 1);
       assert.equal(error.failures[0].index, 1);
       assert.match(error.failures[0].error.message, /boom-1/);
+      assert.match(error.message, /\[1\] boom-1/);
       return true;
     },
   );
