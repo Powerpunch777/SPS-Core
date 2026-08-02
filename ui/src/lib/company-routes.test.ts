@@ -106,13 +106,6 @@ describe("company routes", () => {
     expect(toCompanyRelativePath("/SPS/assistants/new")).toBe("/assistants/new");
   });
 
-  it("treats bundled Plugin Discovery as a company route", () => {
-    expect(isBoardPathWithoutPrefix("/discover")).toBe(true);
-    expect(extractCompanyPrefixFromPath("/discover")).toBeNull();
-    expect(applyCompanyPrefix("/discover", "SPS")).toBe("/SPS/discover");
-    expect(toCompanyRelativePath("/SPS/discover")).toBe("/discover");
-  });
-
   it("treats Skill Studio create mode as an unprefixed board route", () => {
     expect(isBoardPathWithoutPrefix("/skills/studio/new")).toBe(true);
     expect(extractCompanyPrefixFromPath("/skills/studio/new")).toBeNull();

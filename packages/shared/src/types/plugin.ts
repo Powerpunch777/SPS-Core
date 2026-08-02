@@ -414,6 +414,65 @@ export interface PluginUiSlotDeclaration {
   order?: number;
 }
 
+export type PluginDashboardWidgetSize = "small" | "medium" | "large" | "full";
+
+export interface PluginWorkspaceShellNavigationItem {
+  id: string;
+  displayName: string;
+  target: string;
+  order?: number;
+}
+
+export interface PluginWorkspaceShellDashboardPresetItem {
+  /** Target plugin key. Omit to target a widget owned by the Shell provider. */
+  pluginKey?: string;
+  widgetId: string;
+  size: PluginDashboardWidgetSize;
+  order: number;
+}
+
+/**
+ * Workspace-level navigation proposal. Enabling a plugin never selects its
+ * Shell automatically; the Host stores an explicit selection per Workspace.
+ */
+export interface PluginWorkspaceShellDeclaration {
+  id: string;
+  displayName: string;
+  defaultRoute?: string;
+  navigation?: PluginWorkspaceShellNavigationItem[];
+  dashboardPreset?: PluginWorkspaceShellDashboardPresetItem[];
+  emptyWorkspaceAction?: {
+    displayName: string;
+    target: string;
+  };
+}
+
+/**
+ * Workflow-neutral widget rendered inside the Core Dashboard boundary.
+ */
+export interface PluginDashboardWidgetDeclaration {
+  id: string;
+  displayName: string;
+  description?: string;
+  exportName: string;
+  sizes: PluginDashboardWidgetSize[];
+  defaultSize: PluginDashboardWidgetSize;
+  defaultOrder: number;
+  dataAction: string;
+  navigationTarget?: string;
+}
+
+export interface PluginInboxActionDeclaration {
+  id: string;
+  displayName: string;
+  action: string;
+  destructive?: boolean;
+}
+
+export interface PluginInboxDeclaration {
+  actions?: PluginInboxActionDeclaration[];
+}
+
 /**
  * Describes the action triggered by a plugin launcher surface.
  */
@@ -496,6 +555,10 @@ export interface PluginUiDeclaration {
   slots?: PluginUiSlotDeclaration[];
   /** Declarative launcher metadata for host-mounted plugin entry points. */
   launchers?: PluginLauncherDeclaration[];
+  /** Optional Workspace Shell proposal. Requires `ui.workspaceShell.provide`. */
+  workspaceShell?: PluginWorkspaceShellDeclaration;
+  /** Core Dashboard contributions. Requires `ui.dashboard.contribute`. */
+  dashboardWidgets?: PluginDashboardWidgetDeclaration[];
 }
 
 /**
@@ -721,6 +784,8 @@ export interface PaperclipPluginManifestV1 {
   launchers?: PluginLauncherDeclaration[];
   /** UI bundle declarations. Requires `entrypoints.ui` when populated. */
   ui?: PluginUiDeclaration;
+  /** Workflow-neutral Core Inbox actions. */
+  inbox?: PluginInboxDeclaration;
 }
 
 // ---------------------------------------------------------------------------

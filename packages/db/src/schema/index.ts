@@ -110,6 +110,12 @@ export {
   spsPluginNodeRunEvents,
   spsPluginArtifacts,
 } from "./sps_plugin_execution.js";
+export {
+  spsWorkspaceShellSettings,
+  spsDashboardLayoutItems,
+  spsPluginInboxItems,
+  spsPluginInboxUserStates,
+} from "./sps_workspace_surfaces.js";
 export { costEvents } from "./cost_events.js";
 export { financeEvents } from "./finance_events.js";
 export { approvals } from "./approvals.js";

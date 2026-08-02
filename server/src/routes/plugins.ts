@@ -58,12 +58,17 @@ import {
 } from "../services/plugin-company-activation.js";
 import { listReadyAgentPlatformExtensions } from "../services/agent-platform-extensions.js";
 import { pluginLifecycleManager, type PluginLifecycleManager } from "../services/plugin-lifecycle.js";
+import { spsWorkspaceSurfaceService } from "../services/sps-workspace-surfaces.js";
 import {
   getPluginUiContributionMetadata,
   listMissingDeclaredPluginEntrypoints,
   pluginLoader,
   REPO_ROOT,
 } from "../services/plugin-loader.js";
+import {
+  declaredSpsPluginEntrypoint,
+  resolveSpsPluginPackageMetadata,
+} from "../services/plugin-package-metadata.js";
 import { logActivity } from "../services/activity-log.js";
 import { publishGlobalLiveEvent } from "../services/live-events.js";
 import { issueService } from "../services/issues.js";
@@ -124,6 +129,8 @@ type PluginUiContribution = {
   uiEntryFile: string;
   slots: PluginUiSlotDeclaration[];
   launchers: PluginLauncherDeclaration[];
+  workspaceShell: NonNullable<PaperclipPluginManifestV1["ui"]>["workspaceShell"] | null;
+  dashboardWidgets: NonNullable<PaperclipPluginManifestV1["ui"]>["dashboardWidgets"];
 };
 
 /** Request body for POST /api/plugins/install */
@@ -251,17 +258,8 @@ async function findPackageJsonFiles(root: string, maxDepth = 4): Promise<string[
 }
 
 function manifestSourcePath(packageRoot: string, pkgJson: Record<string, unknown>): string | null {
-  const paperclipPlugin = pkgJson.paperclipPlugin;
-  if (
-    !paperclipPlugin
-    || typeof paperclipPlugin !== "object"
-    || Array.isArray(paperclipPlugin)
-  ) {
-    return null;
-  }
-
-  const manifestPath = (paperclipPlugin as Record<string, unknown>).manifest;
-  if (typeof manifestPath !== "string") return null;
+  const manifestPath = declaredSpsPluginEntrypoint(pkgJson, "manifest");
+  if (!manifestPath) return null;
 
   const sourcePath = manifestPath
     .replace(/^\.\/dist\//, "./src/")
@@ -315,13 +313,7 @@ async function discoverBundledPlugins(): Promise<DiscoveredBundledPlugin[]> {
   for (const packageJsonPath of await findPackageJsonFiles(pluginRoot)) {
     const packageRoot = path.dirname(packageJsonPath);
     const pkgJson = await readJsonFile(packageJsonPath);
-    const paperclipPlugin = pkgJson?.paperclipPlugin;
-    if (
-      !pkgJson
-      || !paperclipPlugin
-      || typeof paperclipPlugin !== "object"
-      || Array.isArray(paperclipPlugin)
-    ) {
+    if (!pkgJson || !resolveSpsPluginPackageMetadata(pkgJson)) {
       continue;
     }
 
@@ -336,7 +328,7 @@ async function discoverBundledPlugins(): Promise<DiscoveredBundledPlugin[]> {
         pluginKey: metadata.pluginKey ?? packageName,
         displayName: metadata.displayName ?? titleCasePluginName(packageName),
         description: metadata.description
-          ?? `Bundled Paperclip plugin from ${path.relative(REPO_ROOT, packageRoot)}.`,
+          ?? `Bundled SPS plugin from ${path.relative(REPO_ROOT, packageRoot)}.`,
         localPath: packageRoot,
         tag,
         experimental: isExperimentalBundledPlugin(packageRoot, packageName),
@@ -554,6 +546,7 @@ export function pluginRoutes(
     loader,
     workerManager: bridgeDeps?.workerManager ?? webhookDeps?.workerManager,
   });
+  const workspaceSurfaces = spsWorkspaceSurfaceService(db);
   const issuesSvc = issueService(db);
   const accessSvc = accessService(db);
   const toolAccess = createPluginToolAccessService(db);
@@ -1225,6 +1218,8 @@ export function pluginRoutes(
           uiEntryFile: uiMetadata.uiEntryFile,
           slots: uiMetadata.slots,
           launchers: uiMetadata.launchers,
+          workspaceShell: uiMetadata.workspaceShell,
+          dashboardWidgets: uiMetadata.dashboardWidgets,
         };
       })
       .filter((item): item is PluginUiContribution => item !== null);
@@ -2426,6 +2421,9 @@ export function pluginRoutes(
    * Query params:
    * - purge: If "true", permanently delete all plugin data (hard delete)
    *          Otherwise, soft-delete with 30-day data retention
+   * - deleteInboxSummaries: If "true", remove persisted SPS Inbox summaries
+   *          published by this plugin after its lifecycle unload succeeds.
+   *          Defaults to false so operational history is preserved.
    *
    * Response: PluginRecord (the deleted record)
    * Errors: 404 if plugin not found, 400 for lifecycle errors
@@ -2434,6 +2432,7 @@ export function pluginRoutes(
     assertInstanceAdmin(req);
     const { pluginId } = req.params;
     const purge = req.query.purge === "true";
+    const deleteInboxSummaries = req.query.deleteInboxSummaries === "true";
 
     const plugin = await resolvePlugin(registry, pluginId);
     if (!plugin) {
@@ -2443,10 +2442,18 @@ export function pluginRoutes(
 
     try {
       const result = await lifecycle.unload(plugin.id, purge);
+      // Runtime teardown must finish first. For a hard purge the FK has
+      // already cleared sourcePluginId, so deletion intentionally keys off
+      // the immutable sourcePluginKey rather than the database id.
+      const deletedInboxSummaries = deleteInboxSummaries
+        ? await workspaceSurfaces.deleteInboxSummariesBySourcePluginKey(plugin.pluginKey)
+        : 0;
       await logPluginMutationActivity(req, "plugin.uninstalled", plugin.id, {
         pluginId: plugin.id,
         pluginKey: plugin.pluginKey,
         purge,
+        deleteInboxSummaries,
+        deletedInboxSummaries,
       });
       publishGlobalLiveEvent({ type: "plugin.ui.updated", payload: { pluginId: plugin.id, action: "uninstalled" } });
       res.json(result);

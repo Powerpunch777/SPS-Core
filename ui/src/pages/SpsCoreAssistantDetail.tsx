@@ -64,7 +64,7 @@ export function SpsCoreAssistantDetail() {
             </div>
           </div>
         </div>
-        <Button size="sm" asChild><Link to="/discover">Open Discovery</Link></Button>
+        <Button size="sm" asChild><Link to="/company/settings/instance/plugins">Open Plugins</Link></Button>
       </div>
 
       <section className="space-y-3">

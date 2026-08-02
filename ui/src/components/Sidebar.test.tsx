@@ -24,6 +24,16 @@ const mockAccessApi = vi.hoisted(() => ({
   getCurrentBoardAccess: vi.fn(),
 }));
 
+const mockPluginSlots = vi.hoisted(() => ({
+  slots: [] as Array<{
+    id: string;
+    pluginKey: string;
+    routePath?: string;
+    displayName: string;
+    order?: number;
+  }>,
+}));
+
 vi.mock("@/lib/router", () => ({
   NavLink: ({ to, children, className, ...props }: {
     to: string;
@@ -91,6 +101,7 @@ vi.mock("../hooks/useInboxBadge", () => ({
 }));
 
 vi.mock("@/plugins/slots", () => ({
+  usePluginSlots: () => ({ slots: mockPluginSlots.slots, isLoading: false, errorMessage: null }),
   PluginSlotOutlet: ({ slotTypes }: { slotTypes: string[] }) => (
     <div data-plugin-slot-types={slotTypes.join(",")}>Plugin slot outlet</div>
   ),
@@ -168,6 +179,7 @@ describe("Sidebar", () => {
     mockSidebar.isMobile = false;
     mockSidebar.collapsed = false;
     mockSidebar.peeking = false;
+    mockPluginSlots.slots = [];
   });
 
   afterEach(() => {
@@ -668,10 +680,39 @@ describe("Sidebar", () => {
     expect(labels).toContain("Host settings");
     expect(labels).not.toContain("Tasks");
     expect(labels).not.toContain("Projects");
-    expect(labels).not.toContain("Inbox");
+    expect(labels).toContain("Inbox");
     expect(container.querySelector('[data-testid="sidebar-agents"]')).toBeNull();
-    expect(container.textContent).toContain("Plugin slot outlet");
-    expect(container.textContent).toContain("Plugin launcher outlet");
+    expect(container.textContent).not.toContain("Plugin slot outlet");
+    expect(container.textContent).not.toContain("Plugin launcher outlet");
+
+    flushSync(() => {
+      root.unmount();
+    });
+  });
+
+  it("shows enabled plugin pages in the Core baseline Workspace navigation", async () => {
+    const basicMode = document.createElement("meta");
+    basicMode.name = "sps-basic-mode";
+    basicMode.content = "true";
+    document.head.appendChild(basicMode);
+    const coreBaselineMode = document.createElement("meta");
+    coreBaselineMode.name = "sps-core-baseline-mode";
+    coreBaselineMode.content = "true";
+    document.head.appendChild(coreBaselineMode);
+    mockPluginSlots.slots = [{
+      id: "plugin-discovery-page",
+      pluginKey: "sps.plugin-discovery",
+      routePath: "discover",
+      displayName: "Discovery & Builder",
+      order: 10,
+    }];
+    mockInstanceSettingsApi.getExperimental.mockResolvedValue({ enableIsolatedWorkspaces: false });
+    const root = await renderSidebar();
+
+    const discovery = [...container.querySelectorAll("nav a")]
+      .find((anchor) => anchor.textContent?.trim() === "Discovery & Builder");
+    expect(discovery?.getAttribute("href")).toBe("/PAP/discover");
+    expect(container.textContent).not.toContain("Plugin slot outlet");
 
     flushSync(() => {
       root.unmount();
@@ -702,8 +743,8 @@ describe("Sidebar", () => {
     const labels = [...container.querySelectorAll("nav a")].map((anchor) => anchor.textContent?.trim());
     expect(labels).toContain("Workspace");
     expect(labels).toContain("Host settings");
-    expect(labels).toContain("Plugins");
-    expect(container.textContent).toContain("Plugin slot outlet");
+    expect(labels).not.toContain("Plugins");
+    expect(container.textContent).not.toContain("Plugin slot outlet");
 
     flushSync(() => {
       root.unmount();
@@ -735,7 +776,7 @@ describe("Sidebar", () => {
     expect(labels).toContain("Workspace");
     expect(labels).not.toContain("Host settings");
     expect(labels).not.toContain("Plugins");
-    expect(container.textContent).toContain("Plugin slot outlet");
+    expect(container.textContent).not.toContain("Plugin slot outlet");
 
     flushSync(() => {
       root.unmount();

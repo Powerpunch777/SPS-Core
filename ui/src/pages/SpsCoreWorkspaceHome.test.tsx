@@ -1,173 +1,162 @@
 // @vitest-environment jsdom
 
-import { createRoot } from "react-dom/client";
+import { act } from "react";
+import { createRoot, type Root } from "react-dom/client";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { SpsCoreWorkspaceHome } from "./SpsCoreWorkspaceHome";
-import { queryKeys } from "@/lib/queryKeys";
 
-const mockPluginsApi = vi.hoisted(() => ({
-  listForCompany: vi.fn(),
+const apiMocks = vi.hoisted(() => ({
+  agentsList: vi.fn(),
+  getShell: vi.fn(),
+  getDashboard: vi.fn(),
+  saveDashboardLayout: vi.fn(),
+  listUiContributions: vi.fn(),
+  ensureContributionLoaded: vi.fn(),
 }));
-const mockAgentsApi = vi.hoisted(() => ({
-  list: vi.fn(),
-}));
-const mockSetBreadcrumbs = vi.hoisted(() => vi.fn());
-const mockNavigate = vi.hoisted(() => vi.fn());
+const breadcrumbMock = vi.hoisted(() => vi.fn());
 
-vi.mock("@/api/plugins", () => ({ pluginsApi: mockPluginsApi }));
-vi.mock("@/api/agents", () => ({ agentsApi: mockAgentsApi }));
+vi.mock("@/api/agents", () => ({
+  agentsApi: { list: apiMocks.agentsList },
+}));
+vi.mock("@/api/plugins", () => ({
+  pluginsApi: { listUiContributions: apiMocks.listUiContributions },
+}));
+vi.mock("@/api/workspace-surfaces", () => ({
+  workspaceSurfacesApi: {
+    getShell: apiMocks.getShell,
+    getDashboard: apiMocks.getDashboard,
+    saveDashboardLayout: apiMocks.saveDashboardLayout,
+  },
+}));
 vi.mock("@/context/CompanyContext", () => ({
   useCompany: () => ({
-    selectedCompany: { id: "workspace-1", name: "Prototype Workspace" },
+    selectedCompany: { id: "workspace-1", name: "Prototype Workspace", issuePrefix: "SPS" },
     selectedCompanyId: "workspace-1",
   }),
 }));
 vi.mock("@/context/BreadcrumbContext", () => ({
-  useBreadcrumbs: () => ({ setBreadcrumbs: mockSetBreadcrumbs }),
+  useBreadcrumbs: () => ({ setBreadcrumbs: breadcrumbMock }),
 }));
 vi.mock("@/lib/router", () => ({
-  Link: ({ to, children }: { to: string; children: React.ReactNode }) => <a href={to}>{children}</a>,
-  Navigate: ({ to, replace }: { to: string; replace?: boolean }) => {
-    mockNavigate({ to, replace });
-    return <span data-redirect={to} />;
-  },
+  Link: ({ to, children, ...props }: { to: string; children: React.ReactNode }) => <a href={to} {...props}>{children}</a>,
+  Navigate: ({ to }: { to: string }) => <span data-redirect={to} />,
 }));
+vi.mock("@/plugins/slots", () => ({
+  ensurePluginContributionLoaded: apiMocks.ensureContributionLoaded,
+  PluginDashboardWidgetMount: ({ pluginDisplayName, widget }: { pluginDisplayName: string; widget: { displayName: string } }) => (
+    <div data-testid={`widget-${widget.displayName}`}>{pluginDisplayName} widget</div>
+  ),
+}));
+
+import { SpsCoreWorkspaceHome } from "./SpsCoreWorkspaceHome";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
-async function flushReact() {
-  await Promise.resolve();
-  await new Promise((resolve) => window.setTimeout(resolve, 0));
-  await Promise.resolve();
+async function settle() {
+  await act(async () => {
+    await Promise.resolve();
+    await new Promise((resolve) => window.setTimeout(resolve, 0));
+    await Promise.resolve();
+  });
+}
+
+function assistant() {
+  return { id: "assistant-1", name: "Workspace Assistant", title: "Lead", status: "idle", adapterType: "codex_local" };
+}
+
+function neutralShell(overrides: Record<string, unknown> = {}) {
+  return { mode: "neutral", providerPluginId: null, providerPluginKey: null, shell: null, fallbackReason: null, ...overrides };
+}
+
+function widget(id: string, displayName: string, position: number) {
+  return {
+    pluginId: "plugin-1",
+    pluginKey: "workflow-kit",
+    pluginDisplayName: "Workflow Kit",
+    widget: { id, displayName, description: `${displayName} description`, exportName: "Widget", sizes: ["small", "medium", "large", "full"] },
+    layout: { size: "medium", position, collapsed: false, source: "default" },
+  };
 }
 
 describe("SpsCoreWorkspaceHome", () => {
   let container: HTMLDivElement;
+  let root: Root;
 
   beforeEach(() => {
     container = document.createElement("div");
     document.body.appendChild(container);
+    root = createRoot(container);
+    vi.clearAllMocks();
+    apiMocks.agentsList.mockResolvedValue([assistant()]);
+    apiMocks.getShell.mockResolvedValue(neutralShell());
+    apiMocks.getDashboard.mockResolvedValue({ widgets: [] });
+    apiMocks.listUiContributions.mockResolvedValue([]);
+    apiMocks.saveDashboardLayout.mockResolvedValue({ widgets: [] });
   });
 
   afterEach(() => {
+    act(() => root.unmount());
     container.remove();
-    document.body.innerHTML = "";
-    vi.clearAllMocks();
   });
 
-  it("shows only plugins enabled for the selected Workspace", async () => {
-    mockAgentsApi.list.mockResolvedValue([
-      { id: "assistant-1", name: "Workspace Assistant", title: "Initial Assistant", status: "idle", adapterType: "codex_local" },
-    ]);
-    mockPluginsApi.listForCompany.mockResolvedValue({
-      companyId: "workspace-1",
-      plugins: [
-        {
-          id: "discovery",
-          pluginKey: "sps.plugin-discovery",
-          displayName: "Plugin Discovery & Builder",
-          version: "1.0.0",
-          status: "ready",
-          activation: { enabled: true },
-        },
-        {
-          id: "disabled-workplane",
-          pluginKey: "sps.room-workplane",
-          displayName: "Room Workplane",
-          version: "1.0.0",
-          status: "ready",
-          activation: { enabled: false },
-        },
-        {
-          id: "failed-plugin",
-          pluginKey: "sps.failed",
-          displayName: "Failed plugin",
-          version: "1.0.0",
-          status: "error",
-          activation: { enabled: true },
-        },
-      ],
+  function render() {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    act(() => {
+      root.render(<QueryClientProvider client={queryClient}><SpsCoreWorkspaceHome /></QueryClientProvider>);
     });
-    const root = createRoot(container);
-    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  }
 
-    root.render(
-      <QueryClientProvider client={queryClient}>
-        <SpsCoreWorkspaceHome />
-      </QueryClientProvider>,
-    );
-    await flushReact();
-    await flushReact();
-    await flushReact();
-    await flushReact();
+  it("shows the neutral Dashboard empty state when no plugin contributes widgets", async () => {
+    render();
+    await settle();
+    await settle();
 
-    expect(mockPluginsApi.listForCompany).toHaveBeenCalledWith("workspace-1");
-    expect(mockAgentsApi.list).toHaveBeenCalledWith("workspace-1");
-    expect(container.textContent).toContain("Plugin Discovery & Builder");
-    expect(container.textContent).toContain("Workspace Assistant");
-    expect(container.innerHTML).toContain('href="/discover"');
-    expect(container.innerHTML).toContain('href="/assistants/assistant-1"');
-    expect(container.textContent).not.toContain("Room Workplane");
-    expect(container.textContent).not.toContain("Failed plugin");
-    expect(mockSetBreadcrumbs).toHaveBeenCalledWith([{ label: "Prototype Workspace" }]);
-
-    root.unmount();
+    expect(container.textContent).toContain("Neutral Workspace shows Core status");
+    expect(container.textContent).toContain("No Dashboard widgets yet");
+    expect(container.innerHTML).toContain('href="/company/settings/instance/plugins"');
+    expect(breadcrumbMock).toHaveBeenCalledWith([{ label: "Prototype Workspace" }]);
   });
 
-  it("requires an initial Assistant before opening the Workspace", async () => {
-    mockAgentsApi.list.mockResolvedValue([]);
-    mockPluginsApi.listForCompany.mockResolvedValue({ companyId: "workspace-1", plugins: [] });
-    const root = createRoot(container);
-    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-
-    root.render(
-      <QueryClientProvider client={queryClient}>
-        <SpsCoreWorkspaceHome />
-      </QueryClientProvider>,
-    );
-    await flushReact();
-    await flushReact();
-    await flushReact();
-
-    expect(mockNavigate).toHaveBeenCalledWith({ to: "/assistants/new", replace: true });
-    expect(container.innerHTML).toContain('data-redirect="/assistants/new"');
-
-    root.unmount();
-  });
-
-  it("does not redirect while a newly created Assistant replaces cached empty data", async () => {
-    const resolveAgents: {
-      current?: (agents: Array<{ id: string; name: string; title: string; status: string; adapterType: string }>) => void;
-    } = {};
-    mockAgentsApi.list.mockReturnValue(new Promise((resolve) => {
-      resolveAgents.current = resolve;
+  it("warns when a selected Shell falls back to Neutral Core", async () => {
+    apiMocks.getShell.mockResolvedValue(neutralShell({
+      fallbackReason: "The selected shell is no longer active.",
     }));
-    mockPluginsApi.listForCompany.mockResolvedValue({ companyId: "workspace-1", plugins: [] });
-    const root = createRoot(container);
-    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-    queryClient.setQueryData(queryKeys.agents.list("workspace-1"), []);
+    render();
+    await settle();
+    await settle();
 
-    root.render(
-      <QueryClientProvider client={queryClient}>
-        <SpsCoreWorkspaceHome />
-      </QueryClientProvider>,
-    );
-    await flushReact();
-    await flushReact();
+    expect(container.textContent).toContain("Neutral Shell restored");
+    expect(container.textContent).toContain("The selected shell is no longer active.");
+    expect(container.innerHTML).toContain('href="/company/settings/instance/plugins"');
+    expect(container.innerHTML).not.toContain("workspace-appearance");
+  });
 
-    expect(mockNavigate).not.toHaveBeenCalled();
+  it("mounts plugin widgets and persists an explicit layout change", async () => {
+    const widgets = [widget("first", "First widget", 0), widget("second", "Second widget", 1)];
+    apiMocks.getDashboard.mockResolvedValue({ widgets });
+    apiMocks.listUiContributions.mockResolvedValue([{
+      pluginId: "plugin-1", pluginKey: "workflow-kit", displayName: "Workflow Kit", version: "1.0.0",
+      uiEntryFile: "index.js", slots: [], launchers: [], workspaceShell: null, dashboardWidgets: [],
+    }]);
+    apiMocks.saveDashboardLayout.mockResolvedValue({ widgets });
+    render();
+    await settle();
+    await settle();
+    await settle();
 
-    resolveAgents.current?.([
-      { id: "assistant-1", name: "Workspace Assistant", title: "Initial Assistant", status: "idle", adapterType: "codex_local" },
+    expect(container.querySelector('[data-testid="widget-First widget"]')).not.toBeNull();
+    expect(container.querySelector('[data-testid="widget-Second widget"]')).not.toBeNull();
+    expect(apiMocks.ensureContributionLoaded).toHaveBeenCalled();
+
+    const moveDown = container.querySelector<HTMLButtonElement>('button[aria-label="Move First widget down"]');
+    expect(moveDown).not.toBeNull();
+    act(() => moveDown?.click());
+    await settle();
+
+    expect(apiMocks.saveDashboardLayout).toHaveBeenCalledWith("workspace-1", [
+      expect.objectContaining({ widgetId: "second", position: 0 }),
+      expect.objectContaining({ widgetId: "first", position: 1 }),
     ]);
-    await flushReact();
-    await flushReact();
-
-    expect(mockNavigate).not.toHaveBeenCalled();
-    expect(container.textContent).toContain("Workspace Assistant");
-
-    root.unmount();
   });
 });

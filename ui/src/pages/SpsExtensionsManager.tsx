@@ -1,8 +1,9 @@
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { PluginRecord } from "@paperclipai/shared";
-import { CheckCircle2, Power, Puzzle, Settings, ShieldCheck, Store } from "lucide-react";
+import { CheckCircle2, Power, Puzzle, Settings, ShieldCheck, Store, Trash } from "lucide-react";
 import { pluginsApi, type CompanyPluginActivation } from "@/api/plugins";
+import { PluginUninstallDialog, type PluginUninstallOptions } from "@/components/PluginUninstallDialog";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -39,16 +40,26 @@ function ExtensionRow({
   activation,
   builtIn = false,
   changing = false,
+  uninstalling = false,
   onToggle,
+  onUninstall,
 }: {
   plugin: PluginRecord;
   activation: CompanyPluginActivation | null;
   builtIn?: boolean;
   changing?: boolean;
+  uninstalling?: boolean;
   onToggle: () => void;
+  onUninstall: () => void;
 }) {
   const state = plugin.status === "ready" ? "Ready" : plugin.status;
   const companyEnabled = activation?.enabled ?? false;
+  const canChangeUse = plugin.status !== "upgrade_pending" && plugin.status !== "uninstalled";
+  const useLabel = companyEnabled
+    ? "Stop using"
+    : plugin.status === "ready"
+      ? "Use in this Workspace"
+      : "Start and use";
   return (
     <div className="flex items-start justify-between gap-4 px-4 py-4">
       <div className="min-w-0">
@@ -76,17 +87,27 @@ function ExtensionRow({
         <Button
           variant={companyEnabled ? "outline" : "default"}
           size="sm"
-          disabled={plugin.status !== "ready" || changing}
+          disabled={!canChangeUse || changing}
           onClick={onToggle}
         >
           <Power className="h-4 w-4" />
-          {companyEnabled ? "Disable" : "Enable"}
+          {useLabel}
         </Button>
         <Button variant="outline" size="sm" asChild>
           <Link to={`/company/settings/instance/plugins/${plugin.id}`}>
             <Settings className="h-4 w-4" />
             {plugin.status === "upgrade_pending" ? "Review update" : "Settings"}
           </Link>
+        </Button>
+        <Button
+          variant="outline"
+          size="sm"
+          className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+          disabled={!canChangeUse || uninstalling}
+          onClick={onUninstall}
+        >
+          <Trash className="h-4 w-4" />
+          Uninstall
         </Button>
       </div>
     </div>
@@ -98,6 +119,7 @@ export function SpsExtensionsManager() {
   const { setBreadcrumbs } = useBreadcrumbs();
   const queryClient = useQueryClient();
   const { pushToast } = useToastActions();
+  const [uninstallPlugin, setUninstallPlugin] = useState<PluginRecord | null>(null);
   const { data: plugins, isLoading, error } = useQuery({
     queryKey: queryKeys.plugins.all,
     queryFn: () => pluginsApi.list(),
@@ -108,18 +130,47 @@ export function SpsExtensionsManager() {
     enabled: Boolean(selectedCompany?.id),
   });
   const activationMutation = useMutation({
-    mutationFn: ({ pluginId, enabled }: { pluginId: string; enabled: boolean }) =>
-      pluginsApi.setCompanyActivation(pluginId, selectedCompany!.id, enabled),
-    onSuccess: (_result, variables) => {
-      queryClient.invalidateQueries({ queryKey: queryKeys.plugins.companyActivation(selectedCompany!.id) });
-      queryClient.invalidateQueries({ queryKey: queryKeys.plugins.uiContributionsPrefix });
+    mutationFn: async ({ plugin, enabled }: { plugin: PluginRecord; enabled: boolean }) => {
+      // A Host installs a package once, while each Workspace chooses whether to
+      // use it. Keep that implementation detail behind one deliberate action:
+      // starting a paused package and enabling it for this Workspace happen as
+      // one operation. Stopping use only changes this Workspace; it never
+      // interrupts another Workspace that may rely on the same package.
+      if (enabled && plugin.status !== "ready") {
+        await pluginsApi.enable(plugin.id);
+      }
+      return await pluginsApi.setCompanyActivation(plugin.id, selectedCompany!.id, enabled);
+    },
+    onSuccess: async (_result, variables) => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.plugins.all }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.plugins.companyActivation(selectedCompany!.id) }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.plugins.uiContributionsPrefix }),
+      ]);
       pushToast({
-        title: variables.enabled ? "Extension enabled for this Company" : "Extension disabled for this Company",
+        title: variables.enabled ? "Extension ready in this Workspace" : "Extension stopped for this Workspace",
+        body: variables.enabled
+          ? "Its navigation and pages are now available without changing other Workspaces."
+          : "The package stays available on this Host for other Workspaces.",
         tone: variables.enabled ? "success" : "info",
       });
     },
     onError: (error: Error) => {
       pushToast({ title: "Could not change Company extension", body: error.message, tone: "error" });
+    },
+  });
+  const uninstallMutation = useMutation({
+    mutationFn: ({ pluginId, options }: { pluginId: string; options: PluginUninstallOptions }) =>
+      pluginsApi.uninstall(pluginId, options),
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: queryKeys.plugins.all }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.plugins.uiContributionsPrefix }),
+      ]);
+      pushToast({ title: "Extension uninstalled", tone: "success" });
+    },
+    onError: (error: Error) => {
+      pushToast({ title: "Could not uninstall extension", body: error.message, tone: "error" });
     },
   });
 
@@ -156,8 +207,10 @@ export function SpsExtensionsManager() {
         plugin={plugin}
         activation={activation}
         builtIn={builtIn}
-        changing={activationMutation.isPending && activationMutation.variables?.pluginId === plugin.id}
-        onToggle={() => activationMutation.mutate({ pluginId: plugin.id, enabled: !activation?.enabled })}
+        changing={activationMutation.isPending && activationMutation.variables?.plugin.id === plugin.id}
+        uninstalling={uninstallMutation.isPending && uninstallMutation.variables?.pluginId === plugin.id}
+        onToggle={() => activationMutation.mutate({ plugin, enabled: !activation?.enabled })}
+        onUninstall={() => setUninstallPlugin(plugin)}
       />
     );
   };
@@ -213,6 +266,19 @@ export function SpsExtensionsManager() {
           )}
         </Card>
       </section>
+
+      <PluginUninstallDialog
+        open={uninstallPlugin !== null}
+        pluginName={uninstallPlugin ? extensionName(uninstallPlugin) : ""}
+        pending={uninstallMutation.isPending}
+        onOpenChange={(open) => { if (!open) setUninstallPlugin(null); }}
+        onConfirm={(options) => {
+          if (!uninstallPlugin) return;
+          uninstallMutation.mutate({ pluginId: uninstallPlugin.id, options }, {
+            onSettled: () => setUninstallPlugin(null),
+          });
+        }}
+      />
     </div>
   );
 }

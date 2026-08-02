@@ -38,6 +38,146 @@ describe("plugin manifest validators", () => {
     expect(parsed.capabilities).toEqual(["ui.dashboardWidget.register"]);
   });
 
+  it("accepts native SPS Shell, Dashboard, and Inbox declarations", () => {
+    const parsed = pluginManifestV1Schema.parse({
+      id: "sps.team-surface",
+      apiVersion: 1,
+      version: "1.0.0",
+      displayName: "SPS Team Surface",
+      description: "Contributes workflow-neutral SPS workspace surfaces.",
+      author: "SPS",
+      categories: ["ui"],
+      capabilities: [
+        "ui.workspaceShell.provide",
+        "ui.dashboard.contribute",
+        "inbox.items.publish",
+        "inbox.items.update",
+        "inbox.actions.register",
+      ],
+      entrypoints: {
+        worker: "./dist/worker.js",
+        ui: "./dist/ui",
+      },
+      ui: {
+        workspaceShell: {
+          id: "team",
+          displayName: "Team",
+          defaultRoute: "/projects",
+          navigation: [{ id: "rooms", displayName: "Rooms", target: "/rooms", order: 10 }],
+          dashboardPreset: [{ widgetId: "active-work", size: "medium", order: 10 }],
+        },
+        dashboardWidgets: [{
+          id: "active-work",
+          displayName: "Active work",
+          exportName: "ActiveWorkWidget",
+          sizes: ["small", "medium"],
+          defaultSize: "medium",
+          defaultOrder: 10,
+          dataAction: "dashboard.active-work",
+        }],
+      },
+      inbox: {
+        actions: [{
+          id: "open-report",
+          displayName: "Open",
+          action: "inbox.open-report",
+        }],
+      },
+    });
+
+    expect(parsed.ui?.workspaceShell?.id).toBe("team");
+    expect(parsed.ui?.dashboardWidgets?.[0]?.defaultSize).toBe("medium");
+    expect(parsed.inbox?.actions?.[0]?.id).toBe("open-report");
+  });
+
+  it("rejects duplicate Dashboard widget and Inbox action ids", () => {
+    const base = {
+      id: "sps.duplicate-surfaces",
+      apiVersion: 1,
+      version: "1.0.0",
+      displayName: "Duplicate surfaces",
+      description: "Duplicates must not create ambiguous Core surface keys.",
+      author: "SPS",
+      categories: ["ui"],
+      capabilities: [
+        "ui.dashboard.contribute",
+        "inbox.actions.register",
+      ],
+      entrypoints: {
+        worker: "./dist/worker.js",
+        ui: "./dist/ui",
+      },
+    };
+    const widget = {
+      id: "status",
+      displayName: "Status",
+      exportName: "StatusWidget",
+      sizes: ["small"],
+      defaultSize: "small",
+      defaultOrder: 1,
+      dataAction: "status.read",
+    };
+    const action = {
+      id: "open",
+      displayName: "Open",
+      action: "status.open",
+    };
+
+    expect(() => pluginManifestV1Schema.parse({
+      ...base,
+      ui: { dashboardWidgets: [widget, widget] },
+    })).toThrow("Dashboard widget ids must be unique");
+    expect(() => pluginManifestV1Schema.parse({
+      ...base,
+      inbox: { actions: [action, action] },
+    })).toThrow("Inbox action ids must be unique");
+  });
+
+  it("rejects native SPS surface declarations without matching capabilities", () => {
+    const parsed = pluginManifestV1Schema.safeParse({
+      id: "sps.invalid-surface",
+      apiVersion: 1,
+      version: "1.0.0",
+      displayName: "Invalid surface",
+      description: "Missing native surface capabilities.",
+      author: "SPS",
+      categories: ["ui"],
+      capabilities: ["ui.page.register"],
+      entrypoints: {
+        worker: "./dist/worker.js",
+        ui: "./dist/ui",
+      },
+      ui: {
+        workspaceShell: { id: "invalid", displayName: "Invalid" },
+        dashboardWidgets: [{
+          id: "status",
+          displayName: "Status",
+          exportName: "StatusWidget",
+          sizes: ["small"],
+          defaultSize: "small",
+          defaultOrder: 1,
+          dataAction: "status.read",
+        }],
+      },
+      inbox: {
+        actions: [{ id: "retry", displayName: "Retry", action: "retry" }],
+      },
+    });
+
+    expect(parsed.success).toBe(false);
+    if (parsed.success) return;
+    const messages = parsed.error.issues.map((issue) => issue.message);
+    expect(messages).toContain(
+      "Capability 'ui.workspaceShell.provide' is required when ui.workspaceShell is declared",
+    );
+    expect(messages).toContain(
+      "Capability 'ui.dashboard.contribute' is required when ui.dashboardWidgets are declared",
+    );
+    expect(messages).toContain(
+      "Capability 'inbox.actions.register' is required when inbox.actions are declared",
+    );
+  });
+
   it("preserves a workflow-neutral SPS Core primitive declaration", () => {
     const parsed = pluginManifestV1Schema.parse({
       id: "sps.source-aware-plugin",

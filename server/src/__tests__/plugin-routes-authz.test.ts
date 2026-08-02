@@ -24,6 +24,12 @@ const mockAccess = vi.hoisted(() => ({
   hasPermission: vi.fn(),
 }));
 
+const mockWorkspaceSurfaces = vi.hoisted(() => ({
+  deleteInboxSummariesBySourcePluginKey: vi.fn(),
+}));
+
+const mockLogActivity = vi.hoisted(() => vi.fn());
+
 vi.mock("../services/plugin-registry.js", () => ({
   pluginRegistryService: () => mockRegistry,
 }));
@@ -33,7 +39,11 @@ vi.mock("../services/plugin-lifecycle.js", () => ({
 }));
 
 vi.mock("../services/activity-log.js", () => ({
-  logActivity: vi.fn(),
+  logActivity: mockLogActivity,
+}));
+
+vi.mock("../services/sps-workspace-surfaces.js", () => ({
+  spsWorkspaceSurfaceService: () => mockWorkspaceSurfaces,
 }));
 
 vi.mock("../services/live-events.js", () => ({
@@ -163,6 +173,7 @@ describe.sequential("plugin install and upgrade authz", () => {
     vi.clearAllMocks();
     mockAccess.canUser.mockResolvedValue(false);
     mockAccess.hasPermission.mockResolvedValue(false);
+    mockWorkspaceSurfaces.deleteInboxSummariesBySourcePluginKey.mockResolvedValue(0);
   });
 
   it("lists bundled monorepo plugin packages", async () => {
@@ -371,7 +382,65 @@ describe.sequential("plugin install and upgrade authz", () => {
     expect(mockLifecycle.disable).toHaveBeenCalledWith(pluginId, undefined);
     expect(mockLifecycle.enable).toHaveBeenCalledWith(pluginId);
     expect(mockLifecycle.unload).toHaveBeenCalledWith(pluginId, true);
+    expect(mockWorkspaceSurfaces.deleteInboxSummariesBySourcePluginKey).not.toHaveBeenCalled();
+    expect(mockLogActivity).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      action: "plugin.uninstalled",
+      details: expect.objectContaining({
+        purge: true,
+        deleteInboxSummaries: false,
+        deletedInboxSummaries: 0,
+      }),
+    }));
   }, 20_000);
+
+  it("deletes Inbox summaries only after successful unload and records the explicit choice", async () => {
+    const plugin = {
+      id: pluginId,
+      pluginKey: "sps.team-workplane",
+      version: "1.0.0",
+      status: "ready",
+      manifestJson: {},
+    };
+    mockRegistry.getByKey.mockResolvedValue(plugin);
+    mockLifecycle.unload.mockResolvedValue(null);
+    mockWorkspaceSurfaces.deleteInboxSummariesBySourcePluginKey.mockResolvedValue(3);
+    const { app } = await createApp(boardActor({ isInstanceAdmin: true }));
+
+    const response = await request(app)
+      .delete(`/api/plugins/${plugin.pluginKey}?purge=true&deleteInboxSummaries=true`);
+
+    expect(response.status).toBe(200);
+    expect(mockLifecycle.unload).toHaveBeenCalledWith(pluginId, true);
+    expect(mockWorkspaceSurfaces.deleteInboxSummariesBySourcePluginKey)
+      .toHaveBeenCalledWith(plugin.pluginKey);
+    expect(mockLogActivity).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      action: "plugin.uninstalled",
+      details: expect.objectContaining({
+        purge: true,
+        deleteInboxSummaries: true,
+        deletedInboxSummaries: 3,
+      }),
+    }));
+  });
+
+  it("does not delete Inbox summaries when lifecycle unload fails", async () => {
+    const plugin = {
+      id: pluginId,
+      pluginKey: "sps.team-workplane",
+      version: "1.0.0",
+      status: "ready",
+      manifestJson: {},
+    };
+    mockRegistry.getByKey.mockResolvedValue(plugin);
+    mockLifecycle.unload.mockRejectedValue(new Error("worker did not stop"));
+    const { app } = await createApp(boardActor({ isInstanceAdmin: true }));
+
+    const response = await request(app)
+      .delete(`/api/plugins/${plugin.pluginKey}?deleteInboxSummaries=true`);
+
+    expect(response.status).toBe(400);
+    expect(mockWorkspaceSurfaces.deleteInboxSummariesBySourcePluginKey).not.toHaveBeenCalled();
+  });
 
   it("rejects plugin config saves that contain secret refs even for instance admins", async () => {
     readyPlugin();

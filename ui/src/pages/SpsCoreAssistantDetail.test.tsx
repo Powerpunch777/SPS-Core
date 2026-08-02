@@ -86,7 +86,8 @@ describe("SpsCoreAssistantDetail", () => {
     }
 
     expect(container.textContent).toContain("Runtime configuration");
-    expect(container.textContent).toContain("Open Discovery");
+    expect(container.textContent).toContain("Open Plugins");
+    expect(container.innerHTML).toContain('href="/company/settings/instance/plugins"');
     expect(container.textContent).not.toContain("Assign Task");
     expect(container.textContent).not.toContain("Reports to");
     expect(mockConfigProps).toHaveBeenCalledWith(expect.objectContaining({

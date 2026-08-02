@@ -57,6 +57,11 @@ import {
   assertRegistryRuntimeManifestMatchesStatic,
   type RegistryStaticPluginManifest,
 } from "./registry-static-manifest.js";
+import {
+  declaredSpsPluginEntrypoint,
+  hasSpsPluginPackageMetadata,
+  resolveSpsPluginPackageMetadata,
+} from "./plugin-package-metadata.js";
 
 const execFileAsync = promisify(execFile);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -491,6 +496,8 @@ export interface PluginUiContributionMetadata {
   uiEntryFile: string;
   slots: PluginUiSlotDeclaration[];
   launchers: PluginLauncherDeclaration[];
+  workspaceShell: NonNullable<PaperclipPluginManifestV1["ui"]>["workspaceShell"] | null;
+  dashboardWidgets: NonNullable<PaperclipPluginManifestV1["ui"]>["dashboardWidgets"];
 }
 
 /**
@@ -547,11 +554,11 @@ export interface PluginLoader {
    * Load and parse the plugin manifest from a package directory.
    *
    * Reads the package.json, finds the manifest entrypoint declared under
-   * the "paperclipPlugin.manifest" key, loads the manifest module, and
+   * the SPS package metadata manifest entrypoint, loads the manifest module, and
    * validates it against the plugin manifest schema.
    *
-   * Returns null if the package is not a Paperclip plugin.
-   * Throws if the package is a Paperclip plugin but the manifest is invalid.
+   * Returns null if the package is not an SPS plugin.
+   * Throws if the package is an SPS plugin but the manifest is invalid.
    *
    * @see PLUGIN_SPEC.md §10 — Package Contract
    */
@@ -790,18 +797,12 @@ export function resolveDeclaredPluginEntrypoints(
   packageRoot: string,
   pkgJson: Record<string, unknown>,
 ): PluginEntrypointPath[] {
-  const paperclipPlugin = pkgJson["paperclipPlugin"];
-  if (
-    paperclipPlugin === null
-    || typeof paperclipPlugin !== "object"
-    || Array.isArray(paperclipPlugin)
-  ) {
-    return [];
-  }
+  const metadata = resolveSpsPluginPackageMetadata(pkgJson);
+  if (!metadata) return [];
 
   const entrypoints: PluginEntrypointPath[] = [];
   for (const key of ["manifest", "worker", "ui"] as const) {
-    const relativePath = (paperclipPlugin as Record<string, unknown>)[key];
+    const relativePath = metadata.entrypoints[key];
     if (typeof relativePath === "string" && relativePath.length > 0) {
       entrypoints.push({
         key,
@@ -1006,8 +1007,8 @@ export async function ensureLocalPluginBuilt(
 /**
  * Resolve the manifest entrypoint from a package.json and package root.
  *
- * The spec defines a "paperclipPlugin" key in package.json with a "manifest"
- * subkey pointing to the manifest module.  This helper resolves the path.
+ * SPS package metadata defines a "manifest" subkey pointing to the manifest
+ * module. `paperclipPlugin` remains a compatibility alias for existing packages.
  *
  * @see PLUGIN_SPEC.md §10 — Package Contract
  */
@@ -1015,21 +1016,12 @@ function resolveManifestPath(
   packageRoot: string,
   pkgJson: Record<string, unknown>,
 ): string | null {
-  const paperclipPlugin = pkgJson["paperclipPlugin"];
-  if (
-    paperclipPlugin !== null &&
-    typeof paperclipPlugin === "object" &&
-    !Array.isArray(paperclipPlugin)
-  ) {
-    const manifestRelPath = (paperclipPlugin as Record<string, unknown>)[
-      "manifest"
-    ];
-    if (typeof manifestRelPath === "string") {
-      // NOTE: the resolved path is returned as-is even if the file does not yet
-      // exist on disk (e.g. the package has not been built).  Callers MUST guard
-      // with existsSync() before passing the path to loadManifestFromPath().
-      return path.resolve(packageRoot, manifestRelPath);
-    }
+  const manifestRelPath = declaredSpsPluginEntrypoint(pkgJson, "manifest");
+  if (manifestRelPath) {
+    // NOTE: the resolved path is returned as-is even if the file does not yet
+    // exist on disk (e.g. the package has not been built). Callers MUST guard
+    // with existsSync() before passing the path to loadManifestFromPath().
+    return path.resolve(packageRoot, manifestRelPath);
   }
 
   // Fallback: look for dist/manifest.js as a convention
@@ -1129,7 +1121,10 @@ export function getPluginUiContributionMetadata(
     ...(manifest.ui?.launchers ?? []),
   ];
 
-  if (slots.length === 0 && launchers.length === 0) {
+  const workspaceShell = manifest.ui?.workspaceShell ?? null;
+  const dashboardWidgets = manifest.ui?.dashboardWidgets ?? [];
+
+  if (slots.length === 0 && launchers.length === 0 && !workspaceShell && dashboardWidgets.length === 0) {
     return null;
   }
 
@@ -1137,6 +1132,8 @@ export function getPluginUiContributionMetadata(
     uiEntryFile: "index.js",
     slots,
     launchers,
+    workspaceShell,
+    dashboardWidgets,
   };
 }
 
@@ -1510,10 +1507,10 @@ export function pluginLoader(
     const version = typeof pkgJson["version"] === "string" ? pkgJson["version"] : "0.0.0";
 
     // Determine if this is a plugin package at all
-    const hasPaperclipPlugin = "paperclipPlugin" in pkgJson;
+    const hasPluginMetadata = hasSpsPluginPackageMetadata(pkgJson);
     const nameMatchesConvention = isPluginPackageName(packageName);
 
-    if (!hasPaperclipPlugin && !nameMatchesConvention) {
+    if (!hasPluginMetadata && !nameMatchesConvention) {
       return null;
     }
 
@@ -1841,11 +1838,11 @@ export function pluginLoader(
       const pkgJson = await readPackageJson(packagePath);
       if (!pkgJson) return null;
 
-      const hasPaperclipPlugin = "paperclipPlugin" in pkgJson;
+      const hasPluginMetadata = hasSpsPluginPackageMetadata(pkgJson);
       const packageName = typeof pkgJson["name"] === "string" ? pkgJson["name"] : "";
       const nameMatchesConvention = isPluginPackageName(packageName);
 
-      if (!hasPaperclipPlugin && !nameMatchesConvention) {
+      if (!hasPluginMetadata && !nameMatchesConvention) {
         return null;
       }
 

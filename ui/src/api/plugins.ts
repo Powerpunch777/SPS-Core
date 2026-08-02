@@ -14,6 +14,8 @@ import type {
   PluginLauncherDeclaration,
   PluginLauncherRenderContextSnapshot,
   PluginUiSlotDeclaration,
+  PluginWorkspaceShellDeclaration,
+  PluginDashboardWidgetDeclaration,
   PluginLocalFolderDeclaration,
   PluginRecord,
   PluginConfig,
@@ -43,6 +45,8 @@ export type PluginUiContribution = {
   uiEntryFile: string;
   slots: PluginUiSlotDeclaration[];
   launchers: PluginLauncherDeclaration[];
+  workspaceShell: PluginWorkspaceShellDeclaration | null;
+  dashboardWidgets: PluginDashboardWidgetDeclaration[];
 };
 
 export interface CompanyPluginActivation {
@@ -356,14 +360,19 @@ export const pluginsApi = {
     api.post<PluginRecord>("/plugins/install", params),
 
   /**
-   * Uninstall a plugin.
-   *
-   * @param pluginId - UUID of the plugin to remove.
-   * @param purge - If `true`, permanently delete all plugin data (hard delete).
-   *   Otherwise the plugin is soft-deleted with a 30-day data retention window.
+   * Uninstall a plugin. Inbox summaries are retained unless the Host makes an
+   * explicit deletion choice.
    */
-  uninstall: (pluginId: string, purge?: boolean) =>
-    api.delete<{ ok: boolean }>(`/plugins/${pluginId}${purge ? "?purge=true" : ""}`),
+  uninstall: (pluginId: string, options: {
+    purge?: boolean;
+    deleteInboxSummaries?: boolean;
+  } = {}) => {
+    const query = new URLSearchParams({
+      purge: String(options.purge === true),
+      deleteInboxSummaries: String(options.deleteInboxSummaries === true),
+    });
+    return api.delete<{ ok: boolean }>(`/plugins/${pluginId}?${query.toString()}`);
+  },
 
   /**
    * Transition a plugin from `error` state back to `ready`.

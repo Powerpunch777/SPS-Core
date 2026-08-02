@@ -310,6 +310,7 @@ describe("CompanySettingsSidebar", () => {
     expect(container.textContent).toContain("Sources");
     expect(container.textContent).toContain("Nodes");
     expect(container.textContent).toContain("Plugins");
+    expect(container.textContent).not.toContain("Workspace appearance");
     expect(container.textContent).not.toContain("Members");
     expect(container.textContent).not.toContain("Invites");
     expect(container.textContent).not.toContain("Secrets");

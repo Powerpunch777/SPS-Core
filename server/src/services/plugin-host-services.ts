@@ -80,6 +80,7 @@ import { authorizationService, type AuthorizationActor } from "./authorization.j
 import { sanitizeRecord } from "../redaction.js";
 import { isCoreManagedMemoryLifecycleSubscription } from "./memory-providers.js";
 import { spsPluginExecutionService } from "./sps-plugin-execution.js";
+import { spsWorkspaceSurfaceService } from "./sps-workspace-surfaces.js";
 
 // ---------------------------------------------------------------------------
 // SSRF protection for plugin HTTP fetch
@@ -560,6 +561,7 @@ export function buildHostServices(
     manifest: options.manifest,
   });
   const spsExecution = spsPluginExecutionService(db, pluginKey);
+  const workspaceSurfaces = spsWorkspaceSurfaceService(db);
   const heartbeat = heartbeatService(db, {
     pluginWorkerManager: options.pluginWorkerManager,
   });
@@ -1300,6 +1302,40 @@ export function buildHostServices(
         await stateStore.delete(pluginId, params.scopeKind as any, params.stateKey, {
           scopeId: params.scopeId,
           namespace: params.namespace,
+        });
+      },
+    },
+
+    inbox: {
+      async publish(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        const plugin = await registry.getById(pluginId);
+        if (!plugin) throw new Error("Plugin installation record is unavailable");
+        await ensurePluginAvailableForCompany(companyId);
+        return workspaceSurfaces.publishInboxItem({
+          companyId,
+          plugin,
+          item: params,
+        });
+      },
+      async update(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        const plugin = await registry.getById(pluginId);
+        if (!plugin) throw new Error("Plugin installation record is unavailable");
+        await ensurePluginAvailableForCompany(companyId);
+        return workspaceSurfaces.updateInboxItem({
+          companyId,
+          plugin,
+          item: params,
+        });
+      },
+      async withdraw(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        return workspaceSurfaces.withdrawInboxItem({
+          companyId,
+          pluginKey,
+          externalId: params.externalId,
         });
       },
     },

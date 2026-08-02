@@ -5509,6 +5509,99 @@ for (const route of [
   registerCurrentRoute({ method: route[0], path: route[1], tags: ["plugins"], summary: route[2] });
 }
 
+const workspaceShellSelectionSchema = z.object({
+  pluginId: z.string().uuid().nullable(),
+  shellId: z.string().min(1).max(100).nullable().optional(),
+});
+
+const workspaceDashboardLayoutSchema = z.object({
+  items: z.array(z.object({
+    pluginId: z.string().uuid(),
+    widgetId: z.string().min(1).max(100),
+    size: z.enum(["small", "medium", "large", "full"]),
+    position: z.number().int(),
+    collapsed: z.boolean().optional(),
+  })).max(200),
+});
+
+const workspaceInboxStateSchema = z.object({
+  read: z.boolean().optional(),
+  archived: z.boolean().optional(),
+}).refine((value) => value.read !== undefined || value.archived !== undefined, {
+  message: "At least one Inbox state field is required",
+});
+
+const workspaceInboxQuerySchema = z.object({
+  archived: z.enum(["true", "false"]).optional(),
+});
+
+registerCurrentRoute({
+  method: "get",
+  path: "/api/companies/{companyId}/workspace-shell/providers",
+  tags: ["workspace"],
+  summary: "List workspace shell providers",
+});
+
+registerCurrentRoute({
+  method: "get",
+  path: "/api/companies/{companyId}/workspace-shell",
+  tags: ["workspace"],
+  summary: "Get the selected workspace shell",
+});
+
+registerCurrentRoute({
+  method: "put",
+  path: "/api/companies/{companyId}/workspace-shell",
+  tags: ["workspace"],
+  summary: "Select the workspace shell",
+  body: workspaceShellSelectionSchema,
+});
+
+registerCurrentRoute({
+  method: "get",
+  path: "/api/companies/{companyId}/workspace-dashboard",
+  tags: ["workspace"],
+  summary: "Get the workspace dashboard",
+});
+
+registerCurrentRoute({
+  method: "put",
+  path: "/api/companies/{companyId}/workspace-dashboard/layout",
+  tags: ["workspace"],
+  summary: "Save the workspace dashboard layout",
+  body: workspaceDashboardLayoutSchema,
+});
+
+registerCurrentRoute({
+  method: "get",
+  path: "/api/companies/{companyId}/workspace-inbox",
+  tags: ["workspace"],
+  summary: "List workspace Inbox items",
+  query: workspaceInboxQuerySchema,
+});
+
+registerCurrentRoute({
+  method: "patch",
+  path: "/api/companies/{companyId}/workspace-inbox/{itemId}",
+  tags: ["workspace"],
+  summary: "Update a workspace Inbox item",
+  body: workspaceInboxStateSchema,
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/companies/{companyId}/workspace-inbox/{itemId}/actions/{actionId}",
+  tags: ["workspace"],
+  summary: "Perform a workspace Inbox action",
+  responses: {
+    200: r.ok(),
+    400: r.badRequest,
+    401: r.unauthorized,
+    404: r.notFound,
+    501: { description: "Plugin Inbox actions are unavailable" },
+  },
+});
+
 for (const route of [
   ["get", "/api/companies/{companyId}/sps-members", "List SPS company members"],
   ["post", "/api/companies/{companyId}/sps-members/{memberId}/revoke", "Revoke an SPS company member"],

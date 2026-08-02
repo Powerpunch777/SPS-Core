@@ -640,6 +640,33 @@ export interface PluginSpsArtifact {
 }
 
 /**
+ * The finite Worker-to-Host operation set that forms SPS's public Runtime
+ * transport contract. It intentionally excludes general plugin RPC methods.
+ */
+export type PluginSpsRuntimeOperation =
+  | "sps.workspaceSources.list"
+  | "sps.runtimes.list"
+  | "sps.executionGrants.list"
+  | "sps.executionGrants.upsert"
+  | "sps.executionGrants.revoke"
+  | "sps.runs.dispatch"
+  | "sps.runs.get"
+  | "sps.runs.listEvents"
+  | "sps.artifacts.publish"
+  | "sps.artifacts.list";
+
+/**
+ * Public Runtime transport supplied by SPS Desktop to a plugin Worker.
+ *
+ * This is deliberately a narrow structural contract so the public
+ * `@sonparkserver/plugin-sdk/runtime` facade can consume it without importing
+ * private Core modules or receiving a general Worker RPC escape hatch.
+ */
+export interface PluginSpsRuntimeTransport {
+  request(operation: PluginSpsRuntimeOperation, input: Record<string, unknown>): Promise<unknown>;
+}
+
+/**
  * Workflow-neutral SPS infrastructure for plugins. `subjectKey` is owned by
  * the calling plugin; Core does not interpret it as an Agent, Task, or role.
  */
@@ -1193,6 +1220,32 @@ export interface PluginToolsClient {
       fn: (params: unknown, runCtx: ToolRunContext) => Promise<ToolResult>;
     }>,
   ): Promise<{ registered: number }>;
+}
+
+export interface PluginInboxItemInput {
+  companyId: string;
+  externalId: string;
+  targetUserId?: string | null;
+  category: string;
+  severity?: "info" | "success" | "warning" | "error";
+  title: string;
+  summary: string;
+  navigationTarget?: string | null;
+  actionIds?: string[];
+  opaqueReference?: Record<string, unknown>;
+}
+
+/**
+ * Publish compact workflow-neutral summaries into the Core Inbox. The source
+ * plugin remains the owner of the full business record.
+ */
+export interface PluginInboxClient {
+  /** Requires `inbox.items.publish`. */
+  publish(input: PluginInboxItemInput): Promise<{ id: string; externalId: string }>;
+  /** Requires `inbox.items.update`; updates an existing stable external id. */
+  update(input: PluginInboxItemInput): Promise<{ id: string; externalId: string }>;
+  /** Requires `inbox.items.update`; hides the summary without deleting plugin data. */
+  withdraw(input: { companyId: string; externalId: string }): Promise<void>;
 }
 
 /**
@@ -2173,6 +2226,12 @@ export interface PluginContext {
   /** Use Host-managed Workspace Sources and Node-local CLI runtimes. */
   sps: PluginSpsClient;
 
+  /**
+   * Finite public SPS Runtime transport. New portable plugins can pass this
+   * to `@sonparkserver/plugin-sdk/runtime`; `sps` remains for compatibility.
+   */
+  spsTransport: PluginSpsRuntimeTransport;
+
   /** Subscribe to and emit domain events. Requires `events.subscribe` / `events.emit`. */
   events: PluginEventsClient;
 
@@ -2199,6 +2258,9 @@ export interface PluginContext {
 
   /** Read and write scoped plugin state. Requires `plugin.state.read` / `plugin.state.write`. */
   state: PluginStateClient;
+
+  /** Publish and update workflow-neutral Core Inbox summaries. */
+  inbox: PluginInboxClient;
 
   /** Create and query plugin-owned entity records. */
   entities: PluginEntitiesClient;

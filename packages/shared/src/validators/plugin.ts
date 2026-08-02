@@ -417,6 +417,87 @@ export const pluginUiSlotDeclarationSchema = z.object({
 
 export type PluginUiSlotDeclarationInput = z.infer<typeof pluginUiSlotDeclarationSchema>;
 
+const pluginDashboardWidgetSizeSchema = z.enum(["small", "medium", "large", "full"]);
+
+const pluginWorkspaceTargetSchema = z.string().min(1).max(500).refine(
+  (value) => value.startsWith("/") && !value.startsWith("//") && !value.includes(".."),
+  { message: "target must be a safe absolute SPS route" },
+);
+
+export const pluginWorkspaceShellDeclarationSchema = z.object({
+  id: z.string().min(1).max(100).regex(/^[a-z0-9][a-z0-9._-]*$/),
+  displayName: z.string().min(1).max(100),
+  defaultRoute: pluginWorkspaceTargetSchema.optional(),
+  navigation: z.array(z.object({
+    id: z.string().min(1).max(100).regex(/^[a-z0-9][a-z0-9._-]*$/),
+    displayName: z.string().min(1).max(100),
+    target: pluginWorkspaceTargetSchema,
+    order: z.number().int().optional(),
+  })).max(50).optional(),
+  dashboardPreset: z.array(z.object({
+    pluginKey: z.string().min(1).max(150).optional(),
+    widgetId: z.string().min(1).max(150),
+    size: pluginDashboardWidgetSizeSchema,
+    order: z.number().int(),
+  })).max(100).optional(),
+  emptyWorkspaceAction: z.object({
+    displayName: z.string().min(1).max(100),
+    target: pluginWorkspaceTargetSchema,
+  }).optional(),
+}).superRefine((value, ctx) => {
+  const ids = value.navigation?.map((item) => item.id) ?? [];
+  if (new Set(ids).size !== ids.length) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Workspace Shell navigation ids must be unique",
+      path: ["navigation"],
+    });
+  }
+});
+
+export type PluginWorkspaceShellDeclarationInput =
+  z.infer<typeof pluginWorkspaceShellDeclarationSchema>;
+
+export const pluginDashboardWidgetDeclarationSchema = z.object({
+  id: z.string().min(1).max(100).regex(/^[a-z0-9][a-z0-9._-]*$/),
+  displayName: z.string().min(1).max(100),
+  description: z.string().max(500).optional(),
+  exportName: z.string().min(1).max(150),
+  sizes: z.array(pluginDashboardWidgetSizeSchema).min(1),
+  defaultSize: pluginDashboardWidgetSizeSchema,
+  defaultOrder: z.number().int(),
+  dataAction: z.string().min(1).max(150),
+  navigationTarget: pluginWorkspaceTargetSchema.optional(),
+}).superRefine((value, ctx) => {
+  if (!value.sizes.includes(value.defaultSize)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "defaultSize must be included in sizes",
+      path: ["defaultSize"],
+    });
+  }
+  if (new Set(value.sizes).size !== value.sizes.length) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Dashboard widget sizes must be unique",
+      path: ["sizes"],
+    });
+  }
+});
+
+export type PluginDashboardWidgetDeclarationInput =
+  z.infer<typeof pluginDashboardWidgetDeclarationSchema>;
+
+export const pluginInboxActionDeclarationSchema = z.object({
+  id: z.string().min(1).max(100).regex(/^[a-z0-9][a-z0-9._-]*$/),
+  displayName: z.string().min(1).max(100),
+  action: z.string().min(1).max(150),
+  destructive: z.boolean().optional(),
+});
+
+export type PluginInboxActionDeclarationInput =
+  z.infer<typeof pluginInboxActionDeclarationSchema>;
+
 const entityScopedLauncherPlacementZones = [
   "detailTab",
   "taskDetailView",
@@ -887,6 +968,11 @@ export const pluginManifestV1Schema = z.object({
   ui: z.object({
     slots: z.array(pluginUiSlotDeclarationSchema).min(1).optional(),
     launchers: z.array(pluginLauncherDeclarationSchema).optional(),
+    workspaceShell: pluginWorkspaceShellDeclarationSchema.optional(),
+    dashboardWidgets: z.array(pluginDashboardWidgetDeclarationSchema).min(1).max(100).optional(),
+  }).optional(),
+  inbox: z.object({
+    actions: z.array(pluginInboxActionDeclarationSchema).min(1).max(100).optional(),
   }).optional(),
 }).superRefine((manifest, ctx) => {
   // ── Entrypoint ↔ UI slot consistency ──────────────────────────────────
@@ -894,10 +980,28 @@ export const pluginManifestV1Schema = z.object({
   // host knows where to load the bundle from (PLUGIN_SPEC.md §10.1).
   const hasUiSlots = (manifest.ui?.slots?.length ?? 0) > 0;
   const hasUiLaunchers = (manifest.ui?.launchers?.length ?? 0) > 0;
-  if ((hasUiSlots || hasUiLaunchers) && !manifest.entrypoints.ui) {
+  const hasWorkspaceShell = Boolean(manifest.ui?.workspaceShell);
+  const hasDashboardWidgets = (manifest.ui?.dashboardWidgets?.length ?? 0) > 0;
+  const dashboardWidgetIds = manifest.ui?.dashboardWidgets?.map((widget) => widget.id) ?? [];
+  if (new Set(dashboardWidgetIds).size !== dashboardWidgetIds.length) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
-      message: "entrypoints.ui is required when ui.slots or ui.launchers are declared",
+      message: "Dashboard widget ids must be unique",
+      path: ["ui", "dashboardWidgets"],
+    });
+  }
+  const inboxActionIds = manifest.inbox?.actions?.map((action) => action.id) ?? [];
+  if (new Set(inboxActionIds).size !== inboxActionIds.length) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Inbox action ids must be unique",
+      path: ["inbox", "actions"],
+    });
+  }
+  if ((hasUiSlots || hasUiLaunchers || hasWorkspaceShell || hasDashboardWidgets) && !manifest.entrypoints.ui) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "entrypoints.ui is required when UI contributions are declared",
       path: ["entrypoints", "ui"],
     });
   }
@@ -911,6 +1015,30 @@ export const pluginManifestV1Schema = z.object({
       code: z.ZodIssueCode.custom,
       message: "minimumHostVersion and minimumPaperclipVersion must match when both are declared",
       path: ["minimumHostVersion"],
+    });
+  }
+
+  if (hasWorkspaceShell && !manifest.capabilities.includes("ui.workspaceShell.provide")) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Capability 'ui.workspaceShell.provide' is required when ui.workspaceShell is declared",
+      path: ["capabilities"],
+    });
+  }
+
+  if (hasDashboardWidgets && !manifest.capabilities.includes("ui.dashboard.contribute")) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Capability 'ui.dashboard.contribute' is required when ui.dashboardWidgets are declared",
+      path: ["capabilities"],
+    });
+  }
+
+  if ((manifest.inbox?.actions?.length ?? 0) > 0 && !manifest.capabilities.includes("inbox.actions.register")) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Capability 'inbox.actions.register' is required when inbox.actions are declared",
+      path: ["capabilities"],
     });
   }
 

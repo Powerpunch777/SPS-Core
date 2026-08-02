@@ -143,6 +143,13 @@ export interface TestHarness {
   telemetry: Array<{ eventName: string; dimensions?: Record<string, string | number | boolean> }>;
   dbQueries: Array<{ sql: string; params?: unknown[] }>;
   dbExecutes: Array<{ sql: string; params?: unknown[] }>;
+  inboxItems: Array<{
+    id: string;
+    companyId: string;
+    externalId: string;
+    title: string;
+    withdrawn: boolean;
+  }>;
 }
 
 // ---------------------------------------------------------------------------
@@ -483,6 +490,7 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
   const telemetry: TestHarness["telemetry"] = [];
   const dbQueries: TestHarness["dbQueries"] = [];
   const dbExecutes: TestHarness["dbExecutes"] = [];
+  const inboxItems: TestHarness["inboxItems"] = [];
 
   const state = new Map<string, unknown>();
   const entities = new Map<string, PluginEntityRecord>();
@@ -837,6 +845,11 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
         return status;
       },
     },
+    spsTransport: {
+      async request() {
+        throw new Error("The in-memory plugin test harness does not provide SPS Node infrastructure");
+      },
+    },
     sps: {
       workspaceSources: {
         async list() {
@@ -959,6 +972,45 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
       async delete(input) {
         requireCapability(manifest, capabilitySet, "plugin.state.write");
         state.delete(stateMapKey(input));
+      },
+    },
+    inbox: {
+      async publish(input) {
+        requireCapability(manifest, capabilitySet, "inbox.items.publish");
+        const existing = inboxItems.find((item) => (
+          item.companyId === input.companyId && item.externalId === input.externalId
+        ));
+        if (existing) {
+          existing.title = input.title;
+          existing.withdrawn = false;
+          return { id: existing.id, externalId: existing.externalId };
+        }
+        const record = {
+          id: randomUUID(),
+          companyId: input.companyId,
+          externalId: input.externalId,
+          title: input.title,
+          withdrawn: false,
+        };
+        inboxItems.push(record);
+        return { id: record.id, externalId: record.externalId };
+      },
+      async update(input) {
+        requireCapability(manifest, capabilitySet, "inbox.items.update");
+        const existing = inboxItems.find((item) => (
+          item.companyId === input.companyId && item.externalId === input.externalId
+        ));
+        if (!existing) throw new Error("Inbox item not found");
+        existing.title = input.title;
+        existing.withdrawn = false;
+        return { id: existing.id, externalId: existing.externalId };
+      },
+      async withdraw(input) {
+        requireCapability(manifest, capabilitySet, "inbox.items.update");
+        const existing = inboxItems.find((item) => (
+          item.companyId === input.companyId && item.externalId === input.externalId
+        ));
+        if (existing) existing.withdrawn = true;
       },
     },
     entities: {
@@ -2689,6 +2741,7 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
     telemetry,
     dbQueries,
     dbExecutes,
+    inboxItems,
   };
 
   return harness;

@@ -23,9 +23,6 @@ const BOARD_ROUTE_ROOTS = new Set([
   // `/SPS/agent-rooms`, rather than being misread as a company prefix.
   "agent-rooms",
   "decisions",
-  // Plugin Discovery & Builder is bundled with the Core baseline. Treat its
-  // public route like the other company-scoped entry points.
-  "discover",
   "inbox",
   "board-chat",
   "artifacts",

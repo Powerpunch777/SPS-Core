@@ -1,4 +1,5 @@
 import { useMemo } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { NavLink, useLocation } from "@/lib/router";
 import {
   House,
@@ -6,6 +7,7 @@ import {
   SquarePen,
   Users,
   Inbox,
+  Puzzle,
 } from "lucide-react";
 import { useCompany } from "../context/CompanyContext";
 import { useDialogActions } from "../context/DialogContext";
@@ -13,6 +15,11 @@ import { SIDEBAR_SCROLL_RESET_STATE } from "../lib/navigation-scroll";
 import { cn } from "../lib/utils";
 import { useInboxBadge } from "../hooks/useInboxBadge";
 import { Badge } from "@/components/ui/badge";
+import { workspaceSurfacesApi } from "@/api/workspace-surfaces";
+import { queryKeys } from "@/lib/queryKeys";
+import { isSpsBasicModeEnabled } from "@/lib/sps-basic-mode";
+import { isSpsCoreBaselineModeEnabled } from "@/lib/sps-core-baseline-mode";
+import { isWorkplaneModeEnabled } from "@/lib/workplane-mode";
 
 interface MobileBottomNavProps {
   visible: boolean;
@@ -40,22 +47,49 @@ export function MobileBottomNav({ visible }: MobileBottomNavProps) {
   const { selectedCompanyId } = useCompany();
   const { openNewIssue } = useDialogActions();
   const inboxBadge = useInboxBadge(selectedCompanyId);
+  const coreBaseline = isSpsBasicModeEnabled()
+    && isSpsCoreBaselineModeEnabled()
+    && !isWorkplaneModeEnabled();
+  const { data: workspaceInbox } = useQuery({
+    queryKey: queryKeys.workspaceSurfaces.inbox(selectedCompanyId ?? ""),
+    queryFn: () => workspaceSurfacesApi.listInbox(selectedCompanyId!),
+    enabled: coreBaseline && Boolean(selectedCompanyId),
+    refetchInterval: 15_000,
+  });
+  const workspaceUnreadCount = workspaceInbox?.items.filter((item) => item.unread).length ?? 0;
 
   const items = useMemo<MobileNavItem[]>(
-    () => [
-      { type: "link", to: "/dashboard", label: "Home", icon: House },
-      { type: "link", to: "/issues", label: "Tasks", icon: CircleDot },
-      { type: "action", label: "Create", icon: SquarePen, onClick: () => openNewIssue() },
-      { type: "link", to: "/agents/all", label: "Agents", icon: Users },
-      {
-        type: "link",
-        to: "/inbox",
-        label: "Inbox",
-        icon: Inbox,
-        badge: inboxBadge.inbox,
-      },
-    ],
-    [openNewIssue, inboxBadge.inbox],
+    () => coreBaseline
+      ? [
+        { type: "link", to: "/dashboard", label: "Workspace", icon: House },
+        {
+          type: "link",
+          to: "/inbox",
+          label: "Inbox",
+          icon: Inbox,
+          badge: workspaceUnreadCount,
+        },
+        {
+          type: "link",
+          to: "/company/settings/instance/plugins",
+          label: "Plugins",
+          icon: Puzzle,
+        },
+      ]
+      : [
+        { type: "link", to: "/dashboard", label: "Home", icon: House },
+        { type: "link", to: "/issues", label: "Tasks", icon: CircleDot },
+        { type: "action", label: "Create", icon: SquarePen, onClick: () => openNewIssue() },
+        { type: "link", to: "/agents/all", label: "Agents", icon: Users },
+        {
+          type: "link",
+          to: "/inbox",
+          label: "Inbox",
+          icon: Inbox,
+          badge: inboxBadge.inbox,
+        },
+      ],
+    [coreBaseline, inboxBadge.inbox, openNewIssue, workspaceUnreadCount],
   );
 
   return (
@@ -66,7 +100,10 @@ export function MobileBottomNav({ visible }: MobileBottomNavProps) {
       )}
       aria-label="Mobile navigation"
     >
-      <div className="grid h-16 grid-cols-5 px-1">
+      <div
+        className="grid h-16 px-1"
+        style={{ gridTemplateColumns: `repeat(${items.length}, minmax(0, 1fr))` }}
+      >
         {items.map((item) => {
           if (item.type === "action") {
             const Icon = item.icon;
