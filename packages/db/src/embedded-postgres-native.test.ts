@@ -3,7 +3,9 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  cleanupWindowsSubstMappings,
   ensureLinuxSharedLibraryAliases,
+  prepareEmbeddedPostgresNativeRuntime,
   resolveWindowsNativeRuntimePath,
   resolveWindowsShortPath,
 } from "./embedded-postgres-native.js";
@@ -48,5 +50,23 @@ describe("embedded Postgres native runtime", () => {
   it("does not invoke the Windows short-path bridge for an ASCII path", () => {
     expect(resolveWindowsShortPath("C:\\SPS\\runtime\\bin")).toBeNull();
     expect(resolveWindowsNativeRuntimePath("C:\\SPS\\runtime\\bin")).toBeNull();
+  });
+
+  it.runIf(process.platform === "win32")("replaces an inherited native binary path with a locally derived ASCII path", async () => {
+    const previous = process.env.SPS_EMBEDDED_POSTGRES_BINARY_DIR;
+    process.env.SPS_EMBEDDED_POSTGRES_BINARY_DIR = "C:\\untrusted\\postgres-bin";
+    try {
+      await prepareEmbeddedPostgresNativeRuntime();
+      const derived = process.env.SPS_EMBEDDED_POSTGRES_BINARY_DIR;
+      expect(derived).not.toBe("C:\\untrusted\\postgres-bin");
+      if (derived) {
+        expect(path.isAbsolute(derived)).toBe(true);
+        expect(derived).toMatch(/^[\x00-\x7f]+$/);
+      }
+    } finally {
+      cleanupWindowsSubstMappings();
+      if (previous === undefined) delete process.env.SPS_EMBEDDED_POSTGRES_BINARY_DIR;
+      else process.env.SPS_EMBEDDED_POSTGRES_BINARY_DIR = previous;
+    }
   });
 });

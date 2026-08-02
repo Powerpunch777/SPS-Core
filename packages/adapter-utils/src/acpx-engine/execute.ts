@@ -146,6 +146,8 @@ interface AcpxPreparedRuntime {
   skillsIdentity: Record<string, unknown>;
   childStderrLogPath: string | null;
   paperclipClaudeSettings: PaperclipClaudeSettingsResult | null;
+  mcpServers: AcpRuntimeOptions["mcpServers"];
+  mcpIdentity: unknown;
 }
 
 const defaultWarmHandles = new Map<string, RuntimeCacheEntry>();
@@ -172,6 +174,60 @@ function stableJson(value: unknown): string {
 
 function shortHash(value: unknown): string {
   return createHash("sha256").update(stableJson(value)).digest("hex").slice(0, 16);
+}
+
+function prepareMcpServers(input: AdapterExecutionContext["externalTools"]): {
+  servers: AcpRuntimeOptions["mcpServers"];
+  identity: unknown;
+} {
+  const specs = input?.mcpServers;
+  if (!specs || specs.length === 0) return { servers: undefined, identity: [] };
+  if (specs.length > 32) throw new Error("At most 32 Core MCP servers may be injected into one adapter run.");
+
+  const normalized = specs.map((spec, index) => {
+    if (spec.kind !== "stdio") throw new Error(`Unsupported Core MCP transport at index ${index}.`);
+    for (const [label, value] of [
+      ["name", spec.name],
+      ["command", spec.command],
+      ["identity", spec.identity],
+      ["revision", spec.revision],
+    ] as const) {
+      if (!value.trim() || value.includes("\u0000")) {
+        throw new Error(`Core MCP server ${label} must be a non-empty string without NUL bytes.`);
+      }
+    }
+    if (spec.args.length > 128 || spec.args.some((arg) => typeof arg !== "string" || arg.includes("\u0000"))) {
+      throw new Error(`Core MCP server ${spec.name} has invalid arguments.`);
+    }
+    const env = (spec.env ?? []).map((entry) => {
+      if (!entry.name.trim() || entry.name.includes("\u0000") || entry.value.includes("\u0000")) {
+        throw new Error(`Core MCP server ${spec.name} has an invalid environment entry.`);
+      }
+      return { name: entry.name, value: entry.value };
+    });
+    return {
+      server: {
+        name: spec.name,
+        command: spec.command,
+        args: [...spec.args],
+        env,
+      },
+      identity: {
+        identity: spec.identity,
+        revision: spec.revision,
+        configurationHash: shortHash({
+          name: spec.name,
+          command: spec.command,
+          args: [...spec.args],
+          envNames: env.map((entry) => entry.name).sort(),
+        }),
+      },
+    };
+  });
+  return {
+    servers: normalized.map(({ server }) => server) as AcpRuntimeOptions["mcpServers"],
+    identity: normalized.map(({ identity }) => identity),
+  };
 }
 
 function defaultPaperclipInstanceDir(): string {
@@ -1024,6 +1080,7 @@ async function buildRuntime(input: {
   engine: AcpxEngineSettings;
 }): Promise<AcpxPreparedRuntime> {
   const { runId, agent, config, context, authToken } = input.ctx;
+  const preparedMcp = prepareMcpServers(input.ctx.externalTools);
   const workspaceContext = parseObject(context.paperclipWorkspace);
   const secretsContext = parseObject(context.paperclipSecrets);
   const secretManifest = Array.isArray(secretsContext.manifest) ? secretsContext.manifest : [];
@@ -1302,6 +1359,7 @@ async function buildRuntime(input: {
         }
       : null,
     secretManifestHash: shortHash(secretManifest),
+    mcpIdentity: preparedMcp.identity,
   });
   const taskKey = asString(input.ctx.runtime.taskKey, "") || wakeTaskId || workspaceId || "default";
   const sessionKey = `paperclip:${agent.companyId}:${agent.id}:${taskKey}:${fingerprint}`;
@@ -1342,6 +1400,8 @@ async function buildRuntime(input: {
     },
     childStderrLogPath,
     paperclipClaudeSettings,
+    mcpServers: preparedMcp.servers,
+    mcpIdentity: preparedMcp.identity,
   };
 }
 
@@ -1980,7 +2040,12 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
       "stderr",
       `[paperclip] ${formatAdapterExecutionTimeoutStartLogLine(prepared.timeoutResolution)}\n`,
     );
-    const warmIdleMs = asNumber(ctx.config.warmHandleIdleMs, DEFAULT_ACP_ENGINE_WARM_HANDLE_IDLE_MS);
+    // Core-scoped tool credentials are run-bound. Recreate the ACP process so
+    // every turn gets fresh MCP env, while the stable identity fingerprint
+    // still lets the provider conversation resume through its session id.
+    const warmIdleMs = prepared.mcpServers && prepared.mcpServers.length > 0
+      ? 0
+      : asNumber(ctx.config.warmHandleIdleMs, DEFAULT_ACP_ENGINE_WARM_HANDLE_IDLE_MS);
     await cleanupIdleHandles({ handles: warmHandles, now: now(), idleMs: warmIdleMs });
 
     const previousParams = parseObject(ctx.runtime.sessionParams);
@@ -1998,6 +2063,7 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
       // and custom agents already emit their own per-tool output and don't
       // benefit from doubling the log volume.
       verbose: prepared.acpxAgent === "claude",
+      ...(prepared.mcpServers && prepared.mcpServers.length > 0 ? { mcpServers: prepared.mcpServers } : {}),
     };
     const runtime = cached?.runtime ?? createRuntime(runtimeOptions);
     if (cached) clearWarmHandleTimer(cached);

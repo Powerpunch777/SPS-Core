@@ -60,6 +60,7 @@ export type AuthorizationAction =
   | "agent_config:update"
   | "skill_config:update"
   | "agent:read"
+  | "agent:invoke"
   | "agent:wake"
   | "company_scope:read"
   | "issue:comment"
@@ -133,6 +134,7 @@ function companyIdForResource(resource: AuthorizationResource) {
 }
 
 function permissionForAction(action: AuthorizationAction): PermissionKey | null {
+  if (action === "agent:invoke") return "agents:invoke";
   if (action === "agent_config:read" || action === "agent_config:update" || action === "skill_config:update") {
     return null;
   }

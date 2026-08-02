@@ -5509,6 +5509,114 @@ for (const route of [
   registerCurrentRoute({ method: route[0], path: route[1], tags: ["plugins"], summary: route[2] });
 }
 
+const marketplaceSearchQuerySchema = z.object({
+  q: z.string().optional(),
+  category: z.string().optional(),
+  capability: z.string().optional(),
+  limit: z.string().optional(),
+});
+
+const marketplaceMessageListQuerySchema = z.object({
+  limit: z.string().optional(),
+  after: z.string().optional(),
+});
+
+const marketplaceAssistantSessionSchema = z.object({
+  agentId: z.string().uuid(),
+});
+
+const marketplaceAssistantMessageSchema = z.object({
+  content: z.string().trim().min(1).max(16_000),
+  idempotencyKey: z.string().trim().min(8).max(200).optional(),
+});
+
+const marketplaceAssistantToolSchema = z.object({
+  input: z.unknown(),
+});
+
+registerCurrentRoute({
+  method: "get",
+  path: "/api/companies/{companyId}/marketplace/plugins",
+  tags: ["marketplace"],
+  summary: "Search Marketplace plugins",
+  query: marketplaceSearchQuerySchema,
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
+});
+
+registerCurrentRoute({
+  method: "get",
+  path: "/api/companies/{companyId}/marketplace/plugins/{pluginId}",
+  tags: ["marketplace"],
+  summary: "Get Marketplace plugin details",
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registerCurrentRoute({
+  method: "get",
+  path: "/api/companies/{companyId}/marketplace/assistant/agents",
+  tags: ["marketplace"],
+  summary: "List Agents available to Marketplace Assistant",
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/companies/{companyId}/marketplace/assistant/sessions",
+  tags: ["marketplace"],
+  summary: "Create or reuse a Marketplace Assistant session",
+  body: marketplaceAssistantSessionSchema,
+  responses: {
+    201: r.ok(),
+    400: r.badRequest,
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
+    409: r.conflict,
+  },
+});
+
+registerCurrentRoute({
+  method: "get",
+  path: "/api/companies/{companyId}/marketplace/assistant/sessions/{sessionId}/messages",
+  tags: ["marketplace"],
+  summary: "List Marketplace Assistant messages",
+  query: marketplaceMessageListQuerySchema,
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/companies/{companyId}/marketplace/assistant/sessions/{sessionId}/messages",
+  tags: ["marketplace"],
+  summary: "Send a Marketplace Assistant message",
+  body: marketplaceAssistantMessageSchema,
+  responses: {
+    202: { description: "Marketplace Assistant run queued" },
+    400: r.badRequest,
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
+    409: r.conflict,
+  },
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/companies/{companyId}/marketplace/assistant/sessions/{sessionId}/close",
+  tags: ["marketplace"],
+  summary: "Close a Marketplace Assistant session",
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/companies/{companyId}/marketplace/assistant/tools/{toolName}",
+  tags: ["marketplace"],
+  summary: "Execute a scoped Marketplace Assistant tool",
+  body: marketplaceAssistantToolSchema,
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
 const pluginDependencyImpactQuerySchema = z.object({
   action: z.enum(["disable", "delete"]),
 });

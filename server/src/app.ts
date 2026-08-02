@@ -8,6 +8,7 @@ import type { InspectDatabaseBackupHealthOptions } from "./services/database-bac
 import type { StorageService } from "./storage/types.js";
 import { httpLogger, errorHandler } from "./middleware/index.js";
 import { actorMiddleware } from "./middleware/auth.js";
+import { marketplaceAssistantScopeGuard } from "./middleware/marketplace-assistant-scope-guard.js";
 import { boardMutationGuard } from "./middleware/board-mutation-guard.js";
 import { desktopLocalAccessGuard } from "./middleware/desktop-local-access.js";
 import { privateHostnameGuard, resolvePrivateHostnameAllowSet } from "./middleware/private-hostname-guard.js";
@@ -53,6 +54,7 @@ import { assetRoutes } from "./routes/assets.js";
 import { accessRoutes } from "./routes/access.js";
 import { spsNodeRoutes } from "./routes/sps-nodes.js";
 import { spsWorkspaceSourceRoutes } from "./routes/sps-workspace-sources.js";
+import { spsMarketplaceRoutes } from "./routes/sps-marketplace.js";
 import { pluginRoutes } from "./routes/plugins.js";
 import { adapterRoutes } from "./routes/adapters.js";
 import { pluginUiStaticRoutes } from "./routes/plugin-ui-static.js";
@@ -214,6 +216,7 @@ export async function createApp(
       resolveSession: opts.resolveSession,
     }),
   );
+  app.use(marketplaceAssistantScopeGuard());
   app.use("/api/auth", authRoutes(db));
   if (opts.spsIdentityHandler) {
     app.use("/api/sps-identity", opts.spsIdentityHandler);
@@ -379,6 +382,7 @@ export async function createApp(
   api.use(adapterRoutes());
   api.use(spsNodeRoutes(db));
   api.use(spsWorkspaceSourceRoutes(db));
+  api.use(spsMarketplaceRoutes(db, workerManager));
   api.use(
     accessRoutes(db, {
       deploymentMode: opts.deploymentMode,

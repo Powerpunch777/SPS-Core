@@ -1837,6 +1837,30 @@ describe("effective run session config freshness", () => {
     ]);
   });
 
+  it("reads SPS freshness metadata from the persisted envelope before adapter decoding", async () => {
+    const metadata = await buildSessionConfigMetadata();
+    const persisted = sessionParamsWithConfigMetadata(metadata);
+
+    expect(codexSessionCodec.deserialize(persisted)).not.toHaveProperty(
+      "__paperclipConfigFingerprint",
+    );
+
+    const decision = resolveTaskSessionConfigFreshness({
+      hasTaskSession: true,
+      configuredModel: "gpt-5.4-mini",
+      taskSessionParams: persisted,
+      configMetadata: metadata,
+    });
+
+    expect(decision).toMatchObject({
+      reset: false,
+      reasons: [],
+      changedCategories: [],
+      storedFingerprint: metadata.fingerprint,
+      nextFingerprint: metadata.fingerprint,
+    });
+  });
+
   it("freshens legacy task sessions that lack versioned config metadata", async () => {
     const metadata = await buildSessionConfigMetadata();
 

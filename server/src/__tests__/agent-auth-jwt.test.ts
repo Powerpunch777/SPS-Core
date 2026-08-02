@@ -79,6 +79,18 @@ describe("agent local JWT", () => {
     expect(claims?.key_scope).toEqual({ kind: "skill_test", issueId });
   });
 
+  it("round-trips a Marketplace Assistant run scope", () => {
+    vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+    const sessionId = "22222222-2222-4222-8222-222222222222";
+    const token = createLocalAgentJwt("agent-1", "company-1", "codex_local", "run-1", "user-1", {
+      kind: "marketplace_assistant",
+      sessionId,
+    });
+
+    const claims = verifyLocalAgentJwt(token!);
+    expect(claims?.key_scope).toEqual({ kind: "marketplace_assistant", sessionId });
+  });
+
   it("returns null when secret is missing", () => {
     process.env[secretEnv] = "";
     const token = createLocalAgentJwt("agent-1", "company-1", "claude_local", "run-1");

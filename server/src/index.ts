@@ -337,6 +337,10 @@ export async function startServer(): Promise<StartedServer> {
   } else {
     const moduleName = "embedded-postgres";
     let EmbeddedPostgres: EmbeddedPostgresCtor;
+    // The Windows native package resolves its binary paths while it is
+    // imported. Prepare the short/subst path first so Unicode install paths
+    // never reach initdb through the active ANSI code page.
+    await prepareEmbeddedPostgresNativeRuntime();
     try {
       const mod = await import(moduleName);
       EmbeddedPostgres = mod.default as EmbeddedPostgresCtor;
@@ -345,8 +349,6 @@ export async function startServer(): Promise<StartedServer> {
         "Embedded PostgreSQL mode requires dependency `embedded-postgres`. Reinstall dependencies (without omitting required packages), or set DATABASE_URL for external Postgres.",
       );
     }
-    await prepareEmbeddedPostgresNativeRuntime();
-  
     const dataDir = resolve(config.embeddedPostgresDataDir);
     const configuredPort = config.embeddedPostgresPort;
     let port = configuredPort;

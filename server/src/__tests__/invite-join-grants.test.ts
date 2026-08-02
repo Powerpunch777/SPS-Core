@@ -69,6 +69,7 @@ describe("human invite roles", () => {
     expect(grantsForHumanRole("owner")).toEqual([
       { permissionKey: "agents:create", scope: null },
       { permissionKey: "agents:configure", scope: null },
+      { permissionKey: "agents:invoke", scope: null },
       { permissionKey: "skills:create", scope: null },
       { permissionKey: "environments:manage", scope: null },
       { permissionKey: "users:invite", scope: null },
@@ -82,6 +83,7 @@ describe("human invite roles", () => {
     expect(grantsForHumanRole("admin")).toEqual([
       { permissionKey: "agents:create", scope: null },
       { permissionKey: "agents:configure", scope: null },
+      { permissionKey: "agents:invoke", scope: null },
       { permissionKey: "skills:create", scope: null },
       { permissionKey: "environments:manage", scope: null },
       { permissionKey: "users:invite", scope: null },
