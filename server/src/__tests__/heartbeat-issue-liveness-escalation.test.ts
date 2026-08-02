@@ -88,11 +88,21 @@ describeEmbeddedPostgres("heartbeat issue graph liveness escalation", () => {
   afterEach(async () => {
     vi.clearAllMocks();
     runningProcesses.clear();
+    const heartbeat = heartbeatService(db);
+    const observedRunIds = new Set<string>();
     let idlePolls = 0;
     for (let attempt = 0; attempt < 100; attempt += 1) {
       const runs = await db
-        .select({ status: heartbeatRuns.status })
+        .select({ id: heartbeatRuns.id, status: heartbeatRuns.status })
         .from(heartbeatRuns);
+      for (const run of runs) observedRunIds.add(run.id);
+
+      // A heartbeat can mark its DB row terminal before executeRun finishes its
+      // final bookkeeping. Quiesce the in-process execution before truncating.
+      await Promise.all(
+        [...observedRunIds].map((runId) => heartbeat.waitForRunExecutionDrain(runId)),
+      );
+
       const hasActiveRun = runs.some((run) => run.status === "queued" || run.status === "running");
       if (!hasActiveRun) {
         idlePolls += 1;
@@ -102,7 +112,6 @@ describeEmbeddedPostgres("heartbeat issue graph liveness escalation", () => {
       }
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
-    await new Promise((resolve) => setTimeout(resolve, 50));
     await db.execute(sql.raw(`TRUNCATE TABLE "companies" CASCADE`));
     await instanceSettingsService(db).updateExperimental({
       enableIssueGraphLivenessAutoRecovery: false,

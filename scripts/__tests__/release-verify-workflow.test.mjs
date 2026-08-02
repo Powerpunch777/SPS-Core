@@ -7,7 +7,7 @@ import test from "node:test";
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 function readWorkflow(name) {
-  return readFileSync(path.join(repoRoot, ".github/workflows", name), "utf8");
+  return readFileSync(path.join(repoRoot, ".github/workflows", name), "utf8").replace(/\r\n/g, "\n");
 }
 
 test("release workflow delegates stable and canary verification to the reusable workflow", () => {

@@ -37,7 +37,6 @@
     "prepare:ui-dist": "node ../scripts/prepare-server-ui-dist.mjs",
     "build": "tsc && mkdir -p dist/onboarding-assets dist/built-ins && cp -R src/onboarding-assets/. dist/onboarding-assets/ && cp -R src/built-ins/. dist/built-ins/",
     "prepack": "pnpm run prepare:ui-dist",
-    "postpack": "rm -rf ui-dist",
     "clean": "rm -rf dist",
     "start": "node dist/index.js",
     "typecheck": "pnpm --filter @paperclipai/plugin-sdk ensure-build-deps && tsc --noEmit"
@@ -62,7 +61,7 @@
     "@paperclipai/hermes-paperclip-adapter": "workspace:*",
     "ajv": "^8.20.0",
     "ajv-formats": "^3.0.1",
-    "better-auth": "1.6.20",
+    "better-auth": "1.6.22",
     "chokidar": "^4.0.3",
     "detect-port": "^2.1.0",
     "dompurify": "^3.4.8",

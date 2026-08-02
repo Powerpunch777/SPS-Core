@@ -76,14 +76,14 @@ function resolvePnpmInvocation() {
     if (existsSync(bundledNpxCli)) {
       return {
         command: process.execPath,
-        prefixArgs: [bundledNpxCli, "--yes", "pnpm@9.15.4"],
+        prefixArgs: [bundledNpxCli, "--yes", "pnpm@11.9.0"],
       };
     }
   }
 
   return {
     command: process.platform === "win32" ? "npx.cmd" : "npx",
-    prefixArgs: ["--yes", "pnpm@9.15.4"],
+    prefixArgs: ["--yes", "pnpm@11.9.0"],
   };
 }
 

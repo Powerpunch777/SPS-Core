@@ -8,13 +8,19 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, "..");
 const packageDir = process.cwd();
 const packageJsonPath = join(packageDir, "package.json");
+const devPackageJsonPath = join(packageDir, "package.dev.json");
 const sdkPackageJsonPath = join(repoRoot, "packages", "plugins", "sdk", "package.json");
 
 if (!existsSync(packageJsonPath)) {
   throw new Error(`No package.json found in plugin directory: ${packageDir}`);
 }
 
-const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf8"));
+if (existsSync(devPackageJsonPath)) {
+  throw new Error(`Refusing to overwrite existing ${devPackageJsonPath}`);
+}
+
+const packageJsonText = readFileSync(packageJsonPath, "utf8");
+const packageJson = JSON.parse(packageJsonText);
 const sdkPackageJson = JSON.parse(readFileSync(sdkPackageJsonPath, "utf8"));
 const canonicalJson = (value) => {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
@@ -62,6 +68,7 @@ const publishPackageJson = {
   dependencies,
 };
 
+writeFileSync(devPackageJsonPath, packageJsonText);
 writeFileSync(packageJsonPath, `${JSON.stringify(publishPackageJson, null, 2)}\n`);
 
 console.log(`  ✓ Generated publishable plugin package.json for ${packageJson.name}`);

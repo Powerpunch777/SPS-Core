@@ -4,14 +4,26 @@ import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
-const repoRoot = new URL("..", import.meta.url).pathname.replace(/\/$/, "");
+function toBashPath(path) {
+  const normalized = path.replaceAll("\\", "/");
+  return normalized.replace(/^([A-Za-z]):/, (_, drive) => `/${drive.toLowerCase()}`);
+}
+
+const repoRoot = toBashPath(fileURLToPath(new URL("..", import.meta.url))).replace(/\/$/, "");
 
 function writeExecutable(path, body) {
   writeFileSync(path, body, { mode: 0o755 });
 }
 
-function runPublishHelper({ pnpmMode, npmVersionExists = false, distTag = "canary", callerPipefail = true }) {
+function runPublishHelper({
+  pnpmMode,
+  npmVersionExists = false,
+  distTag = "canary",
+  callerPipefail = true,
+  helper = "publish",
+}) {
   const fixtureDir = mkdtempSync(join(tmpdir(), "paperclip-release-lib-"));
   const binDir = join(fixtureDir, "bin");
   const stateDir = join(fixtureDir, "state");
@@ -29,6 +41,14 @@ case "$PNPM_MODE" in
   success)
     echo "published"
     exit 0
+    ;;
+  preview-success)
+    printf 'hidden detail\nsummary one\nsummary two\nsummary three\n'
+    exit 0
+    ;;
+  preview-failure)
+    printf 'root publish error\ncontext line\n'
+    exit 42
     ;;
   tlog-then-success)
     if [ ! -f "$FAKE_STATE_DIR/pnpm-called" ]; then
@@ -76,26 +96,32 @@ exit 1
   );
 
   const shellOptions = callerPipefail ? "set -euo pipefail" : "set -eu";
+  const helperCall =
+    helper === "preview"
+      ? `preview_package_publish ${distTag}`
+      : `publish_package_to_npm ${distTag} @paperclipai/example 1.2.3`;
   const script = `
 ${shellOptions}
+export PATH="${toBashPath(binDir)}:$PATH"
 source "${repoRoot}/scripts/release-lib.sh"
-publish_package_to_npm ${distTag} @paperclipai/example 1.2.3
+${helperCall}
 `;
+  const runnerPath = join(fixtureDir, "run-helper.sh");
+  writeExecutable(runnerPath, script);
 
   let status = 0;
   let output = "";
   try {
-    output = execFileSync("bash", ["-c", script], {
+    output = execFileSync("bash", [runnerPath], {
       cwd: fixtureDir,
       encoding: "utf8",
       env: {
         ...process.env,
-        PATH: `${binDir}:${process.env.PATH}`,
-        FAKE_CALL_LOG: callLog,
-        FAKE_STATE_DIR: stateDir,
+        FAKE_CALL_LOG: toBashPath(callLog),
+        FAKE_STATE_DIR: toBashPath(stateDir),
         NPM_VERSION_EXISTS: npmVersionExists ? "true" : "false",
         PNPM_MODE: pnpmMode,
-        REPO_ROOT: fixtureDir,
+        REPO_ROOT: toBashPath(fixtureDir),
       },
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -161,4 +187,20 @@ test("publish_package_to_npm does not retry stable publishes without provenance"
   assert.notEqual(result.status, 0);
   assert.match(result.calls, /^npm view @paperclipai\/example@1\.2\.3 version$/m);
   assert.doesNotMatch(result.calls, /--provenance=false/);
+});
+
+test("preview_package_publish keeps successful output concise", () => {
+  const result = runPublishHelper({ pnpmMode: "preview-success", distTag: "latest", helper: "preview" });
+
+  assert.equal(result.status, 0);
+  assert.match(result.calls, /^pnpm publish --dry-run --no-git-checks --tag latest$/m);
+  assert.doesNotMatch(result.output, /hidden detail/);
+  assert.match(result.output, /summary one\nsummary two\nsummary three/);
+});
+
+test("preview_package_publish preserves failures and their full diagnostics", () => {
+  const result = runPublishHelper({ pnpmMode: "preview-failure", distTag: "latest", helper: "preview" });
+
+  assert.equal(result.status, 42);
+  assert.match(result.output, /root publish error\ncontext line/);
 });
