@@ -17,6 +17,8 @@ const mockExecutionWorkspaceService = vi.hoisted(() => ({
   update: vi.fn(),
 }));
 
+const mockProjectAccessService = vi.hoisted(() => ({}));
+
 const mockSecretService = vi.hoisted(() => ({
   normalizeEnvBindingsForPersistence: vi.fn(),
 }));
@@ -45,6 +47,7 @@ vi.mock("../services/index.js", () => ({
   executionWorkspaceService: () => mockExecutionWorkspaceService,
   heartbeatService: () => mockHeartbeatService,
   logActivity: mockLogActivity,
+  projectAccessService: () => mockProjectAccessService,
   projectService: () => mockProjectService,
   secretService: () => mockSecretService,
   workspaceOperationService: () => mockWorkspaceOperationService,
@@ -73,6 +76,7 @@ function registerWorkspaceRouteMocks() {
     executionWorkspaceService: () => mockExecutionWorkspaceService,
     heartbeatService: () => mockHeartbeatService,
     logActivity: mockLogActivity,
+    projectAccessService: () => mockProjectAccessService,
     projectService: () => mockProjectService,
     secretService: () => mockSecretService,
     workspaceOperationService: () => mockWorkspaceOperationService,

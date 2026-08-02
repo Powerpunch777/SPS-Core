@@ -121,6 +121,20 @@ export interface HostServices {
     deleteFile(params: WorkerToHostMethods["localFolders.deleteFile"][0]): Promise<WorkerToHostMethods["localFolders.deleteFile"][1]>;
   };
 
+  /** Provides workflow-neutral Host Sources, Node runtimes, and plugin runs. */
+  sps?: {
+    listWorkspaceSources(params: WorkerToHostMethods["sps.workspaceSources.list"][0]): Promise<WorkerToHostMethods["sps.workspaceSources.list"][1]>;
+    listRuntimes(params: WorkerToHostMethods["sps.runtimes.list"][0]): Promise<WorkerToHostMethods["sps.runtimes.list"][1]>;
+    listExecutionGrants(params: WorkerToHostMethods["sps.executionGrants.list"][0]): Promise<WorkerToHostMethods["sps.executionGrants.list"][1]>;
+    upsertExecutionGrant(params: WorkerToHostMethods["sps.executionGrants.upsert"][0]): Promise<WorkerToHostMethods["sps.executionGrants.upsert"][1]>;
+    revokeExecutionGrant(params: WorkerToHostMethods["sps.executionGrants.revoke"][0]): Promise<WorkerToHostMethods["sps.executionGrants.revoke"][1]>;
+    dispatchRun(params: WorkerToHostMethods["sps.runs.dispatch"][0]): Promise<WorkerToHostMethods["sps.runs.dispatch"][1]>;
+    getRun(params: WorkerToHostMethods["sps.runs.get"][0]): Promise<WorkerToHostMethods["sps.runs.get"][1]>;
+    listRunEvents(params: WorkerToHostMethods["sps.runs.listEvents"][0]): Promise<WorkerToHostMethods["sps.runs.listEvents"][1]>;
+    publishArtifact(params: WorkerToHostMethods["sps.artifacts.publish"][0]): Promise<WorkerToHostMethods["sps.artifacts.publish"][1]>;
+    listArtifacts(params: WorkerToHostMethods["sps.artifacts.list"][0]): Promise<WorkerToHostMethods["sps.artifacts.list"][1]>;
+  };
+
   /** Provides `state.get`, `state.set`, `state.delete`. */
   state: {
     get(params: WorkerToHostMethods["state.get"][0]): Promise<WorkerToHostMethods["state.get"][1]>;
@@ -380,6 +394,18 @@ const METHOD_CAPABILITY_MAP: Record<WorkerToHostMethodName, PluginCapability | n
   "localFolders.readText": "local.folders",
   "localFolders.writeTextAtomic": "local.folders",
   "localFolders.deleteFile": "local.folders",
+
+  // Workflow-neutral SPS infrastructure
+  "sps.workspaceSources.list": "sps.workspaceSources.read",
+  "sps.runtimes.list": "sps.runtimes.read",
+  "sps.executionGrants.list": "sps.executionGrants.read",
+  "sps.executionGrants.upsert": "sps.executionGrants.write",
+  "sps.executionGrants.revoke": "sps.executionGrants.write",
+  "sps.runs.dispatch": "sps.runs.dispatch",
+  "sps.runs.get": "sps.runs.read",
+  "sps.runs.listEvents": "sps.runs.read",
+  "sps.artifacts.publish": "sps.artifacts.write",
+  "sps.artifacts.list": "sps.artifacts.read",
 
   // State
   "state.get": "plugin.state.read",
@@ -680,6 +706,47 @@ export function createHostClientHandlers(
     }),
     "localFolders.deleteFile": gated("localFolders.deleteFile", async (params) => {
       return services.localFolders.deleteFile(params);
+    }),
+
+    "sps.workspaceSources.list": gated("sps.workspaceSources.list", async (params) => {
+      if (!services.sps) throw new Error("This SPS host does not expose workflow-neutral Workspace Sources");
+      return services.sps.listWorkspaceSources(params);
+    }),
+    "sps.runtimes.list": gated("sps.runtimes.list", async (params) => {
+      if (!services.sps) throw new Error("This SPS host does not expose Node runtime discovery");
+      return services.sps.listRuntimes(params);
+    }),
+    "sps.executionGrants.list": gated("sps.executionGrants.list", async (params) => {
+      if (!services.sps) throw new Error("This SPS host does not expose plugin execution grants");
+      return services.sps.listExecutionGrants(params);
+    }),
+    "sps.executionGrants.upsert": gated("sps.executionGrants.upsert", async (params) => {
+      if (!services.sps) throw new Error("This SPS host does not expose plugin execution grants");
+      return services.sps.upsertExecutionGrant(params);
+    }),
+    "sps.executionGrants.revoke": gated("sps.executionGrants.revoke", async (params) => {
+      if (!services.sps) throw new Error("This SPS host does not expose plugin execution grants");
+      return services.sps.revokeExecutionGrant(params);
+    }),
+    "sps.runs.dispatch": gated("sps.runs.dispatch", async (params) => {
+      if (!services.sps) throw new Error("This SPS host does not expose plugin runtime dispatch");
+      return services.sps.dispatchRun(params);
+    }),
+    "sps.runs.get": gated("sps.runs.get", async (params) => {
+      if (!services.sps) throw new Error("This SPS host does not expose plugin runtime dispatch");
+      return services.sps.getRun(params);
+    }),
+    "sps.runs.listEvents": gated("sps.runs.listEvents", async (params) => {
+      if (!services.sps) throw new Error("This SPS host does not expose plugin runtime dispatch");
+      return services.sps.listRunEvents(params);
+    }),
+    "sps.artifacts.publish": gated("sps.artifacts.publish", async (params) => {
+      if (!services.sps) throw new Error("This SPS host does not expose workflow-neutral artifacts");
+      return services.sps.publishArtifact(params);
+    }),
+    "sps.artifacts.list": gated("sps.artifacts.list", async (params) => {
+      if (!services.sps) throw new Error("This SPS host does not expose workflow-neutral artifacts");
+      return services.sps.listArtifacts(params);
     }),
 
     // State

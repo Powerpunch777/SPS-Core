@@ -74,6 +74,7 @@ export const spsNodes = pgTable(
     ownerUserId: text("owner_user_id").notNull(),
     displayName: text("display_name").notNull(),
     publicKey: text("public_key").notNull(),
+    transportPublicKey: text("transport_public_key"),
     platform: text("platform").notNull(),
     appVersion: text("app_version"),
     capabilities: jsonb("capabilities").$type<SpsNodeCapability[]>().notNull().default([]),
@@ -227,9 +228,72 @@ export const spsAgentNodeBindings = pgTable(
 );
 
 /**
+ * A Host-owned source folder made available to approved Member Nodes. The Hub
+ * records only the network share identity; the Host's local source path and
+ * the plaintext share credentials never leave their respective computers.
+ */
+export const spsHostProjectShares = pgTable(
+  "sps_host_project_shares",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    projectId: uuid("project_id").notNull().references(() => projects.id, { onDelete: "cascade" }),
+    // The physical Owner Host may execute work through Core directly and is
+    // not required to register itself as a remote Node. Keep this optional for
+    // a future Host Runner binding without making source sharing depend on it.
+    hostNodeId: uuid("host_node_id").references(() => spsNodes.id, { onDelete: "set null" }),
+    sharePath: text("share_path").notNull(),
+    status: text("status").notNull().default("active"),
+    createdByUserId: text("created_by_user_id").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    companyProjectUniqueIdx: uniqueIndex("sps_host_project_shares_company_project_unique_idx").on(
+      table.companyId,
+      table.projectId,
+    ),
+    hostNodeIdx: index("sps_host_project_shares_host_node_idx").on(table.hostNodeId),
+  }),
+);
+
+/**
+ * The credential envelope is encrypted to the target Node's transport public
+ * key. The Hub can route it but cannot decrypt it, and it is never added to a
+ * CLI environment or task transcript.
+ */
+export const spsHostProjectShareNodeGrants = pgTable(
+  "sps_host_project_share_node_grants",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    shareId: uuid("share_id").notNull().references(() => spsHostProjectShares.id, { onDelete: "cascade" }),
+    nodeId: uuid("node_id").notNull().references(() => spsNodes.id, { onDelete: "cascade" }),
+    credentialAlgorithm: text("credential_algorithm").notNull().default("rsa-oaep-sha256"),
+    credentialEnvelope: text("credential_envelope").notNull(),
+    grantedByUserId: text("granted_by_user_id").notNull(),
+    revokedAt: timestamp("revoked_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => ({
+    shareNodeUniqueIdx: uniqueIndex("sps_host_project_share_node_grants_share_node_unique_idx").on(
+      table.shareId,
+      table.nodeId,
+    ),
+    companyNodeIdx: index("sps_host_project_share_node_grants_company_node_idx").on(
+      table.companyId,
+      table.nodeId,
+    ),
+  }),
+);
+
+/**
  * A command is created by the Hub and claimed by the SPS Desktop Node that
  * owns the local CLI/runtime. Command rows deliberately contain no provider
- * credentials: those stay in the Desktop Node's local secure storage.
+ * credentials: those stay in the Desktop Node's local secure storage. A
+ * project share access envelope is an exception only in form: it is encrypted
+ * to the target Node and cannot be read by the Hub or passed to the CLI.
  */
 export const spsNodeCommands = pgTable(
   "sps_node_commands",
@@ -245,6 +309,7 @@ export const spsNodeCommands = pgTable(
     command: text("command").notNull(),
     args: jsonb("args").$type<string[]>().notNull().default([]),
     cwdHint: text("cwd_hint"),
+    workspaceAccess: jsonb("workspace_access").$type<Record<string, unknown> | null>(),
     env: jsonb("env").$type<Record<string, string>>().notNull().default({}),
     stdin: text("stdin"),
     timeoutMs: integer("timeout_ms"),

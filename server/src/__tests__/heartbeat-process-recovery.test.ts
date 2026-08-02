@@ -1983,7 +1983,10 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       executionRunId: retryRun?.id ?? null,
     });
 
-    const comments = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
+    const comments = await waitForValue(async () => {
+      const rows = await db.select().from(issueComments).where(eq(issueComments.issueId, issueId));
+      return rows.length > 0 ? rows : null;
+    });
     expect(comments).toHaveLength(1);
     expect(comments[0]).toMatchObject({
       authorType: "system",
@@ -1991,11 +1994,15 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       body: "Agent failed to resume after approval: `adapter_failed` — retrying (attempt 1/3)",
     });
 
-    const interaction = await db
-      .select({ result: issueThreadInteractions.result })
-      .from(issueThreadInteractions)
-      .where(eq(issueThreadInteractions.id, interactionId))
-      .then((rows) => rows[0] ?? null);
+    const interaction = await waitForValue(async () => {
+      const row = await db
+        .select({ result: issueThreadInteractions.result })
+        .from(issueThreadInteractions)
+        .where(eq(issueThreadInteractions.id, interactionId))
+        .then((rows) => rows[0] ?? null);
+      const result = row?.result;
+      return result && typeof result === "object" && "resumeFailure" in result ? row : null;
+    });
     expect(interaction?.result).toMatchObject({
       version: 1,
       outcome: "accepted",

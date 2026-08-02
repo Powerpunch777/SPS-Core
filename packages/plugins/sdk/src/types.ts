@@ -553,6 +553,145 @@ export interface PluginLocalFoldersClient {
   deleteFile(companyId: string, folderKey: string, relativePath: string): Promise<PluginLocalFolderStatus>;
 }
 
+/** A Host-managed source folder without its filesystem path or credentials. */
+export interface PluginSpsWorkspaceSource {
+  id: string;
+  displayName: string;
+  status: string;
+  routeStatus: "configured" | "not_configured";
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Safe Node-local runtime metadata. Provider credentials never leave the Node. */
+export interface PluginSpsRuntime {
+  id: string;
+  nodeId: string;
+  nodeLabel: string;
+  kind: string;
+  runnerKey: string;
+  label: string;
+  profileLabel: string | null;
+  credentialStatus: string;
+  availabilityStatus: string;
+  availabilityDetail: string | null;
+  availabilityObservedAt: string | null;
+  retryAfter: string | null;
+  online: boolean;
+}
+
+/** A technical allowance for one plugin-defined subject to use one runtime. */
+export interface PluginSpsExecutionGrant {
+  id: string;
+  companyId: string;
+  pluginKey: string;
+  subjectKey: string;
+  nodeId: string;
+  runnerProfileId: string;
+  workspaceSourceId: string | null;
+  status: string;
+  revokedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PluginSpsRun {
+  id: string;
+  companyId: string;
+  pluginKey: string;
+  subjectKey: string;
+  executionGrantId: string;
+  nodeId: string;
+  runnerProfileId: string;
+  workspaceSourceId: string | null;
+  status: string;
+  exitCode: number | null;
+  signal: string | null;
+  timedOut: boolean;
+  error: string | null;
+  claimedAt: string | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PluginSpsRunEvent {
+  sequence: number;
+  stream: string;
+  body: string;
+  createdAt: string;
+}
+
+/** A plugin-published work-product record without Host-local file paths. */
+export interface PluginSpsArtifact {
+  id: string;
+  companyId: string;
+  pluginKey: string;
+  subjectKey: string;
+  runId: string | null;
+  title: string;
+  kind: string;
+  referenceUrl: string | null;
+  summary: string | null;
+  data: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * Workflow-neutral SPS infrastructure for plugins. `subjectKey` is owned by
+ * the calling plugin; Core does not interpret it as an Agent, Task, or role.
+ */
+export interface PluginSpsClient {
+  workspaceSources: {
+    list(companyId: string): Promise<PluginSpsWorkspaceSource[]>;
+  };
+  runtimes: {
+    list(companyId: string, options?: { nodeId?: string | null }): Promise<PluginSpsRuntime[]>;
+  };
+  executionGrants: {
+    list(companyId: string, options?: { subjectKey?: string | null; includeRevoked?: boolean }): Promise<PluginSpsExecutionGrant[]>;
+    upsert(input: {
+      companyId: string;
+      subjectKey: string;
+      nodeId: string;
+      runnerProfileId: string;
+      workspaceSourceId?: string | null;
+    }): Promise<PluginSpsExecutionGrant>;
+    revoke(companyId: string, grantId: string): Promise<PluginSpsExecutionGrant>;
+  };
+  runs: {
+    dispatch(input: {
+      companyId: string;
+      executionGrantId: string;
+      args: string[];
+      env?: Record<string, string>;
+      stdin?: string | null;
+      timeoutMs?: number | null;
+    }): Promise<PluginSpsRun>;
+    get(companyId: string, runId: string): Promise<PluginSpsRun>;
+    listEvents(companyId: string, runId: string, options?: { afterSequence?: number | null }): Promise<PluginSpsRunEvent[]>;
+  };
+  artifacts: {
+    publish(input: {
+      companyId: string;
+      subjectKey: string;
+      runId?: string | null;
+      title: string;
+      kind?: string | null;
+      referenceUrl?: string | null;
+      summary?: string | null;
+      data?: Record<string, unknown>;
+    }): Promise<PluginSpsArtifact>;
+    list(companyId: string, options?: {
+      subjectKey?: string | null;
+      runId?: string | null;
+      limit?: number | null;
+    }): Promise<PluginSpsArtifact[]>;
+  };
+}
+
 /**
  * `ctx.events` — subscribe to and emit Paperclip domain events.
  *
@@ -2030,6 +2169,9 @@ export interface PluginContext {
 
   /** Configure and safely access trusted company-scoped local folders. */
   localFolders: PluginLocalFoldersClient;
+
+  /** Use Host-managed Workspace Sources and Node-local CLI runtimes. */
+  sps: PluginSpsClient;
 
   /** Subscribe to and emit domain events. Requires `events.subscribe` / `events.emit`. */
   events: PluginEventsClient;

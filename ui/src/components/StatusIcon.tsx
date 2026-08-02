@@ -15,6 +15,8 @@ interface StatusIconProps {
   status: string;
   blockerAttention?: IssueBlockerAttention | null;
   onChange?: (status: string) => void;
+  /** Statuses that cannot be selected in the current task context. */
+  unavailableStatuses?: Record<string, string>;
   className?: string;
   showLabel?: boolean;
   /** Glyph size (PAP-243a). Default `md` (16px); lists/detail/mentions use `lg` (20px). */
@@ -75,11 +77,20 @@ function blockedAttentionLabel(blockerAttention: IssueBlockerAttention | null | 
  * glyph — the blocked shape recoloured blue — while the full blocked reason
  * still rides on the accessible label.
  */
-export function StatusIcon({ status, blockerAttention, onChange, className, showLabel, size = "md" }: StatusIconProps) {
+export function StatusIcon({
+  status,
+  blockerAttention,
+  onChange,
+  unavailableStatuses,
+  className,
+  showLabel,
+  size = "md",
+}: StatusIconProps) {
   const [open, setOpen] = useState(false);
   const isCoveredBlocked = status === "blocked" && blockerAttention?.state === "covered";
   const ariaLabel = status === "blocked" ? blockedAttentionLabel(blockerAttention) : statusLabel(status);
   const glyphStatus = isCoveredBlocked ? "in_queue" : status;
+  const pickerConstraintSummary = Object.values(unavailableStatuses ?? {})[0];
 
   const glyph = (
     <StatusGlyph
@@ -102,7 +113,10 @@ export function StatusIcon({ status, blockerAttention, onChange, className, show
   }
 
   const trigger = showLabel ? (
-    <button className="inline-flex min-h-5 items-center gap-1.5 cursor-pointer hover:bg-accent/50 rounded px-1 -mx-1 py-0.5 transition-colors">
+    <button
+      className="inline-flex min-h-5 items-center gap-1.5 cursor-pointer hover:bg-accent/50 rounded px-1 -mx-1 py-0.5 transition-colors"
+      title={pickerConstraintSummary}
+    >
       {glyph}
       <span className="text-sm">{statusLabel(status)}</span>
     </button>
@@ -114,21 +128,27 @@ export function StatusIcon({ status, blockerAttention, onChange, className, show
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>{trigger}</PopoverTrigger>
       <PopoverContent className="w-40 p-1" align="start">
-        {allStatuses.map((s) => (
-          <Button
-            key={s}
-            variant="ghost"
-            size="sm"
-            className={cn("w-full justify-start gap-2 text-xs", s === status && "bg-accent")}
-            onClick={() => {
-              onChange(s);
-              setOpen(false);
-            }}
-          >
-            <StatusIcon status={s} size="lg" />
-            {statusLabel(s)}
-          </Button>
-        ))}
+        {allStatuses.map((s) => {
+          const unavailableReason = unavailableStatuses?.[s];
+          return (
+            <Button
+              key={s}
+              variant="ghost"
+              size="sm"
+              disabled={Boolean(unavailableReason)}
+              title={unavailableReason}
+              className={cn("w-full justify-start gap-2 text-xs", s === status && "bg-accent")}
+              onClick={() => {
+                onChange(s);
+                setOpen(false);
+              }}
+            >
+              <StatusIcon status={s} size="lg" />
+              <span className="min-w-0 truncate">{statusLabel(s)}</span>
+              {unavailableReason ? <span className="ml-auto text-[10px] text-muted-foreground">Assign first</span> : null}
+            </Button>
+          );
+        })}
       </PopoverContent>
     </Popover>
   );

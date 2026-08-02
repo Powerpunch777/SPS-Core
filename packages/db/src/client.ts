@@ -435,7 +435,12 @@ async function loadAppliedMigrations(
   }
 
   if (columnNames.has("hash")) {
-    const rows = await sql.unsafe<{ hash: string }[]>(`SELECT hash FROM ${qualifiedTable} ORDER BY id`);
+    const rows = await sql.unsafe<{
+      hash: string;
+      created_at?: string | number | null;
+    }[]>(
+      `SELECT hash${columnNames.has("created_at") ? ", created_at" : ""} FROM ${qualifiedTable} ORDER BY id`,
+    );
     const hashesToMigrationFiles = await mapHashesToMigrationFiles(availableMigrations);
     const appliedFromHashes = rows
       .map((row) => hashesToMigrationFiles.get(row.hash))
@@ -448,23 +453,30 @@ async function loadAppliedMigrations(
     // instead of treating every unresolved row as an unapplied migration.
     if (appliedFromHashes.length === rows.length) return appliedFromHashes;
 
-    // Fallback when hashes are wholly or partially unresolved.
+    // Resolve unresolved rows independently. Using the latest timestamp for all
+    // rows can make a legacy row in the middle of the lineage imply that later
+    // migrations were applied as well.
     if (columnNames.has("created_at")) {
       const journalEntries = await listJournalMigrationEntries();
       if (journalEntries.length > 0) {
-        const lastDbRows = await sql.unsafe<{ created_at: string | number | null }[]>(
-          `SELECT created_at FROM ${qualifiedTable} ORDER BY created_at DESC LIMIT 1`,
-        );
-        const lastCreatedAt = Number(lastDbRows[0]?.created_at ?? -1);
-        if (Number.isFinite(lastCreatedAt) && lastCreatedAt >= 0) {
-          const appliedFromTimestamp = journalEntries
-            .filter((entry) => availableMigrations.includes(entry.fileName))
-            .filter((entry) => entry.folderMillis <= lastCreatedAt)
-            .map((entry) => entry.fileName)
-            .slice(0, rows.length);
-          const applied = new Set([...appliedFromTimestamp, ...appliedFromHashes]);
-          return availableMigrations.filter((migrationFile) => applied.has(migrationFile));
+        const journalFilesByTimestamp = new Map<number, string[]>();
+        for (const entry of journalEntries) {
+          if (!availableMigrations.includes(entry.fileName)) continue;
+          const files = journalFilesByTimestamp.get(entry.folderMillis) ?? [];
+          files.push(entry.fileName);
+          journalFilesByTimestamp.set(entry.folderMillis, files);
         }
+
+        const applied = new Set(appliedFromHashes);
+        for (const row of rows) {
+          if (hashesToMigrationFiles.has(row.hash)) continue;
+          const createdAt = Number(row.created_at ?? Number.NaN);
+          if (!Number.isFinite(createdAt) || createdAt < 0) continue;
+          const timestampMatches = journalFilesByTimestamp.get(createdAt);
+          if (timestampMatches?.length === 1) applied.add(timestampMatches[0]);
+        }
+
+        return availableMigrations.filter((migrationFile) => applied.has(migrationFile));
       }
     }
 

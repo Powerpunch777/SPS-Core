@@ -95,9 +95,21 @@ export {
   spsNodeAgentGrants,
   spsNodeAgentRunnerGrants,
   spsAgentNodeBindings,
+  spsHostProjectShares,
+  spsHostProjectShareNodeGrants,
   spsNodeCommands,
   spsNodeCommandEvents,
 } from "./sps_nodes.js";
+export {
+  spsWorkspaceSources,
+  spsWorkspaceSourceNodeGrants,
+} from "./sps_workspace_sources.js";
+export {
+  spsPluginExecutionGrants,
+  spsPluginNodeRuns,
+  spsPluginNodeRunEvents,
+  spsPluginArtifacts,
+} from "./sps_plugin_execution.js";
 export { costEvents } from "./cost_events.js";
 export { financeEvents } from "./finance_events.js";
 export { approvals } from "./approvals.js";

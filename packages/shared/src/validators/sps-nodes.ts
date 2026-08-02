@@ -56,6 +56,20 @@ export const spsNodeRunnerAvailabilityStatusSchema = z.enum([
 export const spsNodeRunnerCredentialStatusSchema = z.enum(["ready", "auth_required", "unknown"]);
 export const spsNodeRunnerAvailabilitySourceSchema = z.enum(["node_probe", "adapter", "manual"]);
 
+// These are the Node-local runtimes SPS Desktop may execute directly. Other
+// advertised capability kinds remain useful metadata, but cannot be treated
+// as an arbitrary shell command by a plugin execution request.
+export const spsNodeExecutableRuntimeKindSchema = z.enum([
+  "claude_cli",
+  "codex_cli",
+  "agy_cli",
+  "gemini_cli",
+  "opencode_cli",
+  "pi_cli",
+  "ollama",
+  "lm_studio",
+]);
+
 // These fields are intentionally operational summaries only. The Hub must
 // never receive a CLI token, API key, cookie, home directory, or account ID.
 export const spsNodeRunnerAvailabilitySchema = z.object({
@@ -80,6 +94,7 @@ const uniqueRunnerKeys = (profiles: ReadonlyArray<{ runnerKey: string }>) =>
 export const createSpsNodeSchema = z.object({
   displayName: z.string().trim().min(1).max(120),
   publicKey: z.string().trim().min(32).max(8192),
+  transportPublicKey: z.string().trim().min(64).max(8192).optional().nullable(),
   platform: z.string().trim().min(1).max(120),
   appVersion: z.string().trim().max(120).optional().nullable(),
   capabilities: z.array(spsNodeCapabilitySchema).max(32).default([]),
@@ -163,6 +178,7 @@ export type SpsNodeCapability = z.infer<typeof spsNodeCapabilitySchema>;
 export type SpsNodeRunnerAvailabilityStatus = z.infer<typeof spsNodeRunnerAvailabilityStatusSchema>;
 export type SpsNodeRunnerCredentialStatus = z.infer<typeof spsNodeRunnerCredentialStatusSchema>;
 export type SpsNodeRunnerAvailabilitySource = z.infer<typeof spsNodeRunnerAvailabilitySourceSchema>;
+export type SpsNodeExecutableRuntimeKind = z.infer<typeof spsNodeExecutableRuntimeKindSchema>;
 export type SpsNodeRunnerAvailability = z.infer<typeof spsNodeRunnerAvailabilitySchema>;
 export type SpsNodeRunnerProfile = z.infer<typeof spsNodeRunnerProfileSchema>;
 export type CreateSpsNode = z.infer<typeof createSpsNodeSchema>;

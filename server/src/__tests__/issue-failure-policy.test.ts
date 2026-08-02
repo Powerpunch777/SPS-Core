@@ -241,7 +241,7 @@ describePostgres("IssueExecutionFailurePolicy DB integration tests", () => {
     expect(actions[0].ownerAgentId).toBe(managerId);
     expect(actions[0].wakePolicy).toEqual({
       type: "record_only",
-      reason: "wake_recovery_owner_disabled_by_policy",
+      reason: "automatic_retry_disabled_by_policy",
       ownerAgentId: managerId,
     });
 
@@ -385,7 +385,7 @@ describePostgres("IssueExecutionFailurePolicy DB integration tests", () => {
     expect(actions[0].ownerAgentId).toBe(managerId);
     expect(actions[0].wakePolicy).toEqual({
       type: "record_only",
-      reason: "wake_recovery_owner_disabled_by_policy",
+      reason: "automatic_retry_disabled_by_policy",
       ownerAgentId: managerId,
     });
   });

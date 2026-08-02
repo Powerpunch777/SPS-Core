@@ -4149,6 +4149,9 @@ export function IssueDetail() {
             status={issue.status}
             size="lg"
             blockerAttention={issue.blockerAttention}
+            unavailableStatuses={!issue.assigneeAgentId && !issue.assigneeUserId
+              ? { in_progress: "Assign an agent or member before starting this task." }
+              : undefined}
             onChange={(status) => updateIssue.mutate({ status })}
           />
           <PriorityIcon

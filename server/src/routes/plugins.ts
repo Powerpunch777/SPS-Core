@@ -82,8 +82,11 @@ import {
   assertBoardOrgAccess,
   assertCompanyAccess,
   assertInstanceAdmin,
+  assertSpsCoreHostAuthority,
+  hasSpsCoreHostAuthority,
   getActorInfo,
 } from "./authz.js";
+import { isSpsCoreBaselineModeEnabled } from "../ui-branding.js";
 import { validateInstanceConfig } from "../services/plugin-config-validator.js";
 import {
   findLocalFolderDeclaration,
@@ -768,7 +771,7 @@ export function pluginRoutes(
     requestedPermissions: readonly (typeof PERMISSION_KEYS)[number][],
   ) {
     if (!companyId || requestedPermissions.length === 0) return [];
-    if (req.actor.type === "board" && (req.actor.source === "local_implicit" || req.actor.isInstanceAdmin)) {
+    if (hasSpsCoreHostAuthority(req)) {
       return [...requestedPermissions];
     }
     if (req.actor.type === "board" && req.actor.userId) {
@@ -881,7 +884,14 @@ export function pluginRoutes(
   async function assertPluginCompanyAdministrator(req: Request, companyId: string): Promise<void> {
     assertBoard(req);
     assertCompanyAccess(req, companyId);
-    if (req.actor.source === "local_implicit" || req.actor.isInstanceAdmin) return;
+    // A company activation changes the active product surface. In the
+    // workflow-neutral SPS baseline that lifecycle authority belongs only to
+    // the physical Host, not a migrated company permission.
+    if (isSpsCoreBaselineModeEnabled()) {
+      assertSpsCoreHostAuthority(req);
+      return;
+    }
+    if (hasSpsCoreHostAuthority(req)) return;
     const userId = req.actor.userId;
     if (!userId || !await accessSvc.hasPermission(companyId, "user", userId, "agents:configure")) {
       throw forbidden("Company Agent configuration permission is required for this plugin setting.");
@@ -2872,7 +2882,7 @@ export function pluginRoutes(
     // board-level user were allowed to set it.
     if (
       "devUiUrl" in body.configJson &&
-      !(req.actor.type === "board" && req.actor.isInstanceAdmin)
+      !hasSpsCoreHostAuthority(req)
     ) {
       delete body.configJson.devUiUrl;
     }

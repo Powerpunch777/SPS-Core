@@ -13,6 +13,7 @@ import {
   XCircle,
 } from "lucide-react";
 import { agentsApi } from "@/api/agents";
+import { accessApi, type CurrentBoardAccess } from "@/api/access";
 import { ApiError } from "@/api/client";
 import { spsNodesApi, type SpsNode } from "@/api/spsNodes";
 import { Badge } from "@/components/ui/badge";
@@ -28,6 +29,7 @@ import { useBreadcrumbs } from "@/context/BreadcrumbContext";
 import { useCompany } from "@/context/CompanyContext";
 import { useToast } from "@/context/ToastContext";
 import { queryKeys } from "@/lib/queryKeys";
+import { isSpsCoreBaselineModeEnabled } from "@/lib/sps-core-baseline-mode";
 
 function nodeStatusBadge(status: SpsNode["status"]) {
   if (status === "active") return <Badge className="bg-emerald-600 text-white hover:bg-emerald-600">Active</Badge>;
@@ -58,11 +60,25 @@ function nodeIsOnline(lastSeenAt: string | null) {
   return Date.now() - new Date(lastSeenAt).getTime() <= 2 * 60 * 1000;
 }
 
-function errorMessage(error: unknown) {
+function errorMessage(error: unknown, spsCoreBaseline: boolean) {
   if (error instanceof ApiError && error.status === 403) {
-    return "Only company owners and admins can manage SPS Nodes.";
+    return spsCoreBaseline
+      ? "Only the SPS Host can manage shared Nodes."
+      : "Only company owners and admins can manage SPS Nodes.";
   }
   return error instanceof Error ? error.message : "Unknown error";
+}
+
+export function canManageSpsNodes(
+  companyId: string | null,
+  access: CurrentBoardAccess | undefined,
+  spsCoreBaseline: boolean,
+) {
+  if (!companyId || !access) return null;
+  if (spsCoreBaseline) return access.source === "local_implicit";
+  if (access.isInstanceAdmin || access.source === "local_implicit") return true;
+  const membership = access.memberships?.find((item) => item.companyId === companyId && item.status === "active");
+  return membership?.membershipRole === "owner" || membership?.membershipRole === "admin";
 }
 
 export function SpsNodes() {
@@ -70,26 +86,33 @@ export function SpsNodes() {
   const { setBreadcrumbs } = useBreadcrumbs();
   const { pushToast } = useToast();
   const queryClient = useQueryClient();
+  const spsCoreBaseline = isSpsCoreBaselineModeEnabled();
   const [agentDrafts, setAgentDrafts] = useState<Record<string, string>>({});
+
+  const boardAccessQuery = useQuery({
+    queryKey: queryKeys.access.currentBoardAccess,
+    queryFn: () => accessApi.getCurrentBoardAccess(),
+  });
+  const canManageNodes = canManageSpsNodes(selectedCompanyId, boardAccessQuery.data, spsCoreBaseline);
 
   useEffect(() => {
     setBreadcrumbs([
-      { label: selectedCompany?.name ?? "Company", href: "/dashboard" },
-      { label: "Settings", href: "/company/settings" },
+      { label: selectedCompany?.name ?? (spsCoreBaseline ? "Workspace" : "Company"), href: "/dashboard" },
+      { label: spsCoreBaseline ? "Host settings" : "Settings", href: "/company/settings" },
       { label: "Nodes" },
     ]);
-  }, [selectedCompany?.name, setBreadcrumbs]);
+  }, [selectedCompany?.name, setBreadcrumbs, spsCoreBaseline]);
 
   const nodesQuery = useQuery({
     queryKey: queryKeys.spsNodes.list(selectedCompanyId ?? ""),
     queryFn: () => spsNodesApi.list(selectedCompanyId!),
-    enabled: !!selectedCompanyId,
+    enabled: !!selectedCompanyId && canManageNodes === true,
     refetchInterval: 15_000,
   });
   const agentsQuery = useQuery({
     queryKey: queryKeys.agents.list(selectedCompanyId ?? ""),
     queryFn: () => agentsApi.list(selectedCompanyId!),
-    enabled: !!selectedCompanyId,
+    enabled: !!selectedCompanyId && canManageNodes === true && !spsCoreBaseline,
   });
 
   const refreshNodes = async () => {
@@ -103,7 +126,7 @@ export function SpsNodes() {
       await refreshNodes();
       pushToast({ title: "SPS Node approved", tone: "success" });
     },
-    onError: (error) => pushToast({ title: "Could not approve SPS Node", body: errorMessage(error), tone: "error" }),
+    onError: (error) => pushToast({ title: "Could not approve SPS Node", body: errorMessage(error, spsCoreBaseline), tone: "error" }),
   });
   const revokeMutation = useMutation({
     mutationFn: (nodeId: string) => spsNodesApi.revoke(nodeId),
@@ -111,7 +134,7 @@ export function SpsNodes() {
       await refreshNodes();
       pushToast({ title: "SPS Node revoked", tone: "success" });
     },
-    onError: (error) => pushToast({ title: "Could not revoke SPS Node", body: errorMessage(error), tone: "error" }),
+    onError: (error) => pushToast({ title: "Could not revoke SPS Node", body: errorMessage(error, spsCoreBaseline), tone: "error" }),
   });
   const grantMutation = useMutation({
     mutationFn: (input: { nodeId: string; agentId: string }) => spsNodesApi.grantAgent(input.nodeId, input.agentId),
@@ -123,7 +146,7 @@ export function SpsNodes() {
         tone: "success",
       });
     },
-    onError: (error) => pushToast({ title: "Could not grant Agent access", body: errorMessage(error), tone: "error" }),
+    onError: (error) => pushToast({ title: "Could not grant Agent access", body: errorMessage(error, spsCoreBaseline), tone: "error" }),
   });
   const revokeGrantMutation = useMutation({
     mutationFn: (input: { nodeId: string; agentId: string }) => spsNodesApi.revokeAgent(input.nodeId, input.agentId),
@@ -131,7 +154,7 @@ export function SpsNodes() {
       await refreshNodes();
       pushToast({ title: "Agent access removed", tone: "success" });
     },
-    onError: (error) => pushToast({ title: "Could not remove Agent access", body: errorMessage(error), tone: "error" }),
+    onError: (error) => pushToast({ title: "Could not remove Agent access", body: errorMessage(error, spsCoreBaseline), tone: "error" }),
   });
   const bindMutation = useMutation({
     mutationFn: (input: { nodeId: string; agentId: string }) => spsNodesApi.bindPrimary(input.agentId, input.nodeId),
@@ -139,7 +162,7 @@ export function SpsNodes() {
       await refreshNodes();
       pushToast({ title: "Primary execution Node updated", tone: "success" });
     },
-    onError: (error) => pushToast({ title: "Could not set primary Node", body: errorMessage(error), tone: "error" }),
+    onError: (error) => pushToast({ title: "Could not set primary Node", body: errorMessage(error, spsCoreBaseline), tone: "error" }),
   });
   const clearBindingMutation = useMutation({
     mutationFn: (agentId: string) => spsNodesApi.clearPrimary(agentId),
@@ -147,7 +170,7 @@ export function SpsNodes() {
       await refreshNodes();
       pushToast({ title: "Primary execution Node cleared", tone: "success" });
     },
-    onError: (error) => pushToast({ title: "Could not clear primary Node", body: errorMessage(error), tone: "error" }),
+    onError: (error) => pushToast({ title: "Could not clear primary Node", body: errorMessage(error, spsCoreBaseline), tone: "error" }),
   });
 
   const activeAgents = useMemo(
@@ -156,13 +179,38 @@ export function SpsNodes() {
   );
 
   if (!selectedCompanyId) {
-    return <div className="text-sm text-muted-foreground">Select a company to manage SPS Nodes.</div>;
+    return <div className="text-sm text-muted-foreground">Select a {spsCoreBaseline ? "Workspace" : "company"} to manage SPS Nodes.</div>;
   }
-  if (nodesQuery.isLoading || agentsQuery.isLoading) {
+  if (boardAccessQuery.isLoading || canManageNodes === null) {
+    return <div className="text-sm text-muted-foreground">Checking SPS Node access...</div>;
+  }
+  if (canManageNodes === false) {
+    return (
+      <div className="max-w-2xl space-y-4">
+        <header className="space-y-2">
+          <div className="flex items-center gap-2">
+            <MonitorCog className="h-5 w-5 text-muted-foreground" />
+            <h1 className="text-lg font-semibold">SPS Nodes</h1>
+          </div>
+          <p className="text-sm text-muted-foreground">
+            {spsCoreBaseline
+              ? "Only the Host manages the shared computer inventory from this page."
+              : "SPS Nodes are approved and assigned by company Owners or Admins. Team members do not manage the shared computer inventory from this page."}
+          </p>
+        </header>
+        <div className="rounded-lg border border-border bg-muted/30 px-4 py-3 text-sm text-muted-foreground">
+          Open SPS Desktop on this computer and choose <strong>Connect this computer as an SPS Node</strong>. {spsCoreBaseline
+            ? "The Host will then see it as pending approval."
+            : "The Owner will then see it as pending approval and can grant it to specific Agents."}
+        </div>
+      </div>
+    );
+  }
+  if (nodesQuery.isLoading || (!spsCoreBaseline && agentsQuery.isLoading)) {
     return <div className="text-sm text-muted-foreground">Loading SPS Nodes...</div>;
   }
   if (nodesQuery.error) {
-    return <div className="text-sm text-destructive">{errorMessage(nodesQuery.error)}</div>;
+    return <div className="text-sm text-destructive">{errorMessage(nodesQuery.error, spsCoreBaseline)}</div>;
   }
 
   const nodes = nodesQuery.data ?? [];
@@ -181,7 +229,7 @@ export function SpsNodes() {
           <h1 className="text-lg font-semibold">SPS Nodes</h1>
         </div>
         <p className="max-w-3xl text-sm text-muted-foreground">
-          Approve computers registered by SPS Desktop, then grant each Agent access to the CLI or local AI available on that computer. Runner Profiles show safe readiness and quota evidence without exposing local credentials.
+          Approve computers registered by SPS Desktop. Runner profiles show safe runtime readiness and quota evidence without exposing local credentials.
         </p>
         <div className="flex items-start gap-2 rounded-lg border border-border bg-muted/30 px-4 py-3 text-sm text-muted-foreground">
           <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0" />
@@ -285,7 +333,7 @@ export function SpsNodes() {
                     )}
                   </div>
 
-                  <div className="space-y-3 border-t border-border pt-5">
+                  {!spsCoreBaseline ? <div className="space-y-3 border-t border-border pt-5">
                     <div>
                       <h3 className="text-sm font-semibold">Agent execution access</h3>
                       <p className="text-sm text-muted-foreground">Only granted Agents can use this computer. The picker lists only Agents whose adapter has been discovered on this Node. A new Agent grant includes currently compatible Runner Profiles; later policy can narrow that access to a selected local profile. The first approved Node granted to an Agent becomes its primary execution Node. Later grants are available for reassignment and leave the current primary unchanged.</p>
@@ -349,7 +397,7 @@ export function SpsNodes() {
                     ) : (
                       <p className="text-sm text-muted-foreground">No Agent has execution access to this Node.</p>
                     )}
-                  </div>
+                  </div> : null}
                 </div>
               </section>
             );

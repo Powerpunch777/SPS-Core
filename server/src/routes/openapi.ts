@@ -5491,6 +5491,73 @@ for (const route of [
 
 // ─── Spec builder ─────────────────────────────────────────────────────────────
 
+for (const route of [
+  ["get", "/api/plugins/agent-platform/extensions", "List agent-platform plugin extensions"],
+  ["get", "/api/plugins/memory-providers", "List available memory providers"],
+  ["get", "/api/plugins/companies/{companyId}/memory-provider", "Get the company memory provider"],
+  ["put", "/api/plugins/companies/{companyId}/memory-provider", "Set the company memory provider"],
+  ["get", "/api/plugins/companies/{companyId}/memory-provider/deliveries", "List memory-provider deliveries"],
+  ["get", "/api/plugins/{pluginId}/companies/{companyId}/tool-grants", "List plugin tool grants"],
+  ["put", "/api/plugins/{pluginId}/companies/{companyId}/tool-grants/{agentId}", "Set an agent plugin tool grant"],
+  ["get", "/api/plugins/{pluginId}/companies/{companyId}/tool-audit", "List plugin tool audit events"],
+  ["get", "/api/plugins/registry/stages", "List staged registry plugins"],
+  ["post", "/api/plugins/registry/stages", "Stage a registry plugin"],
+  ["post", "/api/plugins/registry/stages/{stageId}/enable", "Enable a staged registry plugin"],
+  ["get", "/api/plugins/{pluginId}/migration-plan", "Get a plugin database migration plan"],
+  ["get", "/api/plugins/{pluginId}/pending-update", "Get a pending plugin update"],
+] as const) {
+  registerCurrentRoute({ method: route[0], path: route[1], tags: ["plugins"], summary: route[2] });
+}
+
+for (const route of [
+  ["get", "/api/companies/{companyId}/sps-members", "List SPS company members"],
+  ["post", "/api/companies/{companyId}/sps-members/{memberId}/revoke", "Revoke an SPS company member"],
+  ["get", "/api/companies/{companyId}/sps-nodes", "List SPS Nodes"],
+  ["post", "/api/companies/{companyId}/sps-nodes", "Register an SPS Node"],
+  ["post", "/api/sps-nodes/{nodeId}/heartbeat", "Send an SPS Node heartbeat"],
+  ["post", "/api/sps-nodes/{nodeId}/runners/availability", "Report SPS Node runner availability"],
+  ["post", "/api/sps-nodes/{nodeId}/approve", "Approve an SPS Node"],
+  ["post", "/api/sps-nodes/{nodeId}/revoke", "Revoke an SPS Node"],
+  ["post", "/api/sps-nodes/{nodeId}/disconnect", "Disconnect an SPS Node"],
+  ["put", "/api/sps-nodes/{nodeId}/agent-grants/{agentId}", "Grant an agent access to an SPS Node"],
+  ["delete", "/api/sps-nodes/{nodeId}/agent-grants/{agentId}", "Revoke an agent SPS Node grant"],
+  ["put", "/api/sps-nodes/{nodeId}/runners/{runnerProfileId}/agent-grants/{agentId}", "Grant an agent access to an SPS Node runner"],
+  ["delete", "/api/sps-nodes/{nodeId}/runners/{runnerProfileId}/agent-grants/{agentId}", "Revoke an agent SPS Node runner grant"],
+  ["put", "/api/agents/{agentId}/sps-node-binding", "Bind an agent to an SPS Node"],
+  ["delete", "/api/agents/{agentId}/sps-node-binding", "Remove an agent SPS Node binding"],
+  ["get", "/api/projects/{projectId}/sps-host-share", "Get an SPS project host share"],
+  ["put", "/api/projects/{projectId}/sps-host-share", "Set an SPS project host share"],
+  ["put", "/api/projects/{projectId}/sps-host-share/nodes/{nodeId}", "Grant an SPS Node access to a project host share"],
+  ["delete", "/api/projects/{projectId}/sps-host-share/nodes/{nodeId}", "Revoke an SPS Node project host share grant"],
+  ["post", "/api/sps-nodes/{nodeId}/workspace-sources/{sourceId}/claim-route", "Claim an SPS workspace source route"],
+  ["post", "/api/sps-nodes/{nodeId}/commands/claim-next", "Claim the next SPS Node command"],
+  ["post", "/api/sps-nodes/{nodeId}/commands/{commandId}/lease", "Renew an SPS Node command lease"],
+  ["post", "/api/sps-nodes/{nodeId}/commands/{commandId}/events", "Append SPS Node command events"],
+  ["post", "/api/sps-nodes/{nodeId}/commands/{commandId}/complete", "Complete an SPS Node command"],
+  ["post", "/api/sps-nodes/{nodeId}/plugin-runs/claim-next", "Claim the next SPS Node plugin run"],
+  ["post", "/api/sps-nodes/{nodeId}/plugin-runs/{runId}/lease", "Renew an SPS Node plugin-run lease"],
+  ["post", "/api/sps-nodes/{nodeId}/plugin-runs/{runId}/events", "Append SPS Node plugin-run events"],
+  ["post", "/api/sps-nodes/{nodeId}/plugin-runs/{runId}/complete", "Complete an SPS Node plugin run"],
+] as const) {
+  registerCurrentRoute({ method: route[0], path: route[1], tags: ["sps-nodes"], summary: route[2] });
+}
+
+for (const route of [
+  ["get", "/api/companies/{companyId}/sps-workspace-sources", "List SPS workspace sources"],
+  ["post", "/api/companies/{companyId}/sps-workspace-sources", "Create an SPS workspace source"],
+  ["patch", "/api/companies/{companyId}/sps-workspace-sources/{sourceId}", "Update an SPS workspace source"],
+  ["delete", "/api/companies/{companyId}/sps-workspace-sources/{sourceId}", "Delete an SPS workspace source"],
+  ["put", "/api/companies/{companyId}/sps-workspace-sources/{sourceId}/nodes/{nodeId}", "Grant an SPS Node workspace-source access"],
+  ["delete", "/api/companies/{companyId}/sps-workspace-sources/{sourceId}/nodes/{nodeId}", "Revoke an SPS Node workspace-source grant"],
+] as const) {
+  registerCurrentRoute({
+    method: route[0],
+    path: route[1],
+    tags: ["sps-workspace-sources"],
+    summary: route[2],
+  });
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function buildOpenApiDocument(): any {
   return applyDocumentFixups({

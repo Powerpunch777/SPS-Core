@@ -68,12 +68,27 @@ describeEmbeddedPostgres("heartbeat issue rewake throttle", () => {
   }, 20_000);
 
   afterEach(async () => {
-    runningProcesses.clear();
+    let previousSnapshot = "";
+    let stablePolls = 0;
     for (let attempt = 0; attempt < 100; attempt += 1) {
       const runs = await db.select({ status: heartbeatRuns.status }).from(heartbeatRuns);
-      if (!runs.some((run) => run.status === "queued" || run.status === "running")) break;
+      const wakeups = await db.select({ status: agentWakeupRequests.status }).from(agentWakeupRequests);
+      const snapshot = JSON.stringify({
+        activeRunCount: runs.filter((run) => run.status === "queued" || run.status === "running").length,
+        wakeupCount: wakeups.length,
+        wakeupStatuses: wakeups.map((wakeup) => wakeup.status).sort(),
+      });
+      const hasActiveRuns = runs.some((run) => run.status === "queued" || run.status === "running");
+      if (!hasActiveRuns && runningProcesses.size === 0 && snapshot === previousSnapshot) {
+        stablePolls += 1;
+      } else {
+        stablePolls = 0;
+      }
+      if (stablePolls >= 3) break;
+      previousSnapshot = snapshot;
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
+    runningProcesses.clear();
     await db.delete(environmentLeases);
     await db.delete(issueComments);
     await db.delete(issues);

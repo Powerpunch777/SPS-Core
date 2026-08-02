@@ -30,6 +30,7 @@ import {
 import { useToastActions } from "@/context/ToastContext";
 import { cn } from "@/lib/utils";
 import { isSpsBasicModeEnabled } from "@/lib/sps-basic-mode";
+import { isSpsCoreBaselineModeEnabled } from "@/lib/sps-core-baseline-mode";
 import { isWorkplaneModeEnabled } from "@/lib/workplane-mode";
 import { SpsExtensionsManager } from "./SpsExtensionsManager";
 
@@ -107,15 +108,15 @@ function GenericPluginManager() {
   const [uninstallPluginId, setUninstallPluginId] = useState<string | null>(null);
   const [uninstallPluginName, setUninstallPluginName] = useState<string>("");
   const [errorDetailsPlugin, setErrorDetailsPlugin] = useState<PluginRecord | null>(null);
+  const coreBaselineMode = isSpsCoreBaselineModeEnabled();
 
   useEffect(() => {
     setBreadcrumbs([
-      { label: selectedCompany?.name ?? "Company", href: "/dashboard" },
-      { label: "Settings", href: "/company/settings" },
-      { label: "Instance settings", href: "/company/settings/instance/general" },
+      { label: selectedCompany?.name ?? (coreBaselineMode ? "Workspace" : "Company"), href: "/dashboard" },
+      { label: coreBaselineMode ? "Host settings" : "Settings", href: "/company/settings" },
       { label: "Plugins" },
     ]);
-  }, [selectedCompany?.name, setBreadcrumbs]);
+  }, [coreBaselineMode, selectedCompany?.name, setBreadcrumbs]);
 
   const { data: plugins, isLoading, error } = useQuery({
     queryKey: queryKeys.plugins.all,

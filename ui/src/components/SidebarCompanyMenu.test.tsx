@@ -15,9 +15,13 @@ const mockAuthApi = vi.hoisted(() => ({
   updateProfile: vi.fn(),
   signOut: vi.fn(),
 }));
+const mockAccessApi = vi.hoisted(() => ({
+  getCurrentBoardAccess: vi.fn(),
+}));
 const mockNavigate = vi.hoisted(() => vi.fn());
 const mockOpenOnboarding = vi.hoisted(() => vi.fn());
 const mockSetSelectedCompanyId = vi.hoisted(() => vi.fn());
+const mockCreateCompany = vi.hoisted(() => vi.fn());
 const mockSetSidebarOpen = vi.hoisted(() => vi.fn());
 const mockLocation = vi.hoisted(() => ({ pathname: "/PAP/dashboard" }));
 const mockSidebarPreferencesApi = vi.hoisted(() => ({
@@ -27,6 +31,10 @@ const mockSidebarPreferencesApi = vi.hoisted(() => ({
 
 vi.mock("@/api/auth", () => ({
   authApi: mockAuthApi,
+}));
+
+vi.mock("@/api/access", () => ({
+  accessApi: mockAccessApi,
 }));
 
 vi.mock("@/api/sidebarPreferences", () => ({
@@ -74,6 +82,7 @@ vi.mock("@/context/CompanyContext", () => ({
       status: "active",
     },
     setSelectedCompanyId: mockSetSelectedCompanyId,
+    createCompany: mockCreateCompany,
   }),
 }));
 
@@ -123,6 +132,20 @@ describe("SidebarCompanyMenu", () => {
       },
     });
     mockAuthApi.signOut.mockResolvedValue(undefined);
+    mockAccessApi.getCurrentBoardAccess.mockResolvedValue({
+      user: null,
+      userId: "user-1",
+      isInstanceAdmin: true,
+      companyIds: ["company-1"],
+      source: "local_implicit",
+      keyId: null,
+    });
+    mockCreateCompany.mockResolvedValue({
+      id: "company-4",
+      issuePrefix: "NEW",
+      name: "New Workspace",
+      status: "active",
+    });
     mockSidebarPreferencesApi.getCompanyOrder.mockResolvedValue({
       orderedIds: ["company-1", "company-2", "company-3"],
       updatedAt: null,
@@ -134,10 +157,131 @@ describe("SidebarCompanyMenu", () => {
     mockLocation.pathname = "/PAP/dashboard";
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    await flushReact();
     container.remove();
-    document.body.innerHTML = "";
+    await flushReact();
+    document.body.replaceChildren();
+    document.head.querySelector('meta[name="sps-core-baseline-mode"]')?.remove();
     vi.clearAllMocks();
+  });
+
+  it("uses the neutral workspace switcher and creates a workspace in SPS Core mode", async () => {
+    const meta = document.createElement("meta");
+    meta.name = "sps-core-baseline-mode";
+    meta.content = "true";
+    document.head.appendChild(meta);
+
+    const root = createRoot(container);
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+
+    act(() => {
+      root.render(
+        <QueryClientProvider client={queryClient}>
+          <SidebarCompanyMenu />
+        </QueryClientProvider>,
+      );
+    });
+    await flushReact();
+    await flushReact();
+    await flushReact();
+
+    const trigger = container.querySelector('button[aria-label="Open Acme Labs workspace switcher"]');
+    expect(trigger).not.toBeNull();
+    act(() => {
+      trigger?.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, button: 0 }));
+      trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flushReact();
+
+    expect(document.body.textContent).toContain("Switch workspace");
+    expect(document.body.textContent).toContain("Create new workspace...");
+    expect(document.body.textContent).toContain("Team access");
+    expect(document.body.textContent).toContain("Host settings");
+    expect(document.body.textContent).not.toContain("Company settings");
+    expect(document.body.textContent).not.toContain("PAP");
+
+    const createItem = Array.from(document.body.querySelectorAll('[data-slot="dropdown-menu-item"]'))
+      .find((element) => element.textContent?.includes("Create new workspace"));
+    expect(createItem).toBeTruthy();
+    act(() => {
+      createItem?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flushReact();
+
+    const nameInput = document.body.querySelector<HTMLInputElement>("#new-workspace-name");
+    expect(nameInput).not.toBeNull();
+    act(() => {
+      const valueSetter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+      valueSetter?.call(nameInput, "Product Lab");
+      nameInput?.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await flushReact();
+
+    const form = nameInput?.closest("form");
+    act(() => {
+      form?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+    await flushReact();
+    await flushReact();
+
+    expect(mockCreateCompany).toHaveBeenCalledWith({ name: "Product Lab" });
+    expect(mockOpenOnboarding).not.toHaveBeenCalled();
+    expect(mockNavigate).toHaveBeenCalledWith("/dashboard");
+
+    act(() => {
+      root.unmount();
+    });
+  });
+
+  it("keeps Host-only management actions out of a Member workspace switcher", async () => {
+    const meta = document.createElement("meta");
+    meta.name = "sps-core-baseline-mode";
+    meta.content = "true";
+    document.head.appendChild(meta);
+    mockAccessApi.getCurrentBoardAccess.mockResolvedValue({
+      user: null,
+      userId: "member-1",
+      isInstanceAdmin: true,
+      companyIds: ["company-1"],
+      source: "session",
+      keyId: null,
+    });
+
+    const root = createRoot(container);
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    act(() => {
+      root.render(
+        <QueryClientProvider client={queryClient}>
+          <SidebarCompanyMenu />
+        </QueryClientProvider>,
+      );
+    });
+    await flushReact();
+    await flushReact();
+    await flushReact();
+
+    const trigger = container.querySelector('button[aria-label="Open Acme Labs workspace switcher"]');
+    expect(trigger).not.toBeNull();
+    act(() => {
+      trigger?.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, button: 0 }));
+      trigger?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+    await flushReact();
+
+    expect(document.body.textContent).not.toContain("Create new workspace...");
+    expect(document.body.textContent).not.toContain("Team access");
+    const menuItems = Array.from(document.body.querySelectorAll('[data-slot="dropdown-menu-item"]'));
+    expect(menuItems.some((item) => item.textContent?.trim() === "Host settings")).toBe(false);
+    expect(document.body.textContent).toContain("Host settings are managed on the Host computer.");
+
+    act(() => {
+      root.unmount();
+    });
   });
 
   it("uses company-centric create copy without the chat flag", async () => {

@@ -705,6 +705,9 @@ export function IssueProperties({
   };
   const reviewerLabel = reviewerValues.map((value) => executionParticipantLabel(value)).join(", ");
   const approverLabel = approverValues.map((value) => executionParticipantLabel(value)).join(", ");
+  const unavailableStatusReasons = !issue.assigneeAgentId && !issue.assigneeUserId
+    ? { in_progress: "Assign an agent or member before starting this task." }
+    : undefined;
   const reviewerTrigger = reviewerValues.length > 0
     ? <span className="text-sm truncate min-w-0" title={reviewerLabel}>{reviewerLabel}</span>
     : <span className="text-sm text-muted-foreground">None</span>;
@@ -1882,6 +1885,7 @@ export function IssueProperties({
             status={issue.status}
             size="lg"
             blockerAttention={issue.blockerAttention}
+            unavailableStatuses={unavailableStatusReasons}
             onChange={(status) => onUpdate({ status })}
             showLabel
           />

@@ -5,6 +5,7 @@ import {
   CloudUpload,
   Cpu,
   FlaskConical,
+  FolderCog,
   KeyRound,
   MailPlus,
   MonitorCog,
@@ -29,6 +30,7 @@ import { useCompany } from "@/context/CompanyContext";
 import { useSidebar } from "@/context/SidebarContext";
 import { usePluginSlots } from "@/plugins/slots";
 import { isSpsBasicModeEnabled } from "@/lib/sps-basic-mode";
+import { isSpsCoreBaselineModeEnabled } from "@/lib/sps-core-baseline-mode";
 import { isWorkplaneModeEnabled } from "@/lib/workplane-mode";
 import { SidebarNavItem } from "./SidebarNavItem";
 
@@ -79,11 +81,76 @@ export function CompanySettingsSidebar() {
     queryFn: () => pluginsApi.list(),
   });
   const spsWorkplaneShell = isSpsBasicModeEnabled() && isWorkplaneModeEnabled();
+  const spsCoreBaseline = isSpsBasicModeEnabled() && isSpsCoreBaselineModeEnabled() && !isWorkplaneModeEnabled();
   const showCloudUpstream = experimentalSettings?.enableCloudSync === true;
   const sidebarPlugins = (plugins ?? []).filter((plugin) => {
     if (isSandboxProviderOnly(plugin)) return false;
     return !spsWorkplaneShell || !plugin.packageName.startsWith("@paperclipai/");
   });
+
+  if (spsCoreBaseline) {
+    return (
+      <aside className="w-full h-full min-h-0 border-r border-border bg-background flex flex-col">
+        <div className="flex flex-col gap-1 px-3 py-3 shrink-0">
+          <Link
+            to="/dashboard"
+            onClick={() => {
+              if (isMobile) setSidebarOpen(false);
+            }}
+            className="flex items-center gap-1.5 rounded-md px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-accent/50 hover:text-foreground"
+          >
+            <ChevronLeft className="h-3.5 w-3.5 shrink-0" />
+            <span className="truncate">{selectedCompany?.name ?? "Workspace"}</span>
+          </Link>
+          <div className="flex items-center gap-2 px-2 py-1">
+            <Settings className="h-4 w-4 text-muted-foreground shrink-0" />
+            <span className="flex-1 truncate text-sm font-bold text-foreground">Host settings</span>
+          </div>
+        </div>
+
+        <nav className="flex-1 min-h-0 overflow-y-auto scrollbar-auto-hide px-3 py-2">
+          <div className="px-3 pb-1 text-(length:--text-micro) font-semibold uppercase tracking-wide text-muted-foreground">Workspace</div>
+          <div className="flex flex-col gap-0.5">
+            <SidebarNavItem to="/company/settings" label="Overview" icon={SlidersHorizontal} end />
+            <SidebarNavItem to="/company/settings/project-sources" label="Sources" icon={FolderCog} end />
+            <SidebarNavItem to="/company/settings/nodes" label="Nodes" icon={Network} end />
+          </div>
+          <div className="mt-5 px-3 pb-1 text-(length:--text-micro) font-semibold uppercase tracking-wide text-muted-foreground">Platform</div>
+          <div className="flex flex-col gap-0.5">
+            <SidebarNavItem to={`${INSTANCE_SETTINGS_PATH_PREFIX}/plugins`} label="Plugins" icon={Puzzle} />
+            {companySettingsPluginSlots
+              .filter((slot) => slot.routePath)
+              .map((slot) => (
+                <SidebarNavItem
+                  key={`${slot.pluginKey}:${slot.id}`}
+                  to={`/company/settings/${slot.routePath}`}
+                  label={slot.displayName}
+                  icon={Puzzle}
+                  end
+                />
+              ))}
+            {sidebarPlugins.length > 0 ? (
+              <div className="ml-4 mt-1 flex flex-col gap-0.5 border-l border-border/70 pl-3">
+                {sidebarPlugins.map((plugin) => (
+                  <NavLink
+                    key={plugin.id}
+                    to={`${INSTANCE_SETTINGS_PATH_PREFIX}/plugins/${plugin.id}`}
+                    state={SIDEBAR_SCROLL_RESET_STATE}
+                    className={({ isActive }) => [
+                      "rounded-md px-2 py-1.5 text-xs transition-colors",
+                      isActive ? "bg-accent text-foreground" : "text-muted-foreground hover:bg-accent/50 hover:text-foreground",
+                    ].join(" ")}
+                  >
+                    {plugin.manifestJson.displayName ?? plugin.packageName}
+                  </NavLink>
+                ))}
+              </div>
+            ) : null}
+          </div>
+        </nav>
+      </aside>
+    );
+  }
 
   return (
     <aside className="w-full h-full min-h-0 border-r border-border bg-background flex flex-col">
@@ -127,6 +194,7 @@ export function CompanySettingsSidebar() {
             badge={badges?.joinRequests ?? 0}
             end
           />
+          <SidebarNavItem to="/company/settings/project-sources" label="Project Sources" icon={FolderCog} end />
           {companySettingsPluginSlots
             .filter((slot) => slot.routePath)
             .map((slot) => (

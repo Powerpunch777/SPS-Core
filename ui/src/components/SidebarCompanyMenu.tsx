@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useState, type FormEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Check,
@@ -23,7 +23,16 @@ import { CSS } from "@dnd-kit/utilities";
 import type { Company } from "@paperclipai/shared";
 import { Link, useLocation, useNavigate } from "@/lib/router";
 import { authApi } from "@/api/auth";
+import { accessApi } from "@/api/access";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -32,10 +41,13 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { useCompany } from "@/context/CompanyContext";
 import { useDialogActions } from "@/context/DialogContext";
 import { useCompanyOrder } from "@/hooks/useCompanyOrder";
 import { queryKeys } from "@/lib/queryKeys";
+import { isSpsCoreBaselineModeEnabled } from "@/lib/sps-core-baseline-mode";
 import { cn, SIDEBAR_RAIL_HIDDEN_LABEL } from "@/lib/utils";
 import { useSidebar } from "../context/SidebarContext";
 import { CompanyPatternIcon } from "./CompanyPatternIcon";
@@ -60,11 +72,13 @@ function SortableCompanyItem({
   company,
   isEditing,
   isSelected,
+  showIssuePrefix,
   onSelect,
 }: {
   company: Company;
   isEditing: boolean;
   isSelected: boolean;
+  showIssuePrefix: boolean;
   onSelect: (company: Company) => void;
 }) {
   const {
@@ -118,9 +132,11 @@ function SortableCompanyItem({
         </button>
       ) : (
         <>
-          <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 font-mono text-(length:--text-nano) text-muted-foreground">
-            {company.issuePrefix}
-          </span>
+          {showIssuePrefix ? (
+            <span className="shrink-0 rounded bg-muted px-1.5 py-0.5 font-mono text-(length:--text-nano) text-muted-foreground">
+              {company.issuePrefix}
+            </span>
+          ) : null}
           {isSelected ? <Check className="size-4 text-muted-foreground" /> : null}
         </>
       )}
@@ -131,13 +147,18 @@ function SortableCompanyItem({
 export function SidebarCompanyMenu({ open: controlledOpen, onOpenChange }: SidebarCompanyMenuProps = {}) {
   const [internalOpen, setInternalOpen] = useState(false);
   const [isEditingOrder, setIsEditingOrder] = useState(false);
+  const [createWorkspaceOpen, setCreateWorkspaceOpen] = useState(false);
+  const [workspaceName, setWorkspaceName] = useState("");
+  const [createWorkspaceError, setCreateWorkspaceError] = useState<string | null>(null);
+  const [creatingWorkspace, setCreatingWorkspace] = useState(false);
   const queryClient = useQueryClient();
-  const { companies, selectedCompany, setSelectedCompanyId } = useCompany();
+  const { companies, selectedCompany, setSelectedCompanyId, createCompany } = useCompany();
   const { openOnboarding } = useDialogActions();
   const { isMobile, setSidebarOpen, collapsed, peeking } = useSidebar();
   const rail = collapsed && !peeking;
   const location = useLocation();
   const navigate = useNavigate();
+  const coreBaselineMode = isSpsCoreBaselineModeEnabled();
   const open = controlledOpen ?? internalOpen;
   const setOpen = onOpenChange ?? setInternalOpen;
   const sensors = useSensors(
@@ -157,6 +178,13 @@ export function SidebarCompanyMenu({ open: controlledOpen, onOpenChange }: Sideb
     queryFn: () => authApi.getSession(),
     retry: false,
   });
+  const { data: boardAccess } = useQuery({
+    queryKey: queryKeys.access.currentBoardAccess,
+    queryFn: () => accessApi.getCurrentBoardAccess(),
+    enabled: coreBaselineMode,
+    retry: false,
+  });
+  const canManageCoreHost = !coreBaselineMode || boardAccess?.source === "local_implicit";
   const currentUserId = session?.user?.id ?? session?.session?.userId ?? null;
   const { orderedCompanies, persistOrder } = useCompanyOrder({
     companies: sidebarCompanies,
@@ -202,7 +230,31 @@ export function SidebarCompanyMenu({ open: controlledOpen, onOpenChange }: Sideb
   function addCompany() {
     setOpen(false);
     if (isMobile) setSidebarOpen(false);
+    if (coreBaselineMode) {
+      setCreateWorkspaceError(null);
+      setCreateWorkspaceOpen(true);
+      return;
+    }
     openOnboarding();
+  }
+
+  async function createWorkspace(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const name = workspaceName.trim();
+    if (!name || creatingWorkspace) return;
+
+    setCreatingWorkspace(true);
+    setCreateWorkspaceError(null);
+    try {
+      await createCompany({ name });
+      setWorkspaceName("");
+      setCreateWorkspaceOpen(false);
+      navigate("/dashboard");
+    } catch (error) {
+      setCreateWorkspaceError(error instanceof Error ? error.message : "Workspace could not be created.");
+    } finally {
+      setCreatingWorkspace(false);
+    }
   }
 
   const handleDragEnd = useCallback(
@@ -221,7 +273,8 @@ export function SidebarCompanyMenu({ open: controlledOpen, onOpenChange }: Sideb
   );
 
   return (
-    <DropdownMenu open={open} onOpenChange={handleOpenChange}>
+    <>
+      <DropdownMenu open={open} onOpenChange={handleOpenChange}>
       <DropdownMenuTrigger asChild>
         <Button
           variant="ghost"
@@ -231,12 +284,14 @@ export function SidebarCompanyMenu({ open: controlledOpen, onOpenChange }: Sideb
           // svg present (expanded) it was already 12px but without it (rail) it fell
           // back to 8px — a 4px horizontal jump on collapse (PAP-10676).
           className="h-9 flex-1 justify-start gap-2 px-3 text-left"
-          aria-label={selectedCompany ? `Open ${selectedCompany.name} company switcher` : "Open company switcher"}
+          aria-label={selectedCompany
+            ? `Open ${selectedCompany.name} ${coreBaselineMode ? "workspace" : "company"} switcher`
+            : `Open ${coreBaselineMode ? "workspace" : "company"} switcher`}
         >
           <span className="flex min-w-0 flex-1 items-center gap-2">
             {selectedCompany ? <WorkspaceIcon company={selectedCompany} /> : null}
             <span className={cn("truncate text-sm font-bold text-foreground", rail && SIDEBAR_RAIL_HIDDEN_LABEL)}>
-              {selectedCompany?.name ?? "Select company"}
+              {selectedCompany?.name ?? (coreBaselineMode ? "Select workspace" : "Select company")}
             </span>
           </span>
           {!rail && <ChevronsUpDown className="size-3.5 shrink-0 text-muted-foreground" />}
@@ -245,7 +300,7 @@ export function SidebarCompanyMenu({ open: controlledOpen, onOpenChange }: Sideb
       <DropdownMenuContent align="start" sideOffset={8} className="w-64 p-1">
         <div className="flex items-center justify-between gap-2 px-2 py-1.5">
           <DropdownMenuLabel className="p-0 text-(length:--text-micro) font-semibold uppercase text-muted-foreground">
-            Switch company
+            {coreBaselineMode ? "Switch workspace" : "Switch company"}
           </DropdownMenuLabel>
           <button
             type="button"
@@ -275,57 +330,73 @@ export function SidebarCompanyMenu({ open: controlledOpen, onOpenChange }: Sideb
                   company={company}
                   isEditing={isEditingOrder}
                   isSelected={company.id === selectedCompany?.id}
+                  showIssuePrefix={!coreBaselineMode}
                   onSelect={selectCompany}
                 />
               ))}
             </SortableContext>
           </DndContext>
           {orderedCompanies.length === 0 ? (
-            <DropdownMenuItem disabled>No companies</DropdownMenuItem>
+            <DropdownMenuItem disabled>{coreBaselineMode ? "No workspaces" : "No companies"}</DropdownMenuItem>
           ) : null}
         </div>
-        <DropdownMenuSeparator />
-        <DropdownMenuItem
-          onClick={addCompany}
-          className="gap-2 py-2 text-muted-foreground"
-          disabled={isEditingOrder}
-        >
-          <Plus className="size-4" />
-          <span>Create new company...</span>
-        </DropdownMenuItem>
-        <DropdownMenuSeparator />
-        <DropdownMenuItem asChild disabled={isEditingOrder}>
-          <Link
-            to="/company/settings/invites"
-            onClick={(event) => {
-              if (isEditingOrder) {
-                event.preventDefault();
-                return;
-              }
-              closeNavigationChrome();
-            }}
-          >
-            <UserPlus className="size-4" />
-            <span className="truncate">
-              {selectedCompany ? `Invite people to ${selectedCompany.name}` : "Invite people"}
-            </span>
-          </Link>
-        </DropdownMenuItem>
-        <DropdownMenuItem asChild disabled={isEditingOrder}>
-          <Link
-            to="/company/settings"
-            onClick={(event) => {
-              if (isEditingOrder) {
-                event.preventDefault();
-                return;
-              }
-              closeNavigationChrome();
-            }}
-          >
-            <Settings className="size-4" />
-            <span>Company settings</span>
-          </Link>
-        </DropdownMenuItem>
+        {canManageCoreHost ? (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              onClick={addCompany}
+              className="gap-2 py-2 text-muted-foreground"
+              disabled={isEditingOrder}
+            >
+              <Plus className="size-4" />
+              <span>{coreBaselineMode ? "Create new workspace..." : "Create new company..."}</span>
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem asChild disabled={isEditingOrder}>
+              <Link
+                to={coreBaselineMode ? "/company/settings/team" : "/company/settings/invites"}
+                onClick={(event) => {
+                  if (isEditingOrder) {
+                    event.preventDefault();
+                    return;
+                  }
+                  closeNavigationChrome();
+                }}
+              >
+                <UserPlus className="size-4" />
+                <span className="truncate">
+                  {coreBaselineMode
+                    ? "Team access"
+                    : selectedCompany
+                      ? `Invite people to ${selectedCompany.name}`
+                      : "Invite people"}
+                </span>
+              </Link>
+            </DropdownMenuItem>
+            <DropdownMenuItem asChild disabled={isEditingOrder}>
+              <Link
+                to="/company/settings"
+                onClick={(event) => {
+                  if (isEditingOrder) {
+                    event.preventDefault();
+                    return;
+                  }
+                  closeNavigationChrome();
+                }}
+              >
+                <Settings className="size-4" />
+                <span>{coreBaselineMode ? "Host settings" : "Company settings"}</span>
+              </Link>
+            </DropdownMenuItem>
+          </>
+        ) : coreBaselineMode && boardAccess ? (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem disabled className="py-2 text-xs text-muted-foreground">
+              Host settings are managed on the Host computer.
+            </DropdownMenuItem>
+          </>
+        ) : null}
         {session?.session ? (
           <>
             <DropdownMenuSeparator />
@@ -339,7 +410,61 @@ export function SidebarCompanyMenu({ open: controlledOpen, onOpenChange }: Sideb
             </DropdownMenuItem>
           </>
         ) : null}
-      </DropdownMenuContent>
-    </DropdownMenu>
+        </DropdownMenuContent>
+      </DropdownMenu>
+
+      {coreBaselineMode ? (
+        <Dialog
+          open={createWorkspaceOpen}
+          onOpenChange={(nextOpen) => {
+            if (creatingWorkspace) return;
+            setCreateWorkspaceOpen(nextOpen);
+            if (!nextOpen) {
+              setWorkspaceName("");
+              setCreateWorkspaceError(null);
+            }
+          }}
+        >
+          <DialogContent className="sm:max-w-md">
+            <form className="grid gap-4" onSubmit={createWorkspace}>
+              <DialogHeader>
+                <DialogTitle>Create workspace</DialogTitle>
+                <DialogDescription>
+                  A workspace holds projects, assistants, sources, and plugin configuration.
+                </DialogDescription>
+              </DialogHeader>
+              <div className="grid gap-2">
+                <Label htmlFor="new-workspace-name">Workspace name</Label>
+                <Input
+                  id="new-workspace-name"
+                  value={workspaceName}
+                  onChange={(event) => setWorkspaceName(event.target.value)}
+                  placeholder="My workspace"
+                  autoFocus
+                  maxLength={120}
+                  disabled={creatingWorkspace}
+                />
+                {createWorkspaceError ? (
+                  <p role="alert" className="text-sm text-destructive">{createWorkspaceError}</p>
+                ) : null}
+              </div>
+              <DialogFooter>
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => setCreateWorkspaceOpen(false)}
+                  disabled={creatingWorkspace}
+                >
+                  Cancel
+                </Button>
+                <Button type="submit" disabled={!workspaceName.trim() || creatingWorkspace}>
+                  {creatingWorkspace ? "Creating..." : "Create workspace"}
+                </Button>
+              </DialogFooter>
+            </form>
+          </DialogContent>
+        </Dialog>
+      ) : null}
+    </>
   );
 }

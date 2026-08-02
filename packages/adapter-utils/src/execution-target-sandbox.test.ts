@@ -810,7 +810,7 @@ describe("sandbox adapter execution targets", () => {
     }));
   });
 
-  it("treats SSH targets as bridge-only", () => {
+  it("keeps SSH targets on the callback bridge", () => {
     const target = {
       kind: "remote" as const,
       transport: "ssh" as const,
@@ -835,6 +835,29 @@ describe("sandbox adapter execution targets", () => {
       username: "paperclip",
       remoteCwd: "/workspace",
     });
+  });
+
+  it("keeps SPS Nodes off the callback bridge", () => {
+    const target = {
+      kind: "remote" as const,
+      transport: "sps_node" as const,
+      nodeId: "node-1",
+      nodeLabel: "Member desktop",
+      remoteCwd: "C:/workspace",
+      runner: {
+        execute: vi.fn(async () => ({
+          exitCode: 0,
+          signal: null,
+          timedOut: false,
+          stdout: "",
+          stderr: "",
+          pid: null,
+          startedAt: new Date().toISOString(),
+        })),
+      },
+    };
+
+    expect(adapterExecutionTargetUsesPaperclipBridge(target)).toBe(false);
   });
 
   it("uses the provider-declared shell for sandbox helper commands", async () => {

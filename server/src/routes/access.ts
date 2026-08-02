@@ -76,7 +76,12 @@ import {
   collapseDuplicatePendingHumanJoinRequests,
   findReusableHumanJoinRequest,
 } from "../lib/join-request-dedupe.js";
-import { assertAuthenticated, assertCompanyAccess } from "./authz.js";
+import {
+  assertAuthenticated,
+  assertCompanyAccess,
+  assertSpsCoreHostAuthority,
+  hasSpsCoreHostAuthority,
+} from "./authz.js";
 import {
   claimBoardOwnership,
   inspectBoardClaimChallenge
@@ -84,6 +89,7 @@ import {
 import { claimFirstInstanceAdmin } from "../first-admin-claim.js";
 import { getStorageService } from "../storage/index.js";
 import { secretService } from "../services/secrets.js";
+import { isSpsCoreBaselineModeEnabled } from "../ui-branding.js";
 
 function hashToken(token: string) {
   return createHash("sha256").update(token).digest("hex");
@@ -174,6 +180,16 @@ function requestBaseUrl(req: Request) {
     req.header("x-forwarded-host")?.split(",")[0]?.trim() || req.header("host");
   if (!host) return "";
   return `${proto}://${host}`;
+}
+
+function configuredPublicBaseUrl(value?: string) {
+  const raw = value?.trim();
+  if (!raw) return "";
+  try {
+    return new URL(raw).origin;
+  } catch {
+    return "";
+  }
 }
 
 function buildCliAuthApprovalPath(challengeId: string, token: string) {
@@ -1113,12 +1129,13 @@ function toInviteSummaryResponse(
       brandColor: string | null;
       logoUrl: string | null;
     }
-    | null = null
+    | null = null,
+  publicBaseUrl?: string,
 ) {
   const companyInfo = typeof company === "string"
     ? { name: company, brandColor: null, logoUrl: null }
     : company;
-  const baseUrl = requestBaseUrl(req);
+  const baseUrl = configuredPublicBaseUrl(publicBaseUrl) || requestBaseUrl(req);
   const invitePath = `/invite/${token}`;
   const onboardingPath = `/api/invites/${token}/onboarding`;
   const onboardingTextPath = `/api/invites/${token}/onboarding.txt`;
@@ -1749,9 +1766,10 @@ function buildInviteOnboardingManifest(
     deploymentExposure: DeploymentExposure;
     bindHost: string;
     allowedHostnames: string[];
+    publicBaseUrl?: string;
   }
 ) {
-  const baseUrl = requestBaseUrl(req);
+  const baseUrl = configuredPublicBaseUrl(opts.publicBaseUrl) || requestBaseUrl(req);
   const skillPath = `/api/invites/${token}/skills/paperclip`;
   const skillUrl = baseUrl ? `${baseUrl}${skillPath}` : skillPath;
   const registrationEndpointPath = `/api/invites/${token}/accept`;
@@ -1780,7 +1798,8 @@ function buildInviteOnboardingManifest(
       req,
       token,
       invite,
-      opts.companyName ?? null
+      opts.companyName ?? null,
+      opts.publicBaseUrl,
     ),
     onboarding: {
       instructions:
@@ -2653,6 +2672,7 @@ export function accessRoutes(
     deploymentExposure: DeploymentExposure;
     bindHost: string;
     allowedHostnames: string[];
+    publicBaseUrl?: string;
     inviteResolutionNetwork?: Partial<InviteResolutionNetwork>;
   }
 ) {
@@ -2666,6 +2686,10 @@ export function accessRoutes(
 
   async function assertInstanceAdmin(req: Request) {
     if (req.actor.type !== "board") throw unauthorized();
+    if (isSpsCoreBaselineModeEnabled()) {
+      assertSpsCoreHostAuthority(req);
+      return;
+    }
     if (isLocalImplicit(req)) return;
     const allowed = await access.isInstanceAdmin(req.actor.userId);
     if (!allowed) throw forbidden("Instance admin required");
@@ -2868,6 +2892,11 @@ export function accessRoutes(
       user: accessSnapshot.user,
       userId: req.actor.userId,
       isInstanceAdmin: accessSnapshot.isInstanceAdmin,
+      // Core Host authority is a live Desktop capability, not an inherited
+      // database role. The sidebar needs this explicit signal so a signed-in
+      // Host and a remote Member cannot be confused after an account session
+      // is established.
+      isCoreHost: hasSpsCoreHostAuthority(req),
       companyIds: accessSnapshot.companyIds,
       memberships: accessSnapshot.memberships,
       source: req.actor.source ?? "none",
@@ -3019,6 +3048,38 @@ export function accessRoutes(
       permissionKey
     );
     if (!allowed) throw forbidden("Permission denied");
+  }
+
+  async function assertSpsCoreTechnicalTeamAccess(req: Request, companyId: string) {
+    assertCompanyAccess(req, companyId);
+    if (req.actor.type !== "board") throw unauthorized("SPS Host authentication required");
+    if (isSpsCoreBaselineModeEnabled()) {
+      assertSpsCoreHostAuthority(req);
+      return;
+    }
+    if (isLocalImplicit(req)) return;
+    throw forbidden("Only the SPS Host can manage technical team access");
+  }
+
+  function assertSpsCoreTechnicalMemberInvite(input: {
+    allowedJoinTypes: "human" | "agent" | "both";
+    humanRole?: "owner" | "admin" | "operator" | "viewer" | null;
+    defaultsPayload?: Record<string, unknown> | null;
+    agentMessage?: string | null;
+  }) {
+    if (
+      input.allowedJoinTypes !== "human"
+      || (input.humanRole !== null && input.humanRole !== undefined && input.humanRole !== "operator")
+      || input.defaultsPayload !== null && input.defaultsPayload !== undefined
+      || input.agentMessage !== null && input.agentMessage !== undefined
+    ) {
+      throw badRequest("The SPS Core baseline can create only a technical human Member invitation");
+    }
+  }
+
+  function assertSpsCoreWorkflowMembershipApiIsPluginOwned() {
+    if (!isSpsCoreBaselineModeEnabled()) return;
+    throw notFound("Workflow member roles and permissions are provided by SPS plugins");
   }
 
   async function assertCanGenerateOpenClawInvitePrompt(
@@ -3309,15 +3370,21 @@ export function accessRoutes(
     validate(createCompanyInviteSchema),
     async (req, res) => {
       const companyId = req.params.companyId as string;
-      await assertCompanyPermission(req, companyId, "users:invite");
+      const baselineMode = isSpsCoreBaselineModeEnabled();
+      if (baselineMode) {
+        await assertSpsCoreTechnicalTeamAccess(req, companyId);
+        assertSpsCoreTechnicalMemberInvite(req.body);
+      } else {
+        await assertCompanyPermission(req, companyId, "users:invite");
+      }
       const { token, created, normalizedAgentMessage } =
         await createCompanyInviteForCompany({
           req,
           companyId,
-          allowedJoinTypes: req.body.allowedJoinTypes,
-          humanRole: req.body.humanRole ?? null,
-          defaultsPayload: req.body.defaultsPayload ?? null,
-          agentMessage: req.body.agentMessage ?? null,
+          allowedJoinTypes: baselineMode ? "human" : req.body.allowedJoinTypes,
+          humanRole: baselineMode ? "operator" : req.body.humanRole ?? null,
+          defaultsPayload: baselineMode ? null : req.body.defaultsPayload ?? null,
+          agentMessage: baselineMode ? null : req.body.agentMessage ?? null,
           expiresInMinutes: req.body.expiresInMinutes,
         });
 
@@ -3345,7 +3412,8 @@ export function accessRoutes(
         req,
         token,
         created,
-        companyBranding
+        companyBranding,
+        opts.publicBaseUrl,
       );
       res.status(201).json({
         ...created,
@@ -3399,7 +3467,8 @@ export function accessRoutes(
         req,
         token,
         created,
-        companyBranding
+        companyBranding,
+        opts.publicBaseUrl,
       );
       res.status(201).json({
         ...created,
@@ -3439,7 +3508,7 @@ export function accessRoutes(
         )
       : null;
     res.json({
-      ...toInviteSummaryResponse(req, token, invite, companyBranding),
+      ...toInviteSummaryResponse(req, token, invite, companyBranding, opts.publicBaseUrl),
       invitedByUserName: inviterName,
       joinRequestStatus: inviteJoinRequest?.status ?? null,
       joinRequestType: inviteJoinRequest?.requestType ?? null,
@@ -4126,7 +4195,11 @@ export function accessRoutes(
       await assertInstanceAdmin(req);
     } else {
       if (!invite.companyId) throw conflict("Invite is missing company scope");
-      await assertCompanyPermission(req, invite.companyId, "users:invite");
+      if (isSpsCoreBaselineModeEnabled()) {
+        await assertSpsCoreTechnicalTeamAccess(req, invite.companyId);
+      } else {
+        await assertCompanyPermission(req, invite.companyId, "users:invite");
+      }
     }
     if (invite.acceptedAt) throw conflict("Invite already consumed");
     if (invite.revokedAt) return res.json(invite);
@@ -4157,7 +4230,11 @@ export function accessRoutes(
 
   router.get("/companies/:companyId/invites", async (req, res) => {
     const companyId = req.params.companyId as string;
-    await assertCompanyPermission(req, companyId, "users:invite");
+    if (isSpsCoreBaselineModeEnabled()) {
+      await assertSpsCoreTechnicalTeamAccess(req, companyId);
+    } else {
+      await assertCompanyPermission(req, companyId, "users:invite");
+    }
     const query = listCompanyInvitesQuerySchema.parse(req.query);
     const invitesForCompany = await loadCompanyInviteRecords(db, companyId, query);
     res.json(invitesForCompany);
@@ -4459,6 +4536,7 @@ export function accessRoutes(
   );
 
   router.get("/companies/:companyId/members", async (req, res) => {
+    assertSpsCoreWorkflowMembershipApiIsPluginOwned();
     const companyId = req.params.companyId as string;
     await assertCompanyPermission(req, companyId, "users:manage_permissions");
     const [members, currentAccess] = await Promise.all([
@@ -4482,6 +4560,7 @@ export function accessRoutes(
     "/companies/:companyId/members/:memberId",
     validate(updateCompanyMemberSchema),
     async (req, res) => {
+      assertSpsCoreWorkflowMembershipApiIsPluginOwned();
       const companyId = req.params.companyId as string;
       const memberId = req.params.memberId as string;
       await assertCompanyPermission(req, companyId, "users:manage_permissions");
@@ -4579,6 +4658,7 @@ export function accessRoutes(
     "/companies/:companyId/members/:memberId/role-and-grants",
     validate(updateCompanyMemberWithPermissionsSchema),
     async (req, res) => {
+      assertSpsCoreWorkflowMembershipApiIsPluginOwned();
       const companyId = req.params.companyId as string;
       const memberId = req.params.memberId as string;
       await assertCompanyPermission(req, companyId, "users:manage_permissions");
@@ -4706,6 +4786,7 @@ export function accessRoutes(
     "/companies/:companyId/members/:memberId/archive",
     validate(archiveCompanyMemberSchema),
     async (req, res) => {
+      assertSpsCoreWorkflowMembershipApiIsPluginOwned();
       const companyId = req.params.companyId as string;
       const memberId = req.params.memberId as string;
       await assertCompanyPermission(req, companyId, "users:manage_permissions");
@@ -4747,6 +4828,7 @@ export function accessRoutes(
     "/companies/:companyId/members/:memberId/permissions",
     validate(updateMemberPermissionsSchema),
     async (req, res) => {
+      assertSpsCoreWorkflowMembershipApiIsPluginOwned();
       const companyId = req.params.companyId as string;
       const memberId = req.params.memberId as string;
       await assertCompanyPermission(req, companyId, "users:manage_permissions");

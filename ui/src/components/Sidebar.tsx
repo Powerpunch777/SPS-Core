@@ -14,6 +14,7 @@ import {
   Layers,
   GitBranch,
   Package,
+  Puzzle,
   Settings,
   FolderOpen,
   PanelLeftClose,
@@ -36,6 +37,7 @@ import { useSidebar } from "../context/SidebarContext";
 import { attentionApi } from "../api/attention";
 import { heartbeatsApi } from "../api/heartbeats";
 import { instanceSettingsApi } from "../api/instanceSettings";
+import { accessApi } from "../api/access";
 import { queryKeys } from "../lib/queryKeys";
 import { attentionBadgeCount } from "../lib/attention";
 import { useInboxBadge } from "../hooks/useInboxBadge";
@@ -49,14 +51,17 @@ import { SidebarCompanyMenu } from "./SidebarCompanyMenu";
 import { ProductBrand } from "./ProductBrand";
 import { isWorkplaneModeEnabled } from "../lib/workplane-mode";
 import { isSpsBasicModeEnabled } from "../lib/sps-basic-mode";
+import { isSpsCoreBaselineModeEnabled } from "../lib/sps-core-baseline-mode";
 
 export function Sidebar() {
   const workplaneMode = isWorkplaneModeEnabled();
   const basicMode = isSpsBasicModeEnabled();
+  const coreBaselineMode = isSpsCoreBaselineModeEnabled();
   // SPS Desktop's bundled Workplane is intentionally room-first. Keep this
   // product navigation behind the existing runtime profile so generic Core
   // deployments retain their own information architecture.
   const spsWorkplaneShell = basicMode && workplaneMode;
+  const spsCoreBaselineShell = basicMode && coreBaselineMode && !workplaneMode;
   const { openNewIssue } = useDialogActions();
   // Every labeled section is collapsible (session-scoped, default open) —
   // one policy across static nav groups and the data-driven sections.
@@ -70,6 +75,17 @@ export function Sidebar() {
     queryKey: queryKeys.instance.experimentalSettings,
     queryFn: () => instanceSettingsApi.getExperimental(),
   });
+  const { data: boardAccess } = useQuery({
+    queryKey: queryKeys.access.currentBoardAccess,
+    queryFn: () => accessApi.getCurrentBoardAccess(),
+    enabled: spsCoreBaselineShell,
+    retry: false,
+  });
+  // A signed-in Desktop Host is represented by an SPS Identity session plus
+  // the Desktop-only Host proof. `isCoreHost` is verified by the server for
+  // this exact request; database roles and session source are deliberately
+  // not used as a proxy for possession of the physical Host.
+  const canManageCoreHost = !spsCoreBaselineShell || boardAccess?.isCoreHost === true;
   const liveRunsQueryKey = queryKeys.liveRuns(selectedCompanyId!);
   const sharedLiveRuns = useSharedPollingQuery({
     companyId: selectedCompanyId,
@@ -118,6 +134,59 @@ export function Sidebar() {
     companyId: selectedCompanyId,
     companyPrefix: selectedCompany?.issuePrefix ?? null,
   };
+
+  if (spsCoreBaselineShell) {
+    return (
+      <aside className="w-full h-full min-h-0 border-r border-border bg-background flex flex-col">
+        <div className="flex items-center gap-1 px-3 h-12 shrink-0">
+          <ProductBrand compact={rail} className="mr-auto" />
+          {!rail && !isMobile && !collapseLocked ? (
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              className="text-muted-foreground shrink-0"
+              aria-expanded={!collapsed}
+              aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+              title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+              onClick={() => toggleCollapsed()}
+            >
+              {collapsed ? <PanelLeftOpen className="h-4 w-4" /> : <PanelLeftClose className="h-4 w-4" />}
+            </Button>
+          ) : null}
+        </div>
+
+        <nav className="flex-1 min-h-0 overflow-y-auto scrollbar-auto-hide flex flex-col gap-4 pointer-coarse:gap-3 px-3 py-2">
+          <div className="flex flex-col gap-0.5">
+            <SidebarCompanyMenu />
+            <SidebarNavItem to="/dashboard" label="Workspace" icon={LayoutDashboard} />
+          </div>
+
+          <SidebarSection label="Plugins" collapsible={{ open: workOpen, onOpenChange: setWorkOpen }}>
+            <PluginSlotOutlet
+              slotTypes={["sidebar"]}
+              context={pluginContext}
+              className="flex flex-col gap-0.5"
+              itemClassName="text-(length:--text-compact) font-medium"
+              missingBehavior="placeholder"
+            />
+            <PluginLauncherOutlet
+              placementZones={["sidebar"]}
+              context={pluginContext}
+              className="flex flex-col gap-0.5"
+              itemClassName="text-(length:--text-compact) font-medium"
+            />
+          </SidebarSection>
+
+          {canManageCoreHost ? (
+            <SidebarSection label="Settings" collapsible={{ open: companyOpen, onOpenChange: setCompanyOpen }}>
+              <SidebarNavItem to="/company/settings" label="Host settings" icon={Settings} />
+              <SidebarNavItem to="/company/settings/instance/plugins" label="Plugins" icon={Puzzle} />
+            </SidebarSection>
+          ) : null}
+        </nav>
+      </aside>
+    );
+  }
 
   return (
     <aside className="w-full h-full min-h-0 border-r border-border bg-background flex flex-col">

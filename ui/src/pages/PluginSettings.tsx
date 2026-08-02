@@ -9,6 +9,7 @@ import { PluginSlotMount, usePluginSlots } from "@/plugins/slots";
 import { pluginsApi, type PluginDatabaseMigrationPlan, type PluginLocalFolderStatus } from "@/api/plugins";
 import { agentsApi } from "@/api/agents";
 import { queryKeys } from "@/lib/queryKeys";
+import { isSpsCoreBaselineModeEnabled } from "@/lib/sps-core-baseline-mode";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { ChoosePathButton } from "@/components/PathInstructionsModal";
@@ -68,6 +69,7 @@ export function PluginSettings() {
   const { setBreadcrumbs } = useBreadcrumbs();
   const { companyPrefix, pluginId } = useParams<{ companyPrefix?: string; pluginId: string }>();
   const [activeTab, setActiveTab] = useState<"configuration" | "status">("configuration");
+  const coreBaselineMode = isSpsCoreBaselineModeEnabled();
 
   const { data: plugin, isLoading: pluginLoading } = useQuery({
     queryKey: queryKeys.plugins.detail(pluginId!),
@@ -120,13 +122,12 @@ export function PluginSettings() {
 
   useEffect(() => {
     setBreadcrumbs([
-      { label: selectedCompany?.name ?? "Company", href: "/dashboard" },
-      { label: "Settings", href: "/company/settings" },
-      { label: "Instance settings", href: "/company/settings/instance/general" },
+      { label: selectedCompany?.name ?? (coreBaselineMode ? "Workspace" : "Company"), href: "/dashboard" },
+      { label: coreBaselineMode ? "Host settings" : "Settings", href: "/company/settings" },
       { label: "Plugins", href: "/company/settings/instance/plugins" },
       { label: plugin?.manifestJson?.displayName ?? plugin?.packageName ?? "Plugin Details" },
     ]);
-  }, [selectedCompany?.name, setBreadcrumbs, companyPrefix, plugin]);
+  }, [coreBaselineMode, selectedCompany?.name, setBreadcrumbs, companyPrefix, plugin]);
 
   useEffect(() => {
     setActiveTab("configuration");
@@ -230,7 +231,19 @@ export function PluginSettings() {
               <div className="space-y-1">
                 <h2 className="text-base font-semibold">Settings</h2>
               </div>
-              {hasLocalFolders ? (
+              {hasLocalFolders && coreBaselineMode ? (
+                <div className="rounded-md border border-border/60 bg-muted/20 px-4 py-3 text-sm">
+                  <p className="font-medium text-foreground">This plugin uses legacy folder declarations.</p>
+                  <p className="mt-1 text-muted-foreground">
+                    SPS Core keeps Host-managed files in Workspace Sources. Use a Profile 2.0 version of this plugin to request a Source route instead of configuring a raw local folder here.
+                  </p>
+                  <div className="mt-3">
+                    <Link to="/company/settings/project-sources">
+                      <Button variant="outline" size="sm">Open Sources</Button>
+                    </Link>
+                  </div>
+                </div>
+              ) : hasLocalFolders ? (
                 <PluginLocalFoldersSettings
                   pluginId={pluginId!}
                   companyId={selectedCompanyId}
@@ -273,6 +286,13 @@ export function PluginSettings() {
                   pluginStatus={plugin.status}
                   supportsConfigTest={(plugin as unknown as { supportsConfigTest?: boolean }).supportsConfigTest === true}
                 />
+              ) : environmentDrivers.length > 0 && coreBaselineMode ? (
+                <div className="rounded-md border border-border/60 bg-muted/20 px-4 py-3 text-sm">
+                  <p className="font-medium text-foreground">This plugin requires a legacy environment configuration surface.</p>
+                  <p className="mt-1 text-muted-foreground">
+                    SPS Core does not expose instance-scoped environments. Use a Profile 2.0 compatible version of this plugin, or configure a plugin-provided settings page.
+                  </p>
+                </div>
               ) : environmentDrivers.length > 0 ? (
                 <div className="rounded-md border border-border/60 bg-muted/20 px-4 py-3 text-sm">
                   <p className="font-medium text-foreground">Configure this plugin from Instance Settings → Environments.</p>

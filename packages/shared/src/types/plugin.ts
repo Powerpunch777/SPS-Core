@@ -616,6 +616,26 @@ export interface PluginAgentPlatformDeclaration {
   profileKey?: string;
 }
 
+/**
+ * Versioned declaration of workflow-neutral SPS Core primitives used by a
+ * plugin. It is descriptive only: the Host mediates every resulting route,
+ * runtime, secret, artifact, and execution grant.
+ */
+export interface PluginSpsCoreDeclaration {
+  /** Major-versioned SPS Core primitive contract. */
+  contractVersion: string;
+  /** Core primitives the plugin may request during its lifecycle. */
+  primitives: Array<
+    | "workspace.sources.metadata"
+    | "workspace.sources.route"
+    | "runtimes.list"
+    | "runtimes.dispatch"
+    | "runs.observe"
+    | "artifacts.write"
+    | "secrets.use"
+  >;
+}
+
 // ---------------------------------------------------------------------------
 // Plugin Manifest V1
 // ---------------------------------------------------------------------------
@@ -692,6 +712,8 @@ export interface PaperclipPluginManifestV1 {
   memoryProvider?: PluginMemoryProviderDeclaration;
   /** Product-neutral Agent Platform extension metadata. */
   agentPlatform?: PluginAgentPlatformDeclaration;
+  /** Versioned SPS Core primitive declaration. */
+  sps?: PluginSpsCoreDeclaration;
   /**
    * Legacy top-level launcher declarations.
    * Prefer `ui.launchers` for new manifests.

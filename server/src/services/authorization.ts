@@ -27,6 +27,7 @@ import {
   type TrustPresetResolution,
 } from "./trust-preset-resolver.js";
 import { logger } from "../middleware/logger.js";
+import { isSpsCoreBaselineModeEnabled } from "../ui-branding.js";
 
 export type AuthorizationActor =
   {
@@ -491,6 +492,7 @@ export function authorizationDeniedDetails(decision: AuthorizationDecision) {
 
 export function authorizationService(db: Db) {
   async function isInstanceAdmin(userId: string | null | undefined): Promise<boolean> {
+    if (isSpsCoreBaselineModeEnabled()) return false;
     if (!userId) return false;
     if (
       await db
@@ -1586,6 +1588,7 @@ export function authorizationService(db: Db) {
       // elevated — not even via stale instance_admin rows left behind by
       // deployments that ran the pre-hardening cloud_tenant path.
       if (
+        !isSpsCoreBaselineModeEnabled() &&
         !input.actor.ignoreInstanceAdmin &&
         input.actor.source !== "cloud_tenant" &&
         (input.actor.isInstanceAdmin || await isInstanceAdmin(input.actor.userId))
@@ -1603,6 +1606,22 @@ export function authorizationService(db: Db) {
         companyId,
       });
       if (boardProjectScopeDeny) return boardProjectScopeDeny;
+      if (
+        input.actor.userId &&
+        (input.action === "issue:comment" || input.action === "issue:mutate")
+      ) {
+        const { project } = await loadResourceContext(input.resource);
+        if (project?.accessMode === "restricted") {
+          const membership = await getActiveMembership(companyId, "user", input.actor.userId);
+          if (membership && membership.membershipRole !== "viewer") {
+            return allow({
+              action: input.action,
+              reason: "allow_company_member",
+              explanation: "Allowed by active Company membership and explicit restricted Project access.",
+            });
+          }
+        }
+      }
       // What instance-admin elevation used to give cloud tenant users is
       // replaced by company-scoped visibility: an active membership in the
       // resource company grants the same read surface a same-company agent

@@ -298,7 +298,7 @@ export function resolveAdapterExecutionTargetCwd(
 export function adapterExecutionTargetUsesPaperclipBridge(
   target: AdapterExecutionTarget | null | undefined,
 ): boolean {
-  return target?.kind === "remote" && target.transport === "sandbox";
+  return target?.kind === "remote" && target.transport !== "sps_node";
 }
 
 export function describeAdapterExecutionTarget(
@@ -1736,7 +1736,7 @@ export async function startAdapterExecutionTargetPaperclipBridge(input: {
   if (!adapterExecutionTargetUsesPaperclipBridge(input.target)) {
     return null;
   }
-  if (!input.target || input.target.kind !== "remote" || input.target.transport !== "sandbox") {
+  if (!input.target || input.target.kind !== "remote" || input.target.transport === "sps_node") {
     return null;
   }
 
@@ -1744,7 +1744,7 @@ export async function startAdapterExecutionTargetPaperclipBridge(input: {
   const onLog = input.onLog ?? (async () => {});
   const hostApiToken = input.hostApiToken?.trim() ?? "";
   if (hostApiToken.length === 0) {
-    throw new Error("Sandbox bridge mode requires a host-side Paperclip API token.");
+    throw new Error("Remote bridge mode requires a host-side Paperclip API token.");
   }
 
   const runtimeRootDir =
@@ -1773,7 +1773,7 @@ export async function startAdapterExecutionTargetPaperclipBridge(input: {
 
   await onLog(
     "stdout",
-    `[paperclip] Starting sandbox callback bridge for ${input.adapterKey} in ${bridgeRuntimeDir}.\n`,
+    `[paperclip] Starting remote callback bridge for ${input.adapterKey} in ${bridgeRuntimeDir}.\n`,
   );
 
   const bridgeAsset = await createSandboxCallbackBridgeAsset();

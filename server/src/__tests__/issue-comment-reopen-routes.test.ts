@@ -769,10 +769,8 @@ describe.sequential("issue comment reopen routes", () => {
     );
   });
 
-  // The guard compares against the issue's current assignee, not the requested
-  // one — so an admin agent reassigning a different agent's terminal issue to
-  // themselves with comment + reopen=true still reopens as today (AC-3).
-  it("still reopens a done issue via PATCH when a different agent reassigns to self with reopen=true", async () => {
+  // A broad access grant does not let an agent take over another agent's task.
+  it("denies a different agent taking over a done issue through comment and reopen", async () => {
     const otherAgentId = "33333333-3333-4333-8333-333333333333";
     mockAccessService.decide.mockImplementation(async (input: { action?: string }) => ({
       allowed: true,
@@ -797,25 +795,9 @@ describe.sequential("issue comment reopen routes", () => {
       .patch("/api/issues/11111111-1111-4111-8111-111111111111")
       .send({ comment: "taking over", reopen: true, assigneeAgentId: otherAgentId });
 
-    expect(res.status).toBe(200);
-    expect(mockIssueService.update).toHaveBeenCalledWith(
-      "11111111-1111-4111-8111-111111111111",
-      expect.objectContaining({
-        assigneeAgentId: otherAgentId,
-        status: "todo",
-      }),
-    );
-    expect(mockLogActivity).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({
-        action: "issue.updated",
-        details: expect.objectContaining({
-          reopened: true,
-          reopenedFrom: "done",
-          status: "todo",
-        }),
-      }),
-    );
+    expect(res.status).toBe(403);
+    expect(mockIssueService.update).not.toHaveBeenCalled();
+    expect(mockLogActivity).not.toHaveBeenCalled();
   });
 
   it("moves assigned blocked issues back to todo via POST comments", async () => {
