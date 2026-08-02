@@ -83,16 +83,16 @@ function loadReleaseManifest() {
   });
 }
 
-// Sections whose @paperclipai workspace deps are rewritten to the calver release
-// version by replaceWorkspaceDeps() and that consumers resolve at install time.
+// Sections whose workspace deps are rewritten to the calver release version by
+// replaceWorkspaceDeps() and that consumers resolve at install time.
 const RESOLVED_DEP_SECTIONS = ["dependencies", "optionalDependencies", "peerDependencies"];
 
 // A publishFromCi:true package gets republished at the unified calver version every
-// release, and every @paperclipai/* workspace: dep it declares is rewritten to that
-// same calver version. If the target is NOT publishFromCi:true it never gets a calver
-// publish, so the rewritten spec points at a version that will never exist on npm and
-// the package becomes uninstallable. Detect those edges so the release fails fast
-// instead of shipping a broken canary (e.g. server -> skills-catalog from #8327).
+// release, and every workspace dependency on another package in the release plan is
+// rewritten to that same calver version. If the target is NOT publishFromCi:true it
+// never gets a calver publish, so the rewritten spec points at a version that will
+// never exist on npm and the package becomes uninstallable. Detect those edges so
+// the release fails fast instead of shipping a broken canary.
 function findUnpublishableWorkspaceEdges(packages) {
   const publishFromCiByName = new Map(packages.map((pkg) => [pkg.name, pkg.publishFromCi]));
   const problems = [];
@@ -105,7 +105,6 @@ function findUnpublishableWorkspaceEdges(packages) {
       if (!deps) continue;
 
       for (const [depName, spec] of Object.entries(deps)) {
-        if (!depName.startsWith("@paperclipai/")) continue;
         if (typeof spec !== "string" || !spec.startsWith("workspace:")) continue;
         if (publishFromCiByName.get(depName) === true) continue;
 
@@ -218,13 +217,13 @@ function getReleasePackages() {
   return sortTopologically(buildReleasePackagePlan().filter((pkg) => pkg.publishFromCi));
 }
 
-function replaceWorkspaceDeps(deps, version) {
+function replaceWorkspaceDeps(deps, version, releasePackageNames) {
   if (!deps) return deps;
   const next = { ...deps };
 
   for (const [name, value] of Object.entries(next)) {
-    if (!name.startsWith("@paperclipai/")) continue;
     if (typeof value !== "string" || !value.startsWith("workspace:")) continue;
+    if (!releasePackageNames.has(name)) continue;
     next[name] = version;
   }
 
@@ -233,15 +232,16 @@ function replaceWorkspaceDeps(deps, version) {
 
 function setVersion(version) {
   const packages = getReleasePackages();
+  const releasePackageNames = new Set(packages.map((pkg) => pkg.name));
 
   for (const pkg of packages) {
     const nextPkg = {
       ...pkg.pkg,
       version,
-      dependencies: replaceWorkspaceDeps(pkg.pkg.dependencies, version),
-      optionalDependencies: replaceWorkspaceDeps(pkg.pkg.optionalDependencies, version),
-      peerDependencies: replaceWorkspaceDeps(pkg.pkg.peerDependencies, version),
-      devDependencies: replaceWorkspaceDeps(pkg.pkg.devDependencies, version),
+      dependencies: replaceWorkspaceDeps(pkg.pkg.dependencies, version, releasePackageNames),
+      optionalDependencies: replaceWorkspaceDeps(pkg.pkg.optionalDependencies, version, releasePackageNames),
+      peerDependencies: replaceWorkspaceDeps(pkg.pkg.peerDependencies, version, releasePackageNames),
+      devDependencies: replaceWorkspaceDeps(pkg.pkg.devDependencies, version, releasePackageNames),
     };
 
     writeFileSync(pkg.pkgPath, `${JSON.stringify(nextPkg, null, 2)}\n`);
@@ -332,4 +332,5 @@ export {
   getReleasePackages,
   loadReleaseManifest,
   normalizePackageDir,
+  replaceWorkspaceDeps,
 };

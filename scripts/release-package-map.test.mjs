@@ -7,6 +7,7 @@ import {
   findUnpublishableWorkspaceEdges,
   getReleasePackages,
   normalizePackageDir,
+  replaceWorkspaceDeps,
 } from "./release-package-map.mjs";
 
 function pkg(name, { publishFromCi, ...deps } = {}) {
@@ -100,6 +101,40 @@ test("guard allows true->true workspace edges", () => {
   ]);
 
   assert.deepEqual(problems, []);
+});
+
+test("guard checks workspace edges for SPS package namespaces too", () => {
+  const problems = findUnpublishableWorkspaceEdges([
+    pkg("@paperclipai/server", {
+      publishFromCi: true,
+      dependencies: { "@sps/mcp-server": "workspace:*" },
+    }),
+    pkg("@sps/mcp-server", { publishFromCi: false }),
+  ]);
+
+  assert.equal(problems.length, 1);
+  assert.match(problems[0], /@sps\/mcp-server/);
+});
+
+test("version rewrite replaces workspace dependencies for every enrolled package namespace", () => {
+  assert.deepEqual(
+    replaceWorkspaceDeps(
+      {
+        "@paperclipai/shared": "workspace:*",
+        "@sps/mcp-server": "workspace:^",
+        "@paperclipai/not-in-release": "workspace:*",
+        zod: "^3.0.0",
+      },
+      "2026.802.0",
+      new Set(["@paperclipai/shared", "@sps/mcp-server"]),
+    ),
+    {
+      "@paperclipai/shared": "2026.802.0",
+      "@sps/mcp-server": "2026.802.0",
+      "@paperclipai/not-in-release": "workspace:*",
+      zod: "^3.0.0",
+    },
+  );
 });
 
 test("guard ignores non-workspace specs, non-internal deps, and edges from off-train packages", () => {

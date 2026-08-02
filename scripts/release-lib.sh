@@ -344,6 +344,25 @@ publish_package_to_npm() {
   return 1
 }
 
+preview_package_publish() {
+  local dist_tag="$1"
+  local preview_log preview_status
+
+  preview_log="$(mktemp "${TMPDIR:-/tmp}/paperclip-npm-preview.XXXXXX")"
+
+  if pnpm publish --dry-run --no-git-checks --tag "$dist_tag" >"$preview_log" 2>&1; then
+    tail -3 "$preview_log"
+    rm -f "$preview_log"
+    return 0
+  else
+    preview_status=$?
+  fi
+
+  cat "$preview_log"
+  rm -f "$preview_log"
+  return "$preview_status"
+}
+
 wait_for_release_registry_state() {
   local attempts="${1:-12}"
   local delay_seconds="${2:-5}"
