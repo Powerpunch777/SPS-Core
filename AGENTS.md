@@ -1,134 +1,109 @@
 # AGENTS.md
 
-Guidance for human and AI contributors working in this repository.
+Guidance for human and AI contributors working in SPS Core.
 
 ## 1. Purpose
 
-Paperclip is a control plane for AI-agent companies.
-The current implementation target is V1 and is defined in `doc/SPEC-implementation.md`.
+SPS Core is the workflow-neutral platform runtime embedded by SPS Desktop. It
+provides identity, durable storage, Host and Node execution, Agent adapter
+plumbing, plugin lifecycle, recovery, and other shared safety boundaries.
+
+Workflow semantics belong to plugins. Do not make Rooms, Tasks, org charts,
+approval flows, or a particular development process mandatory Core behavior.
 
 ## 2. Read This First
 
 Before making changes, read in this order:
 
-1. `doc/GOAL.md`
-2. `doc/PRODUCT.md`
-3. `doc/SPEC-implementation.md`
-4. `doc/DEVELOPING.md`
-5. `doc/DATABASE.md`
+1. `doc/SPS-CORE-CONTRACT.md`
+2. `README.md`
+3. the closest package or directory `AGENTS.md`, when present
+4. the relevant schema, route, service, UI, and tests
+5. upstream documents under `doc/` only when working on retained compatibility
 
-`doc/SPEC.md` is long-horizon product context.
-`doc/SPEC-implementation.md` is the concrete V1 build contract.
+The historical Paperclip product specifications describe inherited behavior.
+They are not the SPS product contract unless `doc/SPS-CORE-CONTRACT.md` or an
+SPS-owned test explicitly adopts that behavior.
 
-## 3. Repo Map
+## 3. Repository Map
 
-- `server/`: Express REST API and orchestration services
-- `ui/`: React + Vite board UI
-- `packages/db/`: Drizzle schema, migrations, DB clients
-- `packages/shared/`: shared types, constants, validators, API path constants
-- `packages/adapters/`: agent adapter implementations (Claude, Codex, Cursor, etc.)
-- `packages/adapter-utils/`: shared adapter utilities
-- `packages/plugins/`: plugin system packages
-- `doc/`: operational and product docs
+- `server/`: API, orchestration services, plugin host, and compatibility adapters
+- `ui/`: embedded SPS Workspace UI
+- `packages/db/`: schema, migrations, and database clients
+- `packages/shared/`: shared types, constants, validators, and API paths
+- `packages/adapters/`: Agent runtime adapters
+- `packages/plugins/`: plugin runtime packages
+- `doc/`: engineering and compatibility documentation
 
-## 4. Dev Setup (Auto DB)
+## 4. Core Engineering Rules
 
-Use embedded PGlite in dev by leaving `DATABASE_URL` unset.
-
-```sh
-pnpm install
-pnpm dev
-```
-
-This starts:
-
-- API: `http://localhost:3100`
-- UI: `http://localhost:3100` (served by API server in dev middleware mode)
-
-Quick checks:
-
-```sh
-curl http://localhost:3100/api/health
-curl http://localhost:3100/api/companies
-```
-
-Reset local dev DB:
-
-```sh
-rm -rf data/pglite
-pnpm dev
-```
-
-## 5. Core Engineering Rules
-
-1. Keep changes company-scoped.
-Every domain entity should be scoped to a company and company boundaries must be enforced in routes/services.
+1. Preserve tenant isolation.
+Every durable entity must have an enforceable tenant boundary. The current
+compatibility schema often calls that tenant a `company`; do not expose the
+legacy term as a new public SPS product requirement.
 
 2. Keep contracts synchronized.
-If you change schema/API behavior, update all impacted layers:
-- `packages/db` schema and exports
-- `packages/shared` types/constants/validators
-- `server` routes/services
-- `ui` API clients and pages
+Schema or API changes must update the affected DB exports, shared contracts,
+server routes and services, UI clients, tests, and migrations.
 
-3. Preserve control-plane invariants.
-- Single-assignee task model
-- Atomic issue checkout semantics
-- Approval gates for governed actions
-- Budget hard-stop auto-pause behavior
-- Activity logging for mutating actions
+3. Keep Core workflow-neutral.
+New SPS behavior must not require the inherited single-assignee issue model,
+org-chart reporting, heartbeat task checkout, or Paperclip approval semantics.
+Plugins may adopt those behaviors through documented capabilities.
 
-4. Do not replace strategic docs wholesale unless asked.
-Prefer additive updates. Keep `doc/SPEC.md` and `doc/SPEC-implementation.md` aligned.
+4. Preserve compatibility deliberately.
+Existing company, issue, task, agent, and `@paperclipai/*` behavior remains a
+compatibility constraint until SPS provides a migration and rollback path. Put
+new adapters in an explicit compatibility namespace; do not spread new direct
+dependencies on legacy domain types.
 
-5. Keep repo plan docs dated and centralized.
-When you are creating a plan file in the repository itself, new plan documents belong in `doc/plans/` and should use `YYYY-MM-DD-slug.md` filenames. This does not replace Paperclip issue planning: if a Paperclip issue asks for a plan, update the issue `plan` document per the `paperclip` skill instead of creating a repo markdown file.
+5. Fail closed at trust boundaries.
+Identity, Node execution, Source grants, plugin capabilities, package signatures,
+leases, restore, and update compatibility must reject ambiguous or stale input.
 
-6. Attach inspectable generated artifacts.
-When your task produces a user-inspectable deliverable file, follow the Paperclip skill's "Generated Artifacts and Work Products" workflow before final disposition. In this repo, prefer the self-contained skill helper at `skills/paperclip/scripts/paperclip-upload-artifact.sh` so the file is available through the Paperclip API, create/update an artifact work product when the file is the deliverable, link the uploaded artifact in the final issue comment, and then set status. Do not rely on local filesystem paths as the only access path. If an important file intentionally remains workspace-only, create/update a work product with `metadata.resourceRef.kind: "workspace_file"` and a workspace-relative path, then name that work product and path in the final comment. Treat browse/search as a fallback for recovering workspace files, not the preferred deliverable path. See `doc/AGENT-ARTIFACTS.md` for details and `.mp4`/`.webm` examples.
+6. Keep product ownership clear.
+Core may provide generic storage, events, jobs, navigation slots, diagnostics,
+and host services. A plugin owns the domain meaning of data rendered through
+those capabilities.
 
-## 6. Database Change Workflow
+7. Avoid unrelated migrations and refactors.
+Large legacy modules are being split incrementally. Extract one coherent domain
+at a time and preserve behavior with focused tests.
 
-When changing data model:
+8. Preserve catalog trust provenance.
+The Marketplace search service currently consumes a local catalog materialized
+by SPS Desktop. A catalog `source.id` or displayed trust label is not a signature
+check. Do not add arbitrary remote catalog input or elevate trust without a
+verified Source, hash/signature evidence, freshness policy, and fail-closed tests.
 
-1. Edit `packages/db/src/schema/*.ts`
-2. Ensure new tables are exported from `packages/db/src/schema/index.ts`
-3. Generate migration:
+## 5. Database Change Workflow
 
-```sh
-pnpm db:generate
-```
+When changing the data model:
 
-4. Validate compile:
+1. Edit `packages/db/src/schema/*.ts`.
+2. Export new tables from `packages/db/src/schema/index.ts`.
+3. Generate the migration with `pnpm db:generate`.
+4. Validate with focused tests and `pnpm -r typecheck`.
+5. Document compatibility, rollback, and data ownership when the change touches
+   an inherited Paperclip table.
 
-```sh
-pnpm -r typecheck
-```
+Never silently reinterpret existing rows as a new SPS contract.
 
-Notes:
-- `packages/db/drizzle.config.ts` reads compiled schema from `dist/schema/*.js`
-- `pnpm db:generate` compiles `packages/db` first
+## 6. API and Auth Expectations
 
-## 7. Verification Before Hand-off
+- Base path: `/api`.
+- Enforce tenant access in routes and services.
+- Agent and Marketplace Assistant credentials are scoped capabilities, not board
+  administrator sessions.
+- Node commands require signed authority, an active lease, an allowed runtime,
+  and an authorized Source grant.
+- Marketplace Assistant tools remain read-only catalog tools unless a separate,
+  explicit Host action performs installation.
 
-Default local/agent test path:
+## 7. Verification Before Handoff
 
-```sh
-pnpm test
-```
-
-This is the cheap default and only runs the Vitest suite. Browser suites stay opt-in:
-
-```sh
-pnpm test:e2e
-pnpm test:release-smoke
-```
-
-Run the browser suites only when your change touches them or when you are explicitly verifying CI/release flows.
-
-For normal issue work, run the smallest relevant verification first. Do not default to repo-wide typecheck/build/test on every heartbeat when a narrower check is enough to prove the change.
-
-Run this full check before claiming repo work done in a PR-ready hand-off, or when the change scope is broad enough that targeted checks are not sufficient:
+Run the smallest relevant check first. Before claiming broad or PR-ready Core
+work complete, run:
 
 ```sh
 pnpm -r typecheck
@@ -136,91 +111,36 @@ pnpm test:run
 pnpm build
 ```
 
-If anything cannot be run, explicitly report what was not run and why.
+Run browser or release smoke suites when the affected surface requires them.
+SPS-Source owns final candidate tuple, Desktop, bundled-plugin, and physical
+Host/Member release evidence. Report every check that could not be run.
 
-## 8. API and Auth Expectations
+For UI changes, follow `DESIGN.md` and run:
 
-- Base path: `/api`
-- Board access is treated as full-control operator context
-- Agent access uses bearer API keys (`agent_api_keys`), hashed at rest
-- Agent keys must not access other companies
+```sh
+pnpm check:token-gates
+```
 
-When adding endpoints:
+When opening a pull request, read and complete every section of
+`.github/PULL_REQUEST_TEMPLATE.md`, including reasoning, verification, risks,
+model use, and checklist items.
 
-- apply company access checks
-- enforce actor permissions (board vs agent)
-- write activity log entries for mutations
-- return consistent HTTP errors (`400/401/403/404/409/422/500`)
+## 8. Documentation and Attribution
 
-## 9. UI Expectations
+- SPS-owned plans belong in the SPS-Source product documentation unless the plan
+  is only about this Core repository.
+- Keep applicable Paperclip and third-party license notices intact.
+- Do not present inherited upstream marketing or workflow rules as current SPS
+  product behavior.
+- Use `SPS`, `Workspace`, `Host`, `Member`, `Node`, `Source`, and `Plugin` on new
+  product-facing surfaces unless a compatibility API requires a legacy name.
 
-- Keep routes and nav aligned with available API surface
-- Use company selection context for company-scoped pages
-- Surface failures clearly; do not silently ignore API errors
+## 9. Definition of Done
 
-## 10. Pull Request Requirements
+A Core change is done only when:
 
-When creating a pull request (via `gh pr create` or any other method), you **must** read and fill in every section of [`.github/PULL_REQUEST_TEMPLATE.md`](.github/PULL_REQUEST_TEMPLATE.md). Do not craft ad-hoc PR bodies — use the template as the structure for your PR description. Required sections:
-
-- **Thinking Path** — trace reasoning from project context to this change (see `CONTRIBUTING.md` for examples)
-- **What Changed** — bullet list of concrete changes
-- **Verification** — how a reviewer can confirm it works
-- **Risks** — what could go wrong
-- **Model Used** — the AI model that produced or assisted with the change (provider, exact model ID, context window, capabilities). Write "None — human-authored" if no AI was used.
-- **Checklist** — all items checked
-
-## 11. Definition of Done
-
-A change is done when all are true:
-
-1. Behavior matches `doc/SPEC-implementation.md`
-2. Typecheck, tests, and build pass
-3. Contracts are synced across db/shared/server/ui
-4. Docs updated when behavior or commands change
-5. PR description follows the [PR template](.github/PULL_REQUEST_TEMPLATE.md) with all sections filled in (including Model Used)
-
-## 11. Fork-Specific: HenkDz/paperclip
-
-This is a fork of `paperclipai/paperclip` with QoL patches and a **built-in** Hermes adapter story on branch `feat/externalize-hermes-adapter` ([tree](https://github.com/HenkDz/paperclip/tree/feat/externalize-hermes-adapter)).
-
-### Branch Strategy
-
-- `feat/externalize-hermes-adapter` now ships `hermes_local` and `hermes_gateway` as built-in core adapters.
-- Older fork branches may still document plugin-only Hermes; treat this file as authoritative for the current branch.
-
-### Hermes (built-in)
-
-- `hermes_local` is available without Adapter manager installation and runs the local Hermes CLI.
-- `hermes_gateway` is available without Adapter manager installation and calls an already-running Hermes API server.
-- Operators may still install external Hermes packages through Adapter manager to override/shadow the built-ins.
-- Optional: `file:` entry in `~/.paperclip/adapter-plugins.json` remains useful for local development of override packages.
-
-### Local Dev
-
-- Fork runs on port 3101+ (auto-detects if 3100 is taken by upstream instance)
-- `npx vite build` hangs on NTFS — use `node node_modules/vite/bin/vite.js build` instead
-- Server startup from NTFS takes 30-60s — don't assume failure immediately
-- Kill ALL paperclip processes before starting: `pkill -f "paperclip"; pkill -f "tsx.*index.ts"`
-- Vite cache survives `rm -rf dist` — delete both: `rm -rf ui/dist ui/node_modules/.vite`
-
-### Fork QoL Patches (not in upstream)
-
-These are local modifications in the fork's UI. If re-copying source, these must be re-applied:
-
-1. **stderr_group** — amber accordion for MCP init noise in `RunTranscriptView.tsx`
-2. **tool_group** — accordion for consecutive non-terminal tools (write, read, search, browser)
-3. **Dashboard excerpt** — `LatestRunCard` strips markdown, shows first 3 lines/280 chars
-
-### Plugin System
-
-PR #2218 (`feat/external-adapter-phase1`) adds external adapter support. See root `AGENTS.md` for full details.
-
-- Adapters can be loaded as external plugins via `~/.paperclip/adapter-plugins.json`
-- The plugin-loader should have ZERO hardcoded adapter imports — pure dynamic loading
-- `createServerAdapter()` must include ALL optional fields (especially `detectModel`)
-- Built-in UI adapters can shadow external plugin parsers; external override pause/resume should restore the built-in parser.
-- Reference external adapters: Droid (npm); Hermes can also be tested as an override package.
-
-## Design system
-
-`DESIGN.md` at the repo root is the source of truth for UI design decisions. The token-only rule applies to all `ui/` changes: every color, spacing, radius, type, shadow, and motion value in `ui/src/components/**` and `ui/src/pages/**` comes from the token layer in `ui/src/index.css` — no hex, raw px, arbitrary Tailwind bracket values, or raw `font-size`/`fontSize` declarations in components, outside the documented allowlist in `ui/src/index.css`. Run `pnpm check:token-gates` (`scripts/check-token-gates.mjs`) before committing UI changes — it fails on any violation not covered by that allowlist.
+1. It follows `doc/SPS-CORE-CONTRACT.md` and identifies Core or Plugin ownership.
+2. Relevant tests, typecheck, build, and UI token gates pass.
+3. DB, shared, server, UI, migration, and compatibility contracts stay aligned.
+4. Documentation and rollback notes match the implemented behavior.
+5. The pull request follows the repository template and reports unrun checks.
