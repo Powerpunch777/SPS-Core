@@ -22,6 +22,7 @@ const mockAccessService = vi.hoisted(() => ({
   decide: vi.fn(),
 }));
 const mockWorkspaceOperationService = vi.hoisted(() => ({}));
+const mockProjectAccessService = vi.hoisted(() => ({}));
 const mockSecretService = vi.hoisted(() => ({
   normalizeEnvBindingsForPersistence: vi.fn(),
 }));
@@ -41,6 +42,7 @@ vi.mock("../services/index.js", () => ({
   environmentService: () => mockEnvironmentService,
   goalService: () => mockGoalService,
   logActivity: mockLogActivity,
+  projectAccessService: () => mockProjectAccessService,
   projectService: () => mockProjectService,
   secretService: () => mockSecretService,
   workspaceOperationService: () => mockWorkspaceOperationService,
@@ -61,6 +63,7 @@ function registerModuleMocks() {
     environmentService: () => mockEnvironmentService,
     goalService: () => mockGoalService,
     logActivity: mockLogActivity,
+    projectAccessService: () => mockProjectAccessService,
     projectService: () => mockProjectService,
     secretService: () => mockSecretService,
     workspaceOperationService: () => mockWorkspaceOperationService,
