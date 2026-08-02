@@ -43,6 +43,7 @@ interface TestContext {
 }
 
 interface IssueRunLockState {
+  status: string | null;
   assigneeAgentId: string | null;
   checkoutRunId: string | null;
   executionRunId: string | null;
@@ -69,6 +70,7 @@ async function getIssueRunLockState(board: APIRequestContext, issueId: string): 
   expect(res.ok()).toBe(true);
   const issue = await res.json();
   return {
+    status: issue.status ?? null,
     assigneeAgentId: issue.assigneeAgentId ?? null,
     checkoutRunId: issue.checkoutRunId ?? null,
     executionRunId: issue.executionRunId ?? null,
@@ -94,6 +96,50 @@ async function retryAgentPatchWithCurrentLockOnConflict(
     data: patchData,
   });
   return retryRes.ok() ? retryRes : failedRes;
+}
+
+/**
+ * Assignment wake can win the race with the run created by this test. Cancel
+ * only that run, then remove the resulting stale checkout through the board
+ * admin contract before retrying the intended checkout.
+ */
+async function settleAutomaticCheckout(
+  board: APIRequestContext,
+  agent: AgentAuth,
+  issueId: string,
+) {
+  const deadline = Date.now() + 20_000;
+  let cancelledRunId: string | null = null;
+
+  while (Date.now() < deadline) {
+    const state = await getIssueRunLockState(board, issueId);
+    if (state.assigneeAgentId !== agent.agentId || state.status !== "in_progress") return;
+
+    const conflictingRunId = state.checkoutRunId ?? state.executionRunId;
+    if (!conflictingRunId) return;
+
+    const runRes = await board.get(`${BASE_URL}/api/heartbeat-runs/${conflictingRunId}`);
+    const run = runRes.status() === 404 ? null : await runRes.json();
+    if (run && ["queued", "running"].includes(run.status)) {
+      if (cancelledRunId !== conflictingRunId) {
+        const cancelRes = await board.post(`${BASE_URL}/api/heartbeat-runs/${conflictingRunId}/cancel`, {
+          data: {},
+        });
+        expect(cancelRes.ok()).toBe(true);
+        cancelledRunId = conflictingRunId;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      continue;
+    }
+
+    const releaseRes = await board.post(`${BASE_URL}/api/issues/${issueId}/admin/force-release`, {
+      data: { clearAssignee: false },
+    });
+    expect(releaseRes.ok()).toBe(true);
+    return;
+  }
+
+  throw new Error(`Automatic checkout did not settle for issue ${issueId} within 20 seconds`);
 }
 
 /** PATCH an issue as an agent with a fresh heartbeat run ID. */
@@ -137,6 +183,13 @@ async function agentCheckoutAndPatch(
       if (res.ok()) {
         return res;
       }
+
+      await settleAutomaticCheckout(board, agent, issueId);
+      const settledCheckout = await board.post(`${BASE_URL}/api/issues/${issueId}/checkout`, {
+        data: { agentId: agent.agentId, expectedStatuses },
+      });
+      expect(settledCheckout.ok()).toBe(true);
+      return board.patch(`${BASE_URL}/api/issues/${issueId}`, { data: patchData });
     }
     // If agent checkout fails (e.g. run expired), fall back to board checkout
     // then PATCH with the agent's identity
