@@ -61,6 +61,26 @@ test("server publish lifecycle keeps ui-dist available through payload collectio
   assert.equal(server.pkg.scripts?.postpack, undefined);
 });
 
+test("plugin publish lifecycles use the cross-platform package helpers", () => {
+  const plugins = buildReleasePackagePlan().filter(
+    ({ pkg }) => pkg.spsPlugin || pkg.paperclipPlugin,
+  );
+
+  assert.ok(plugins.length > 0);
+  for (const plugin of plugins) {
+    assert.match(
+      plugin.pkg.scripts?.prepack ?? "",
+      /^node .*generate-plugin-package-json\.mjs$/,
+      `${plugin.name} prepack`,
+    );
+    assert.match(
+      plugin.pkg.scripts?.postpack ?? "",
+      /^node .*restore-plugin-package-json\.mjs$/,
+      `${plugin.name} postpack`,
+    );
+  }
+});
+
 test("guard flags a publishFromCi:true package depending on a publishFromCi:false package", () => {
   const problems = findUnpublishableWorkspaceEdges([
     pkg("@paperclipai/server", {
