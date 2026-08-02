@@ -40,8 +40,8 @@ describe("activity formatting", () => {
       ],
     };
 
-    expect(formatActivityVerb("issue.approvers_updated", details)).toBe("removed approver Board from");
-    expect(formatIssueActivityAction("issue.approvers_updated", details)).toBe("removed approver Board");
+    expect(formatActivityVerb("issue.approvers_updated", details)).toBe("removed approver Owner from");
+    expect(formatIssueActivityAction("issue.approvers_updated", details)).toBe("removed approver Owner");
   });
 
   it("falls back to updated wording when reviewers are both added and removed", () => {

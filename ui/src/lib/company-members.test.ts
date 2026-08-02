@@ -31,7 +31,7 @@ describe("company-members helpers", () => {
     ]);
 
     expect(labels.get("user-1")).toBe("Taylor");
-    expect(labels.get("local-board")).toBe("Board");
+    expect(labels.get("local-board")).toBe("Owner");
   });
 
   it("builds user profiles with labels and avatars", () => {
@@ -48,7 +48,7 @@ describe("company-members helpers", () => {
       image: "https://example.com/taylor.png",
     });
     expect(profiles.get("local-board")).toEqual({
-      label: "Board",
+      label: "Owner",
       image: null,
     });
   });

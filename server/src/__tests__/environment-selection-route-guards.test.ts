@@ -54,6 +54,10 @@ const mockLogActivity = vi.hoisted(() => vi.fn());
 
 vi.mock("../services/index.js", () => ({
   projectService: () => mockProjectService,
+  projectAccessService: () => ({
+    list: vi.fn(async () => []),
+    replace: vi.fn(),
+  }),
   issueService: () => mockIssueService,
   companyService: () => mockCompanyService,
   environmentService: () => mockEnvironmentService,
@@ -63,6 +67,7 @@ vi.mock("../services/index.js", () => ({
   accessService: () => ({
     canUser: vi.fn(),
     hasPermission: vi.fn(),
+    decide: vi.fn(async () => ({ allowed: true, reason: "test_allow" })),
   }),
   agentService: () => ({
     getById: vi.fn(),
