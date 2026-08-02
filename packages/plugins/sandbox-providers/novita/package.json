@@ -42,11 +42,11 @@
     "novita-ai"
   ],
   "scripts": {
-    "prebuild": "pnpm -C ../../../.. --filter @paperclipai/plugin-sdk ensure-build-deps",
-    "build": "rm -rf dist && tsc",
-    "clean": "rm -rf dist",
-    "typecheck": "pnpm -C ../../../.. --filter @paperclipai/plugin-sdk ensure-build-deps && tsc --noEmit",
-    "test": "pnpm -C ../../../.. --filter @paperclipai/plugin-sdk ensure-build-deps && vitest run --config vitest.config.ts",
+    "prebuild": "node ../../../../scripts/ensure-plugin-build-deps.mjs",
+    "build": "node ../../../../scripts/clean-package-dist.mjs && tsc",
+    "clean": "node ../../../../scripts/clean-package-dist.mjs",
+    "typecheck": "node ../../../../scripts/ensure-plugin-build-deps.mjs && tsc --noEmit",
+    "test": "node ../../../../scripts/ensure-plugin-build-deps.mjs && vitest run --config vitest.config.ts",
     "prepack": "rm -f package.dev.json && cp package.json package.dev.json && node ../../../../scripts/generate-plugin-package-json.mjs",
     "postpack": "if [ -f package.dev.json ]; then mv package.dev.json package.json; fi"
   },

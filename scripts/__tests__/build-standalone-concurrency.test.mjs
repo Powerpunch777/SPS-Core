@@ -19,14 +19,42 @@ test("runs the package manager through Node when npm_execpath is a JS entrypoint
   );
 });
 
-test("uses an explicit platform executable when npm_execpath is a command shim", () => {
+test("uses the Windows command processor for command shims and PATH fallback", () => {
   assert.deepEqual(
     resolvePackageManagerInvocation(
-      { npm_execpath: "C:/tools/pnpm.cmd" },
+      {
+        ComSpec: "C:/Windows/System32/cmd.exe",
+        npm_execpath: "C:/tools/pnpm.cmd",
+      },
       "win32",
     ),
-    { command: "pnpm.cmd", argsPrefix: [] },
+    {
+      command: "C:/Windows/System32/cmd.exe",
+      argsPrefix: ["/d", "/s", "/c", "C:/tools/pnpm.cmd"],
+    },
   );
+  assert.deepEqual(
+    resolvePackageManagerInvocation(
+      {
+        ComSpec: "C:/Windows/System32/cmd.exe",
+        SPS_PNPM_SCRIPT_SHELL: "C:/Program Files/Git/bin/bash.exe",
+      },
+      "win32",
+    ),
+    {
+      command: "C:/Windows/System32/cmd.exe",
+      argsPrefix: [
+        "/d",
+        "/s",
+        "/c",
+        "pnpm",
+        "--config.script-shell=C:/Program Files/Git/bin/bash.exe",
+      ],
+    },
+  );
+});
+
+test("uses the direct executable on Unix", () => {
   assert.deepEqual(
     resolvePackageManagerInvocation({}, "linux"),
     { command: "pnpm", argsPrefix: [] },

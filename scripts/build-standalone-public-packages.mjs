@@ -142,13 +142,34 @@ export function resolvePackageManagerInvocation(
   platform = process.platform,
 ) {
   const npmExecPath = env.npm_execpath;
+  const scriptShell = env.SPS_PNPM_SCRIPT_SHELL || env.npm_config_script_shell;
+  const configArgs = scriptShell
+    ? [`--config.script-shell=${scriptShell}`]
+    : [];
   if (npmExecPath && /\.(?:cjs|mjs|js)$/i.test(npmExecPath)) {
-    return { command: process.execPath, argsPrefix: [npmExecPath] };
+    return {
+      command: process.execPath,
+      argsPrefix: [npmExecPath, ...configArgs],
+    };
+  }
+
+  if (platform === "win32") {
+    const commandProcessor = env.ComSpec || env.COMSPEC || "cmd.exe";
+    return {
+      command: commandProcessor,
+      argsPrefix: [
+        "/d",
+        "/s",
+        "/c",
+        npmExecPath || "pnpm",
+        ...configArgs,
+      ],
+    };
   }
 
   return {
-    command: platform === "win32" ? "pnpm.cmd" : "pnpm",
-    argsPrefix: [],
+    command: npmExecPath || "pnpm",
+    argsPrefix: configArgs,
   };
 }
 
