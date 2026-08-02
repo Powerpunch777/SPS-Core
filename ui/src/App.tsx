@@ -1,80 +1,12 @@
+import { Suspense } from "react";
 import { Navigate, Outlet, Route, Routes, useLocation, useParams } from "@/lib/router";
 import { useQuery } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { useTranslation } from "@/i18n";
-import { Layout } from "./components/Layout";
 import { ConferenceRoomChatGate } from "./components/ConferenceRoomChatGate";
 import { PipelinesExperimentalGate } from "./components/PipelinesExperimentalGate";
 import { CasesExperimentalGate } from "./components/CasesExperimentalGate";
-import { Cases } from "./pages/Cases";
-import { CaseDetail } from "./pages/CaseDetail";
-import { OnboardingWizardVariant } from "./components/OnboardingWizardVariant";
 import { CloudAccessGate } from "./components/CloudAccessGate";
-import { Dashboard } from "./pages/Dashboard";
-import { DashboardLive } from "./pages/DashboardLive";
-import { Timeline } from "./pages/Timeline";
-import { Companies } from "./pages/Companies";
-import { AGENT_FILTER_TABS, Agents } from "./pages/Agents";
-import { AgentDetail } from "./pages/AgentDetail";
-import { Projects } from "./pages/Projects";
-import { ProjectDetail } from "./pages/ProjectDetail";
-import { ProjectWorkspaceDetail } from "./pages/ProjectWorkspaceDetail";
-import { Workspaces } from "./pages/Workspaces";
-import { Issues } from "./pages/Issues";
-import { Search } from "./pages/Search";
-import { IssueDetail } from "./pages/IssueDetail";
-import { IssueChatLongThreadPerf } from "./pages/IssueChatLongThreadPerf";
-import { Routines } from "./pages/Routines";
-import { Learnings, PipelineItemDetail, PipelineItemLegacyRedirect, Pipelines, ReviewQueue } from "./pages/Pipelines";
-import { PipelineSettings } from "./pages/PipelineSettings";
-import { RoutineDetail } from "./pages/RoutineDetail";
-import { UserProfile } from "./pages/UserProfile";
-import { ExecutionWorkspaceDetail } from "./pages/ExecutionWorkspaceDetail";
-import { Goals } from "./pages/Goals";
-import { Artifacts } from "./pages/Artifacts";
-import { GoalDetail } from "./pages/GoalDetail";
-import { Approvals } from "./pages/Approvals";
-import { ApprovalDetail } from "./pages/ApprovalDetail";
-import { Costs } from "./pages/Costs";
-import { Activity } from "./pages/Activity";
-import { Inbox } from "./pages/Inbox";
-import { WhatNeedsMe } from "./pages/WhatNeedsMe";
-import { BoardChat } from "./pages/BoardChat";
-import { CompanySettings } from "./pages/CompanySettings";
-import { CompanyEnvironments } from "./pages/CompanyEnvironments";
-import { CloudUpstream } from "./pages/CloudUpstream";
-import { CloudUpstreamUxLab } from "./pages/CloudUpstreamUxLab";
-import { BootstrapSetupUxLab } from "./pages/BootstrapSetupUxLab";
-import { ResponsibleUserDenialUxLab } from "./pages/ResponsibleUserDenialUxLab";
-import { CompanySettingsPluginPage } from "./pages/CompanySettingsPluginPage";
-import { CompanyAccess, CompanyAccessLegacyRoute } from "./pages/CompanyAccess";
-import { CompanyInvites } from "./pages/CompanyInvites";
-import { SpsNodes } from "./pages/SpsNodes";
-import { CompanyProjectSources } from "./pages/CompanyProjectSources";
-import { CompanySkills } from "./pages/CompanySkills";
-import { SkillStudio } from "./pages/SkillStudio";
-import { Secrets } from "./pages/Secrets";
-import { CompanyExport } from "./pages/CompanyExport";
-import { CompanyImport } from "./pages/CompanyImport";
-import { DesignGuide } from "./pages/DesignGuide";
-import { InstanceGeneralSettings } from "./pages/InstanceGeneralSettings";
-import { InstanceAccess } from "./pages/InstanceAccess";
-import { InstanceSettings } from "./pages/InstanceSettings";
-import { InstanceExperimentalSettings } from "./pages/InstanceExperimentalSettings";
-import { ProfileSettings } from "./pages/ProfileSettings";
-import { PluginManager } from "./pages/PluginManager";
-import { PluginSettings } from "./pages/PluginSettings";
-import { AdapterManager } from "./pages/AdapterManager";
-import { PluginPage } from "./pages/PluginPage";
-import { OrgChart } from "./pages/OrgChart";
-import { NewAgent } from "./pages/NewAgent";
-import { AuthPage } from "./pages/Auth";
-import { BoardClaimPage } from "./pages/BoardClaim";
-import { CliAuthPage } from "./pages/CliAuth";
-import { InviteLandingPage } from "./pages/InviteLanding";
-import { SpsJoinPage } from "./pages/SpsJoin";
-import { JoinRequestQueue } from "./pages/JoinRequestQueue";
-import { NotFoundPage } from "./pages/NotFound";
 import { useCompany } from "./context/CompanyContext";
 import { useDialogActions, useDialogState } from "./context/DialogContext";
 import { loadLastInboxTab } from "./lib/inbox";
@@ -85,16 +17,174 @@ import {
 import { normalizeRememberedInstanceSettingsPath } from "./lib/instance-settings";
 import { isWorkplaneModeEnabled } from "./lib/workplane-mode";
 import { isSpsCoreBaselineModeEnabled } from "./lib/sps-core-baseline-mode";
-import { SpsCoreWorkspaceHome } from "./pages/SpsCoreWorkspaceHome";
-import { SpsWorkspaceInbox } from "./pages/SpsWorkspaceInbox";
-import { SpsCoreAssistantDetail } from "./pages/SpsCoreAssistantDetail";
-import { SpsCoreHostSettings } from "./pages/SpsCoreHostSettings";
-import { SpsCoreWorkspaceSources } from "./pages/SpsCoreWorkspaceSources";
-import { SpsCoreTeamAccess } from "./pages/SpsCoreTeamAccess";
-import { SpsCoreServerSettings } from "./pages/SpsCoreServerSettings";
 import { workspaceSurfacesApi } from "./api/workspace-surfaces";
 import { queryKeys } from "./lib/queryKeys";
 import { workspaceShellRoute } from "./lib/workspace-shell-route";
+import { AGENT_FILTER_TABS } from "./lib/agent-filter-tabs";
+import { lazyNamed } from "./lib/lazy-named";
+
+const Layout = lazyNamed(() => import("./components/Layout"), "Layout");
+const OnboardingWizardVariant = lazyNamed(
+  () => import("./components/OnboardingWizardVariant"),
+  "OnboardingWizardVariant",
+);
+const CompanySettingsPluginPage = lazyNamed(
+  () => import("./pages/CompanySettingsPluginPage"),
+  "CompanySettingsPluginPage",
+);
+const SpsNodes = lazyNamed(() => import("./pages/SpsNodes"), "SpsNodes");
+const PluginManager = lazyNamed(() => import("./pages/PluginManager"), "PluginManager");
+const PluginSettings = lazyNamed(() => import("./pages/PluginSettings"), "PluginSettings");
+const PluginPage = lazyNamed(() => import("./pages/PluginPage"), "PluginPage");
+const NewAgent = lazyNamed(() => import("./pages/NewAgent"), "NewAgent");
+const AuthPage = lazyNamed(() => import("./pages/Auth"), "AuthPage");
+const BoardClaimPage = lazyNamed(() => import("./pages/BoardClaim"), "BoardClaimPage");
+const CliAuthPage = lazyNamed(() => import("./pages/CliAuth"), "CliAuthPage");
+const InviteLandingPage = lazyNamed(
+  () => import("./pages/InviteLanding"),
+  "InviteLandingPage",
+);
+const SpsJoinPage = lazyNamed(() => import("./pages/SpsJoin"), "SpsJoinPage");
+const NotFoundPage = lazyNamed(() => import("./pages/NotFound"), "NotFoundPage");
+const SpsCoreWorkspaceHome = lazyNamed(
+  () => import("./pages/SpsCoreWorkspaceHome"),
+  "SpsCoreWorkspaceHome",
+);
+const SpsWorkspaceInbox = lazyNamed(
+  () => import("./pages/SpsWorkspaceInbox"),
+  "SpsWorkspaceInbox",
+);
+const SpsCoreAssistantDetail = lazyNamed(
+  () => import("./pages/SpsCoreAssistantDetail"),
+  "SpsCoreAssistantDetail",
+);
+const SpsCoreHostSettings = lazyNamed(
+  () => import("./pages/SpsCoreHostSettings"),
+  "SpsCoreHostSettings",
+);
+const SpsCoreWorkspaceSources = lazyNamed(
+  () => import("./pages/SpsCoreWorkspaceSources"),
+  "SpsCoreWorkspaceSources",
+);
+const SpsCoreTeamAccess = lazyNamed(
+  () => import("./pages/SpsCoreTeamAccess"),
+  "SpsCoreTeamAccess",
+);
+const SpsCoreServerSettings = lazyNamed(
+  () => import("./pages/SpsCoreServerSettings"),
+  "SpsCoreServerSettings",
+);
+const Cases = lazyNamed(() => import("./pages/Cases"), "Cases");
+const CaseDetail = lazyNamed(() => import("./pages/CaseDetail"), "CaseDetail");
+const Dashboard = lazyNamed(() => import("./pages/Dashboard"), "Dashboard");
+const DashboardLive = lazyNamed(() => import("./pages/DashboardLive"), "DashboardLive");
+const Timeline = lazyNamed(() => import("./pages/Timeline"), "Timeline");
+const Companies = lazyNamed(() => import("./pages/Companies"), "Companies");
+const Agents = lazyNamed(() => import("./pages/Agents"), "Agents");
+const AgentDetail = lazyNamed(() => import("./pages/AgentDetail"), "AgentDetail");
+const Projects = lazyNamed(() => import("./pages/Projects"), "Projects");
+const ProjectDetail = lazyNamed(() => import("./pages/ProjectDetail"), "ProjectDetail");
+const ProjectWorkspaceDetail = lazyNamed(
+  () => import("./pages/ProjectWorkspaceDetail"),
+  "ProjectWorkspaceDetail",
+);
+const Workspaces = lazyNamed(() => import("./pages/Workspaces"), "Workspaces");
+const Issues = lazyNamed(() => import("./pages/Issues"), "Issues");
+const Search = lazyNamed(() => import("./pages/Search"), "Search");
+const IssueDetail = lazyNamed(() => import("./pages/IssueDetail"), "IssueDetail");
+const IssueChatLongThreadPerf = lazyNamed(
+  () => import("./pages/IssueChatLongThreadPerf"),
+  "IssueChatLongThreadPerf",
+);
+const Routines = lazyNamed(() => import("./pages/Routines"), "Routines");
+const Learnings = lazyNamed(() => import("./pages/Pipelines"), "Learnings");
+const PipelineItemDetail = lazyNamed(
+  () => import("./pages/Pipelines"),
+  "PipelineItemDetail",
+);
+const PipelineItemLegacyRedirect = lazyNamed(
+  () => import("./pages/Pipelines"),
+  "PipelineItemLegacyRedirect",
+);
+const Pipelines = lazyNamed(() => import("./pages/Pipelines"), "Pipelines");
+const ReviewQueue = lazyNamed(() => import("./pages/Pipelines"), "ReviewQueue");
+const PipelineSettings = lazyNamed(
+  () => import("./pages/PipelineSettings"),
+  "PipelineSettings",
+);
+const RoutineDetail = lazyNamed(() => import("./pages/RoutineDetail"), "RoutineDetail");
+const UserProfile = lazyNamed(() => import("./pages/UserProfile"), "UserProfile");
+const ExecutionWorkspaceDetail = lazyNamed(
+  () => import("./pages/ExecutionWorkspaceDetail"),
+  "ExecutionWorkspaceDetail",
+);
+const Goals = lazyNamed(() => import("./pages/Goals"), "Goals");
+const Artifacts = lazyNamed(() => import("./pages/Artifacts"), "Artifacts");
+const GoalDetail = lazyNamed(() => import("./pages/GoalDetail"), "GoalDetail");
+const Approvals = lazyNamed(() => import("./pages/Approvals"), "Approvals");
+const ApprovalDetail = lazyNamed(
+  () => import("./pages/ApprovalDetail"),
+  "ApprovalDetail",
+);
+const Costs = lazyNamed(() => import("./pages/Costs"), "Costs");
+const Activity = lazyNamed(() => import("./pages/Activity"), "Activity");
+const Inbox = lazyNamed(() => import("./pages/Inbox"), "Inbox");
+const WhatNeedsMe = lazyNamed(() => import("./pages/WhatNeedsMe"), "WhatNeedsMe");
+const BoardChat = lazyNamed(() => import("./pages/BoardChat"), "BoardChat");
+const CompanySettings = lazyNamed(
+  () => import("./pages/CompanySettings"),
+  "CompanySettings",
+);
+const CompanyEnvironments = lazyNamed(
+  () => import("./pages/CompanyEnvironments"),
+  "CompanyEnvironments",
+);
+const CloudUpstream = lazyNamed(() => import("./pages/CloudUpstream"), "CloudUpstream");
+const CloudUpstreamUxLab = lazyNamed(
+  () => import("./pages/CloudUpstreamUxLab"),
+  "CloudUpstreamUxLab",
+);
+const BootstrapSetupUxLab = lazyNamed(
+  () => import("./pages/BootstrapSetupUxLab"),
+  "BootstrapSetupUxLab",
+);
+const ResponsibleUserDenialUxLab = lazyNamed(
+  () => import("./pages/ResponsibleUserDenialUxLab"),
+  "ResponsibleUserDenialUxLab",
+);
+const CompanyAccess = lazyNamed(() => import("./pages/CompanyAccess"), "CompanyAccess");
+const CompanyAccessLegacyRoute = lazyNamed(
+  () => import("./pages/CompanyAccess"),
+  "CompanyAccessLegacyRoute",
+);
+const CompanyInvites = lazyNamed(() => import("./pages/CompanyInvites"), "CompanyInvites");
+const CompanyProjectSources = lazyNamed(
+  () => import("./pages/CompanyProjectSources"),
+  "CompanyProjectSources",
+);
+const CompanySkills = lazyNamed(() => import("./pages/CompanySkills"), "CompanySkills");
+const SkillStudio = lazyNamed(() => import("./pages/SkillStudio"), "SkillStudio");
+const Secrets = lazyNamed(() => import("./pages/Secrets"), "Secrets");
+const CompanyExport = lazyNamed(() => import("./pages/CompanyExport"), "CompanyExport");
+const CompanyImport = lazyNamed(() => import("./pages/CompanyImport"), "CompanyImport");
+const DesignGuide = lazyNamed(() => import("./pages/DesignGuide"), "DesignGuide");
+const InstanceGeneralSettings = lazyNamed(
+  () => import("./pages/InstanceGeneralSettings"),
+  "InstanceGeneralSettings",
+);
+const InstanceAccess = lazyNamed(() => import("./pages/InstanceAccess"), "InstanceAccess");
+const InstanceSettings = lazyNamed(() => import("./pages/InstanceSettings"), "InstanceSettings");
+const InstanceExperimentalSettings = lazyNamed(
+  () => import("./pages/InstanceExperimentalSettings"),
+  "InstanceExperimentalSettings",
+);
+const ProfileSettings = lazyNamed(() => import("./pages/ProfileSettings"), "ProfileSettings");
+const AdapterManager = lazyNamed(() => import("./pages/AdapterManager"), "AdapterManager");
+const OrgChart = lazyNamed(() => import("./pages/OrgChart"), "OrgChart");
+const JoinRequestQueue = lazyNamed(
+  () => import("./pages/JoinRequestQueue"),
+  "JoinRequestQueue",
+);
 
 function CoreBaselineIndexRedirect() {
   const { selectedCompanyId, selectedCompany } = useCompany();
@@ -516,11 +606,24 @@ function NoCompaniesStartPage() {
   );
 }
 
+function RouteLoadingFallback() {
+  return (
+    <div
+      className="mx-auto max-w-xl py-10 text-sm text-muted-foreground"
+      role="status"
+      aria-live="polite"
+    >
+      Loading workspace...
+    </div>
+  );
+}
+
 export function App() {
   return (
     <>
-      <Routes>
-        <Route path="auth" element={<AuthPage />} />
+      <Suspense fallback={<RouteLoadingFallback />}>
+        <Routes>
+          <Route path="auth" element={<AuthPage />} />
         <Route path="board-claim/:token" element={<BoardClaimPage />} />
         <Route path="cli-auth/:id" element={<CliAuthPage />} />
         <Route path="invite/:token" element={<InviteLandingPage />} />
@@ -588,9 +691,12 @@ export function App() {
             {boardRoutes()}
           </Route>
           <Route path="*" element={<NotFoundPage scope="global" />} />
-        </Route>
-      </Routes>
-      <OnboardingWizardVariant />
+          </Route>
+        </Routes>
+      </Suspense>
+      <Suspense fallback={null}>
+        <OnboardingWizardVariant />
+      </Suspense>
     </>
   );
 }

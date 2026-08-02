@@ -58,6 +58,12 @@ These are compatibility implementation details. New SPS features must not use
 them as the only public contract. Prefer SPS-owned modules and adapters that can
 later be redirected to neutral storage and execution services.
 
+SPS-owned server and UI modules consume retained dependencies through
+`server/src/compat/paperclip/` and `ui/src/compat/paperclip/`. The
+`pnpm check:sps-compat-boundary` gate rejects new direct imports from the owned
+surface. Add a narrow facade export with an explicit migration reason instead
+of bypassing this gate.
+
 ## Change Rules
 
 1. Do not delete compatibility behavior without data migration, plugin impact,
@@ -77,6 +83,9 @@ later be redirected to neutral storage and execution services.
    source until provenance, signature/hash, expiry, and fail-closed behavior are
    verified at the catalog boundary. The current local catalog path assumes
    Desktop has already materialized trusted data.
+8. Core UI routes must remain independently loadable. The production build is
+   checked by `pnpm check:sps-ui-bundle`; increasing the entry budget requires
+   measured startup evidence and an explicit contract review.
 
 ## Migration Direction
 

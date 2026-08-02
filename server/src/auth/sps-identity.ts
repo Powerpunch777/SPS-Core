@@ -1,8 +1,8 @@
 import { createHash, createPublicKey, randomBytes, verify } from "node:crypto";
 import { Router, type Request, type Response } from "express";
 import { and, eq, gt } from "drizzle-orm";
-import type { Db } from "@paperclipai/db";
-import { authSessions, authUsers } from "@paperclipai/db";
+import type { Db } from "../compat/paperclip/db.js";
+import { authSessions, authUsers } from "../compat/paperclip/db.js";
 import type { Config } from "../config.js";
 import type { BetterAuthSessionResult } from "./better-auth.js";
 

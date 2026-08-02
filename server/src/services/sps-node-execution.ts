@@ -1,5 +1,5 @@
 import { and, asc, eq, gt, isNull } from "drizzle-orm";
-import type { Db } from "@paperclipai/db";
+import type { Db } from "../compat/paperclip/db.js";
 import {
   spsAgentNodeBindings,
   spsHostProjectShareNodeGrants,
@@ -10,9 +10,9 @@ import {
   spsNodeCommands,
   spsNodeRunnerProfiles,
   spsNodes,
-} from "@paperclipai/db";
-import { spsNodeCapabilityForAdapter, spsNodeSupportsAdapter } from "@paperclipai/shared";
-import type { AdapterSpsNodeExecutionTarget } from "@paperclipai/adapter-utils/execution-target";
+} from "../compat/paperclip/db.js";
+import { spsNodeCapabilityForAdapter, spsNodeSupportsAdapter } from "../compat/paperclip/shared.js";
+import type { AdapterSpsNodeExecutionTarget } from "../compat/paperclip/adapter-runtime.js";
 
 const NODE_ONLINE_WINDOW_MS = 2 * 60 * 1000;
 const COMMAND_RESULT_GRACE_MS = 90 * 1000;

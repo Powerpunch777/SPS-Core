@@ -9,7 +9,7 @@ import {
   LayoutDashboard,
   Puzzle,
 } from "lucide-react";
-import type { PluginDashboardWidgetSize } from "@paperclipai/shared";
+import type { PluginDashboardWidgetSize } from "../compat/paperclip/shared";
 import { Link, Navigate } from "@/lib/router";
 import { agentsApi } from "@/api/agents";
 import { pluginsApi } from "@/api/plugins";

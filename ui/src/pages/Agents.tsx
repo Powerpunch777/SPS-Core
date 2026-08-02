@@ -36,6 +36,7 @@ import { usePublishSharedQueryData, useSharedPollingQuery } from "../hooks/useSh
 import { getAdapterLabel } from "../adapters/adapter-display-registry";
 import { isSpsBasicModeEnabled } from "../lib/sps-basic-mode";
 import { isWorkplaneModeEnabled } from "../lib/workplane-mode";
+import { AGENT_FILTER_TABS, type AgentFilterTab } from "../lib/agent-filter-tabs";
 
 const roleLabels = AGENT_ROLE_LABELS as Record<string, string>;
 
@@ -47,8 +48,7 @@ const ConfigureBuiltInAgentModal = lazy(() =>
   })),
 );
 
-export const AGENT_FILTER_TABS = ["all", "active", "paused", "error", "builtin"] as const;
-type FilterTab = (typeof AGENT_FILTER_TABS)[number];
+type FilterTab = AgentFilterTab;
 
 const AGENT_FILTER_TAB_ITEMS: { value: FilterTab; label: string }[] = [
   { value: "all", label: "All" },

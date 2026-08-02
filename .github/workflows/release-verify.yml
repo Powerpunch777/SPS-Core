@@ -173,3 +173,6 @@ jobs:
 
       - name: Build
         run: pnpm build
+
+      - name: Enforce SPS compatibility and UI bundle boundaries
+        run: pnpm check:sps-compat-boundary && pnpm check:sps-ui-bundle

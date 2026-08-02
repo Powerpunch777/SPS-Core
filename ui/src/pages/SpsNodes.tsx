@@ -1,6 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { isAgentStatusAssignableToWork, spsNodeCapabilityForAdapter, type Agent } from "@paperclipai/shared";
+import {
+  isAgentStatusAssignableToWork,
+  spsNodeCapabilityForAdapter,
+  type Agent,
+} from "../compat/paperclip/shared";
 import {
   CheckCircle2,
   CirclePause,

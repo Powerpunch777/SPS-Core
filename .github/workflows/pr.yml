@@ -52,6 +52,12 @@ jobs:
       - name: Reject git push in adapter/runtime code
         run: node ./scripts/check-no-git-push.mjs
 
+      - name: Enforce the SPS compatibility namespace
+        run: pnpm check:sps-compat-boundary
+
+      - name: Test SPS compatibility and bundle gates
+        run: pnpm test:sps-compat-boundary && pnpm test:sps-ui-bundle
+
       - name: Test no-git-push check
         run: node --test ./scripts/check-no-git-push.test.mjs
 
@@ -251,6 +257,9 @@ jobs:
       - name: Build
         run: pnpm build
 
+      - name: Enforce the SPS UI entry budget
+        run: pnpm check:sps-ui-bundle
+
   verify_serialized_server:
     name: Verify serialized server suites (${{ matrix.shard_label }})
     needs: [policy]
@@ -343,8 +352,9 @@ jobs:
       - name: Release canary dry run via release.sh internal build
         env:
           USED_ARTIFACT_LOCKFILE: ${{ needs.policy.outputs.lockfile_regenerated || '0' }}
+          RELEASE_BRANCH: ci-canary-dry-run
         run: |
-          git checkout -B master HEAD
+          git checkout -B "$RELEASE_BRANCH" HEAD
           if [ "$USED_ARTIFACT_LOCKFILE" = "1" ]; then
             git add pnpm-lock.yaml
             if ! git diff --cached --quiet; then
