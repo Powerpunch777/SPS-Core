@@ -174,8 +174,8 @@ export function Sidebar() {
 
   if (spsCoreBaselineShell) {
     return (
-      <aside className="sps-workbench-nav w-full h-full min-h-0 border-r border-border bg-background flex flex-col">
-        <div className="sps-workbench-brand flex items-center gap-1 px-3 h-12 shrink-0">
+      <aside className="w-full h-full min-h-0 border-r border-border bg-background flex flex-col">
+        <div className="flex items-center gap-1 px-3 h-12 shrink-0">
           <ProductBrand compact={rail} className="mr-auto" />
           {!rail && !isMobile && !collapseLocked ? (
             <Button
@@ -192,7 +192,7 @@ export function Sidebar() {
           ) : null}
         </div>
 
-        <nav className="sps-workbench-nav-body flex-1 min-h-0 overflow-y-auto scrollbar-auto-hide flex flex-col gap-4 pointer-coarse:gap-3 px-3 py-2">
+        <nav className="flex-1 min-h-0 overflow-y-auto scrollbar-auto-hide flex flex-col gap-4 pointer-coarse:gap-3 px-3 py-2">
           <div className="flex flex-col gap-0.5">
             <SidebarCompanyMenu />
           </div>

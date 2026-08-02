@@ -21,7 +21,6 @@ import { RouteErrorBoundary } from "./RouteErrorBoundary";
 import { SidebarShell } from "./SidebarShell";
 import { SecondarySidebar } from "./SecondarySidebar";
 import { SidebarAccountMenu } from "./SidebarAccountMenu";
-import { SpsWorkspaceContext } from "./SpsWorkspaceContext";
 import { useDialogActions } from "../context/DialogContext";
 import { GeneralSettingsProvider } from "../context/GeneralSettingsContext";
 import { usePanel } from "../context/PanelContext";
@@ -43,7 +42,6 @@ import { scheduleMainContentFocus } from "../lib/main-content-focus";
 import { pinDocumentScrollToZero } from "../lib/pin-document-scroll";
 import { cn } from "../lib/utils";
 import { isSpsBasicModeEnabled } from "../lib/sps-basic-mode";
-import { isSpsCoreBaselineModeEnabled } from "../lib/sps-core-baseline-mode";
 import { isWorkplaneModeEnabled } from "../lib/workplane-mode";
 import { NotFoundPage } from "../pages/NotFound";
 import { PluginSlotMount, resolveRouteSidebarSlot, usePluginSlots } from "../plugins/slots";
@@ -183,9 +181,6 @@ export function Layout() {
   // scan on a fresh SPS install. Expand the primary navigation once when a
   // normal SPS page opens; takeover pages keep their focused secondary pane.
   const spsWorkplaneShell = isSpsBasicModeEnabled() && isWorkplaneModeEnabled();
-  const spsCoreWorkbenchShell = isSpsBasicModeEnabled()
-    && isSpsCoreBaselineModeEnabled()
-    && !isWorkplaneModeEnabled();
   const expandedSpsRouteRef = useRef<string | null>(null);
   useEffect(() => {
     const shouldExpand = spsWorkplaneShell && !hasSecondarySidebar && !isSkillsRoute;
@@ -552,13 +547,7 @@ export function Layout() {
       </a>
       <WorktreeBanner />
       <DevRestartBanner devServer={health?.devServer} />
-      <div
-        className={cn(
-          "min-h-0 flex-1",
-          isMobile ? "w-full" : "flex overflow-clip",
-          !isMobile && spsCoreWorkbenchShell && "sps-workbench-shell",
-        )}
-      >
+      <div className={cn("min-h-0 flex-1", isMobile ? "w-full" : "flex overflow-clip")}>
         {isMobile && sidebarOpen && (
           <button
             type="button"
@@ -591,9 +580,6 @@ export function Layout() {
             collapsed={collapsed}
             peeking={peeking}
             resizable
-            storageKey={spsCoreWorkbenchShell ? "sps.workbench.sidebar.width" : undefined}
-            defaultWidth={spsCoreWorkbenchShell ? 224 : undefined}
-            className={spsCoreWorkbenchShell ? "sps-workbench-primary" : undefined}
             onPanelMouseEnter={handlePanelPointerEnter}
             onPanelMouseLeave={handlePanelPointerLeave}
             onPanelFocusCapture={collapsed ? handlePanelFocus : undefined}
@@ -613,11 +599,7 @@ export function Layout() {
           <SecondarySidebar>{secondarySidebar}</SecondarySidebar>
         ) : null}
 
-        <div className={cn(
-          "flex min-w-0 flex-col",
-          isMobile ? "w-full" : "h-full flex-1",
-          !isMobile && spsCoreWorkbenchShell && "sps-workbench-main",
-        )}>
+        <div className={cn("flex min-w-0 flex-col", isMobile ? "w-full" : "h-full flex-1")}>
           <div
             className={cn(
               isMobile && "sticky top-0 z-20 bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/85",
@@ -637,10 +619,7 @@ export function Layout() {
               ref={mainContentRef}
               tabIndex={-1}
               className={cn(
-                "flex-1 outline-none",
-                spsCoreWorkbenchShell
-                  ? "sps-workbench-scroll"
-                  : "bg-app-canvas p-4 md:m-2 md:rounded-pane md:border md:border-app-border md:bg-app-panel md:shadow-panel md:p-6",
+                "flex-1 outline-none bg-app-canvas p-4 md:m-2 md:rounded-pane md:border md:border-app-border md:bg-app-panel md:shadow-panel md:p-6",
                 // Reserve the scrollbar gutter on desktop so pages whose height
                 // changes (e.g. switching skill-detail tabs) don't widen/shift
                 // when the vertical scrollbar appears or disappears (PAP-10907).
@@ -663,7 +642,6 @@ export function Layout() {
             <PropertiesPanel />
           </div>
         </div>
-        {!isMobile && spsCoreWorkbenchShell ? <SpsWorkspaceContext /> : null}
       </div>
       {isMobile && <MobileBottomNav visible={mobileNavVisible} />}
       <CommandPalette />

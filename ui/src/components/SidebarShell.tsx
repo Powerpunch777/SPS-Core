@@ -29,18 +29,17 @@ function clampSidebarWidth(width: number) {
   return Math.min(MAX_SIDEBAR_WIDTH, Math.max(MIN_SIDEBAR_WIDTH, width));
 }
 
-function readStoredSidebarWidth(storageKey: string, defaultWidth = DEFAULT_SIDEBAR_WIDTH) {
-  const clampedDefaultWidth = clampSidebarWidth(defaultWidth);
-  if (typeof window === "undefined") return clampedDefaultWidth;
+function readStoredSidebarWidth(storageKey: string) {
+  if (typeof window === "undefined") return DEFAULT_SIDEBAR_WIDTH;
 
   try {
     const stored = window.localStorage.getItem(storageKey);
-    if (!stored) return clampedDefaultWidth;
+    if (!stored) return DEFAULT_SIDEBAR_WIDTH;
     const parsed = Number.parseInt(stored, 10);
-    if (!Number.isFinite(parsed)) return clampedDefaultWidth;
+    if (!Number.isFinite(parsed)) return DEFAULT_SIDEBAR_WIDTH;
     return clampSidebarWidth(parsed);
   } catch {
-    return clampedDefaultWidth;
+    return DEFAULT_SIDEBAR_WIDTH;
   }
 }
 
@@ -64,7 +63,6 @@ type SidebarShellProps = {
   peeking?: boolean;
   resizable?: boolean;
   storageKey?: string;
-  defaultWidth?: number;
   className?: string;
   /** Forwarded to the overlay panel so Layout can wire peek triggers. */
   onPanelMouseEnter?: MouseEventHandler<HTMLDivElement>;
@@ -97,23 +95,22 @@ export function SidebarShell({
   peeking = false,
   resizable = false,
   storageKey = "paperclip.sidebar.width",
-  defaultWidth = DEFAULT_SIDEBAR_WIDTH,
   className,
   onPanelMouseEnter,
   onPanelMouseLeave,
   onPanelFocusCapture,
   onPanelBlurCapture,
 }: SidebarShellProps) {
-  const [width, setWidth] = useState(() => readStoredSidebarWidth(storageKey, defaultWidth));
+  const [width, setWidth] = useState(() => readStoredSidebarWidth(storageKey));
   const [isResizing, setIsResizing] = useState(false);
   const widthRef = useRef(width);
   const dragState = useRef<{ startX: number; startWidth: number } | null>(null);
 
   useEffect(() => {
-    const storedWidth = readStoredSidebarWidth(storageKey, defaultWidth);
+    const storedWidth = readStoredSidebarWidth(storageKey);
     widthRef.current = storedWidth;
     setWidth(storedWidth);
-  }, [defaultWidth, storageKey]);
+  }, [storageKey]);
 
   // Unified width function (plan §5): one code path for every pinned state.
   const expandedWidth = open ? width : 0;
