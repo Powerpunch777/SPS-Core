@@ -96,6 +96,37 @@ export function companyRoutes(db: Db, storage?: StorageService) {
     assertCompanyAccess(req, target.companyId);
   }
 
+  function assertUserWorkspaceImportPolicy(input: {
+    target: { mode: "new_company" } | { mode: "existing_company"; companyId: string };
+    collisionStrategy?: "rename" | "skip" | "replace";
+  }) {
+    if (input.target.mode !== "new_company") {
+      throw forbidden("Workspace imports must create a new Workspace");
+    }
+    if (input.collisionStrategy && input.collisionStrategy !== "rename") {
+      throw forbidden("Workspace imports only allow the rename collision strategy");
+    }
+  }
+
+  function normalizeUserWorkspaceImport<T extends {
+    target: { mode: "new_company" } | { mode: "existing_company"; companyId: string };
+    collisionStrategy?: "rename" | "skip" | "replace";
+  }>(input: T): T & { collisionStrategy: "rename" } {
+    assertUserWorkspaceImportPolicy(input);
+    return { ...input, collisionStrategy: "rename" };
+  }
+
+  function assertRawUserWorkspaceImportPolicy(input: unknown) {
+    if (!input || typeof input !== "object") return;
+    const candidate = input as { target?: { mode?: unknown }; collisionStrategy?: unknown };
+    if (candidate.target && candidate.target.mode !== "new_company") {
+      throw forbidden("Workspace imports must create a new Workspace");
+    }
+    if (candidate.collisionStrategy !== undefined && candidate.collisionStrategy !== "rename") {
+      throw forbidden("Workspace imports only allow the rename collision strategy");
+    }
+  }
+
   async function assertSameCompanyCeoAgentOrBoard(req: Request, companyId: string, capability: string) {
     assertCompanyAccess(req, companyId);
     if (req.actor.type === "board") {
@@ -258,7 +289,7 @@ export function companyRoutes(db: Db, storage?: StorageService) {
 
   router.post("/import/preview", async (req, res) => {
     assertBoard(req);
-    const body = companyPortabilityPreviewSchema.parse(req.body);
+    const body = normalizeUserWorkspaceImport(companyPortabilityPreviewSchema.parse(req.body));
     assertImportTargetAccess(req, body.target);
     const preview = await portability.previewImport(body);
     res.json(preview);
@@ -278,6 +309,7 @@ export function companyRoutes(db: Db, storage?: StorageService) {
   router.post(COMPANY_IMPORT_ROUTE_PATH, async (req, res) => {
     assertBoard(req);
     const rawImportBody: unknown = req.body;
+    assertRawUserWorkspaceImportPolicy(rawImportBody);
     const actor = getActorInfo(req);
     const boardUserId = req.actor.type === "board" ? req.actor.userId : null;
     if (req.header("x-paperclip-cloud-async-import") === "1") {
@@ -286,7 +318,7 @@ export function companyRoutes(db: Db, storage?: StorageService) {
       const job = createImportJob(cloudTenantRequestKey(req));
       importJobs.set(job.id, job);
       const operation = async () => {
-        const importBody = companyPortabilityImportSchema.parse(rawImportBody);
+        const importBody = normalizeUserWorkspaceImport(companyPortabilityImportSchema.parse(rawImportBody));
         assertImportTargetAccess(req, importBody.target);
         const activity = importedCompanyActivityContext(actor, importBody.include ?? null);
         const result = await portability.importBundle(importBody, boardUserId);
@@ -300,7 +332,7 @@ export function companyRoutes(db: Db, storage?: StorageService) {
       return;
     }
 
-    const importBody = companyPortabilityImportSchema.parse(rawImportBody);
+    const importBody = normalizeUserWorkspaceImport(companyPortabilityImportSchema.parse(rawImportBody));
     assertImportTargetAccess(req, importBody.target);
     const activity = importedCompanyActivityContext(actor, importBody.include ?? null);
     const result = await portability.importBundle(importBody, boardUserId);

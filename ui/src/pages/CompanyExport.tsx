@@ -430,7 +430,7 @@ function generateReadmeFromSelection(
 
   lines.push("## What's Inside");
   lines.push("");
-  lines.push(`This is an ${PRODUCT_NAME} Agent Company package.`);
+  lines.push(`This is an ${PRODUCT_NAME} Workspace package.`);
   lines.push("");
 
   const counts: Array<[string, number]> = [];
@@ -473,7 +473,7 @@ function generateReadmeFromSelection(
 
   lines.push("## Getting Started");
   lines.push("");
-  lines.push(`Open ${PRODUCT_NAME}, then choose Company settings > Import to import this package.`);
+  lines.push(`Open ${PRODUCT_NAME}, then choose Workspace settings > Import to create a new Workspace from this package.`);
   lines.push("");
   lines.push("---");
   lines.push(`Exported from ${PRODUCT_NAME} on ${new Date().toISOString().split("T")[0]}`);
@@ -669,8 +669,8 @@ export function CompanyExport() {
 
   useEffect(() => {
     setBreadcrumbs([
-      { label: "Org Chart", href: "/org" },
-      { label: "Export" },
+      { label: "Workspace", href: "/org" },
+      { label: "Export Workspace" },
     ]);
   }, [setBreadcrumbs]);
 
@@ -786,7 +786,7 @@ export function CompanyExport() {
 
     // Regenerate README.md based on checked selection
     if (typeof exportData.files["README.md"] === "string") {
-      const companyName = exportData.manifest.company?.name ?? selectedCompany?.name ?? "Company";
+      const companyName = exportData.manifest.company?.name ?? selectedCompany?.name ?? "Workspace";
       const companyDescription = exportData.manifest.company?.description ?? null;
       filtered["README.md"] = generateReadmeFromSelection(
         exportData.manifest,
@@ -908,7 +908,7 @@ export function CompanyExport() {
   }
 
   if (!selectedCompanyId) {
-    return <EmptyState icon={Package} message="Select a company to export." />;
+    return <EmptyState icon={Package} message="Select a Workspace to export." />;
   }
 
   if (exportPreviewMutation.isPending && !exportData) {
@@ -932,7 +932,7 @@ export function CompanyExport() {
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex flex-wrap items-center gap-4 text-sm">
             <span className="font-medium">
-              {selectedCompany?.name ?? "Company"} export
+              {selectedCompany?.name ?? "Workspace"} export
             </span>
             <span className="text-muted-foreground">
               {selectedCount} / {totalFiles} file{totalFiles === 1 ? "" : "s"} selected
