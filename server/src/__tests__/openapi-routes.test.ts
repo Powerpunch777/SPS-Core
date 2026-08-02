@@ -47,6 +47,7 @@ const apiPrefixes: Record<string, string> = {
   "sidebar-badges.ts": "/api",
   "sidebar-preferences.ts": "/api",
   "sps-nodes.ts": "/api",
+  "sps-workspace-surfaces.ts": "/api",
   "sps-workspace-sources.ts": "/api",
   "teams-catalog.ts": "/api",
   "user-profiles.ts": "/api",
