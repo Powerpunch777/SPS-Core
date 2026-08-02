@@ -2,9 +2,24 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  createStandaloneWorkspacePolicy,
   resolveConcurrency,
   runWithConcurrency,
 } from "../build-standalone-public-packages.mjs";
+
+test("copies the root allowBuilds policy to standalone projects", () => {
+  const policy = createStandaloneWorkspacePolicy(`packages:\n  - packages/*\n\nallowBuilds:\n  esbuild: true\n  protobufjs: true\n`);
+
+  assert.match(policy, /allowBuilds:\n\s+esbuild: true\n\s+protobufjs: true/);
+  assert.doesNotMatch(policy, /packages:/);
+});
+
+test("rejects a root without an explicit build allowlist", () => {
+  assert.throws(
+    () => createStandaloneWorkspacePolicy("packages:\n  - packages/*\n"),
+    /missing allowBuilds policy/,
+  );
+});
 
 function deferred() {
   let resolve;

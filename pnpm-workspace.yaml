@@ -55,5 +55,7 @@ allowBuilds:
   cpu-features: false
   es5-ext: false
   esbuild: true
+  cbor-extract: true
+  protobufjs: true
   sqlite3: true
   ssh2: false
