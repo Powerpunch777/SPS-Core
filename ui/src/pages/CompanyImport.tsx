@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type {
-  CompanyPortabilityCollisionStrategy,
   CompanyPortabilityFileEntry,
   CompanyPortabilityPreviewResult,
   CompanyPortabilitySource,
@@ -649,7 +648,6 @@ async function readLocalPackageZip(file: File): Promise<{
 export function CompanyImport() {
   const {
     selectedCompanyId,
-    selectedCompany,
     setSelectedCompanyId,
   } = useCompany();
   const { setBreadcrumbs } = useBreadcrumbs();
@@ -672,7 +670,6 @@ export function CompanyImport() {
   } | null>(null);
 
   // Target state
-  const [targetMode, setTargetMode] = useState<"existing" | "new">("new");
   const [newCompanyName, setNewCompanyName] = useState("");
 
   // Preview state
@@ -686,7 +683,6 @@ export function CompanyImport() {
   const [nameOverrides, setNameOverrides] = useState<Record<string, string>>({});
   const [skippedSlugs, setSkippedSlugs] = useState<Set<string>>(new Set());
   const [confirmedSlugs, setConfirmedSlugs] = useState<Set<string>>(new Set());
-  const [collisionStrategy, setCollisionStrategy] = useState<CompanyPortabilityCollisionStrategy>("rename");
 
   // Adapter override state
   const [adapterOverrides, setAdapterOverrides] = useState<Record<string, string>>({});
@@ -710,8 +706,8 @@ export function CompanyImport() {
 
   useEffect(() => {
     setBreadcrumbs([
-      { label: "Org Chart", href: "/org" },
-      { label: "Import" },
+      { label: "Workspace", href: "/org" },
+      { label: "Import Workspace" },
     ]);
   }, [setBreadcrumbs]);
 
@@ -733,11 +729,8 @@ export function CompanyImport() {
       return companiesApi.importPreview({
         source,
         include: { company: true, agents: true, projects: true, issues: true },
-        target:
-          targetMode === "new"
-            ? { mode: "new_company", newCompanyName: newCompanyName || null }
-            : { mode: "existing_company", companyId: selectedCompanyId! },
-        collisionStrategy,
+        target: { mode: "new_company", newCompanyName: newCompanyName || null },
+        collisionStrategy: "rename",
       });
     },
     onSuccess: (result) => {
@@ -772,12 +765,8 @@ export function CompanyImport() {
       setAdapterExpandedSlugs(new Set());
       setAdapterConfigValues({});
 
-      // Check all files by default, then uncheck COMPANY.md for existing company
+      // A user import always creates a new Workspace, so every package file starts selected.
       const allFiles = new Set(Object.keys(result.files));
-      if (targetMode === "existing" && result.manifest.company && result.plan.companyAction === "update") {
-        const companyPath = ensureMarkdownPath(result.manifest.company.path);
-        allFiles.delete(companyPath);
-      }
       setCheckedFiles(allFiles);
 
       // Expand top-level dirs + all ancestor dirs of files with conflicts (update action)
@@ -837,11 +826,8 @@ export function CompanyImport() {
       return companiesApi.importBundle({
         source,
         include: { company: true, agents: true, projects: true, issues: true },
-        target:
-          targetMode === "new"
-            ? { mode: "new_company", newCompanyName: newCompanyName || null }
-            : { mode: "existing_company", companyId: selectedCompanyId! },
-        collisionStrategy,
+        target: { mode: "new_company", newCompanyName: newCompanyName || null },
+        collisionStrategy: "rename",
         nameOverrides: buildFinalNameOverrides(),
         selectedFiles: buildSelectedFiles(),
         adapterOverrides: buildFinalAdapterOverrides(),
@@ -1088,7 +1074,7 @@ export function CompanyImport() {
   const selectedAction = selectedFile ? (actionMap.get(selectedFile) ?? null) : null;
 
   if (!selectedCompanyId) {
-    return <EmptyState icon={Download} message="Select a company to import into." />;
+    return <EmptyState icon={Download} message="Select a Workspace context to import from." />;
   }
 
   return (
@@ -1096,7 +1082,7 @@ export function CompanyImport() {
       {/* Source form section */}
       <div className="border-b border-border px-5 py-5 space-y-4">
         <div>
-          <h2 className="text-base font-semibold">Import source</h2>
+          <h2 className="text-base font-semibold">Import Workspace package</h2>
           <p className="text-xs text-muted-foreground mt-1">
             Choose a GitHub repo or upload a local {PRODUCT_NAME} zip package.
           </p>
@@ -1180,53 +1166,24 @@ export function CompanyImport() {
           </Field>
         )}
 
-        <Field label="Target" hint="Import into this company or create a new one.">
-          <select
-            className="w-full rounded-md border border-border bg-transparent px-2.5 py-1.5 text-sm outline-none"
-            value={targetMode}
-            onChange={(e) => {
-              setTargetMode(e.target.value as "existing" | "new");
-              setImportPreview(null);
-            }}
-          >
-            <option value="new">Create new company</option>
-            <option value="existing">
-              Existing company: {selectedCompany?.name}
-            </option>
-          </select>
-        </Field>
-
-        {targetMode === "new" && (
-          <Field
-            label="New company name"
-            hint="Optional override. Leave blank to use the package name."
-          >
-            <input
-              className="w-full rounded-md border border-border bg-transparent px-2.5 py-1.5 text-sm outline-none"
-              type="text"
-              value={newCompanyName}
-              onChange={(e) => setNewCompanyName(e.target.value)}
-              placeholder="Imported Company"
-            />
-          </Field>
-        )}
+        <div className="rounded-md border border-border bg-accent/20 px-3 py-3 text-sm">
+          <div className="font-medium">Creates a new Workspace</div>
+          <p className="mt-1 text-xs text-muted-foreground">
+            Imports never merge with or replace an existing Workspace. Conflicts inside the package use rename automatically.
+          </p>
+        </div>
 
         <Field
-          label="Collision strategy"
-          hint="Board imports can rename, skip, or replace matching company content."
+          label="New Workspace name"
+          hint="Optional override. Leave blank to use the package name."
         >
-          <select
+          <input
             className="w-full rounded-md border border-border bg-transparent px-2.5 py-1.5 text-sm outline-none"
-            value={collisionStrategy}
-            onChange={(e) => {
-              setCollisionStrategy(e.target.value as CompanyPortabilityCollisionStrategy);
-              setImportPreview(null);
-            }}
-          >
-            <option value="rename">Rename on conflict</option>
-            <option value="skip">Skip on conflict</option>
-            <option value="replace">Replace existing</option>
-          </select>
+            type="text"
+            value={newCompanyName}
+            onChange={(e) => setNewCompanyName(e.target.value)}
+            placeholder="Imported Workspace"
+          />
         </Field>
 
         <div className="flex flex-wrap items-center gap-2">
