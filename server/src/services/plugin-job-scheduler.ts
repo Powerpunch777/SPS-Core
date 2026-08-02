@@ -34,13 +34,14 @@
  * @see ./cron.ts — Cron parsing utilities
  */
 
-import { and, eq, lte, or } from "drizzle-orm";
+import { and, eq, isNull, lte, or } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { pluginJobs, pluginJobRuns } from "@paperclipai/db";
+import { companies, pluginCompanySettings, pluginJobs, pluginJobRuns, plugins } from "@paperclipai/db";
 import type { PluginJobStore } from "./plugin-job-store.js";
 import type { PluginWorkerManager } from "./plugin-worker-manager.js";
 import { parseCron, nextCronTick, validateCron } from "./cron.js";
 import { logger } from "../middleware/logger.js";
+import { analyzePluginDependencies, isPluginDependencyAvailable } from "./plugin-dependencies.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -157,7 +158,9 @@ export interface PluginJobScheduler {
    * @returns The created run info
    * @throws {Error} if the job is not found, not active, or already running
    */
-  triggerJob(jobId: string, trigger?: "manual" | "retry"): Promise<TriggerJobResult>;
+  triggerJob(jobId: string, trigger?: "manual" | "retry", companyId?: string | null): Promise<TriggerJobResult>;
+  cancelRun(runId: string, reason?: string): Promise<boolean>;
+  retryRun(runId: string): Promise<TriggerJobResult>;
 
   /**
    * Run a single scheduler tick immediately (for testing).
@@ -224,8 +227,11 @@ export function createPluginJobScheduler(
   /** Whether the scheduler is running. */
   let running = false;
 
-  /** Set of job IDs currently being executed (for overlap prevention). */
+  /** Set of job/company execution keys currently being executed. */
   const activeJobs = new Set<string>();
+  /** Live dispatch promises, used to honour the global bounded concurrency
+   * limit without losing a workspace occurrence. */
+  const activeExecutions = new Map<string, Promise<void>>();
 
   /** Total number of ticks since start. */
   let tickCount = 0;
@@ -235,6 +241,64 @@ export function createPluginJobScheduler(
 
   /** Guard against concurrent tick execution. */
   let tickInProgress = false;
+
+  function executionKey(jobId: string, companyId: string | null): string {
+    return `${jobId}:${companyId ?? "host"}`;
+  }
+
+  function companyCondition(companyId: string | null) {
+    return companyId === null ? isNull(pluginJobRuns.companyId) : eq(pluginJobRuns.companyId, companyId);
+  }
+
+  function trackDispatch(key: string, dispatch: Promise<void>): Promise<void> {
+    activeExecutions.set(key, dispatch);
+    void dispatch.then(
+      () => { activeExecutions.delete(key); },
+      () => { activeExecutions.delete(key); },
+    );
+    return dispatch;
+  }
+
+  async function waitForCapacity(): Promise<void> {
+    while (activeJobs.size >= maxConcurrentJobs) {
+      const active = [...activeExecutions.values()];
+      // Every Core dispatch is tracked. The fallback protects a malformed
+      // integration from spinning forever and leaves the occurrence due.
+      if (active.length === 0) throw new Error("scheduler capacity is occupied by an untracked run");
+      await Promise.race(active);
+    }
+  }
+
+  async function enabledCompanyIds(pluginId: string): Promise<string[]> {
+    const [plugin] = await db.select({ manifestJson: plugins.manifestJson }).from(plugins).where(eq(plugins.id, pluginId));
+    if (!plugin) return [];
+    const defaultEnabled = plugin.manifestJson.companyActivation?.defaultEnabled ?? true;
+    const rows = await db.select({ id: companies.id, enabled: pluginCompanySettings.enabled })
+      .from(companies)
+      .leftJoin(pluginCompanySettings, and(eq(pluginCompanySettings.companyId, companies.id), eq(pluginCompanySettings.pluginId, pluginId)))
+      .where(eq(companies.status, "active"));
+    const enabled = rows.filter((row) => row.enabled ?? defaultEnabled).map((row) => row.id);
+    const available = await Promise.all(enabled.map(async (companyId) => ({ companyId, available: await pluginDependencyAvailable(pluginId, companyId) })));
+    return available.filter((entry) => entry.available).map((entry) => entry.companyId);
+  }
+
+  async function pluginDependencyAvailable(pluginId: string, companyId: string | null): Promise<boolean> {
+    const records = companyId
+      ? await db.select({ plugin: plugins, enabled: pluginCompanySettings.enabled })
+        .from(plugins)
+        .leftJoin(pluginCompanySettings, and(eq(pluginCompanySettings.pluginId, plugins.id), eq(pluginCompanySettings.companyId, companyId)))
+      : (await db.select({ plugin: plugins }).from(plugins)).map((row) => ({ ...row, enabled: undefined }));
+    const target = records.find((row) => row.plugin.id === pluginId)?.plugin;
+    if (!target || target.status !== "ready") return false;
+    const report = analyzePluginDependencies(records.map((row) => ({
+      id: row.plugin.id,
+      version: row.plugin.version,
+      manifest: row.plugin.manifestJson,
+      available: row.plugin.status === "ready",
+      active: row.plugin.status === "ready" && (companyId === null || (row.enabled ?? row.plugin.manifestJson.companyActivation?.defaultEnabled ?? true)),
+    })));
+    return isPluginDependencyAvailable(report, target.manifestJson.id);
+  }
 
   // -----------------------------------------------------------------------
   // Core: tick
@@ -290,14 +354,6 @@ export function createPluginJobScheduler(
         }
 
         // Overlap prevention: skip if this job is already running
-        if (activeJobs.has(job.id)) {
-          log.debug(
-            { jobId: job.id, jobKey: job.jobKey, pluginId: job.pluginId },
-            "skipping job — already running (overlap prevention)",
-          );
-          continue;
-        }
-
         // Check if the worker is available
         if (!workerManager.isRunning(job.pluginId)) {
           log.debug(
@@ -316,7 +372,35 @@ export function createPluginJobScheduler(
           continue;
         }
 
-        dispatches.push(dispatchJob(job));
+        const targets = job.scope === "workspace"
+          ? await enabledCompanyIds(job.pluginId)
+          : [null];
+        if (job.scope === "host" && !await pluginDependencyAvailable(job.pluginId, null)) {
+          await advanceSchedulePointer(job);
+          continue;
+        }
+        if (targets.length === 0) {
+          await advanceSchedulePointer(job);
+          continue;
+        }
+        const targetDispatches: Promise<void>[] = [];
+        for (const companyId of targets) {
+          const key = executionKey(job.id, companyId);
+          // An active target owns this occurrence already. We do not create a
+          // duplicate run, while other companies remain eligible.
+          if (activeJobs.has(key)) continue;
+          await waitForCapacity();
+          targetDispatches.push(trackDispatch(key, dispatchJob(job, companyId)));
+        }
+        // A schedule advances only after every selected company target has
+        // been accepted for processing. This prevents a disabled/slow tenant
+        // from being silently skipped by a global definition pointer.
+        dispatches.push(Promise.allSettled(targetDispatches).then(async () => {
+          // Every target was either dispatched or was already processing the
+          // same occurrence. Advancing once prevents completed tenants from
+          // being re-dispatched on the next tick.
+          await advanceSchedulePointer(job);
+        }));
       }
 
       if (dispatches.length > 0) {
@@ -342,12 +426,14 @@ export function createPluginJobScheduler(
    */
   async function dispatchJob(
     job: typeof pluginJobs.$inferSelect,
+    companyId: string | null,
   ): Promise<void> {
     const { id: jobId, pluginId, jobKey, schedule } = job;
     const jobLog = log.child({ jobId, pluginId, jobKey });
 
     // Mark as active (overlap prevention)
-    activeJobs.add(jobId);
+    const activeKey = executionKey(jobId, companyId);
+    activeJobs.add(activeKey);
 
     let runId: string | undefined;
     const startedAt = Date.now();
@@ -358,13 +444,14 @@ export function createPluginJobScheduler(
         jobId,
         pluginId,
         trigger: "schedule",
+        companyId,
       });
       runId = run.id;
 
       jobLog.info({ runId }, "dispatching scheduled job");
 
       // 2. Mark run as running
-      await jobStore.markRunning(runId);
+      if (!await jobStore.markRunning(runId)) return;
 
       // 3. Call worker via RPC
       await workerManager.call(
@@ -376,6 +463,7 @@ export function createPluginJobScheduler(
             runId,
             trigger: "schedule" as const,
             scheduledAt: (job.nextRunAt ?? new Date()).toISOString(),
+            ...(companyId ? { companyId } : {}),
           },
         },
         jobTimeoutMs,
@@ -418,17 +506,7 @@ export function createPluginJobScheduler(
       }
     } finally {
       // Remove from active set
-      activeJobs.delete(jobId);
-
-      // 5. Always advance the schedule pointer (even on failure)
-      try {
-        await advanceSchedulePointer(job);
-      } catch (err) {
-        jobLog.error(
-          { err: err instanceof Error ? err.message : String(err) },
-          "failed to advance schedule pointer",
-        );
-      }
+      activeJobs.delete(activeKey);
     }
   }
 
@@ -439,6 +517,7 @@ export function createPluginJobScheduler(
   async function triggerJob(
     jobId: string,
     trigger: "manual" | "retry" = "manual",
+    companyId?: string | null,
   ): Promise<TriggerJobResult> {
     const job = await jobStore.getJobById(jobId);
     if (!job) {
@@ -451,8 +530,23 @@ export function createPluginJobScheduler(
       );
     }
 
-    // Overlap prevention
-    if (activeJobs.has(jobId)) {
+    const effectiveCompanyId: string | null = job.scope === "workspace"
+      ? (companyId ?? null)
+      : null;
+    if (job.scope === "workspace" && !effectiveCompanyId) {
+      throw new Error(`Workspace job "${job.jobKey}" requires a companyId`);
+    }
+    if (job.scope !== "workspace" && companyId) {
+      throw new Error(`Host job "${job.jobKey}" does not accept a companyId`);
+    }
+    if (job.scope === "workspace" && !(await enabledCompanyIds(job.pluginId)).includes(effectiveCompanyId!)) {
+      throw new Error(`Plugin is disabled or Company is unavailable for "${job.jobKey}"`);
+    }
+    if (!await pluginDependencyAvailable(job.pluginId, effectiveCompanyId)) {
+      throw new Error(`Plugin dependency graph is blocked for "${job.jobKey}"`);
+    }
+    const activeKey = executionKey(jobId, effectiveCompanyId);
+    if (activeJobs.has(activeKey)) {
       throw new Error(
         `Job "${job.jobKey}" is already running — cannot trigger while in progress`,
       );
@@ -466,6 +560,7 @@ export function createPluginJobScheduler(
         and(
           eq(pluginJobRuns.jobId, jobId),
           eq(pluginJobRuns.status, "running"),
+          companyCondition(effectiveCompanyId),
         ),
       );
 
@@ -487,10 +582,14 @@ export function createPluginJobScheduler(
       jobId,
       pluginId: job.pluginId,
       trigger,
+      companyId: effectiveCompanyId,
     });
 
     // Dispatch in background — don't block the caller
-    void dispatchManualRun(job, run.id, trigger);
+    void trackDispatch(
+      executionKey(job.id, effectiveCompanyId),
+      dispatchManualRun(job, run.id, trigger, effectiveCompanyId),
+    );
 
     return { runId: run.id, jobId };
   }
@@ -502,15 +601,17 @@ export function createPluginJobScheduler(
     job: typeof pluginJobs.$inferSelect,
     runId: string,
     trigger: "manual" | "retry",
+    companyId: string | null,
   ): Promise<void> {
     const { id: jobId, pluginId, jobKey } = job;
     const jobLog = log.child({ jobId, pluginId, jobKey, runId, trigger });
 
-    activeJobs.add(jobId);
+    const activeKey = executionKey(jobId, companyId);
+    activeJobs.add(activeKey);
     const startedAt = Date.now();
 
     try {
-      await jobStore.markRunning(runId);
+      if (!await jobStore.markRunning(runId)) return;
 
       await workerManager.call(
         pluginId,
@@ -521,6 +622,7 @@ export function createPluginJobScheduler(
             runId,
             trigger,
             scheduledAt: new Date().toISOString(),
+            ...(companyId ? { companyId } : {}),
           },
         },
         jobTimeoutMs,
@@ -553,8 +655,21 @@ export function createPluginJobScheduler(
         );
       }
     } finally {
-      activeJobs.delete(jobId);
+      activeJobs.delete(activeKey);
     }
+  }
+
+  async function cancelRun(runId: string, reason = "Cancelled by operator"): Promise<boolean> {
+    return jobStore.cancelRun(runId, reason);
+  }
+
+  async function retryRun(runId: string): Promise<TriggerJobResult> {
+    const run = await jobStore.getRunById(runId);
+    if (!run) throw new Error(`Job run not found: ${runId}`);
+    if (run.status !== "failed" && run.status !== "cancelled") {
+      throw new Error("Only failed or cancelled job runs can be retried");
+    }
+    return triggerJob(run.jobId, "retry", run.companyId);
   }
 
   // -----------------------------------------------------------------------
@@ -680,7 +795,9 @@ export function createPluginJobScheduler(
     // Remove any active tracking for jobs owned by this plugin
     const jobs = await jobStore.listJobs(pluginId);
     for (const job of jobs) {
-      activeJobs.delete(job.id);
+      const prefix = `${job.id}:`;
+      for (const key of activeJobs) if (key.startsWith(prefix)) activeJobs.delete(key);
+      for (const key of activeExecutions.keys()) if (key.startsWith(prefix)) activeExecutions.delete(key);
     }
   }
 
@@ -695,6 +812,12 @@ export function createPluginJobScheduler(
     }
 
     running = true;
+    // Restart recovery is intentionally state-level. Workers may have died
+    // with the prior process, and the worker RPC protocol has no cooperative
+    // cancel method; late completions are ignored by conditional transitions.
+    void jobStore.recoverStaleRuns("Cancelled during SPS restart recovery")
+      .then((count) => { if (count > 0) log.warn({ count }, "recovered stale plugin job runs"); })
+      .catch((err) => log.error({ err: err instanceof Error ? err.message : String(err) }, "plugin job stale-run recovery failed"));
     tickTimer = setInterval(() => {
       void tick();
     }, tickIntervalMs);
@@ -746,6 +869,8 @@ export function createPluginJobScheduler(
     registerPlugin,
     unregisterPlugin,
     triggerJob,
+    cancelRun,
+    retryRun,
     tick,
     diagnostics,
   };

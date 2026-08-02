@@ -17,6 +17,7 @@ const mockLifecycle = vi.hoisted(() => ({
   unload: vi.fn(),
   enable: vi.fn(),
   disable: vi.fn(),
+  restartWorker: vi.fn(),
 }));
 
 const mockAccess = vi.hoisted(() => ({
@@ -62,6 +63,7 @@ async function createApp(
     jobDeps?: unknown;
     toolDeps?: unknown;
     bridgeDeps?: unknown;
+    diagnosticsDeps?: unknown;
     captureJsonContext?: (context: unknown, body: unknown) => void;
   } = {},
 ) {
@@ -98,6 +100,10 @@ async function createApp(
     undefined,
     routeOverrides.toolDeps as never,
     routeOverrides.bridgeDeps as never,
+    undefined,
+    undefined,
+    undefined,
+    routeOverrides.diagnosticsDeps as never,
   ));
   app.use(errorHandler);
 
@@ -173,6 +179,7 @@ describe.sequential("plugin install and upgrade authz", () => {
     vi.clearAllMocks();
     mockAccess.canUser.mockResolvedValue(false);
     mockAccess.hasPermission.mockResolvedValue(false);
+    mockRegistry.listInstalled.mockResolvedValue([]);
     mockWorkspaceSurfaces.deleteInboxSummariesBySourcePluginKey.mockResolvedValue(0);
   });
 
@@ -344,6 +351,97 @@ describe.sequential("plugin install and upgrade authz", () => {
     expect(mockLifecycle.disable).not.toHaveBeenCalled();
   }, 20_000);
 
+  it("allows only the SPS Host to restart a ready plugin worker", async () => {
+    readyPlugin();
+    mockLifecycle.restartWorker.mockResolvedValue(undefined);
+    const { app } = await createApp(boardActor({ source: "local_implicit" }));
+
+    const res = await request(app)
+      .post(`/api/plugins/${pluginId}/worker/restart`)
+      .send({});
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ pluginId, restarted: true });
+    expect(mockLifecycle.restartWorker).toHaveBeenCalledWith(pluginId);
+    expect(mockLifecycle.disable).not.toHaveBeenCalled();
+    expect(mockLifecycle.unload).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["disable", "post", `/api/plugins/${pluginId}/disable`],
+    ["uninstall", "delete", `/api/plugins/${pluginId}`],
+  ] as const)("does not mutate on unacknowledged %s dependency impact", async (_name, method, path) => {
+    const provider = { id: pluginId, pluginKey: "sps.provider", version: "1.0.0", status: "ready", manifestJson: { id: "sps.provider" } };
+    const consumer = { id: "22222222-2222-4222-8222-222222222222", pluginKey: "sps.consumer", version: "1.0.0", status: "ready", manifestJson: { id: "sps.consumer", requiredDependencies: [{ id: "sps.provider" }] } };
+    mockRegistry.getById.mockResolvedValue(provider);
+    mockRegistry.listInstalled.mockResolvedValue([provider, consumer]);
+    const { app } = await createApp(boardActor({ isInstanceAdmin: true }));
+    const response = method === "post" ? await request(app).post(path).send({}) : await request(app).delete(path);
+    expect(response.status).toBe(409);
+    expect(response.body.impactReviewId).toEqual(expect.any(String));
+    expect(mockLifecycle.disable).not.toHaveBeenCalled();
+    expect(mockLifecycle.unload).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["disable", "post", `/api/plugins/${pluginId}/disable`],
+    ["delete", "delete", `/api/plugins/${pluginId}`],
+  ] as const)("allows an acknowledged Host %s without cascading to dependents", async (action, method, path) => {
+    const provider = { id: pluginId, pluginKey: "sps.provider", version: "1.0.0", status: "ready", manifestJson: { id: "sps.provider" } };
+    const consumer = { id: "22222222-2222-4222-8222-222222222222", pluginKey: "sps.consumer", version: "1.0.0", status: "ready", manifestJson: { id: "sps.consumer", requiredDependencies: [{ id: "sps.provider" }] } };
+    mockRegistry.getById.mockResolvedValue(provider);
+    mockRegistry.listInstalled.mockResolvedValue([provider, consumer]);
+    mockLifecycle.disable.mockResolvedValue(provider);
+    mockLifecycle.unload.mockResolvedValue(provider);
+    const { app } = await createApp(boardActor({ isInstanceAdmin: true }));
+
+    const preview = await request(app)
+      .get(`/api/plugins/${pluginId}/dependency-impact`)
+      .query({ action });
+    expect(preview.status).toBe(200);
+    const impactReviewId = preview.body.report.impact.reviewId as string;
+
+    const response = method === "post"
+      ? await request(app).post(path).send({ impactReviewId })
+      : await request(app).delete(path).send({ impactReviewId });
+
+    expect(response.status).toBe(200);
+    if (method === "post") expect(mockLifecycle.disable).toHaveBeenCalledWith(pluginId, undefined);
+    else expect(mockLifecycle.unload).toHaveBeenCalledWith(pluginId, false);
+    expect(mockRegistry.listInstalled).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects non-Host users before resolving a plugin worker restart", async () => {
+    const { app } = await createApp(boardActor({ isInstanceAdmin: false }));
+
+    const res = await request(app)
+      .post(`/api/plugins/${pluginId}/worker/restart`)
+      .send({});
+
+    expect(res.status).toBe(403);
+    expect(mockRegistry.getById).not.toHaveBeenCalled();
+    expect(mockLifecycle.restartWorker).not.toHaveBeenCalled();
+  });
+
+  it("returns lifecycle readiness failures without duplicating worker state rules", async () => {
+    mockRegistry.getById.mockResolvedValue({
+      id: pluginId,
+      pluginKey: "paperclip.example",
+      status: "installed",
+      manifestJson: {},
+    });
+    mockLifecycle.restartWorker.mockRejectedValue(new Error("Plugin must be ready before restarting its worker"));
+    const { app } = await createApp(boardActor({ source: "local_implicit" }));
+
+    const res = await request(app)
+      .post(`/api/plugins/${pluginId}/worker/restart`)
+      .send({});
+
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: "Plugin must be ready before restarting its worker" });
+    expect(mockLifecycle.restartWorker).toHaveBeenCalledWith(pluginId);
+  });
+
   it("resolves plugin keys without probing the UUID id column for core plugin actions", async () => {
     const pluginKey = "paperclipqa.hello-plugin";
     const plugin = {
@@ -351,6 +449,7 @@ describe.sequential("plugin install and upgrade authz", () => {
       pluginKey,
       version: "1.0.0",
       status: "ready",
+      manifestJson: { id: pluginKey },
     };
     mockRegistry.getById.mockImplementation(() => {
       throw new Error("getById should not be called for plugin keys");
@@ -1304,6 +1403,66 @@ describe.sequential("plugin tool and bridge authz", () => {
     });
   });
 
+  it("rejects Company activation when the target dependency graph is blocked without mutating activation", async () => {
+    const consumer = { id: pluginId, pluginKey: "sps.consumer", version: "1.0.0", status: "ready", manifestJson: { id: "sps.consumer", requiredDependencies: [{ id: "sps.required" }] } };
+    mockRegistry.getById.mockResolvedValue(consumer);
+    mockRegistry.listInstalled.mockResolvedValue([consumer]);
+    mockRegistry.getCompanySettings.mockResolvedValue(null);
+    const { app } = await createApp(boardActor({ isInstanceAdmin: true }));
+
+    const response = await request(app)
+      .put(`/api/plugins/${pluginId}/companies/${companyA}/activation`)
+      .send({ enabled: true });
+
+    expect(response.status).toBe(409);
+    expect(response.body.report.issues).toContainEqual(expect.objectContaining({ code: "MISSING_REQUIRED", pluginId: "sps.consumer" }));
+    expect(mockRegistry.upsertCompanySettings).not.toHaveBeenCalled();
+  });
+
+  it("requires impact acknowledgement before Company deactivation breaks an active dependent", async () => {
+    const provider = { id: pluginId, pluginKey: "sps.provider", version: "1.0.0", status: "ready", manifestJson: { id: "sps.provider" } };
+    const consumer = { id: "22222222-2222-4222-8222-222222222222", pluginKey: "sps.consumer", version: "1.0.0", status: "ready", manifestJson: { id: "sps.consumer", requiredDependencies: [{ id: "sps.provider" }] } };
+    mockRegistry.getById.mockResolvedValue(provider);
+    mockRegistry.listInstalled.mockResolvedValue([provider, consumer]);
+    mockRegistry.getCompanySettings.mockResolvedValue(null);
+    const { app } = await createApp(boardActor({ isInstanceAdmin: true }));
+
+    const response = await request(app)
+      .put(`/api/plugins/${pluginId}/companies/${companyA}/activation`)
+      .send({ enabled: false });
+
+    expect(response.status).toBe(409);
+    expect(response.body.impactReviewId).toEqual(expect.any(String));
+    expect(mockRegistry.upsertCompanySettings).not.toHaveBeenCalled();
+  });
+
+  it("allows the reviewed Company deactivation without changing another plugin", async () => {
+    const provider = { id: pluginId, pluginKey: "sps.provider", version: "1.0.0", status: "ready", manifestJson: { id: "sps.provider" } };
+    const consumer = { id: "22222222-2222-4222-8222-222222222222", pluginKey: "sps.consumer", version: "1.0.0", status: "ready", manifestJson: { id: "sps.consumer", requiredDependencies: [{ id: "sps.provider" }] } };
+    mockRegistry.getById.mockResolvedValue(provider);
+    mockRegistry.listInstalled.mockResolvedValue([provider, consumer]);
+    mockRegistry.getCompanySettings.mockResolvedValue(null);
+    mockRegistry.upsertCompanySettings.mockResolvedValue({});
+    const { app } = await createApp(boardActor({ isInstanceAdmin: true }));
+
+    const preview = await request(app)
+      .put(`/api/plugins/${pluginId}/companies/${companyA}/activation`)
+      .send({ enabled: false });
+    expect(preview.status).toBe(409);
+
+    const response = await request(app)
+      .put(`/api/plugins/${pluginId}/companies/${companyA}/activation`)
+      .send({ enabled: false, impactReviewId: preview.body.impactReviewId });
+
+    expect(response.status).toBe(200);
+    expect(mockRegistry.upsertCompanySettings).toHaveBeenCalledWith(pluginId, companyA, {
+      enabled: false,
+      settingsJson: {},
+      lastError: null,
+    });
+    expect(mockRegistry.upsertCompanySettings).toHaveBeenCalledTimes(1);
+  });
+
   it("rejects a remote legacy instance admin from changing Company activation in the SPS Core baseline", async () => {
     const previous = process.env.SPS_CORE_BASELINE_MODE;
     process.env.SPS_CORE_BASELINE_MODE = "true";
@@ -1443,5 +1602,37 @@ describe.sequential("plugin tool and bridge authz", () => {
     expect(res.status).toBe(403);
     expect(res.body.error).toContain("own run");
     expect(executeTool).not.toHaveBeenCalled();
+  });
+
+  it("passes only the Host or Member audience to canonical diagnostics", async () => {
+    readyPlugin();
+    const snapshot = {
+      schemaVersion: "sps-plugin-diagnostic/v1",
+      pluginId,
+      pluginKey: "paperclip.example",
+      generatedAt: new Date().toISOString(),
+      facts: [],
+      runtime: { lifecycleStatus: "ready", declaredCapabilities: [], worker: null, scheduler: null },
+    };
+    const diagnostics = { snapshot: vi.fn().mockResolvedValue(snapshot) };
+    const { app } = await createApp(boardActor({ source: "local_implicit", companyIds: [] }), {}, { diagnosticsDeps: { diagnostics } });
+    const hostResponse = await request(app).get(`/api/plugins/${pluginId}/diagnostics`);
+    expect(hostResponse.status).toBe(200);
+    expect(diagnostics.snapshot).toHaveBeenLastCalledWith(pluginId, "host");
+
+    const memberDiagnostics = { snapshot: vi.fn().mockResolvedValue(snapshot) };
+    const member = await createApp(boardActor(), {}, { diagnosticsDeps: { diagnostics: memberDiagnostics } });
+    const memberResponse = await request(member.app).get(`/api/plugins/${pluginId}/diagnostics`);
+    expect(memberResponse.status).toBe(200);
+    expect(memberDiagnostics.snapshot).toHaveBeenLastCalledWith(pluginId, "member");
+  });
+
+  it("rejects Agent credentials before canonical diagnostics are resolved", async () => {
+    readyPlugin();
+    const diagnostics = { snapshot: vi.fn() };
+    const { app } = await createApp(agentActor(), {}, { diagnosticsDeps: { diagnostics } });
+    const response = await request(app).get(`/api/plugins/${pluginId}/diagnostics`);
+    expect(response.status).toBe(403);
+    expect(diagnostics.snapshot).not.toHaveBeenCalled();
   });
 });

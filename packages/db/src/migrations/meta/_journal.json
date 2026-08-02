@@ -1107,6 +1107,13 @@
       "when": 1785788400000,
       "tag": "0159_sps_workspace_surfaces",
       "breakpoints": true
+    },
+    {
+      "idx": 160,
+      "version": "7",
+      "when": 1785960000000,
+      "tag": "0160_sps_workspace_plugin_jobs",
+      "breakpoints": true
     }
   ]
 }

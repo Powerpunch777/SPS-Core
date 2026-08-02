@@ -72,6 +72,7 @@ import { createCompanyMemoryProviderRuntime } from "./services/memory-provider-r
 import { setPluginEventBus } from "./services/activity-log.js";
 import { createPluginDevWatcher } from "./services/plugin-dev-watcher.js";
 import { createPluginHostServiceCleanup } from "./services/plugin-host-service-cleanup.js";
+import { createPluginCanonicalDiagnostics } from "./services/plugin-canonical-diagnostics.js";
 import { pluginRegistryService } from "./services/plugin-registry.js";
 import { installConfiguredBundledPlugins, parseBundledPluginPaths } from "./services/bundled-plugin-bootstrap.js";
 import { createHostClientHandlers } from "@paperclipai/plugin-sdk";
@@ -343,6 +344,16 @@ export async function createApp(
       },
     },
   );
+  // Lifecycle and Loader depend on one another. Complete the composition with
+  // the runtime-capable Loader so plugins installed after startup launch their
+  // workers instead of becoming state-only `ready` records.
+  lifecycle.attachRuntimeLoader(loader);
+  const canonicalPluginDiagnostics = createPluginCanonicalDiagnostics({
+    db,
+    lifecycle,
+    workerManager,
+    scheduler,
+  });
   api.use(
     pluginRoutes(
       db,
@@ -361,6 +372,7 @@ export async function createApp(
           ),
       },
       lifecycle,
+      { diagnostics: canonicalPluginDiagnostics },
     ),
   );
   api.use(spsWorkspaceSurfaceRoutes(db, workerManager));
@@ -640,6 +652,7 @@ export async function createApp(
     disableFeedbackExportFlushes();
     devWatcher?.close();
     viteHtmlRenderer?.dispose();
+    canonicalPluginDiagnostics.dispose();
     hostServiceCleanup.disposeAll();
     hostServiceCleanup.teardown();
   };

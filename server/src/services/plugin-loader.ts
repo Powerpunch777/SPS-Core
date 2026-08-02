@@ -25,8 +25,9 @@
  * @see PLUGIN_SPEC.md §12 — Process Model
  */
 import { existsSync } from "node:fs";
-import { readdir, readFile, rm, stat } from "node:fs/promises";
+import { cp, mkdir, readdir, readFile, rm, stat } from "node:fs/promises";
 import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -78,6 +79,24 @@ function npmInvocation(args: string[]) {
     return { file: nodeCommand, args: [npmCli, ...args] };
   }
   return { file: "npm", args };
+}
+
+function pnpmInvocation(args: readonly string[], processEnv: NodeJS.ProcessEnv) {
+  const pnpmCli = processEnv["SPS_PNPM_CLI"]?.trim()
+    || (processEnv["npm_execpath"]?.toLowerCase().includes("pnpm")
+      ? processEnv["npm_execpath"]?.trim()
+      : "");
+  const nodeCommand = processEnv["SPS_PLUGIN_NODE_COMMAND"]?.trim() || process.execPath;
+  if (
+    pnpmCli
+    && path.isAbsolute(pnpmCli)
+    && existsSync(pnpmCli)
+    && path.isAbsolute(nodeCommand)
+    && existsSync(nodeCommand)
+  ) {
+    return { file: nodeCommand, args: [pnpmCli, ...args] };
+  }
+  return { file: "pnpm", args: [...args] };
 }
 
 async function runNpm(args: string[], options: { timeout: number }) {
@@ -957,6 +976,13 @@ export async function ensureLocalPluginBuilt(
   if (typeof packageName !== "string" || packageName.trim().length === 0 || !manualBuildCommand) return;
 
   const runExecFileAsync = options.execFileAsyncImpl ?? execFileAsync;
+  const resolveBuildInvocation = options.execFileAsyncImpl
+    ? (command: LocalPluginBuildCommand) => command
+    : (command: LocalPluginBuildCommand) => (
+      command.file === "pnpm"
+        ? { ...command, ...pnpmInvocation(command.args, processEnv) }
+        : command
+    );
   const buildCommands = buildLocalPluginBuildCommands(packageRoot, pkgJson, {
     repoRoot: options.repoRoot,
     needsBuild: missingEntrypoints.length > 0,
@@ -965,9 +991,10 @@ export async function ensureLocalPluginBuilt(
 
   try {
     for (const command of buildCommands) {
+      const invocation = resolveBuildInvocation(command);
       await runExecFileAsync(
-        command.file,
-        command.args,
+        invocation.file,
+        invocation.args,
         { cwd: command.cwd, timeout: LOCAL_PLUGIN_AUTOBUILD_TIMEOUT_MS },
       );
     }
@@ -1568,22 +1595,57 @@ export function pluginLoader(
       "plugin-loader: preparing plugin upgrade",
     );
 
-    const discovered = await fetchAndValidate({
-      ...upgradeOptions,
-      packageName,
-      localPath,
-      version,
-      installDir: localPluginDir,
-    });
-    const newManifest = discovered.manifest!;
+    // An upgrade candidate must never overwrite the active artifact while it
+    // is still being parsed, imported, and capability-checked. Keep both npm
+    // and local development candidates in a private staging directory until
+    // the lifecycle commits the replacement.
+    const stagingDir = path.join(
+      localPluginDir,
+      ".upgrade-staging",
+      pluginId,
+      randomUUID(),
+    );
+    let stagedLocalPath: string | undefined;
 
-    if (newManifest.id !== oldManifest.id) {
-      throw new Error(
-        `Upgrade failed: new manifest ID '${newManifest.id}' does not match existing plugin ID '${oldManifest.id}'`,
-      );
+    try {
+      if (localPath) {
+        const sourcePath = path.resolve(localPath);
+        stagedLocalPath = path.join(stagingDir, "package");
+        await mkdir(stagingDir, { recursive: true });
+        await cp(sourcePath, stagedLocalPath, {
+          recursive: true,
+          // Symlink targets must remain outside the candidate boundary only
+          // when the package itself explicitly uses a symlink. Do not resolve
+          // them while copying so validation observes the package faithfully.
+          dereference: false,
+          force: true,
+          errorOnExist: true,
+        });
+      }
+
+      const discovered = await fetchAndValidate({
+        ...upgradeOptions,
+        packageName,
+        localPath: stagedLocalPath,
+        version,
+        installDir: stagingDir,
+      });
+      const newManifest = discovered.manifest!;
+
+      if (newManifest.id !== oldManifest.id) {
+        throw new Error(
+          `Upgrade failed: new manifest ID '${newManifest.id}' does not match existing plugin ID '${oldManifest.id}'`,
+        );
+      }
+
+      return { oldManifest, newManifest, discovered };
+    } catch (error) {
+      // A rejected candidate is not part of the installed plugin state.
+      // Removing only this UUID-scoped staging directory cannot affect the
+      // active package, which remains at its pre-upgrade packagePath.
+      await rm(stagingDir, { recursive: true, force: true });
+      throw error;
     }
-
-    return { oldManifest, newManifest, discovered };
   }
 
   async function commitPreparedPluginUpgrade(
@@ -2358,6 +2420,19 @@ export function pluginLoader(
       buildHostHandlers,
       instanceInfo,
     } = runtimeServices;
+
+    // Bundled plugins may be installed and activated immediately before the
+    // startup loadAll() pass. Treat that already-running runtime as a successful
+    // activation instead of attempting to register the same worker twice and
+    // incorrectly moving a healthy plugin into the error state.
+    if (workerManager.isRunning(pluginId)) {
+      registered.worker = true;
+      log.info(
+        { pluginId, pluginKey, version: plugin.version },
+        "plugin-loader: plugin worker is already active; skipping duplicate activation",
+      );
+      return { plugin, success: true, registered };
+    }
 
     try {
       log.info(

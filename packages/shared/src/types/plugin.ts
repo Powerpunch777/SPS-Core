@@ -85,6 +85,15 @@ export interface PluginJobDeclaration {
   description?: string;
   /** Cron expression for the schedule (e.g. "star/15 star star star star" or "0 * * * *"). */
   schedule?: string;
+  /**
+   * Execution boundary for this job. Workspace jobs run once for every
+   * Company where the plugin is enabled. Host jobs run once for the instance.
+   *
+   * Omitted by legacy manifests means `host`. This preserves historical
+   * instance-wide scheduling and is deprecated for new manifests: new jobs
+   * should declare their scope explicitly.
+   */
+  scope?: "workspace" | "host";
 }
 
 /**
@@ -412,6 +421,26 @@ export interface PluginUiSlotDeclaration {
    * Defaults to host-defined ordering if omitted.
    */
   order?: number;
+}
+
+/** Inclusive version bounds for a plugin dependency declaration. */
+export interface PluginDependencyRangeDeclaration {
+  id: string;
+  minVersion?: string;
+  maxVersion?: string;
+}
+
+/** A non-blocking plugin or service discovery hint. */
+export interface PluginOptionalDependencyDeclaration {
+  id?: string;
+  service?: string;
+  minVersion?: string;
+  maxVersion?: string;
+}
+
+/** A service exposed by a plugin for optional discovery. */
+export interface PluginServiceDeclaration {
+  id: string;
 }
 
 export type PluginDashboardWidgetSize = "small" | "medium" | "large" | "full";
@@ -753,6 +782,14 @@ export interface PaperclipPluginManifestV1 {
   agentToolAccess?: PluginAgentToolAccessPolicy;
   /** Company-level default activation policy for this installed plugin. */
   companyActivation?: PluginCompanyActivationDeclaration;
+  /** Required plugins that must be ready and enabled before this plugin can run. */
+  requiredDependencies?: PluginDependencyRangeDeclaration[];
+  /** Non-blocking plugin or service discovery hints. */
+  optionalDependencies?: PluginOptionalDependencyDeclaration[];
+  /** Plugins that cannot be enabled alongside this plugin. */
+  conflicts?: PluginDependencyRangeDeclaration[];
+  /** Services this plugin offers to optional consumers. */
+  services?: PluginServiceDeclaration[];
   /** Restricted plugin-owned database namespace declaration. */
   database?: PluginDatabaseDeclaration;
   /** Scoped JSON API routes mounted under `/api/plugins/:pluginId/api/*`. */
@@ -823,6 +860,78 @@ export interface PluginRecord {
   installedAt: Date;
   /** Timestamp of the most recent status or metadata change. */
   updatedAt: Date;
+}
+
+// ---------------------------------------------------------------------------
+// Canonical plugin diagnostics
+// ---------------------------------------------------------------------------
+
+/** The public, cross-host diagnostic event schema. */
+export type PluginDiagnosticOriginV1 = "core" | "desktop" | "plugin";
+export type PluginDiagnosticLevelV1 = "debug" | "info" | "warn" | "error";
+export type PluginDiagnosticCategoryV1 =
+  | "manifest"
+  | "compatibility"
+  | "capability"
+  | "worker"
+  | "tool"
+  | "event"
+  | "job"
+  | "run"
+  | "stream"
+  | "ui"
+  | "connector"
+  | "mcp"
+  | "migration"
+  | "backup"
+  | "rollback"
+  | "visibility";
+export type PluginDiagnosticValueV1 = null | boolean | number | string | PluginDiagnosticValueV1[] | {
+  [key: string]: PluginDiagnosticValueV1;
+};
+
+/**
+ * A bounded, product-neutral fact emitted by the Core or a plugin.
+ *
+ * This is deliberately not a log format: it contains stable codes and safe
+ * structured details only. Credentials, absolute host paths, and raw process
+ * output are rejected or redacted before a fact becomes observable.
+ */
+export interface PluginDiagnosticFactV1 {
+  schemaVersion: "sps-plugin-diagnostic/v1";
+  id: string;
+  occurredAt: string;
+  origin: PluginDiagnosticOriginV1;
+  level: PluginDiagnosticLevelV1;
+  category: PluginDiagnosticCategoryV1;
+  code: string;
+  message: string;
+  /** Safe, bounded JSON-like metadata. */
+  details: Record<string, PluginDiagnosticValueV1>;
+}
+
+/** The Core read contract consumed by SDK tooling and any product shell. */
+export interface PluginDiagnosticsSnapshotV1 {
+  schemaVersion: "sps-plugin-diagnostic/v1";
+  pluginId: string;
+  pluginKey: string;
+  generatedAt: string;
+  facts: PluginDiagnosticFactV1[];
+  runtime: {
+    lifecycleStatus: PluginStatus;
+    declaredCapabilities: string[];
+    worker: {
+      status: string;
+      running: boolean;
+      consecutiveCrashes: number;
+      totalCrashes: number;
+      pendingRequests: number;
+    } | null;
+    scheduler: {
+      running: boolean;
+      activeJobCount: number;
+    } | null;
+  };
 }
 
 export interface PluginDatabaseNamespaceRecord {
@@ -990,6 +1099,8 @@ export interface PluginJobRecord {
   jobKey: string;
   /** Cron expression for the schedule. */
   schedule: string;
+  /** Execution boundary declared by the plugin manifest. */
+  scope: "workspace" | "host";
   /** Current job status. */
   status: "active" | "paused" | "failed";
   /** Last time the job was executed. */
@@ -1016,6 +1127,8 @@ export interface PluginJobRunRecord {
   jobId: string;
   /** FK to `plugins.id`. */
   pluginId: string;
+  /** Company/workspace execution scope; null for Host jobs. */
+  companyId: string | null;
   /** What triggered this run. */
   trigger: "schedule" | "manual" | "retry";
   /** Current run status. */

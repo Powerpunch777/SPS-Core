@@ -332,6 +332,63 @@ describeEmbeddedPostgres("plugin install auto-build route", () => {
     await tempDb?.cleanup();
   });
 
+  it("treats a bundled plugin activated before loadAll as already loaded", async () => {
+    const pluginId = randomUUID();
+    const pluginKey = `sps.startup-idempotency-${pluginId.slice(0, 8)}`;
+    const manifest = {
+      id: pluginKey,
+      apiVersion: 1,
+      version: "0.1.0",
+      displayName: "Startup Idempotency Fixture",
+      description: "Verifies that startup does not register an active bundled worker twice.",
+      author: "SPS",
+      categories: ["automation"],
+      capabilities: [],
+      entrypoints: { worker: "./dist/worker.js" },
+    };
+    await db.insert(plugins).values({
+      id: pluginId,
+      pluginKey,
+      packageName: "@sps/startup-idempotency-fixture",
+      version: manifest.version,
+      apiVersion: manifest.apiVersion,
+      categories: manifest.categories,
+      manifestJson: manifest,
+      status: "ready",
+    });
+
+    const startWorker = vi.fn();
+    const workerManager = {
+      isRunning: vi.fn(() => true),
+      startWorker,
+    };
+    const loader = pluginLoader(
+      db,
+      { enableLocalFilesystem: false, enableNpmDiscovery: false },
+      {
+        workerManager,
+        eventBus: {},
+        jobScheduler: {},
+        jobStore: {},
+        toolDispatcher: {},
+        lifecycleManager: mockLifecycle,
+        buildHostHandlers: vi.fn(),
+        instanceInfo: {
+          instanceId: "startup-idempotency-test",
+          hostVersion: "0.0.0-test",
+          deploymentMode: "local_trusted",
+          deploymentExposure: "private",
+        },
+      } as never,
+    );
+
+    const result = await loader.loadAll();
+
+    expect(result).toMatchObject({ total: 1, succeeded: 1, failed: 0 });
+    expect(workerManager.isRunning).toHaveBeenCalledWith(pluginId);
+    expect(startWorker).not.toHaveBeenCalled();
+  }, 20_000);
+
   it("auto-builds bundled local plugins during POST /api/plugins/install when dist is missing", async () => {
     const fixture = await createBundledPluginFixture("success");
     cleanupPaths.add(fixture.packageRoot);
@@ -343,7 +400,7 @@ describeEmbeddedPostgres("plugin install auto-build route", () => {
       .post("/api/plugins/install")
       .send({ packageName: fixture.packageRoot, isLocalPath: true });
 
-    expect(res.status).toBe(200);
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
     expect(res.body.packageName).toBe(fixture.packageName);
     expect(res.body.pluginKey).toBe(fixture.pluginKey);
     expect(existsSync(path.join(fixture.distDir, "manifest.js"))).toBe(true);
@@ -364,7 +421,7 @@ describeEmbeddedPostgres("plugin install auto-build route", () => {
       .post("/api/plugins/install")
       .send({ packageName: fixture.packageRoot, isLocalPath: true });
 
-    expect(res.status).toBe(200);
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
     expect(res.body.packageName).toBe(fixture.packageName);
     expect(res.body.pluginKey).toBe(fixture.pluginKey);
     expect(existsSync(path.join(fixture.distDir, "manifest.js"))).toBe(true);
@@ -389,7 +446,7 @@ describeEmbeddedPostgres("plugin install auto-build route", () => {
       .post("/api/plugins/install")
       .send({ packageName: fixture.packageRoot, isLocalPath: true });
 
-    expect(res.status).toBe(200);
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
     expect(res.body.packageName).toBe(fixture.packageName);
     expect(res.body.pluginKey).toBe(fixture.pluginKey);
     expect(existsSync(path.join(fixture.packageRoot, "node_modules", "@paperclipai", "plugin-sdk"))).toBe(true);

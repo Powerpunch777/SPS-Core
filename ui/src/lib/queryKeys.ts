@@ -326,6 +326,7 @@ export const queryKeys = {
     migrationPlan: (pluginId: string) => ["plugins", pluginId, "migration-plan"] as const,
     pendingUpdate: (pluginId: string) => ["plugins", pluginId, "pending-update"] as const,
     health: (pluginId: string) => ["plugins", pluginId, "health"] as const,
+    diagnostics: (pluginId: string) => ["plugins", pluginId, "diagnostics"] as const,
     uiContributions: (companyId?: string | null) =>
       ["plugins", "ui-contributions", companyId ?? "global"] as const,
     uiContributionsPrefix: ["plugins", "ui-contributions"] as const,

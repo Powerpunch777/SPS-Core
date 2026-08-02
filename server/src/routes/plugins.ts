@@ -56,6 +56,11 @@ import {
   resolvePluginCompanyActivation,
   setPluginCompanyActivation,
 } from "../services/plugin-company-activation.js";
+import {
+  analyzePluginDependencies,
+  isPluginDependencyAvailable,
+  type PluginDependencyReport,
+} from "../services/plugin-dependencies.js";
 import { listReadyAgentPlatformExtensions } from "../services/agent-platform-extensions.js";
 import { pluginLifecycleManager, type PluginLifecycleManager } from "../services/plugin-lifecycle.js";
 import { spsWorkspaceSurfaceService } from "../services/sps-workspace-surfaces.js";
@@ -78,6 +83,7 @@ import type { PluginJobStore } from "../services/plugin-job-store.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
 import type { PluginStreamBus } from "../services/plugin-stream-bus.js";
 import type { PluginToolDispatcher } from "../services/plugin-tool-dispatcher.js";
+import type { PluginCanonicalDiagnostics } from "../services/plugin-canonical-diagnostics.js";
 import type { PluginPerformActionActorContext, ToolRunContext } from "@paperclipai/plugin-sdk";
 import { JsonRpcCallError, PLUGIN_RPC_ERROR_CODES } from "@paperclipai/plugin-sdk";
 import {
@@ -450,6 +456,11 @@ export interface PluginRouteRegistryStagingDeps {
   stagingRoot: string;
 }
 
+/** Canonical, bounded diagnostics owned by the Core runtime. */
+export interface PluginRouteDiagnosticsDeps {
+  diagnostics: PluginCanonicalDiagnostics;
+}
+
 interface PluginScopedApiRequest {
   routeKey: string;
   method: string;
@@ -539,6 +550,7 @@ export function pluginRoutes(
   memoryDeps?: PluginRouteMemoryDeps,
   registryStagingDeps?: PluginRouteRegistryStagingDeps,
   lifecycleManager?: PluginLifecycleManager,
+  diagnosticsDeps?: PluginRouteDiagnosticsDeps,
 ) {
   const router = Router();
   const registry = pluginRegistryService(db);
@@ -898,6 +910,34 @@ export function pluginRoutes(
     return await resolvePluginCompanyActivation(registry, plugin, companyId);
   }
 
+  async function dependencyReportForCompany(
+    companyId: string,
+    target?: { action: "enable" | "disable" | "delete"; pluginId: string },
+  ): Promise<PluginDependencyReport> {
+    const installed = await registry.listInstalled();
+    const candidates = await Promise.all(installed.map(async (candidate) => ({
+      id: candidate.id,
+      version: candidate.version,
+      manifest: candidate.manifestJson,
+      available: candidate.status === "ready",
+      active: candidate.status === "ready" && (await resolveCompanyPluginActivation(candidate, companyId)).enabled,
+    })));
+    return analyzePluginDependencies(candidates, target);
+  }
+
+  async function dependencyReportForHost(
+    target?: { action: "enable" | "disable" | "delete"; pluginId: string },
+  ): Promise<PluginDependencyReport> {
+    const installed = await registry.listInstalled();
+    return analyzePluginDependencies(installed.map((candidate) => ({
+      id: candidate.id,
+      version: candidate.version,
+      manifest: candidate.manifestJson,
+      available: candidate.status === "ready",
+      active: candidate.status === "ready",
+    })), target);
+  }
+
   async function assertCompanyPluginEnabled(
     plugin: { id: string; pluginKey: string; manifestJson: PaperclipPluginManifestV1 },
     companyId: string,
@@ -905,6 +945,10 @@ export function pluginRoutes(
     const activation = await resolveCompanyPluginActivation(plugin, companyId);
     if (!activation.enabled) {
       throw forbidden(`Plugin \"${plugin.pluginKey}\" is disabled for this Company.`);
+    }
+    const report = await dependencyReportForCompany(companyId);
+    if (!isPluginDependencyAvailable(report, plugin.manifestJson.id)) {
+      throw forbidden(`Plugin \"${plugin.pluginKey}\" is blocked by its dependency graph. ${report.recovery.join(" ")}`);
     }
     return activation;
   }
@@ -1033,6 +1077,28 @@ export function pluginRoutes(
     res.json({ companyId, plugins: rows });
   });
 
+  /** Returns the read-only dependency graph for a plugin in one Company. */
+  router.get("/plugins/:pluginId/companies/:companyId/dependencies", async (req, res) => {
+    const { pluginId, companyId } = req.params;
+    assertBoardOrgAccess(req);
+    assertCompanyAccess(req, companyId);
+    const plugin = await resolvePlugin(registry, pluginId);
+    if (!plugin) return void res.status(404).json({ error: "Plugin not found" });
+    const report = await dependencyReportForCompany(companyId);
+    res.json({ pluginId: plugin.id, pluginKey: plugin.pluginKey, companyId, available: isPluginDependencyAvailable(report, plugin.manifestJson.id), report });
+  });
+
+  /** Host-only preview for a global disable/delete; this endpoint never mutates state. */
+  router.get("/plugins/:pluginId/dependency-impact", async (req, res) => {
+    assertInstanceAdmin(req);
+    const plugin = await resolvePlugin(registry, req.params.pluginId);
+    if (!plugin) return void res.status(404).json({ error: "Plugin not found" });
+    const action = req.query.action;
+    if (action !== "disable" && action !== "delete") return void res.status(400).json({ error: '"action" must be disable or delete.' });
+    const report = await dependencyReportForHost({ action, pluginId: plugin.manifestJson.id });
+    res.json({ pluginId: plugin.id, pluginKey: plugin.pluginKey, report });
+  });
+
   /**
    * Stores an explicit Company-level activation override. It never installs,
    * upgrades, unloads, or restarts the Host-wide plugin package.
@@ -1040,7 +1106,8 @@ export function pluginRoutes(
   router.put("/plugins/:pluginId/companies/:companyId/activation", async (req, res) => {
     const { pluginId, companyId } = req.params;
     await assertPluginCompanyAdministrator(req, companyId);
-    const enabled = (req.body as { enabled?: unknown } | undefined)?.enabled;
+    const body = req.body as { enabled?: unknown; impactReviewId?: unknown } | undefined;
+    const enabled = body?.enabled;
     if (typeof enabled !== "boolean") {
       res.status(400).json({ error: '"enabled" must be a boolean.' });
       return;
@@ -1048,6 +1115,20 @@ export function pluginRoutes(
     const plugin = await resolvePlugin(registry, pluginId);
     if (!plugin) {
       res.status(404).json({ error: "Plugin not found" });
+      return;
+    }
+    if (enabled && plugin.status !== "ready") {
+      const report = await dependencyReportForCompany(companyId, { action: "enable", pluginId: plugin.manifestJson.id });
+      res.status(409).json({ error: "Plugin activation requires a ready Host package.", report, recovery: ["Enable or repair the Host plugin package before enabling it for this Company."] });
+      return;
+    }
+    const review = await dependencyReportForCompany(companyId, { action: enabled ? "enable" : "disable", pluginId: plugin.manifestJson.id });
+    if (enabled && !isPluginDependencyAvailable(review, plugin.manifestJson.id)) {
+      res.status(409).json({ error: "Plugin activation is blocked by its dependency graph.", report: review, recovery: review.recovery });
+      return;
+    }
+    if (!enabled && review.impact!.affectedPluginIds.length > 0 && body?.impactReviewId !== review.impact!.reviewId) {
+      res.status(409).json({ error: "This change would break active required dependents. Review the impact and repeat with impactReviewId.", report: review, impactReviewId: review.impact!.reviewId });
       return;
     }
     const activation = await setPluginCompanyActivation(registry, plugin, companyId, enabled);
@@ -2433,10 +2514,19 @@ export function pluginRoutes(
     const { pluginId } = req.params;
     const purge = req.query.purge === "true";
     const deleteInboxSummaries = req.query.deleteInboxSummaries === "true";
+    const impactReviewId = typeof (req.body as { impactReviewId?: unknown } | undefined)?.impactReviewId === "string"
+      ? (req.body as { impactReviewId: string }).impactReviewId
+      : undefined;
 
     const plugin = await resolvePlugin(registry, pluginId);
     if (!plugin) {
       res.status(404).json({ error: "Plugin not found" });
+      return;
+    }
+
+    const dependencyImpact = await dependencyReportForHost({ action: "delete", pluginId: plugin.manifestJson.id });
+    if (dependencyImpact.impact && dependencyImpact.impact.affectedPluginIds.length > 0 && impactReviewId !== dependencyImpact.impact.reviewId) {
+      res.status(409).json({ error: "This uninstall would break active required dependents. Review the impact and repeat with impactReviewId.", report: dependencyImpact, impactReviewId: dependencyImpact.impact.reviewId });
       return;
     }
 
@@ -2514,12 +2604,18 @@ export function pluginRoutes(
   router.post("/plugins/:pluginId/disable", async (req, res) => {
     assertInstanceAdmin(req);
     const { pluginId } = req.params;
-    const body = req.body as { reason?: string } | undefined;
+    const body = req.body as { reason?: string; impactReviewId?: string } | undefined;
     const reason = body?.reason;
 
     const plugin = await resolvePlugin(registry, pluginId);
     if (!plugin) {
       res.status(404).json({ error: "Plugin not found" });
+      return;
+    }
+
+    const dependencyImpact = await dependencyReportForHost({ action: "disable", pluginId: plugin.manifestJson.id });
+    if (dependencyImpact.impact && dependencyImpact.impact.affectedPluginIds.length > 0 && body?.impactReviewId !== dependencyImpact.impact.reviewId) {
+      res.status(409).json({ error: "This disable would break active required dependents. Review the impact and repeat with impactReviewId.", report: dependencyImpact, impactReviewId: dependencyImpact.impact.reviewId });
       return;
     }
 
@@ -2532,6 +2628,32 @@ export function pluginRoutes(
       });
       publishGlobalLiveEvent({ type: "plugin.ui.updated", payload: { pluginId: plugin.id, action: "disabled" } });
       res.json(result);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      res.status(400).json({ error: message });
+    }
+  });
+
+  /**
+   * POST /api/plugins/:pluginId/worker/restart
+   *
+   * Restart the running worker without changing the installed plugin package
+   * or reloading its UI contribution. This is intentionally Host-only: a
+   * worker restart has process-level side effects on the local SPS Host.
+   *
+   * The lifecycle manager owns readiness and transition validation so this
+   * route does not duplicate lifecycle state rules.
+   */
+  router.post("/plugins/:pluginId/worker/restart", async (req, res) => {
+    assertSpsCoreHostAuthority(req);
+    const plugin = await resolvePlugin(registry, req.params.pluginId);
+    if (!plugin) {
+      res.status(404).json({ error: "Plugin not found" });
+      return;
+    }
+    try {
+      await lifecycle.restartWorker(plugin.id);
+      res.json({ pluginId: plugin.id, restarted: true });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       res.status(400).json({ error: message });
@@ -2606,6 +2728,33 @@ export function pluginRoutes(
     };
 
     res.json(result);
+  });
+
+  /**
+   * GET /api/plugins/:pluginId/diagnostics
+   *
+   * Returns canonical diagnostic evidence using the public
+   * `sps-plugin-diagnostic/v1` shape. The Core selects the audience from the
+   * authenticated request: only the SPS Host receives host-governed facts.
+   */
+  router.get("/plugins/:pluginId/diagnostics", async (req, res) => {
+    assertBoardOrgAccess(req);
+    if (!diagnosticsDeps) {
+      res.status(501).json({ error: "Canonical plugin diagnostics are unavailable" });
+      return;
+    }
+    const plugin = await resolvePlugin(registry, req.params.pluginId);
+    if (!plugin) {
+      res.status(404).json({ error: "Plugin not found" });
+      return;
+    }
+    const audience = hasSpsCoreHostAuthority(req) ? "host" : "member";
+    const snapshot = await diagnosticsDeps.diagnostics.snapshot(plugin.id, audience);
+    if (!snapshot) {
+      res.status(404).json({ error: "Plugin not found" });
+      return;
+    }
+    res.json(snapshot);
   });
 
   /**
@@ -3142,6 +3291,19 @@ export function pluginRoutes(
       return;
     }
 
+    const companyId = typeof req.query.companyId === "string" ? req.query.companyId : undefined;
+    if (job.scope === "workspace") {
+      if (!companyId) {
+        res.status(400).json({ error: "companyId is required for workspace job history" });
+        return;
+      }
+      assertCompanyAccess(req, companyId);
+      await assertCompanyPluginEnabled(plugin, companyId);
+    } else if (companyId !== undefined) {
+      res.status(400).json({ error: "Host job history does not accept companyId" });
+      return;
+    }
+
     const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 25;
     if (isNaN(limit) || limit < 1 || limit > 500) {
       res.status(400).json({ error: "limit must be a number between 1 and 500" });
@@ -3149,7 +3311,7 @@ export function pluginRoutes(
     }
 
     try {
-      const runs = await jobDeps.jobStore.listRunsByJob(jobId, limit);
+      const runs = await jobDeps.jobStore.listRunsByJob(jobId, limit, job.scope === "workspace" ? companyId : null);
       res.json(runs);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -3171,6 +3333,10 @@ export function pluginRoutes(
    * - 400 if job not found, not active, already running, or worker unavailable
    */
   router.post("/plugins/:pluginId/jobs/:jobId/trigger", async (req, res) => {
+    // Manual scheduling is a Host control. Workspace scope chooses the
+    // target Company, but does not turn this low-level lifecycle route into a
+    // general Member action; plugins can expose narrower Member actions via
+    // their own typed UI/action contracts.
     assertInstanceAdmin(req);
     if (!jobDeps) {
       res.status(501).json({ error: "Job scheduling is not enabled" });
@@ -3190,13 +3356,59 @@ export function pluginRoutes(
       return;
     }
 
+    const companyId = typeof req.body?.companyId === "string" ? req.body.companyId : undefined;
+    if (job.scope === "workspace") {
+      if (!companyId) {
+        res.status(400).json({ error: "companyId is required for workspace jobs" });
+        return;
+      }
+      await assertCompanyPluginEnabled(plugin, companyId);
+    } else {
+      if (companyId !== undefined) {
+        res.status(400).json({ error: "Host jobs do not accept companyId" });
+        return;
+      }
+    }
+
     try {
-      const result = await jobDeps.scheduler.triggerJob(jobId, "manual");
+      const result = job.scope === "workspace"
+        ? await jobDeps.scheduler.triggerJob(jobId, "manual", companyId)
+        : await jobDeps.scheduler.triggerJob(jobId, "manual");
       res.json(result);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       res.status(400).json({ error: message });
     }
+  });
+
+  router.post("/plugins/:pluginId/jobs/:jobId/runs/:runId/cancel", async (req, res) => {
+    assertInstanceAdmin(req);
+    if (!jobDeps) return void res.status(501).json({ error: "Job scheduling is not enabled" });
+    const plugin = await resolvePlugin(registry, req.params.pluginId);
+    if (!plugin) return void res.status(404).json({ error: "Plugin not found" });
+    const job = await jobDeps.jobStore.getJobByIdForPlugin(plugin.id, req.params.jobId);
+    const run = await jobDeps.jobStore.getRunById(req.params.runId);
+    if (!job || !run || run.jobId !== job.id) return void res.status(404).json({ error: "Job run not found" });
+    if (job.scope === "workspace") {
+      if (!run.companyId) return void res.status(409).json({ error: "Workspace run is missing company scope" });
+    }
+    res.json({ cancelled: await jobDeps.scheduler.cancelRun(run.id) });
+  });
+
+  router.post("/plugins/:pluginId/jobs/:jobId/runs/:runId/retry", async (req, res) => {
+    assertInstanceAdmin(req);
+    if (!jobDeps) return void res.status(501).json({ error: "Job scheduling is not enabled" });
+    const plugin = await resolvePlugin(registry, req.params.pluginId);
+    if (!plugin) return void res.status(404).json({ error: "Plugin not found" });
+    const job = await jobDeps.jobStore.getJobByIdForPlugin(plugin.id, req.params.jobId);
+    const run = await jobDeps.jobStore.getRunById(req.params.runId);
+    if (!job || !run || run.jobId !== job.id) return void res.status(404).json({ error: "Job run not found" });
+    if (job.scope === "workspace") {
+      if (!run.companyId) return void res.status(409).json({ error: "Workspace run is missing company scope" });
+      await assertCompanyPluginEnabled(plugin, run.companyId);
+    }
+    try { res.json(await jobDeps.scheduler.retryRun(run.id)); }
+    catch (err) { res.status(400).json({ error: err instanceof Error ? err.message : String(err) }); }
   });
 
   // ===========================================================================

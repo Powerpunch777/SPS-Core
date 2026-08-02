@@ -127,3 +127,29 @@ describe("pluginLifecycleManager.restartWorker", () => {
     expect(started).toHaveBeenCalledWith({ pluginId: "plugin-1", pluginKey: "example.plugin" });
   });
 });
+
+describe("pluginLifecycleManager.attachRuntimeLoader", () => {
+  it("activates a newly installed plugin through the attached runtime loader", async () => {
+    const installedPlugin = { ...pluginRecord, status: "installed" };
+    const readyPlugin = { ...pluginRecord, status: "ready" };
+    mockRegistry.getById.mockResolvedValue(installedPlugin);
+    mockRegistry.updateStatus.mockResolvedValue(readyPlugin);
+
+    const { workerManager } = makeWorkerManagerStub();
+    const runtimeLoader: Partial<PluginLoader> = {
+      hasRuntimeServices: vi.fn().mockReturnValue(true) as PluginLoader["hasRuntimeServices"],
+      loadSingle: vi.fn().mockResolvedValue({
+        success: true,
+        plugin: readyPlugin,
+        registered: { worker: true, eventSubscriptions: 0, jobs: 0, webhooks: 0, tools: 0 },
+      }) as PluginLoader["loadSingle"],
+    };
+    const lifecycle = pluginLifecycleManager({} as never, { workerManager });
+
+    lifecycle.attachRuntimeLoader(runtimeLoader as PluginLoader);
+    await lifecycle.load("plugin-1");
+
+    expect(runtimeLoader.loadSingle).toHaveBeenCalledWith("plugin-1");
+    expect(() => lifecycle.attachRuntimeLoader({} as PluginLoader)).toThrow(/already attached/i);
+  });
+});

@@ -40,6 +40,8 @@ export const pluginJobs = pgTable(
     jobKey: text("job_key").notNull(),
     /** Cron expression (e.g. `"0 * * * *"`) or interval string. */
     schedule: text("schedule").notNull(),
+    /** Execution boundary. Legacy rows are migrated as Host-scoped. */
+    scope: text("scope").$type<"workspace" | "host">().notNull().default("host"),
     /** Current scheduling state. */
     status: text("status").$type<PluginJobStatus>().notNull().default("active"),
     /** Timestamp of the most recent successful execution. */

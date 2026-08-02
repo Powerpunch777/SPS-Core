@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { PLUGIN_CAPABILITIES } from "../constants.js";
-import { pluginManagedRoutineDeclarationSchema, pluginManifestV1Schema, pluginUiSlotDeclarationSchema } from "./plugin.js";
+import { pluginJobDeclarationSchema, pluginManagedRoutineDeclarationSchema, pluginManifestV1Schema, pluginUiSlotDeclarationSchema } from "./plugin.js";
 
 describe("plugin capability constants", () => {
   it("exposes each capability once", () => {
@@ -9,6 +9,23 @@ describe("plugin capability constants", () => {
 });
 
 describe("plugin manifest validators", () => {
+  it("validates dependency declarations, inclusive bounds, and legacy underscore ids", () => {
+    const base = {
+      id: "sps_legacy.plugin", apiVersion: 1 as const, version: "1.0.0", displayName: "Dependency test", description: "Dependency test", author: "SPS", categories: ["automation"] as const, capabilities: ["jobs.schedule"] as const, entrypoints: { worker: "./worker.js" },
+    };
+    const valid = pluginManifestV1Schema.safeParse({ ...base, requiredDependencies: [{ id: "sps_legacy.provider", minVersion: "1.0.0", maxVersion: "1.0.0" }], optionalDependencies: [{ service: "sps:cache", minVersion: "1.0.0", maxVersion: "1.0.0" }], services: [{ id: "sps:cache" }] });
+    expect(valid.success, valid.success ? "" : JSON.stringify(valid.error.issues)).toBe(true);
+    expect(pluginManifestV1Schema.safeParse({ ...base, optionalDependencies: [{ id: "sps.provider", minVersion: "2.0.0", maxVersion: "1.0.0" }] }).success).toBe(false);
+  });
+
+  it("accepts explicit workspace and host job scopes", () => {
+    expect(pluginJobDeclarationSchema.parse({ jobKey: "sync", displayName: "Sync", scope: "workspace" }).scope).toBe("workspace");
+    expect(pluginJobDeclarationSchema.parse({ jobKey: "cleanup", displayName: "Cleanup", scope: "host" }).scope).toBe("host");
+  });
+
+  it("keeps omitted job scope valid for legacy Host-scoped manifests", () => {
+    expect(pluginJobDeclarationSchema.parse({ jobKey: "legacy", displayName: "Legacy" }).scope).toBeUndefined();
+  });
   it("accepts existing-style plugins that do not request access or authorization capabilities", () => {
     const parsed = pluginManifestV1Schema.parse({
       id: "paperclip.compat-dashboard",

@@ -74,6 +74,61 @@ export const jsonSchemaSchema = z.record(z.string(), z.unknown()).refine(
  * Valid tokens per field: *, N, N-M, N/S, * /S, N-M/S, and comma-separated lists.
  */
 const CRON_FIELD_PATTERN = /^(\*(?:\/[0-9]+)?|[0-9]+(?:-[0-9]+)?(?:\/[0-9]+)?)(?:,(\*(?:\/[0-9]+)?|[0-9]+(?:-[0-9]+)?(?:\/[0-9]+)?))*$/;
+// Core plugin ids have historically allowed `_`; dependency references must
+// accept every valid installed Core plugin id rather than creating an
+// impossible-to-reference legacy package.
+const PLUGIN_DEPENDENCY_ID_PATTERN = /^[a-z0-9][a-z0-9._-]{2,127}$/;
+const PLUGIN_SERVICE_ID_PATTERN = /^[a-z0-9][a-z0-9._:-]{1,127}$/;
+const SEMVER_PATTERN = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/;
+
+function compareDependencyVersions(left: string, right: string): number {
+  const parse = (value: string) => {
+    const match = SEMVER_PATTERN.exec(value)!;
+    return { numbers: [match[1]!, match[2]!, match[3]!], prerelease: match[4]?.split(".") ?? [] };
+  };
+  const compareNumber = (a: string, b: string) => a.length === b.length ? (a === b ? 0 : a < b ? -1 : 1) : a.length < b.length ? -1 : 1;
+  const a = parse(left); const b = parse(right);
+  for (let index = 0; index < 3; index += 1) {
+    const result = compareNumber(a.numbers[index]!, b.numbers[index]!);
+    if (result !== 0) return result;
+  }
+  if (a.prerelease.length === 0 || b.prerelease.length === 0) return a.prerelease.length === b.prerelease.length ? 0 : a.prerelease.length === 0 ? 1 : -1;
+  for (let index = 0; index < Math.max(a.prerelease.length, b.prerelease.length); index += 1) {
+    const leftPart = a.prerelease[index]; const rightPart = b.prerelease[index];
+    if (leftPart === undefined) return -1;
+    if (rightPart === undefined) return 1;
+    if (leftPart === rightPart) continue;
+    const leftNumeric = /^\d+$/.test(leftPart); const rightNumeric = /^\d+$/.test(rightPart);
+    if (leftNumeric && rightNumeric) return compareNumber(leftPart, rightPart);
+    if (leftNumeric !== rightNumeric) return leftNumeric ? -1 : 1;
+    return leftPart < rightPart ? -1 : 1;
+  }
+  return 0;
+}
+
+const pluginDependencyRangeSchema = z.object({
+  id: z.string().regex(PLUGIN_DEPENDENCY_ID_PATTERN),
+  minVersion: z.string().regex(SEMVER_PATTERN).optional(),
+  maxVersion: z.string().regex(SEMVER_PATTERN).optional(),
+}).superRefine((value, ctx) => {
+  if (value.minVersion && value.maxVersion && compareDependencyVersions(value.minVersion, value.maxVersion) > 0) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "minVersion must not exceed maxVersion" });
+  }
+});
+
+const pluginOptionalDependencySchema = z.object({
+  id: z.string().regex(PLUGIN_DEPENDENCY_ID_PATTERN).optional(),
+  service: z.string().regex(PLUGIN_SERVICE_ID_PATTERN).optional(),
+  minVersion: z.string().regex(SEMVER_PATTERN).optional(),
+  maxVersion: z.string().regex(SEMVER_PATTERN).optional(),
+}).superRefine((value, ctx) => {
+  if ((value.id === undefined) === (value.service === undefined)) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Optional dependencies must declare exactly one of id or service" });
+  }
+  if (value.minVersion && value.maxVersion && compareDependencyVersions(value.minVersion, value.maxVersion) > 0) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "minVersion must not exceed maxVersion" });
+  }
+});
 
 function isValidCronExpression(expression: string): boolean {
   const trimmed = expression.trim();
@@ -91,6 +146,7 @@ export const pluginJobDeclarationSchema = z.object({
     (val) => isValidCronExpression(val),
     { message: "schedule must be a valid 5-field cron expression (e.g. '*/15 * * * *')" },
   ).optional(),
+  scope: z.enum(["workspace", "host"]).optional(),
 });
 
 export type PluginJobDeclarationInput = z.infer<typeof pluginJobDeclarationSchema>;
@@ -952,6 +1008,10 @@ export const pluginManifestV1Schema = z.object({
   companyActivation: z.object({
     defaultEnabled: z.boolean().optional(),
   }).optional(),
+  requiredDependencies: z.array(pluginDependencyRangeSchema).max(100).optional(),
+  optionalDependencies: z.array(pluginOptionalDependencySchema).max(100).optional(),
+  conflicts: z.array(pluginDependencyRangeSchema).max(100).optional(),
+  services: z.array(z.object({ id: z.string().regex(PLUGIN_SERVICE_ID_PATTERN) })).max(100).optional(),
   database: pluginDatabaseDeclarationSchema.optional(),
   apiRoutes: z.array(pluginApiRouteDeclarationSchema).optional(),
   environmentDrivers: z.array(pluginEnvironmentDriverDeclarationSchema).optional(),
@@ -975,6 +1035,19 @@ export const pluginManifestV1Schema = z.object({
     actions: z.array(pluginInboxActionDeclarationSchema).min(1).max(100).optional(),
   }).optional(),
 }).superRefine((manifest, ctx) => {
+  const requiredIds = manifest.requiredDependencies?.map((dependency) => dependency.id) ?? [];
+  const conflictIds = manifest.conflicts?.map((conflict) => conflict.id) ?? [];
+  for (const [field, ids] of [["requiredDependencies", requiredIds], ["conflicts", conflictIds]] as const) {
+    if (new Set(ids).size !== ids.length) ctx.addIssue({ code: z.ZodIssueCode.custom, message: `${field} ids must be unique`, path: [field] });
+    if (ids.includes(manifest.id)) ctx.addIssue({ code: z.ZodIssueCode.custom, message: `${field} cannot reference the declaring plugin`, path: [field] });
+  }
+  if (requiredIds.some((id) => conflictIds.includes(id))) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "A plugin cannot both require and conflict with the same plugin", path: ["conflicts"] });
+  }
+  const optionalKeys = manifest.optionalDependencies?.map((dependency) => dependency.id ? `plugin:${dependency.id}` : `service:${dependency.service}`) ?? [];
+  if (new Set(optionalKeys).size !== optionalKeys.length) ctx.addIssue({ code: z.ZodIssueCode.custom, message: "optionalDependencies must be unique", path: ["optionalDependencies"] });
+  const serviceIds = manifest.services?.map((service) => service.id) ?? [];
+  if (new Set(serviceIds).size !== serviceIds.length) ctx.addIssue({ code: z.ZodIssueCode.custom, message: "services ids must be unique", path: ["services"] });
   // ── Entrypoint ↔ UI slot consistency ──────────────────────────────────
   // Plugins that declare UI slots must also declare a UI entrypoint so the
   // host knows where to load the bundle from (PLUGIN_SPEC.md §10.1).
