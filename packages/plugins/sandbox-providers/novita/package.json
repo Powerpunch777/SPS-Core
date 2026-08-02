@@ -48,7 +48,7 @@
     "typecheck": "node ../../../../scripts/ensure-plugin-build-deps.mjs && tsc --noEmit",
     "test": "node ../../../../scripts/ensure-plugin-build-deps.mjs && vitest run --config vitest.config.ts",
     "prepack": "node ../../../../scripts/generate-plugin-package-json.mjs",
-    "postpack": "node ../../../../scripts/restore-plugin-package-json.mjs"
+    "postpack": "node ../../../../scripts/restore-package-json.mjs"
   },
   "dependencies": {
     "novita-sandbox": "^1.0.3-b2"

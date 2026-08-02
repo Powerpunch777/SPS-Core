@@ -75,10 +75,20 @@ test("plugin publish lifecycles use the cross-platform package helpers", () => {
     );
     assert.match(
       plugin.pkg.scripts?.postpack ?? "",
-      /^node .*restore-plugin-package-json\.mjs$/,
+      /^node .*restore-package-json\.mjs$/,
       `${plugin.name} postpack`,
     );
   }
+});
+
+test("UI publish lifecycle uses the cross-platform package helpers", () => {
+  const ui = buildReleasePackagePlan().find(
+    (pkg) => pkg.name === "@paperclipai/ui",
+  );
+
+  assert.ok(ui);
+  assert.equal(ui.pkg.scripts?.prepack, "node ../scripts/generate-ui-package-json.mjs");
+  assert.equal(ui.pkg.scripts?.postpack, "node ../scripts/restore-package-json.mjs");
 });
 
 test("guard flags a publishFromCi:true package depending on a publishFromCi:false package", () => {

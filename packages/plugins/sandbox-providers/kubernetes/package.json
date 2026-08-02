@@ -45,7 +45,7 @@
     "typecheck": "node ../../../../scripts/ensure-plugin-build-deps.mjs && tsc --noEmit",
     "test": "vitest run --config vitest.config.ts",
     "prepack": "node ../../../../scripts/generate-plugin-package-json.mjs",
-    "postpack": "node ../../../../scripts/restore-plugin-package-json.mjs"
+    "postpack": "node ../../../../scripts/restore-package-json.mjs"
   },
   "dependencies": {
     "@kubernetes/client-node": "^1.0.0",

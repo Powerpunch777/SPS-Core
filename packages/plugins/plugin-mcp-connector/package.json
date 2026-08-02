@@ -48,7 +48,7 @@
     "typecheck": "pnpm -C ../../.. --filter @paperclipai/plugin-sdk ensure-build-deps && tsc --noEmit",
     "test": "vitest run --config vitest.config.ts",
     "prepack": "node ../../../scripts/generate-plugin-package-json.mjs",
-    "postpack": "node ../../../scripts/restore-plugin-package-json.mjs"
+    "postpack": "node ../../../scripts/restore-package-json.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
