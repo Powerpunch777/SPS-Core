@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { and, asc, desc, eq, gt, like, or } from "drizzle-orm";
+import { and, asc, desc, eq, getTableColumns, gt, like, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agentTaskSessions, spsMarketplaceAssistantMessages } from "@paperclipai/db";
 
@@ -28,17 +28,17 @@ function pageSize(value: number | undefined): number {
   return Math.min(value, MAX_PAGE_SIZE);
 }
 
-function encodeCursor(createdAt: Date, id: string): string {
-  return Buffer.from(JSON.stringify({ createdAt: createdAt.toISOString(), id }), "utf8").toString("base64url");
+function encodeCursor(createdAt: string, id: string): string {
+  return Buffer.from(JSON.stringify({ createdAt, id }), "utf8").toString("base64url");
 }
 
-function decodeCursor(value: string | undefined): { createdAt: Date; id: string } | undefined {
+function decodeCursor(value: string | undefined): { createdAt: string; id: string } | undefined {
   if (value === undefined) return undefined;
   try {
     const parsed = JSON.parse(Buffer.from(value, "base64url").toString("utf8")) as Record<string, unknown>;
-    const createdAt = new Date(String(parsed.createdAt ?? ""));
+    const createdAt = typeof parsed.createdAt === "string" ? parsed.createdAt : "";
     const id = typeof parsed.id === "string" ? parsed.id : "";
-    if (Number.isNaN(createdAt.getTime()) || !id) throw new Error();
+    if (!createdAt || Number.isNaN(Date.parse(createdAt)) || !id) throw new Error();
     return { createdAt, id };
   } catch {
     throw new Error("Invalid message pagination cursor.");
@@ -132,26 +132,49 @@ export function createSpsMarketplaceAssistantService(db: Db) {
   async function listMessages(input: ListSpsMarketplaceAssistantMessagesInput) {
     const limit = pageSize(input.limit);
     const after = decodeCursor(input.after);
-    const rows = await db.select().from(spsMarketplaceAssistantMessages).where(
+    const createdAtCursor = sql<string>`${spsMarketplaceAssistantMessages.createdAt}::text`;
+    const afterCreatedAt = after === undefined ? undefined : sql<Date>`${after.createdAt}::timestamptz`;
+    const rows = await db.select({
+      ...getTableColumns(spsMarketplaceAssistantMessages),
+      createdAtCursor,
+    }).from(spsMarketplaceAssistantMessages).where(
       after === undefined
         ? eq(spsMarketplaceAssistantMessages.sessionId, input.sessionId)
         : and(
           eq(spsMarketplaceAssistantMessages.sessionId, input.sessionId),
           or(
-            gt(spsMarketplaceAssistantMessages.createdAt, after.createdAt),
+            gt(spsMarketplaceAssistantMessages.createdAt, afterCreatedAt!),
             and(
-              eq(spsMarketplaceAssistantMessages.createdAt, after.createdAt),
+              eq(spsMarketplaceAssistantMessages.createdAt, afterCreatedAt!),
               gt(spsMarketplaceAssistantMessages.id, after.id),
             ),
           ),
         ),
-    ).orderBy(asc(spsMarketplaceAssistantMessages.createdAt), asc(spsMarketplaceAssistantMessages.id)).limit(limit + 1);
+    ).orderBy(asc(spsMarketplaceAssistantMessages.createdAt), asc(spsMarketplaceAssistantMessages.id)).limit(limit + 1).then((rows) =>
+      rows.map((message) => ({
+        message: {
+          id: message.id,
+          sessionId: message.sessionId,
+          runId: message.runId,
+          idempotencyKey: message.idempotencyKey,
+          role: message.role,
+          content: message.content,
+          metadata: message.metadata,
+          createdAt: message.createdAt,
+        },
+        createdAtCursor: message.createdAtCursor,
+      })),
+    );
     const hasMore = rows.length > limit;
-    const messages = hasMore ? rows.slice(0, limit) : rows;
+    const pageRows = hasMore ? rows.slice(0, limit) : rows;
+    const messages = pageRows.map(({ message }) => message);
     return {
       messages,
       nextCursor: hasMore
-        ? encodeCursor(messages[messages.length - 1]!.createdAt, messages[messages.length - 1]!.id)
+        ? encodeCursor(
+          pageRows[pageRows.length - 1]!.createdAtCursor,
+          messages[messages.length - 1]!.id,
+        )
         : null,
     };
   }

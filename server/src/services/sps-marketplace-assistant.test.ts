@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   agents,
@@ -104,7 +104,17 @@ describeEmbeddedPostgres("SPS Marketplace Assistant service", () => {
     const first = await service.appendMessage({ sessionId: session.id, runId: "run-1", idempotencyKey: "user:run-1", role: "user", content: "Find plugins" });
     const duplicate = await service.appendMessage({ sessionId: session.id, runId: "run-1", idempotencyKey: "user:run-1", role: "user", content: "different retry" });
     expect(duplicate.id).toBe(first.id);
-    await service.appendMessage({ sessionId: session.id, runId: "run-1", idempotencyKey: "assistant:run-1", role: "assistant", content: "Results" });
+    const second = await service.appendMessage({ sessionId: session.id, runId: "run-1", idempotencyKey: "assistant:run-1", role: "assistant", content: "Results" });
+    await db.execute(sql`
+      update sps_marketplace_assistant_messages
+      set created_at = '2026-08-02T00:00:00.123456Z'::timestamptz
+      where id = ${first.id}
+    `);
+    await db.execute(sql`
+      update sps_marketplace_assistant_messages
+      set created_at = '2026-08-02T00:00:00.123789Z'::timestamptz
+      where id = ${second.id}
+    `);
     const page = await service.listMessages({ sessionId: session.id, limit: 1 });
     expect(page.messages).toHaveLength(1);
     expect(page.nextCursor).not.toBeNull();
