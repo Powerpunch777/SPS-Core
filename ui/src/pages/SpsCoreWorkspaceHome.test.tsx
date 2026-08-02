@@ -112,9 +112,13 @@ describe("SpsCoreWorkspaceHome", () => {
     await settle();
     await settle();
 
-    expect(container.textContent).toContain("Neutral Workspace shows Core status");
+    expect(container.textContent).toContain("Core keeps the Workspace available");
+    expect(container.textContent).toContain("Plugins own their workflow UI");
     expect(container.textContent).toContain("No Dashboard widgets yet");
     expect(container.innerHTML).toContain('href="/company/settings/instance/plugins"');
+    expect(container.querySelector('[data-sps-surface-owner="core"]')).not.toBeNull();
+    expect(container.innerHTML).not.toContain("agent-rooms");
+    expect(container.textContent).not.toContain("Team Workplane");
     expect(breadcrumbMock).toHaveBeenCalledWith([{ label: "Prototype Workspace" }]);
   });
 

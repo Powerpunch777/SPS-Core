@@ -293,6 +293,11 @@ describe("CompanySettingsSidebar", () => {
     baselineMode.name = "sps-core-baseline-mode";
     baselineMode.content = "true";
     document.head.appendChild(baselineMode);
+    mockPluginsApi.list.mockResolvedValue([{
+      id: "builder",
+      packageName: "sps.plugin-discovery",
+      manifestJson: { displayName: "Plugin Builder", environmentDrivers: [] },
+    }]);
 
     const root = createRoot(container);
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -310,6 +315,8 @@ describe("CompanySettingsSidebar", () => {
     expect(container.textContent).toContain("Sources");
     expect(container.textContent).toContain("Nodes");
     expect(container.textContent).toContain("Plugins");
+    expect(container.textContent).toContain("Installed packages");
+    expect(container.textContent).toContain("Plugin Builder");
     expect(container.textContent).not.toContain("Workspace appearance");
     expect(container.textContent).not.toContain("Members");
     expect(container.textContent).not.toContain("Invites");

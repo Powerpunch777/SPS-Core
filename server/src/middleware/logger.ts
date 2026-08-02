@@ -5,6 +5,7 @@ import { pinoHttp } from "pino-http";
 import { readConfigFile } from "../config-file.js";
 import { resolveDefaultLogsDir, resolveHomeAwarePath } from "../home-paths.js";
 import { shouldSilenceHttpSuccessLog } from "./http-log-policy.js";
+import { resolveServerLogMaxBytes, rotateServerLogIfOversize } from "./log-retention.js";
 import { redactSensitive } from "./redact-sensitive.js";
 
 function resolveServerLogDir(): string {
@@ -22,11 +23,24 @@ fs.mkdirSync(logDir, { recursive: true });
 
 const logFile = path.join(logDir, "server.log");
 
+try {
+  const maxLogBytes = resolveServerLogMaxBytes(
+    process.env.SPS_SERVER_LOG_MAX_BYTES ?? process.env.PAPERCLIP_LOG_MAX_BYTES,
+  );
+  rotateServerLogIfOversize(logFile, maxLogBytes);
+} catch (error) {
+  console.warn("SPS could not apply server log retention.", error);
+}
+
 const sharedOpts = {
   translateTime: "SYS:HH:MM:ss",
   ignore: "pid,hostname",
   singleLine: true,
 };
+
+function requestLogUrl(req: { originalUrl?: string; url?: string }): string {
+  return req.originalUrl || req.url || "/";
+}
 
 export const logger = pino({
   level: "debug",
@@ -55,7 +69,7 @@ export const logger = pino({
 export const httpLogger = pinoHttp({
   logger,
   customLogLevel(_req, res, err) {
-    if (shouldSilenceHttpSuccessLog(_req.method, _req.url, res.statusCode)) {
+    if (shouldSilenceHttpSuccessLog(_req.method, requestLogUrl(_req), res.statusCode)) {
       return "silent";
     }
     if (err || res.statusCode >= 500) return "error";
@@ -63,12 +77,12 @@ export const httpLogger = pinoHttp({
     return "info";
   },
   customSuccessMessage(req, res) {
-    return `${req.method} ${req.url} ${res.statusCode}`;
+    return `${req.method} ${requestLogUrl(req)} ${res.statusCode}`;
   },
   customErrorMessage(req, res, err) {
     const ctx = (res as any).__errorContext;
     const errMsg = ctx?.error?.message || err?.message || (res as any).err?.message || "unknown error";
-    return `${req.method} ${req.url} ${res.statusCode} — ${errMsg}`;
+    return `${req.method} ${requestLogUrl(req)} ${res.statusCode} — ${errMsg}`;
   },
   customProps(req, res) {
     if (res.statusCode >= 400) {

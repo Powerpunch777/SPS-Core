@@ -56,10 +56,11 @@ export interface PluginBundlerPresets {
  * Build esbuild/rollup baseline configs for plugin worker, manifest, and UI bundles.
  *
  * The presets intentionally externalize host/runtime deps (`react`, SDK packages)
- * to match the Paperclip plugin loader contract.
+ * to match the SPS plugin loader contract while retaining legacy UI aliases.
  */
 export function createPluginBundlerPresets(input: PluginBundlerPresetInput = {}): PluginBundlerPresets {
   const uiExternal = [
+    "@sonparkserver/plugin-sdk/ui/bridge",
     "@paperclipai/plugin-sdk/ui",
     "@paperclipai/plugin-sdk/ui/hooks",
     "react",

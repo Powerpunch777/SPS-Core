@@ -11,25 +11,25 @@ type ProductBrandProps = {
 export function ProductBrand({ compact = false, linkToHome = true, className }: ProductBrandProps) {
   const content = (
     <>
-      <span className="relative flex size-7 shrink-0 items-center justify-center overflow-hidden rounded-md border border-border bg-white shadow-sm">
+      <span className="relative flex size-7 shrink-0 items-center justify-center overflow-hidden rounded-control border border-app-border bg-app-panel shadow-sm">
         <img
           src={PRODUCT_LOGO_SRC}
           alt=""
           aria-hidden="true"
-          className="size-full scale-[1.72] object-cover"
+          className="size-full scale-brand-logo object-cover"
         />
       </span>
       {!compact ? (
         <span className="min-w-0 leading-none">
           <span className="block text-sm font-semibold tracking-normal text-foreground">{PRODUCT_NAME}</span>
-          <span className="mt-0.5 block text-[10px] font-medium text-muted-foreground">{PRODUCT_FULL_NAME}</span>
+          <span className="mt-0.5 block text-micro font-medium text-muted-foreground">{PRODUCT_FULL_NAME}</span>
         </span>
       ) : null}
     </>
   );
 
   const sharedClassName = cn(
-    "flex min-w-0 items-center gap-2 rounded-md px-1 py-1 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+    "flex min-w-0 items-center gap-2 rounded-control px-1 py-1 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
     className,
   );
 

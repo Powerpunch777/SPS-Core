@@ -132,15 +132,20 @@ export function CompanySettingsSidebar() {
                   end
                 />
               ))}
-            {sidebarPlugins.length > 0 ? (
-              <div className="ml-4 mt-1 flex flex-col gap-0.5 border-l border-border/70 pl-3">
+          </div>
+          {sidebarPlugins.length > 0 ? (
+            <>
+              <div className="mt-5 px-3 pb-1 text-(length:--text-micro) font-semibold uppercase tracking-wide text-muted-foreground">
+                Installed packages
+              </div>
+              <div className="flex flex-col gap-0.5">
                 {sidebarPlugins.map((plugin) => (
                   <NavLink
                     key={plugin.id}
                     to={`${INSTANCE_SETTINGS_PATH_PREFIX}/plugins/${plugin.id}`}
                     state={SIDEBAR_SCROLL_RESET_STATE}
                     className={({ isActive }) => [
-                      "rounded-md px-2 py-1.5 text-xs transition-colors",
+                      "mx-2 rounded-md px-2 py-1.5 text-xs transition-colors",
                       isActive ? "bg-accent text-foreground" : "text-muted-foreground hover:bg-accent/50 hover:text-foreground",
                     ].join(" ")}
                   >
@@ -148,8 +153,8 @@ export function CompanySettingsSidebar() {
                   </NavLink>
                 ))}
               </div>
-            ) : null}
-          </div>
+            </>
+          ) : null}
         </nav>
       </aside>
     );

@@ -8,7 +8,7 @@ import type { PaperclipConfig } from "../config/schema.js";
 
 const ORIGINAL_ENV = { ...process.env };
 
-function createTempConfig(): string {
+function createTempConfig({ authenticated = false } = {}): string {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "paperclip-doctor-"));
   const configPath = path.join(root, ".paperclip", "config.json");
   const runtimeRoot = path.join(root, "runtime");
@@ -35,7 +35,7 @@ function createTempConfig(): string {
       logDir: path.join(runtimeRoot, "logs"),
     },
     server: {
-      deploymentMode: "local_trusted",
+      deploymentMode: authenticated ? "authenticated" : "local_trusted",
       exposure: "private",
       host: "127.0.0.1",
       port: 3199,
@@ -97,6 +97,19 @@ describe("doctor", () => {
 
     expect(summary.failed).toBe(0);
     expect(summary.warned).toBe(0);
+    expect(process.env.PAPERCLIP_AGENT_JWT_SECRET).toBeTruthy();
+  });
+
+  it("repairs the JWT dependency before checking authenticated deployment", async () => {
+    const configPath = createTempConfig({ authenticated: true });
+
+    const summary = await doctor({
+      config: configPath,
+      repair: true,
+      yes: true,
+    });
+
+    expect(summary.failed).toBe(0);
     expect(process.env.PAPERCLIP_AGENT_JWT_SECRET).toBeTruthy();
   });
 });

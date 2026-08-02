@@ -195,7 +195,10 @@ export function Sidebar() {
         <nav className="flex-1 min-h-0 overflow-y-auto scrollbar-auto-hide flex flex-col gap-4 pointer-coarse:gap-3 px-3 py-2">
           <div className="flex flex-col gap-0.5">
             <SidebarCompanyMenu />
-            <SidebarNavItem to="/dashboard" label="Workspace" icon={LayoutDashboard} />
+          </div>
+
+          <SidebarSection label="Core Workspace">
+            <SidebarNavItem to="/dashboard" label="Dashboard" icon={LayoutDashboard} />
             <SidebarNavItem
               to="/inbox"
               label="Inbox"
@@ -203,7 +206,11 @@ export function Sidebar() {
               badge={workspaceUnreadCount}
               badgeLabel="unread"
             />
-            {shellNavigation.map((item) => (
+          </SidebarSection>
+
+          {shellNavigation.length > 0 || workspacePluginPages.length > 0 ? (
+            <SidebarSection label="Workspace Plugins">
+              {shellNavigation.map((item) => (
               <SidebarNavItem
                 key={`workspace-shell:${item.id}`}
                 to={item.target}
@@ -211,21 +218,22 @@ export function Sidebar() {
                 icon={Puzzle}
                 end
               />
-            ))}
-            {workspacePluginPages.map((slot) => (
-              shellNavigationTargets.has(`/${slot.routePath}`.replace(/\/+$/, "")) ? null :
-              <SidebarNavItem
-                key={`${slot.pluginKey}:${slot.id}`}
-                to={`/${selectedCompany!.issuePrefix}/${slot.routePath}`}
-                label={slot.displayName}
-                icon={Puzzle}
-                end
-              />
-            ))}
-          </div>
+              ))}
+              {workspacePluginPages.map((slot) => (
+                shellNavigationTargets.has(`/${slot.routePath}`.replace(/\/+$/, "")) ? null :
+                <SidebarNavItem
+                  key={`${slot.pluginKey}:${slot.id}`}
+                  to={`/${selectedCompany!.issuePrefix}/${slot.routePath}`}
+                  label={slot.displayName}
+                  icon={Puzzle}
+                  end
+                />
+              ))}
+            </SidebarSection>
+          ) : null}
 
           {canManageCoreHost ? (
-            <SidebarSection label="Settings" collapsible={{ open: companyOpen, onOpenChange: setCompanyOpen }}>
+            <SidebarSection label="Core Platform" collapsible={{ open: companyOpen, onOpenChange: setCompanyOpen }}>
               <SidebarNavItem to="/company/settings" label="Host settings" icon={Settings} />
             </SidebarSection>
           ) : null}

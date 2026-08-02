@@ -14,6 +14,7 @@ import { Button } from "@/components/ui/button";
 import { ArrowLeft } from "lucide-react";
 import { NotFoundPage } from "./NotFound";
 import { isSpsBasicModeEnabled } from "../lib/sps-basic-mode";
+import { isSpsCoreBaselineModeEnabled } from "../lib/sps-core-baseline-mode";
 import { isWorkplaneModeEnabled } from "../lib/workplane-mode";
 
 /**
@@ -116,6 +117,15 @@ export function PluginPage() {
       ? "Workplane 운영"
       : null;
 
+  // In the Core baseline, plugin pages are first-class Workspace surfaces.
+  // They must not inherit generic plugin-settings navigation chrome.
+  const spsCoreWorkspacePluginRoute = isSpsBasicModeEnabled()
+    && isSpsCoreBaselineModeEnabled()
+    && Boolean(pluginRoutePath);
+  const workspaceRouteTitle = spsCoreWorkspacePluginRoute
+    ? pageSlot?.displayName ?? null
+    : spsRouteTitle;
+
   // When the active route has a routeSidebar slot, the sidebar provides the
   // back affordance, but the top bar still needs a route-specific title.
   const routeSidebarActive = useMemo(() => {
@@ -134,15 +144,15 @@ export function PluginPage() {
 
   useEffect(() => {
     if (!pageSlot) return;
-    if (routeSidebarActive || spsWorkplaneRoute || spsSettingsRoute) {
-      setBreadcrumbs([{ label: spsRouteTitle ?? resolveRouteSidebarPageTitle(pageSlot, pluginRouteSplat) }]);
+    if (routeSidebarActive || spsWorkplaneRoute || spsSettingsRoute || spsCoreWorkspacePluginRoute) {
+      setBreadcrumbs([{ label: workspaceRouteTitle ?? resolveRouteSidebarPageTitle(pageSlot, pluginRouteSplat) }]);
       return;
     }
     setBreadcrumbs([
       { label: "Plugins", href: "/company/settings/instance/plugins" },
       { label: pageSlot.pluginDisplayName },
     ]);
-  }, [pageSlot, pluginRouteSplat, setBreadcrumbs, routeSidebarActive, spsRouteTitle, spsSettingsRoute, spsWorkplaneRoute]);
+  }, [pageSlot, pluginRouteSplat, setBreadcrumbs, routeSidebarActive, spsCoreWorkspacePluginRoute, spsSettingsRoute, spsWorkplaneRoute, workspaceRouteTitle]);
 
   if (!resolvedCompanyId) {
     if (hasInvalidCompanyPrefix) {
@@ -185,7 +195,7 @@ export function PluginPage() {
 
   return (
     <div className={spsWorkplaneRoute ? "h-full" : "space-y-4"}>
-      {!routeSidebarActive && !spsWorkplaneRoute && !spsSettingsRoute && (
+      {!routeSidebarActive && !spsWorkplaneRoute && !spsSettingsRoute && !spsCoreWorkspacePluginRoute && (
         <div className="flex items-center gap-2">
           <Button variant="ghost" size="sm" asChild>
             <Link to={backHref}>

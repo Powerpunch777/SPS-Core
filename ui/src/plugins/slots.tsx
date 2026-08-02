@@ -291,11 +291,11 @@ function buildPluginUiUrl(contribution: PluginUiContribution): string {
 /**
  * Import a plugin's UI entry module with bare-specifier rewriting.
  *
- * Plugin bundles are built with `external: ["@paperclipai/plugin-sdk/ui", "react", "react-dom"]`,
- * so their ESM output contains bare specifier imports like:
+ * SPS plugin bundles externalize the public SPS UI bridge, React, and React
+ * DOM, so their ESM output contains bare specifier imports like:
  *
  * ```js
- * import { usePluginData } from "@paperclipai/plugin-sdk/ui";
+ * import { usePluginData } from "@sonparkserver/plugin-sdk/ui/bridge";
  * import React from "react";
  * ```
  *
@@ -303,7 +303,7 @@ function buildPluginUiUrl(contribution: PluginUiContribution): string {
  * fighting import map timing constraints, we:
  * 1. Fetch the module source text
  * 2. Rewrite bare specifier imports to use blob URLs that re-export from the
- *    host's global bridge registry (`globalThis.__paperclipPluginBridge__`)
+ *    host's global SPS bridge registry
  * 3. Import the rewritten module via a blob URL
  *
  * This approach is compatible with all modern browsers and avoids import map
@@ -407,7 +407,7 @@ function getShimBlobUrl(specifier: "react" | "react-dom" | "react-dom/client" | 
  * - `import { ... } from "react";`
  * - `import React from "react";`
  * - `import * as React from "react";`
- * - `import { ... } from "@paperclipai/plugin-sdk/ui";`
+ * - `import { ... } from "@sonparkserver/plugin-sdk/ui/bridge";`
  *
  * Also handles re-exports:
  * - `export { ... } from "react";`
@@ -415,6 +415,8 @@ function getShimBlobUrl(specifier: "react" | "react-dom" | "react-dom/client" | 
 function rewriteBareSpecifiers(source: string): string {
   // Build a mapping of bare specifiers to blob URLs.
   const rewrites: Record<string, string> = {
+    '"@sonparkserver/plugin-sdk/ui/bridge"': `"${getShimBlobUrl("sdk-ui")}"`,
+    "'@sonparkserver/plugin-sdk/ui/bridge'": `'${getShimBlobUrl("sdk-ui")}'`,
     '"@paperclipai/plugin-sdk/ui"': `"${getShimBlobUrl("sdk-ui")}"`,
     "'@paperclipai/plugin-sdk/ui'": `'${getShimBlobUrl("sdk-ui")}'`,
     '"@paperclipai/plugin-sdk/ui/hooks"': `"${getShimBlobUrl("sdk-ui")}"`,
@@ -490,8 +492,8 @@ async function importPluginModule(url: string): Promise<Record<string, unknown>>
  * exports to the correct `pluginKey:exportName` registry keys.
  *
  * Plugin modules are loaded with bare-specifier rewriting so that imports
- * of `@paperclipai/plugin-sdk/ui`, `react`, and `react-dom` resolve to the
- * host-provided implementations via the bridge registry.
+ * of the SPS UI bridge, its legacy compatibility aliases, React, and React
+ * DOM resolve to the host-provided implementations via the bridge registry.
  *
  * Web-component registrations still work: if the module has a named export
  * that matches an `exportName` declared in a slot AND that export is a

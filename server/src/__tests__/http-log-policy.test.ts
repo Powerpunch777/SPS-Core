@@ -50,6 +50,21 @@ describe("shouldSilenceHttpSuccessLog", () => {
         200,
       ),
     ).toBe(true);
+    expect(shouldSilenceHttpSuccessLog("POST", "/api/sps-identity/session", 200)).toBe(true);
+    expect(
+      shouldSilenceHttpSuccessLog(
+        "POST",
+        "/api/sps-nodes/9e753a47-3554-4399-994d-4ec97ce1b04d/commands/claim-next",
+        204,
+      ),
+    ).toBe(true);
+    expect(
+      shouldSilenceHttpSuccessLog(
+        "POST",
+        "/api/sps-nodes/9e753a47-3554-4399-994d-4ec97ce1b04d/plugin-runs/claim-next?waitMs=1500",
+        204,
+      ),
+    ).toBe(true);
   });
 
   it("silences successful static asset requests", () => {
@@ -64,10 +79,12 @@ describe("shouldSilenceHttpSuccessLog", () => {
   it("keeps normal successful application requests", () => {
     expect(shouldSilenceHttpSuccessLog("GET", "/api/issues/PAP-1383", 200)).toBe(false);
     expect(shouldSilenceHttpSuccessLog("PATCH", "/api/issues/PAP-1383", 200)).toBe(false);
+    expect(shouldSilenceHttpSuccessLog("POST", "/api/issues", 201)).toBe(false);
   });
 
   it("keeps failing requests visible", () => {
     expect(shouldSilenceHttpSuccessLog("GET", "/api/health", 500)).toBe(false);
     expect(shouldSilenceHttpSuccessLog("GET", "/@fs/Users/dotta/paperclip/ui/src/main.tsx", 404)).toBe(false);
+    expect(shouldSilenceHttpSuccessLog("POST", "/api/sps-identity/session", 401)).toBe(false);
   });
 });

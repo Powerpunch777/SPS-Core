@@ -3,6 +3,7 @@ import { SpsNodeExecutionUnavailableError } from "./sps-node-execution.js";
 import {
   assertSpsNodeBindingRequiredForAdapter,
   createMarketplaceAssistantExternalTools,
+  markMarketplaceAssistantNodeRuntime,
 } from "./heartbeat.js";
 
 describe("SPS Hub Node-only execution policy", () => {
@@ -31,6 +32,15 @@ describe("SPS Hub Node-only execution policy", () => {
     expect(server.args).not.toContain(process.execPath);
     expect(server.env).toContainEqual({ name: "ELECTRON_RUN_AS_NODE", value: "1" });
     expect(server.revision).toBe("3-node-local-runtime");
+  });
+
+  it("marks only a remote Marketplace Assistant command for Node-local MCP materialization", () => {
+    const original = { env: { EXISTING: "yes" }, model: "test" };
+    expect(markMarketplaceAssistantNodeRuntime(original, true)).toEqual({
+      env: { EXISTING: "yes", SPS_MARKETPLACE_MCP_REQUIRED: "1" },
+      model: "test",
+    });
+    expect(markMarketplaceAssistantNodeRuntime(original, false)).toBe(original);
   });
 
   it("allows a local CLI adapter when the approved Node target exists", () => {

@@ -291,6 +291,31 @@ describe("Layout", () => {
     });
   });
 
+  it("keeps the shared desktop content in its own scrollable panel", async () => {
+    const root = createRoot(container);
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+
+    await act(async () => {
+      root.render(
+        <QueryClientProvider client={queryClient}>
+          <Layout />
+        </QueryClientProvider>,
+      );
+    });
+    await flushReact();
+
+    const main = container.querySelector("main");
+    expect(main?.className).toContain("bg-app-panel");
+    expect(main?.className).toContain("rounded-pane");
+    expect(main?.className).toContain("overflow-auto");
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
   it("collapses atomically when the pointer is still over the sidebar (no re-peek) — PAP-10676", async () => {
     const root = createRoot(container);
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -787,7 +812,7 @@ describe("Layout", () => {
     const { root, rootEl } = await renderLayoutRoot();
 
     expect(rootEl.tagName).toBe("DIV");
-    expect(rootEl.className).toContain("bg-background");
+    expect(rootEl.className).toContain("bg-app-canvas");
     // The mobile root must clip horizontal overflow to prevent a stray wide
     // descendant from making the whole viewport scroll sideways. clip (not
     // hidden) keeps overflow-y visible so body scroll keeps working.
@@ -803,7 +828,7 @@ describe("Layout", () => {
     mockSidebarState.isMobile = false;
     const { root, rootEl } = await renderLayoutRoot();
 
-    expect(rootEl.className).toContain("bg-background");
+    expect(rootEl.className).toContain("bg-app-canvas");
     expect(rootEl.classList.contains("overflow-clip")).toBe(true);
 
     await act(async () => {

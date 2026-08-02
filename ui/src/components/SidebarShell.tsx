@@ -203,9 +203,10 @@ export function SidebarShell({
           // expanded states snap without any sliding motion.
           // Overlay styling only while the panel is wider than its reserved
           // spacer (i.e. peeking) so it floats above content without reflow.
-          isOverlay
-            ? "z-30 border-r border-border bg-background shadow-lg"
+          open
+            ? "rounded-pane border border-app-border bg-app-panel shadow-panel"
             : "z-0",
+          isOverlay && "z-30",
         )}
         style={panelStyle}
         data-sidebar-overlay={isOverlay ? "" : undefined}
