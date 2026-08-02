@@ -7,6 +7,7 @@ function access(overrides: Partial<CurrentBoardAccess>): CurrentBoardAccess {
     user: null,
     userId: "user-1",
     isInstanceAdmin: false,
+    isCoreHost: false,
     companyIds: ["workspace-1"],
     source: "session",
     keyId: null,
