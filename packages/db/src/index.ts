@@ -27,6 +27,11 @@ export {
   type RunDatabaseRestoreOptions,
 } from "./backup-lib.js";
 export {
+  sanitizePostRestoreDatabase,
+  sanitizePostRestoreDatabaseWithExecutor,
+  type PostRestoreSanitizerResult,
+} from "./post-restore-sanitizer.js";
+export {
   createEmbeddedPostgresLogBuffer,
   formatEmbeddedPostgresError,
 } from "./embedded-postgres-error.js";

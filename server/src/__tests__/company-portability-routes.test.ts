@@ -149,7 +149,7 @@ function createExportResult() {
 const importRequest = {
   source: { type: "inline", files: { "COMPANY.md": "---\nname: Test\n---\n" } },
   include: { company: true, agents: true, projects: false, issues: false },
-  target: { mode: "existing_company", companyId },
+  target: { mode: "new_company", newCompanyName: "Imported Test" },
   collisionStrategy: "rename",
 };
 
@@ -483,6 +483,55 @@ describe.sequential("company portability routes", () => {
     expect(mockCompanyPortabilityService.previewImport).not.toHaveBeenCalled();
   });
 
+  it.sequential("rejects global user imports that target an existing Workspace or use skip/replace", async () => {
+    const app = await createApp({
+      type: "board",
+      userId: "user-1",
+      companyIds: [companyId],
+      source: "session",
+      isInstanceAdmin: true,
+    });
+
+    for (const path of ["/api/companies/import/preview", "/api/companies/import"]) {
+      for (const body of [
+        { ...importRequest, target: { mode: "existing_company", companyId } },
+        { ...importRequest, collisionStrategy: "skip" },
+        { ...importRequest, collisionStrategy: "replace" },
+      ]) {
+        const res = await request(app).post(path).send(body);
+
+        expect(res.status).toBe(403);
+        expect(res.body.error).toMatch(/Workspace imports/);
+      }
+    }
+
+    expect(mockCompanyPortabilityService.previewImport).not.toHaveBeenCalled();
+    expect(mockCompanyPortabilityService.importBundle).not.toHaveBeenCalled();
+  });
+
+  it.sequential("normalizes omitted global import collision strategy to rename", async () => {
+    const app = await createApp({
+      type: "board",
+      userId: "user-1",
+      companyIds: [],
+      source: "session",
+      isInstanceAdmin: true,
+    });
+    const { collisionStrategy: _ignored, ...withoutStrategy } = importRequest;
+
+    const res = await request(app)
+      .post("/api/companies/import/preview")
+      .send(withoutStrategy);
+
+    expect(res.status).toBe(200);
+    expect(mockCompanyPortabilityService.previewImport).toHaveBeenCalledWith(
+      expect.objectContaining({
+        target: { mode: "new_company", newCompanyName: "Imported Test" },
+        collisionStrategy: "rename",
+      }),
+    );
+  });
+
   it.sequential("requires instance admin for new-company import preview", async () => {
     const app = await createApp({
       type: "board",
@@ -693,7 +742,7 @@ describe.sequential("company portability routes", () => {
       .post("/api/companies/import")
       .set("x-paperclip-cloud-async-import", "1")
       .set(cloudHeaders)
-      .send({ target: { mode: "existing_company", companyId } });
+      .send({ target: { mode: "new_company" } });
 
     expect(accepted.status).toBe(202);
     expect(accepted.body.job.status).toBe("running");

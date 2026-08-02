@@ -373,12 +373,13 @@ export function CompanySettings() {
       {/* Import / Export */}
       <div className="space-y-4">
         <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
-          {spsWorkplaneShell ? "가져오기와 내보내기" : "Company Packages"}
+          {spsWorkplaneShell ? "가져오기와 내보내기" : "Workspace Packages"}
         </div>
         <div className="rounded-md border border-border px-4 py-4">
           <p className="text-sm text-muted-foreground">
-            Import and export have moved to dedicated pages accessible from the{" "}
-            <Link to="/org" className="underline hover:text-foreground">Org Chart</Link> header.
+            Export this Workspace or import a package as a separate new Workspace. Existing
+            Workspaces are never merged or replaced. Open these pages from the{" "}
+            <Link to="/org" className="underline hover:text-foreground">Workspace</Link> header.
           </p>
           <div className="mt-3 flex flex-wrap items-center gap-2">
             {cloudSyncEnabled ? (
