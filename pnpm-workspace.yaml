@@ -50,6 +50,7 @@ overrides:
 # native/runtime packages it requires; every unlisted transitive build remains
 # blocked by strictDepBuilds.
 allowBuilds:
+  "@embedded-postgres/linux-x64": true
   "@embedded-postgres/windows-x64": true
   cpu-features: false
   es5-ext: false
