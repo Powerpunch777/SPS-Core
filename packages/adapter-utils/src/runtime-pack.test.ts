@@ -1,8 +1,7 @@
-import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
+import { expect, test } from "vitest";
 import { findAgentRuntimePackCommand, listInstalledAgentRuntimePacks } from "./runtime-pack.js";
 
 async function writePack(root: string, id: string, version: string, command = "bin/agent.cmd") {
@@ -24,8 +23,8 @@ test("discovers the newest explicit Agent Runtime pack command", async () => {
     await writePack(root, "example", "1.0.0");
     const newer = await writePack(root, "example", "1.2.0");
     const packs = await listInstalledAgentRuntimePacks(root);
-    assert.equal(packs.length, 2);
-    assert.equal(await findAgentRuntimePackCommand("example-agent", root), path.join(newer, "bin", "agent.cmd"));
+    expect(packs).toHaveLength(2);
+    expect(await findAgentRuntimePackCommand("example-agent", root)).toBe(path.join(newer, "bin", "agent.cmd"));
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }
@@ -36,7 +35,7 @@ test("rejects command paths that escape an Agent Runtime pack", async () => {
   try {
     const packRoot = await writePack(root, "unsafe", "1.0.0", "../outside.cmd");
     await fs.writeFile(path.join(packRoot, "..", "outside.cmd"), "@echo off\r\n", "utf8");
-    assert.equal(await findAgentRuntimePackCommand("example-agent", root), null);
+    expect(await findAgentRuntimePackCommand("example-agent", root)).toBeNull();
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }

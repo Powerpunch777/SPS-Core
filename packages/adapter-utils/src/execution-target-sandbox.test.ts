@@ -810,7 +810,7 @@ describe("sandbox adapter execution targets", () => {
     }));
   });
 
-  it("treats SSH targets as bridge-only", () => {
+  it("keeps SSH targets outside the sandbox-only bridge", () => {
     const target = {
       kind: "remote" as const,
       transport: "ssh" as const,
@@ -827,7 +827,7 @@ describe("sandbox adapter execution targets", () => {
       },
     };
 
-    expect(adapterExecutionTargetUsesPaperclipBridge(target)).toBe(true);
+    expect(adapterExecutionTargetUsesPaperclipBridge(target)).toBe(false);
     expect(adapterExecutionTargetSessionIdentity(target)).toEqual({
       transport: "ssh",
       host: "ssh.example.test",
