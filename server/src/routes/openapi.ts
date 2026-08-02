@@ -5509,6 +5509,80 @@ for (const route of [
   registerCurrentRoute({ method: route[0], path: route[1], tags: ["plugins"], summary: route[2] });
 }
 
+const pluginDependencyImpactQuerySchema = z.object({
+  action: z.enum(["disable", "delete"]),
+});
+
+registerCurrentRoute({
+  method: "get",
+  path: "/api/plugins/{pluginId}/companies/{companyId}/dependencies",
+  tags: ["plugins"],
+  summary: "Get a plugin dependency report for a company",
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registerCurrentRoute({
+  method: "get",
+  path: "/api/plugins/{pluginId}/dependency-impact",
+  tags: ["plugins"],
+  summary: "Preview the impact of disabling or deleting a plugin",
+  query: pluginDependencyImpactQuerySchema,
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registerCurrentRoute({
+  method: "get",
+  path: "/api/plugins/{pluginId}/diagnostics",
+  tags: ["plugins"],
+  summary: "Get canonical plugin diagnostics",
+  responses: {
+    200: r.ok(),
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
+    501: { description: "Canonical plugin diagnostics are unavailable" },
+  },
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/plugins/{pluginId}/jobs/{jobId}/runs/{runId}/cancel",
+  tags: ["plugins"],
+  summary: "Cancel a plugin job run",
+  responses: {
+    200: r.ok(),
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
+    409: r.conflict,
+    501: { description: "Job scheduling is not enabled" },
+  },
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/plugins/{pluginId}/jobs/{jobId}/runs/{runId}/retry",
+  tags: ["plugins"],
+  summary: "Retry a plugin job run",
+  responses: {
+    200: r.ok(),
+    400: r.badRequest,
+    401: r.unauthorized,
+    403: r.forbidden,
+    404: r.notFound,
+    409: r.conflict,
+    501: { description: "Job scheduling is not enabled" },
+  },
+});
+
+registerCurrentRoute({
+  method: "post",
+  path: "/api/plugins/{pluginId}/worker/restart",
+  tags: ["plugins"],
+  summary: "Restart a plugin worker",
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
 const workspaceShellSelectionSchema = z.object({
   pluginId: z.string().uuid().nullable(),
   shellId: z.string().min(1).max(100).nullable().optional(),
