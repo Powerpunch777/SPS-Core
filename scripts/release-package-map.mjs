@@ -9,6 +9,10 @@ const repoRoot = resolve(__dirname, "..");
 const manifestPath = join(repoRoot, "scripts", "release-package-manifest.json");
 const roots = ["packages", "server", "ui", "cli"];
 
+function normalizePackageDir(relDir) {
+  return relDir.replaceAll("\\", "/").replace(/^\.\/+/, "").replace(/\/+$/, "");
+}
+
 function readJson(filePath) {
   return JSON.parse(readFileSync(filePath, "utf8"));
 }
@@ -25,7 +29,7 @@ function discoverPublicPackages() {
       const pkg = readJson(pkgPath);
       if (!pkg.private) {
         packages.push({
-          dir: relDir,
+          dir: normalizePackageDir(relDir),
           pkgPath,
           name: pkg.name,
           version: pkg.version,
@@ -75,7 +79,7 @@ function loadReleaseManifest() {
       );
     }
 
-    return entry;
+    return { ...entry, dir: normalizePackageDir(entry.dir) };
   });
 }
 
@@ -327,4 +331,5 @@ export {
   findUnpublishableWorkspaceEdges,
   getReleasePackages,
   loadReleaseManifest,
+  normalizePackageDir,
 };

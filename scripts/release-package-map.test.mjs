@@ -6,11 +6,23 @@ import {
   checkConfiguration,
   findUnpublishableWorkspaceEdges,
   getReleasePackages,
+  normalizePackageDir,
 } from "./release-package-map.mjs";
 
 function pkg(name, { publishFromCi, ...deps } = {}) {
   return { name, dir: name, publishFromCi, pkg: { name, ...deps } };
 }
+
+test("normalizes Windows package paths to the POSIX manifest form", () => {
+  assert.equal(
+    normalizePackageDir(String.raw`packages\plugins\plugin-workspace-diff`),
+    "packages/plugins/plugin-workspace-diff",
+  );
+  assert.equal(
+    normalizePackageDir("./packages/plugins/plugin-workspace-diff/"),
+    "packages/plugins/plugin-workspace-diff",
+  );
+});
 
 test("release package manifest covers all public packages with explicit CI enrollment", () => {
   const packages = buildReleasePackagePlan();
