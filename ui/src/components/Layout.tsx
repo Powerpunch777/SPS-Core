@@ -663,7 +663,7 @@ export function Layout() {
             <PropertiesPanel />
           </div>
         </div>
-        {!isMobile && spsCoreWorkbenchShell && !hasSecondarySidebar ? <SpsWorkspaceContext /> : null}
+        {!isMobile && spsCoreWorkbenchShell ? <SpsWorkspaceContext /> : null}
       </div>
       {isMobile && <MobileBottomNav visible={mobileNavVisible} />}
       <CommandPalette />
