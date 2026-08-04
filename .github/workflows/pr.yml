@@ -257,6 +257,9 @@ jobs:
       - name: Build
         run: pnpm build
 
+      - name: Require reproducible catalog manifests
+        run: git diff --exit-code -- packages/skills-catalog/generated/catalog.json packages/teams-catalog/generated/catalog.json
+
       - name: Enforce the SPS UI entry budget
         run: pnpm check:sps-ui-bundle
 
