@@ -1,5 +1,6 @@
 import { timingSafeEqual } from "node:crypto";
 import type { Request, RequestHandler } from "express";
+import { verifyLocalAgentJwt } from "../agent-auth-jwt.js";
 
 export const SPS_DESKTOP_ACCESS_HEADER = "x-sps-desktop-access";
 // A second proof is intentionally required before an authenticated private
@@ -30,6 +31,12 @@ function tokenMatches(value: string | undefined, expected: string): boolean {
   const candidate = Buffer.from(value, "utf8");
   const expectedBuffer = Buffer.from(expected, "utf8");
   return candidate.length === expectedBuffer.length && timingSafeEqual(candidate, expectedBuffer);
+}
+
+function localAgentBearerToken(req: Request) {
+  if (!req.path.startsWith("/api/")) return null;
+  const match = req.header("authorization")?.match(/^Bearer\s+([^\s]+)$/i);
+  return match?.[1] ?? null;
 }
 
 /**
@@ -63,7 +70,10 @@ function sendDesktopOnlyResponse(req: Request, res: Parameters<RequestHandler>[1
  * Tailscale requests retain their hostname and use the authenticated team path;
  * only direct loopback requests need the per-launch Electron token.
  */
-export function desktopLocalAccessGuard({ token = process.env[SPS_DESKTOP_ACCESS_TOKEN_ENV]?.trim() } = {}): RequestHandler {
+export function desktopLocalAccessGuard({
+  token = process.env[SPS_DESKTOP_ACCESS_TOKEN_ENV]?.trim(),
+  verifyAgentToken = verifyLocalAgentJwt,
+} = {}): RequestHandler {
   if (!token) return (_req, _res, next) => next();
 
   return (req, res, next) => {
@@ -75,6 +85,15 @@ export function desktopLocalAccessGuard({ token = process.env[SPS_DESKTOP_ACCESS
       return;
     }
     if (tokenMatches(req.header(SPS_DESKTOP_ACCESS_HEADER) ?? undefined, token)) {
+      next();
+      return;
+    }
+    // Core-spawned Agent tools call the loopback API without exposing the
+    // Desktop launch token to an ACP process. A valid short-lived local Agent
+    // JWT may cross this transport gate; actor, run, company, and scope checks
+    // still execute in the authentication and authorization middleware.
+    const agentToken = localAgentBearerToken(req);
+    if (agentToken && verifyAgentToken(agentToken)) {
       next();
       return;
     }

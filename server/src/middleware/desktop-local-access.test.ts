@@ -28,6 +28,14 @@ function response() {
 
 describe("desktopLocalAccessGuard", () => {
   const token = "desktop-launch-token";
+  const agentClaims = {
+    sub: "agent-1",
+    company_id: "company-1",
+    adapter_type: "codex_local",
+    run_id: "run-1",
+    iat: 1,
+    exp: 2,
+  };
 
   it("rejects direct loopback browser requests", () => {
     const guard = desktopLocalAccessGuard({ token });
@@ -61,6 +69,38 @@ describe("desktopLocalAccessGuard", () => {
     guard(request("/SPS/projects", { host: "main-computer.tailnet.ts.net" }), response(), next);
 
     expect(next).toHaveBeenCalledOnce();
+  });
+
+  it("allows a valid local Agent JWT through the API transport gate without exposing the Desktop token", () => {
+    const verifyAgentToken = vi.fn((value: string) => value === "valid-agent-jwt" ? agentClaims : null);
+    const guard = desktopLocalAccessGuard({ token, verifyAgentToken });
+    const allowedNext = vi.fn();
+    const deniedResponse = response();
+
+    guard(request("/api/companies/company-1/marketplace/assistant/tools/search_marketplace_plugins", {
+      host: "127.0.0.1:31310",
+      authorization: "Bearer valid-agent-jwt",
+    }), response(), allowedNext);
+    guard(request("/api/companies/company-1/marketplace/assistant/tools/search_marketplace_plugins", {
+      host: "127.0.0.1:31310",
+      authorization: "Bearer invalid-agent-jwt",
+    }), deniedResponse, vi.fn());
+
+    expect(allowedNext).toHaveBeenCalledOnce();
+    expect(verifyAgentToken).toHaveBeenCalledWith("valid-agent-jwt");
+    expect(deniedResponse.status).toHaveBeenCalledWith(403);
+  });
+
+  it("never lets an Agent bearer token open a browser surface", () => {
+    const verifyAgentToken = vi.fn(() => agentClaims);
+    const res = response();
+    desktopLocalAccessGuard({ token, verifyAgentToken })(request("/SPS/projects", {
+      host: "127.0.0.1:31310",
+      authorization: "Bearer valid-agent-jwt",
+    }), res, vi.fn());
+
+    expect(verifyAgentToken).not.toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(403);
   });
 
   it("requires two matching launch proofs for authenticated Owner recovery", () => {
