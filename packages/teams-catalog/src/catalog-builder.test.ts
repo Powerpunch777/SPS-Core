@@ -126,6 +126,38 @@ describe("teams catalog manifest", () => {
     expect(result.manifest.teams[0]!.contentHash).toMatch(/^sha256:[a-f0-9]{64}$/);
   });
 
+  it("produces the same inventory for LF and existing Windows CRLF checkouts", async () => {
+    const packageDir = await createCatalogPackage();
+    await writeTeam(packageDir, "bundled", "software-development", "line-endings", {
+      frontmatter: [
+        "name: Line Endings",
+        "description: Verify cross-platform team catalog reproducibility.",
+        "schema: agentcompanies/v1",
+        "manager: agents/lead/AGENTS.md",
+      ],
+      files: {
+        "agents/lead/AGENTS.md": "---\nname: Lead\nslug: lead\n---\n\nLead the team.\n",
+      },
+    });
+    const options = {
+      packageDir,
+      generatedAt: "2026-06-03T00:00:00.000Z",
+      catalogSkills,
+    };
+    const lf = await buildCatalogManifest(options);
+    const teamDir = path.join(packageDir, "catalog", "bundled", "software-development", "line-endings");
+    for (const relativePath of ["TEAM.md", "agents/lead/AGENTS.md"]) {
+      const filePath = path.join(teamDir, relativePath);
+      const text = await fs.readFile(filePath, "utf8");
+      await fs.writeFile(filePath, text.replace(/\n/g, "\r\n"), "utf8");
+    }
+
+    const crlf = await buildCatalogManifest(options);
+
+    expect(crlf.errors).toEqual([]);
+    expect(crlf.manifest.teams).toEqual(lf.manifest.teams);
+  });
+
   it("reports frontmatter, directory, uniqueness, reference, and skill errors together", async () => {
     const packageDir = await createCatalogPackage();
     await writeTeam(packageDir, "bundled", "Bad_Category", "duplicate", {

@@ -60,6 +60,30 @@ describe("skills catalog manifest", () => {
     expect(result.manifest.skills[0]!.contentHash).toMatch(/^sha256:[a-f0-9]{64}$/);
   });
 
+  it("produces the same inventory for LF and existing Windows CRLF checkouts", async () => {
+    const packageDir = await createCatalogPackage();
+    await writeSkill(packageDir, "bundled", "software-development", "line-endings", {
+      frontmatter: [
+        "name: Line Endings",
+        "description: Verify cross-platform catalog reproducibility.",
+      ],
+      files: { "references/notes.md": "# Notes\n\nStable bytes.\n" },
+    });
+    const options = { packageDir, generatedAt: "2026-05-26T00:00:00.000Z" };
+    const lf = await buildCatalogManifest(options);
+    const skillDir = path.join(packageDir, "catalog", "bundled", "software-development", "line-endings");
+    for (const relativePath of ["SKILL.md", "references/notes.md"]) {
+      const filePath = path.join(skillDir, relativePath);
+      const text = await fs.readFile(filePath, "utf8");
+      await fs.writeFile(filePath, text.replace(/\n/g, "\r\n"), "utf8");
+    }
+
+    const crlf = await buildCatalogManifest(options);
+
+    expect(crlf.errors).toEqual([]);
+    expect(crlf.manifest.skills).toEqual(lf.manifest.skills);
+  });
+
   it("builds stable manifest entries from pinned GitHub references", async () => {
     const packageDir = await createCatalogPackage();
     const skillMarkdown = [
