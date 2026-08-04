@@ -305,7 +305,15 @@ function runVitest(args, label) {
   mkdirSync(env.PAPERCLIP_HOME, { recursive: true });
   mkdirSync(env.TMPDIR, { recursive: true });
   const pnpm = resolvePnpmInvocation();
-  const commandArgs = [...pnpm.prefixArgs, "exec", "vitest", "run", ...args];
+  const commandArgs = [
+    ...pnpm.prefixArgs,
+    "exec",
+    "vitest",
+    "run",
+    "--exclude",
+    "**/dist/**",
+    ...args,
+  ];
   // The direct Node + npx-cli path above handles normal Windows installs. Keep
   // this fallback for unusual environments that expose only npx.cmd.
   const needsWindowsCmdWrapper = process.platform === "win32" && pnpm.command.toLowerCase() === "npx.cmd";

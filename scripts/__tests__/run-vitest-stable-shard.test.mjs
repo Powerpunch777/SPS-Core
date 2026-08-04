@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
@@ -66,6 +67,11 @@ test("a route/authz suite never leaks into the general-server shards", () => {
       `route/authz suite must stay in the serialized lane, not general-server: ${file}`,
     );
   }
+});
+
+test("stable test invocations never execute generated dist copies", () => {
+  const source = readFileSync(path.join(repoRoot, "scripts", "run-vitest-stable.mjs"), "utf8");
+  assert.match(source, /"--exclude",\s*"\*\*\/dist\/\*\*"/);
 });
 
 test("shard flags are rejected for the parallel workspace groups", () => {

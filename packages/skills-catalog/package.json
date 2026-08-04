@@ -14,6 +14,7 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./canonical-bytes": "./src/canonical-bytes.ts",
     "./package.json": "./package.json",
     "./types": "./src/types.ts",
     "./catalog.json": "./generated/catalog.json"
@@ -24,6 +25,10 @@
       ".": {
         "types": "./dist/src/index.d.ts",
         "import": "./dist/src/index.js"
+      },
+      "./canonical-bytes": {
+        "types": "./dist/src/canonical-bytes.d.ts",
+        "import": "./dist/src/canonical-bytes.js"
       },
       "./package.json": "./package.json",
       "./types": {

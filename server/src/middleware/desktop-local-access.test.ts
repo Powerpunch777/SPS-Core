@@ -7,10 +7,11 @@ import {
   SPS_DESKTOP_OWNER_BOOTSTRAP_HEADER,
 } from "./desktop-local-access.js";
 
-function request(path: string, headers: Record<string, string> = {}): Request {
+function request(path: string, headers: Record<string, string> = {}, remoteAddress = "127.0.0.1"): Request {
   return {
     path,
-    header: (name: string) => headers[name.toLowerCase()]
+    header: (name: string) => headers[name.toLowerCase()],
+    socket: { remoteAddress },
   } as unknown as Request;
 }
 
@@ -67,6 +68,33 @@ describe("desktopLocalAccessGuard", () => {
     const next = vi.fn();
 
     guard(request("/SPS/projects", { host: "main-computer.tailnet.ts.net" }), response(), next);
+
+    expect(next).toHaveBeenCalledOnce();
+  });
+
+  it("rejects a forged forwarded hostname without Tailscale Serve identity proof", () => {
+    const guard = desktopLocalAccessGuard({ token });
+    const res = response();
+    const next = vi.fn();
+
+    guard(request("/SPS/projects", {
+      host: "127.0.0.1:31310",
+      "x-forwarded-host": "owner.tailnet.ts.net",
+    }), res, next);
+
+    expect(next).not.toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(403);
+  });
+
+  it("accepts a loopback Tailscale Serve request with stripped-and-replaced identity proof", () => {
+    const guard = desktopLocalAccessGuard({ token });
+    const next = vi.fn();
+
+    guard(request("/SPS/projects", {
+      host: "127.0.0.1:31310",
+      "x-forwarded-host": "owner.tailnet.ts.net",
+      "tailscale-user-login": "member@example.com",
+    }), response(), next);
 
     expect(next).toHaveBeenCalledOnce();
   });

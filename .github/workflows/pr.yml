@@ -208,7 +208,7 @@ jobs:
     # Preserve the legacy required-check name while the underlying work runs in parallel.
     name: verify
     if: ${{ always() }}
-    needs: [typecheck_release_registry, general_tests, build]
+    needs: [typecheck_release_registry, general_tests, verify_serialized_server, build]
     runs-on: ubuntu-latest
     timeout-minutes: 5
 
@@ -217,10 +217,12 @@ jobs:
         env:
           TYPECHECK_RELEASE_REGISTRY_RESULT: ${{ needs.typecheck_release_registry.result }}
           GENERAL_TESTS_RESULT: ${{ needs.general_tests.result }}
+          SERIALIZED_SERVER_RESULT: ${{ needs.verify_serialized_server.result }}
           BUILD_RESULT: ${{ needs.build.result }}
         run: |
           test "$TYPECHECK_RELEASE_REGISTRY_RESULT" = "success"
           test "$GENERAL_TESTS_RESULT" = "success"
+          test "$SERIALIZED_SERVER_RESULT" = "success"
           test "$BUILD_RESULT" = "success"
 
   build:

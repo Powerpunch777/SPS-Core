@@ -1,22 +1,5 @@
 import type { Request, RequestHandler } from "express";
-
-function isLoopbackHostname(hostname: string): boolean {
-  const normalized = hostname.trim().toLowerCase();
-  return normalized === "localhost" || normalized === "127.0.0.1" || normalized === "::1";
-}
-
-function extractHostname(req: Request): string | null {
-  const forwardedHost = req.header("x-forwarded-host")?.split(",")[0]?.trim();
-  const hostHeader = req.header("host")?.trim();
-  const raw = forwardedHost || hostHeader;
-  if (!raw) return null;
-
-  try {
-    return new URL(`http://${raw}`).hostname.trim().toLowerCase();
-  } catch {
-    return raw.trim().toLowerCase();
-  }
-}
+import { isLoopbackHostname, requestHostname } from "./request-hostname.js";
 
 function normalizeAllowedHostnames(values: string[]): string[] {
   const unique = new Set<string>();
@@ -64,7 +47,7 @@ export function privateHostnameGuard(opts: {
   });
 
   return (req, res, next) => {
-    const hostname = extractHostname(req);
+    const hostname = requestHostname(req) || null;
     const wantsJson = req.path.startsWith("/api") || req.accepts(["json", "html", "text"]) === "json";
 
     if (!hostname) {

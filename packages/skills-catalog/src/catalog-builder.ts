@@ -18,6 +18,7 @@ import type {
   CatalogSkillSource,
   CatalogTrustLevel,
 } from "./types.js";
+import { canonicalCatalogBytes } from "./canonical-bytes.js";
 
 const CATALOG_PACKAGE_NAME = "@paperclipai/skills-catalog";
 const CATALOG_SCHEMA_VERSION = 1;
@@ -816,16 +817,6 @@ async function sortedDirEntries(dir: string) {
 
 function sameManifestExceptGeneratedAt(a: CatalogManifest, b: CatalogManifest) {
   return JSON.stringify({ ...a, generatedAt: "" }) === JSON.stringify({ ...b, generatedAt: "" });
-}
-
-function canonicalCatalogBytes(contents: Buffer) {
-  if (contents.includes(0)) return contents;
-  try {
-    const text = new TextDecoder("utf-8", { fatal: true }).decode(contents);
-    return Buffer.from(text.replace(/\r\n?/g, "\n"), "utf8");
-  } catch {
-    return contents;
-  }
 }
 
 function sha256(contents: Buffer) {

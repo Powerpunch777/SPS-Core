@@ -1,6 +1,7 @@
 import { timingSafeEqual } from "node:crypto";
 import type { Request, RequestHandler } from "express";
 import { verifyLocalAgentJwt } from "../agent-auth-jwt.js";
+import { isLoopbackHostname, requestHostname } from "./request-hostname.js";
 
 export const SPS_DESKTOP_ACCESS_HEADER = "x-sps-desktop-access";
 // A second proof is intentionally required before an authenticated private
@@ -9,22 +10,6 @@ export const SPS_DESKTOP_ACCESS_HEADER = "x-sps-desktop-access";
 // every Electron Workspace request into an implicit instance administrator.
 export const SPS_DESKTOP_OWNER_BOOTSTRAP_HEADER = "x-sps-desktop-owner-bootstrap";
 export const SPS_DESKTOP_ACCESS_TOKEN_ENV = "SPS_DESKTOP_ACCESS_TOKEN";
-
-function requestHostname(req: Request): string {
-  const forwardedHost = req.header("x-forwarded-host")?.split(",")[0]?.trim();
-  const hostHeader = req.header("host")?.trim();
-  const raw = forwardedHost || hostHeader || "";
-  if (!raw) return "";
-  try {
-    return new URL(`http://${raw}`).hostname.trim().toLowerCase();
-  } catch {
-    return raw.trim().toLowerCase();
-  }
-}
-
-function isLoopbackHostname(hostname: string): boolean {
-  return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
-}
 
 function tokenMatches(value: string | undefined, expected: string): boolean {
   if (!value) return false;
