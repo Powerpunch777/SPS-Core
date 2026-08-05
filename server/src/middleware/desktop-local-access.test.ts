@@ -106,12 +106,33 @@ describe("desktopLocalAccessGuard", () => {
     const next = vi.fn();
 
     guard(request("/SPS/projects", {
-      host: "127.0.0.1:31310",
+      host: "owner.tailnet.ts.net",
       "x-forwarded-host": "owner.tailnet.ts.net",
+      "x-forwarded-proto": "https",
+      "x-forwarded-for": "100.64.0.10",
       "tailscale-user-login": "member@example.com",
+      "tailscale-headers-info": "https://tailscale.com/s/serve-headers",
     }), response(), next);
 
     expect(next).toHaveBeenCalledOnce();
+  });
+
+  it("rejects a Serve-looking request when the original and forwarded hosts differ", () => {
+    const guard = desktopLocalAccessGuard({ token });
+    const res = response();
+    const next = vi.fn();
+
+    guard(request("/SPS/projects", {
+      host: "owner.tailnet.ts.net",
+      "x-forwarded-host": "attacker.tailnet.ts.net",
+      "x-forwarded-proto": "https",
+      "x-forwarded-for": "100.64.0.10",
+      "tailscale-user-login": "member@example.com",
+      "tailscale-headers-info": "https://tailscale.com/s/serve-headers",
+    }), res, next);
+
+    expect(next).not.toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(403);
   });
 
   it("allows a valid local Agent JWT through the API transport gate without exposing the Desktop token", () => {

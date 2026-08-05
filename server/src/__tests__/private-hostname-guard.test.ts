@@ -114,4 +114,27 @@ describe("privateHostnameGuard", () => {
     expect(res.status).toBe(403);
     expect(res.text).toContain("only through SPS Desktop");
   });
+
+  it("allows the actual Tailscale Serve proxy shape through the combined boundary", async () => {
+    const app = express();
+    app.use(privateHostnameGuard({
+      enabled: true,
+      allowedHostnames: ["owner.tailnet.ts.net"],
+      bindHost: "127.0.0.1",
+    }));
+    app.use(desktopLocalAccessGuard({ token: "desktop-launch-token" }));
+    app.get("/SPS/projects", (_req, res) => res.status(200).send("ok"));
+
+    const res = await request(app)
+      .get("/SPS/projects")
+      .set("Host", "owner.tailnet.ts.net")
+      .set("X-Forwarded-Host", "owner.tailnet.ts.net")
+      .set("X-Forwarded-Proto", "https")
+      .set("X-Forwarded-For", "100.64.0.10")
+      .set("Tailscale-User-Login", "member@example.com")
+      .set("Tailscale-Headers-Info", "https://tailscale.com/s/serve-headers");
+
+    expect(res.status).toBe(200);
+    expect(res.text).toBe("ok");
+  });
 });

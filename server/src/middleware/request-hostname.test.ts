@@ -17,14 +17,22 @@ describe("requestHostname", () => {
     }))).toBe("127.0.0.1");
   });
 
-  it("accepts a single Tailscale hostname only from a loopback Serve request", () => {
+  it("accepts the complete Tailscale Serve proxy shape from a loopback peer", () => {
     const headers = {
-      host: "127.0.0.1:31310",
+      host: "owner.tailnet.ts.net",
       "x-forwarded-host": "owner.tailnet.ts.net",
+      "x-forwarded-proto": "https",
+      "x-forwarded-for": "100.64.0.10",
       "tailscale-user-login": "member@example.com",
+      "tailscale-headers-info": "https://tailscale.com/s/serve-headers",
     };
     expect(requestHostname(request(headers))).toBe("owner.tailnet.ts.net");
-    expect(requestHostname(request(headers, "100.64.0.10"))).toBe("127.0.0.1");
+    expect(requestHostIdentity(request(headers, "100.64.0.10"))).toEqual({
+      hostname: "owner.tailnet.ts.net",
+      source: "direct",
+      peer: "remote",
+      identity: null,
+    });
     expect(requestHostIdentity(request(headers))).toEqual({
       hostname: "owner.tailnet.ts.net",
       source: "tailscale-serve",
@@ -33,8 +41,12 @@ describe("requestHostname", () => {
     });
   });
 
-  it("keeps a direct Tailscale-looking Host untrusted on a loopback socket", () => {
-    expect(requestHostIdentity(request({ host: "owner.tailnet.ts.net" }))).toEqual({
+  it("keeps a direct Tailscale-looking Host untrusted even with partial forged headers", () => {
+    expect(requestHostIdentity(request({
+      host: "owner.tailnet.ts.net",
+      "x-forwarded-host": "owner.tailnet.ts.net",
+      "tailscale-user-login": "member@example.com",
+    }))).toEqual({
       hostname: "owner.tailnet.ts.net",
       source: "direct",
       peer: "loopback",
@@ -42,16 +54,28 @@ describe("requestHostname", () => {
     });
   });
 
-  it("rejects ambiguous forwarded chains and non-Tailscale forwarded hosts", () => {
-    expect(requestHostname(request({
-      host: "localhost:31310",
-      "x-forwarded-host": "owner.tailnet.ts.net, attacker.invalid",
+  it.each([
+    ["mismatched host", { "x-forwarded-host": "attacker.tailnet.ts.net" }],
+    ["ambiguous host chain", { "x-forwarded-host": "owner.tailnet.ts.net, attacker.invalid" }],
+    ["non-HTTPS proxy", { "x-forwarded-proto": "http" }],
+    ["ambiguous source chain", { "x-forwarded-for": "100.64.0.10, 127.0.0.1" }],
+    ["invalid source address", { "x-forwarded-for": "not-an-ip" }],
+    ["missing identity contract", { "tailscale-headers-info": "https://attacker.invalid" }],
+  ])("rejects a Serve-looking request with %s", (_label, override) => {
+    const identity = requestHostIdentity(request({
+      host: "owner.tailnet.ts.net",
+      "x-forwarded-host": "owner.tailnet.ts.net",
+      "x-forwarded-proto": "https",
+      "x-forwarded-for": "100.64.0.10",
       "tailscale-user-login": "member@example.com",
-    }))).toBe("localhost");
-    expect(requestHostname(request({
-      host: "localhost:31310",
-      "x-forwarded-host": "attacker.invalid",
-      "tailscale-user-login": "member@example.com",
-    }))).toBe("localhost");
+      "tailscale-headers-info": "https://tailscale.com/s/serve-headers",
+      ...override,
+    }));
+    expect(identity.source).toBe("direct");
+    expect(identity.identity).toBeNull();
+  });
+
+  it("normalizes bracketed IPv6 loopback Hosts", () => {
+    expect(requestHostname(request({ host: "[::1]:31310" }, "::1"))).toBe("::1");
   });
 });

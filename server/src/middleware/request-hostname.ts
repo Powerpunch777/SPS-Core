@@ -1,6 +1,9 @@
+import { isIP } from "node:net";
 import type { Request } from "express";
 
 const TAILSCALE_USER_LOGIN_HEADER = "tailscale-user-login";
+const TAILSCALE_HEADERS_INFO_HEADER = "tailscale-headers-info";
+const TAILSCALE_HEADERS_INFO_URL = "https://tailscale.com/s/serve-headers";
 
 export type RequestHostIdentity = {
   hostname: string;
@@ -10,17 +13,24 @@ export type RequestHostIdentity = {
 };
 
 export function isLoopbackHostname(hostname: string): boolean {
-  const normalized = hostname.trim().toLowerCase();
+  const normalized = hostname.trim().toLowerCase().replace(/^\[|\]$/g, "");
   return normalized === "localhost" || normalized === "127.0.0.1" || normalized === "::1";
+}
+
+function normalizeHostname(hostname: string): string {
+  const normalized = hostname.trim().toLowerCase();
+  return normalized.startsWith("[") && normalized.endsWith("]")
+    ? normalized.slice(1, -1)
+    : normalized;
 }
 
 function parseHostname(raw: string | undefined): string {
   const value = raw?.trim() ?? "";
   if (!value) return "";
   try {
-    return new URL(`http://${value}`).hostname.trim().toLowerCase();
+    return normalizeHostname(new URL(`http://${value}`).hostname);
   } catch {
-    return value.toLowerCase();
+    return normalizeHostname(value);
   }
 }
 
@@ -39,20 +49,30 @@ function trustedTailscaleForwardedHost(
   directHostname: string,
   peer: RequestHostIdentity["peer"],
 ): RequestHostIdentity | null {
-  if (!isLoopbackHostname(directHostname) || peer !== "loopback") return null;
+  if (peer !== "loopback" || !directHostname.endsWith(".ts.net")) return null;
 
-  // Tailscale Serve removes caller-supplied identity headers before adding its
-  // own. Requiring that proof prevents a bare X-Forwarded-Host header from
-  // turning a direct loopback browser request into a private team request.
+  // Tailscale Serve connects to the backend over loopback, preserves the
+  // incoming .ts.net Host, and replaces its forwarded and identity headers.
+  // Validate that complete shape so a bare .ts.net Host remains a direct
+  // request that still needs the Desktop launch token.
   const userLogin = req.header(TAILSCALE_USER_LOGIN_HEADER)?.trim() ?? "";
   if (!userLogin || userLogin.length > 320 || /[\r\n\0]/.test(userLogin)) return null;
 
   const forwardedHeader = req.header("x-forwarded-host")?.trim() ?? "";
   if (!forwardedHeader || forwardedHeader.includes(",")) return null;
   const forwardedHostname = parseHostname(forwardedHeader);
-  if (!forwardedHostname.endsWith(".ts.net")) return null;
+  if (forwardedHostname !== directHostname) return null;
+
+  const forwardedProto = req.header("x-forwarded-proto")?.trim().toLowerCase() ?? "";
+  if (forwardedProto !== "https") return null;
+
+  const forwardedFor = req.header("x-forwarded-for")?.trim() ?? "";
+  if (!forwardedFor || forwardedFor.includes(",") || isIP(forwardedFor) === 0) return null;
+
+  const headersInfo = req.header(TAILSCALE_HEADERS_INFO_HEADER)?.trim() ?? "";
+  if (headersInfo !== TAILSCALE_HEADERS_INFO_URL) return null;
   return {
-    hostname: forwardedHostname,
+    hostname: directHostname,
     source: "tailscale-serve",
     peer,
     identity: { userLogin },
