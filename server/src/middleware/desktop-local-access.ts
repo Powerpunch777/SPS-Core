@@ -1,7 +1,7 @@
 import { timingSafeEqual } from "node:crypto";
 import type { Request, RequestHandler } from "express";
 import { verifyLocalAgentJwt } from "../agent-auth-jwt.js";
-import { isLoopbackHostname, requestHostname } from "./request-hostname.js";
+import { isLoopbackHostname, requestHostIdentity } from "./request-hostname.js";
 
 export const SPS_DESKTOP_ACCESS_HEADER = "x-sps-desktop-access";
 // A second proof is intentionally required before an authenticated private
@@ -34,7 +34,13 @@ export function hasTrustedDesktopOwnerBootstrap(
   req: Request,
   { token = process.env[SPS_DESKTOP_ACCESS_TOKEN_ENV]?.trim() } = {},
 ): boolean {
-  if (!token || !isLoopbackHostname(requestHostname(req))) return false;
+  const host = requestHostIdentity(req);
+  if (
+    !token
+    || host.source !== "direct"
+    || host.peer !== "loopback"
+    || !isLoopbackHostname(host.hostname)
+  ) return false;
   return (
     tokenMatches(req.header(SPS_DESKTOP_ACCESS_HEADER) ?? undefined, token)
     && tokenMatches(req.header(SPS_DESKTOP_OWNER_BOOTSTRAP_HEADER) ?? undefined, token)
@@ -62,10 +68,16 @@ export function desktopLocalAccessGuard({
   if (!token) return (_req, _res, next) => next();
 
   return (req, res, next) => {
-    const hostname = requestHostname(req);
+    const host = requestHostIdentity(req);
     // The Owner Host manager probes health before Electron loads the Workspace.
     // Health contains no user data and must remain available for lifecycle checks.
-    if (req.path === "/api/health" || !isLoopbackHostname(hostname)) {
+    const trustedPrivateTransport = host.source === "tailscale-serve"
+      || (
+        host.source === "direct"
+        && host.peer === "remote"
+        && !isLoopbackHostname(host.hostname)
+      );
+    if (req.path === "/api/health" || trustedPrivateTransport) {
       next();
       return;
     }

@@ -96,4 +96,22 @@ describe("privateHostnameGuard", () => {
     expect(res.status).toBe(403);
     expect(res.text).toContain("only through SPS Desktop");
   });
+
+  it("does not let a direct Tailscale-looking Host bypass the loopback Desktop boundary", async () => {
+    const app = express();
+    app.use(privateHostnameGuard({
+      enabled: true,
+      allowedHostnames: ["owner.tailnet.ts.net"],
+      bindHost: "127.0.0.1",
+    }));
+    app.use(desktopLocalAccessGuard({ token: "desktop-launch-token" }));
+    app.get("/SPS/projects", (_req, res) => res.status(200).send("ok"));
+
+    const res = await request(app)
+      .get("/SPS/projects")
+      .set("Host", "owner.tailnet.ts.net");
+
+    expect(res.status).toBe(403);
+    expect(res.text).toContain("only through SPS Desktop");
+  });
 });

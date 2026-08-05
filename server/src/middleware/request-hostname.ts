@@ -2,6 +2,13 @@ import type { Request } from "express";
 
 const TAILSCALE_USER_LOGIN_HEADER = "tailscale-user-login";
 
+export type RequestHostIdentity = {
+  hostname: string;
+  source: "direct" | "tailscale-serve";
+  peer: "loopback" | "remote" | "unknown";
+  identity: { userLogin: string } | null;
+};
+
 export function isLoopbackHostname(hostname: string): boolean {
   const normalized = hostname.trim().toLowerCase();
   return normalized === "localhost" || normalized === "127.0.0.1" || normalized === "::1";
@@ -17,15 +24,22 @@ function parseHostname(raw: string | undefined): string {
   }
 }
 
-function isLoopbackAddress(address: string | undefined): boolean {
+function requestPeer(address: string | undefined): RequestHostIdentity["peer"] {
   const normalized = address?.trim().toLowerCase() ?? "";
+  if (!normalized) return "unknown";
   return normalized === "127.0.0.1"
     || normalized === "::1"
-    || normalized === "::ffff:127.0.0.1";
+    || normalized === "::ffff:127.0.0.1"
+    ? "loopback"
+    : "remote";
 }
 
-function trustedTailscaleForwardedHostname(req: Request, directHostname: string): string | null {
-  if (!isLoopbackHostname(directHostname) || !isLoopbackAddress(req.socket?.remoteAddress)) return null;
+function trustedTailscaleForwardedHost(
+  req: Request,
+  directHostname: string,
+  peer: RequestHostIdentity["peer"],
+): RequestHostIdentity | null {
+  if (!isLoopbackHostname(directHostname) || peer !== "loopback") return null;
 
   // Tailscale Serve removes caller-supplied identity headers before adding its
   // own. Requiring that proof prevents a bare X-Forwarded-Host header from
@@ -36,10 +50,26 @@ function trustedTailscaleForwardedHostname(req: Request, directHostname: string)
   const forwardedHeader = req.header("x-forwarded-host")?.trim() ?? "";
   if (!forwardedHeader || forwardedHeader.includes(",")) return null;
   const forwardedHostname = parseHostname(forwardedHeader);
-  return forwardedHostname.endsWith(".ts.net") ? forwardedHostname : null;
+  if (!forwardedHostname.endsWith(".ts.net")) return null;
+  return {
+    hostname: forwardedHostname,
+    source: "tailscale-serve",
+    peer,
+    identity: { userLogin },
+  };
+}
+
+export function requestHostIdentity(req: Request): RequestHostIdentity {
+  const hostname = parseHostname(req.header("host") ?? undefined);
+  const peer = requestPeer(req.socket?.remoteAddress);
+  return trustedTailscaleForwardedHost(req, hostname, peer) ?? {
+    hostname,
+    source: "direct",
+    peer,
+    identity: null,
+  };
 }
 
 export function requestHostname(req: Request): string {
-  const directHostname = parseHostname(req.header("host") ?? undefined);
-  return trustedTailscaleForwardedHostname(req, directHostname) ?? directHostname;
+  return requestHostIdentity(req).hostname;
 }

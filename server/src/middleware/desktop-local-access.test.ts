@@ -63,11 +63,26 @@ describe("desktopLocalAccessGuard", () => {
     expect(next).toHaveBeenCalledTimes(2);
   });
 
-  it("leaves the authenticated Tailscale hostname path available", () => {
+  it("rejects a direct Tailscale-looking Host on a loopback socket", () => {
+    const guard = desktopLocalAccessGuard({ token });
+    const res = response();
+    const next = vi.fn();
+
+    guard(request("/SPS/projects", { host: "main-computer.tailnet.ts.net" }), res, next);
+
+    expect(next).not.toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(403);
+  });
+
+  it("leaves a direct private Host available only for a real remote peer", () => {
     const guard = desktopLocalAccessGuard({ token });
     const next = vi.fn();
 
-    guard(request("/SPS/projects", { host: "main-computer.tailnet.ts.net" }), response(), next);
+    guard(
+      request("/SPS/projects", { host: "main-computer.tailnet.ts.net" }, "100.64.0.10"),
+      response(),
+      next,
+    );
 
     expect(next).toHaveBeenCalledOnce();
   });

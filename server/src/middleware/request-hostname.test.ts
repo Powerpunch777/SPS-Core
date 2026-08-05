@@ -1,6 +1,6 @@
 import type { Request } from "express";
 import { describe, expect, it } from "vitest";
-import { requestHostname } from "./request-hostname.js";
+import { requestHostIdentity, requestHostname } from "./request-hostname.js";
 
 function request(headers: Record<string, string>, remoteAddress = "127.0.0.1"): Request {
   return {
@@ -25,6 +25,21 @@ describe("requestHostname", () => {
     };
     expect(requestHostname(request(headers))).toBe("owner.tailnet.ts.net");
     expect(requestHostname(request(headers, "100.64.0.10"))).toBe("127.0.0.1");
+    expect(requestHostIdentity(request(headers))).toEqual({
+      hostname: "owner.tailnet.ts.net",
+      source: "tailscale-serve",
+      peer: "loopback",
+      identity: { userLogin: "member@example.com" },
+    });
+  });
+
+  it("keeps a direct Tailscale-looking Host untrusted on a loopback socket", () => {
+    expect(requestHostIdentity(request({ host: "owner.tailnet.ts.net" }))).toEqual({
+      hostname: "owner.tailnet.ts.net",
+      source: "direct",
+      peer: "loopback",
+      identity: null,
+    });
   });
 
   it("rejects ambiguous forwarded chains and non-Tailscale forwarded hosts", () => {
