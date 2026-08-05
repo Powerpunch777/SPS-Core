@@ -15,6 +15,7 @@ describe("actorMiddleware Desktop Owner bootstrap", () => {
     process.env.SPS_DESKTOP_ACCESS_TOKEN = "desktop-launch-token";
     const request = {
       actor: { type: "board", source: "session", isInstanceAdmin: false },
+      socket: { remoteAddress: "127.0.0.1" },
       header: (name: string) => ({
         host: "127.0.0.1:31310",
         [SPS_DESKTOP_ACCESS_HEADER]: "desktop-launch-token",
@@ -40,6 +41,7 @@ describe("actorMiddleware Desktop Owner bootstrap", () => {
     const previousToken = process.env.SPS_DESKTOP_ACCESS_TOKEN;
     process.env.SPS_DESKTOP_ACCESS_TOKEN = "desktop-launch-token";
     const request = {
+      socket: { remoteAddress: "127.0.0.1" },
       header: (name: string) => ({
         host: "127.0.0.1:31310",
         [SPS_DESKTOP_ACCESS_HEADER]: "desktop-launch-token",
@@ -95,6 +97,7 @@ describe("actorMiddleware Desktop Owner bootstrap", () => {
     const previousToken = process.env.SPS_DESKTOP_ACCESS_TOKEN;
     process.env.SPS_DESKTOP_ACCESS_TOKEN = "desktop-launch-token";
     const request = {
+      socket: { remoteAddress: "127.0.0.1" },
       header: (name: string) => ({
         host: "127.0.0.1:31310",
         [SPS_DESKTOP_ACCESS_HEADER]: "desktop-launch-token",
