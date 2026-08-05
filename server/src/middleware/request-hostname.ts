@@ -12,16 +12,16 @@ export type RequestHostIdentity = {
   identity: { userLogin: string } | null;
 };
 
-export function isLoopbackHostname(hostname: string): boolean {
-  const normalized = hostname.trim().toLowerCase().replace(/^\[|\]$/g, "");
-  return normalized === "localhost" || normalized === "127.0.0.1" || normalized === "::1";
-}
-
 function normalizeHostname(hostname: string): string {
   const normalized = hostname.trim().toLowerCase();
   return normalized.startsWith("[") && normalized.endsWith("]")
     ? normalized.slice(1, -1)
     : normalized;
+}
+
+export function isLoopbackHostname(hostname: string): boolean {
+  const normalized = normalizeHostname(hostname);
+  return normalized === "localhost" || normalized === "127.0.0.1" || normalized === "::1";
 }
 
 function parseHostname(raw: string | undefined): string {

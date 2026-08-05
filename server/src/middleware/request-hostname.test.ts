@@ -1,6 +1,6 @@
 import type { Request } from "express";
 import { describe, expect, it } from "vitest";
-import { requestHostIdentity, requestHostname } from "./request-hostname.js";
+import { isLoopbackHostname, requestHostIdentity, requestHostname } from "./request-hostname.js";
 
 function request(headers: Record<string, string>, remoteAddress = "127.0.0.1"): Request {
   return {
@@ -77,5 +77,11 @@ describe("requestHostname", () => {
 
   it("normalizes bracketed IPv6 loopback Hosts", () => {
     expect(requestHostname(request({ host: "[::1]:31310" }, "::1"))).toBe("::1");
+    expect(isLoopbackHostname("[::1]")).toBe(true);
+  });
+
+  it("does not normalize malformed IPv6 loopback brackets", () => {
+    expect(isLoopbackHostname("[::1")).toBe(false);
+    expect(isLoopbackHostname("::1]")).toBe(false);
   });
 });
