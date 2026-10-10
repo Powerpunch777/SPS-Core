@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { CatalogSkill } from "@paperclipai/shared";
 
@@ -178,6 +179,26 @@ describe("skills catalog service", () => {
     expect(mockReadFile).not.toHaveBeenCalled();
   });
 
+  it("canonicalizes CRLF package bytes before manifest verification and preview", async () => {
+    const lfMarkdown = "---\nname: line-endings\n---\n\n# Stable\n";
+    const crlfMarkdown = lfMarkdown.replace(/\n/g, "\r\n");
+    const lineEndingSkill = catalogSkill("line-endings", "Line Endings");
+    lineEndingSkill.files = [{
+      path: "SKILL.md",
+      kind: "skill",
+      sizeBytes: Buffer.byteLength(lfMarkdown),
+      sha256: sha256(lfMarkdown),
+    }];
+    manifestJson = manifest([lineEndingSkill]);
+    mockReadFile.mockResolvedValueOnce(Buffer.from(crlfMarkdown));
+    const service = await import("../services/skills-catalog.js");
+
+    await expect(service.readCatalogSkillFile(lineEndingSkill.id, "SKILL.md")).resolves.toMatchObject({
+      content: lfMarkdown,
+      markdown: true,
+    });
+  });
+
   it("resolves the manifest and bundled skill files from the published package layout", async () => {
     const publishedMarkdown = "---\nname: published\n---\n\n# Published\n";
     const publishedSkill = catalogSkill("published-skill", "Published Skill");
@@ -208,7 +229,7 @@ describe("skills catalog service", () => {
       "utf8",
     );
     expect(mockReadFile).toHaveBeenCalledWith(
-      "/published/node_modules/@paperclipai/skills-catalog/catalog/bundled/software-development/published-skill/SKILL.md",
+      path.resolve("/published/node_modules/@paperclipai/skills-catalog/catalog/bundled/software-development/published-skill/SKILL.md"),
     );
     expect(mockRequireResolve).toHaveBeenCalledWith("@paperclipai/skills-catalog/package.json");
     expect(mockRequireResolve).toHaveBeenCalledWith("@paperclipai/skills-catalog/catalog.json");

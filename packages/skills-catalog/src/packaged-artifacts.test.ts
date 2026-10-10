@@ -1,6 +1,6 @@
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -8,11 +8,24 @@ import { afterEach, describe, expect, it } from "vitest";
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
+function runNpm(args: string[], options: Parameters<typeof execFileSync>[2]) {
+  if (process.platform !== "win32") return execFileSync("npm", args, options);
+  const npmCli = path.join(path.dirname(process.execPath), "node_modules", "npm", "bin", "npm-cli.js");
+  if (!existsSync(npmCli)) throw new Error(`npm CLI was not found beside Node: ${npmCli}`);
+  return execFileSync(process.execPath, [npmCli, ...args], options);
+}
+
+function runPnpm(args: string[], options: Parameters<typeof execFileSync>[2]) {
+  const pnpmCli = process.env.npm_execpath;
+  if (pnpmCli && existsSync(pnpmCli)) return execFileSync(process.execPath, [pnpmCli, ...args], options);
+  return execFileSync(process.platform === "win32" ? "pnpm.cmd" : "pnpm", args, options);
+}
+
 function readPackMetadata(packDestination: string) {
-  const output = execFileSync("npm", ["pack", "--json", "--pack-destination", packDestination], {
+  const output = String(runNpm(["pack", "--json", "--pack-destination", packDestination], {
     cwd: packageRoot,
     encoding: "utf8",
-  });
+  }));
   const metadata = JSON.parse(output);
   if (!Array.isArray(metadata) || metadata.length === 0 || typeof metadata[0]?.filename !== "string") {
     throw new Error(`Unexpected npm pack output from ${packageRoot}: ${output}`);
@@ -38,7 +51,7 @@ describe("skills catalog package artifacts", () => {
     let metadata = readPackMetadata(createPackDestination());
 
     if (!metadata.files.some((entry) => entry.path === "dist/generated/catalog.json")) {
-      execFileSync("pnpm", ["--filter", "@paperclipai/skills-catalog", "build"], {
+      runPnpm(["--filter", "@paperclipai/skills-catalog", "build"], {
         cwd: packageRoot,
         stdio: "ignore",
       });

@@ -1,14 +1,14 @@
 import { Router } from "express";
 import { z } from "zod";
-import type { Db } from "@paperclipai/db";
-import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
-import { logActivity } from "../services/activity-log.js";
-import { spsWorkspaceSurfaceService } from "../services/sps-workspace-surfaces.js";
+import type { Db } from "../compat/paperclip/db.js";
 import {
   assertBoard,
   assertCompanyAccess,
   assertSpsCoreHostAuthority,
-} from "./authz.js";
+  logActivity,
+  type PluginWorkerManager,
+} from "../compat/paperclip/control-plane.js";
+import { spsWorkspaceSurfaceService } from "../services/sps-workspace-surfaces.js";
 import { validate } from "../middleware/validate.js";
 
 const shellSelectionSchema = z.object({

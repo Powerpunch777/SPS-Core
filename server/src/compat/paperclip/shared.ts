@@ -1,0 +1,28 @@
+export {
+  bindSpsAgentNodeSchema,
+  createSpsNodeSchema,
+  createSpsWorkspaceSourceSchema,
+  grantSpsHostProjectShareNodeSchema,
+  grantSpsWorkspaceSourceNodeSchema,
+  isAgentStatusAssignableToWork,
+  isAgentStatusInvokable,
+  reportSpsNodeRunnerAvailabilitySchema,
+  spsNodeCapabilityForAdapter,
+  spsNodeCommandCompleteSchema,
+  spsNodeCommandEventSchema,
+  spsNodeExecutableRuntimeKindSchema,
+  spsNodeHeartbeatMessage,
+  spsNodeHeartbeatSchema,
+  spsNodeSignedRequestMessage,
+  spsNodeSignedRequestSchema,
+  spsNodeSupportsAdapter,
+  updateSpsWorkspaceSourceSchema,
+  upsertSpsHostProjectShareSchema,
+} from "@paperclipai/shared";
+export type {
+  PaperclipPluginManifestV1,
+  PluginDashboardWidgetDeclaration,
+  PluginRecord,
+  PluginWorkspaceShellDeclaration,
+  SpsNodeRunnerProfile,
+} from "@paperclipai/shared";

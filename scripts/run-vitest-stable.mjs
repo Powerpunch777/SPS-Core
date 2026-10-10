@@ -61,6 +61,26 @@ const serializedServerVitestArgs = [
   "--no-file-parallelism",
   "--maxWorkers=1",
 ];
+const windowsVitestPathBudget = 6000;
+
+function chunkValuesByLength(values, budget = windowsVitestPathBudget) {
+  const chunks = [];
+  let current = [];
+  let currentLength = 0;
+  for (const value of values) {
+    const length = value.length + 1;
+    if (length > budget) fail(`A Vitest path exceeds the Windows command budget: ${value}`);
+    if (current.length > 0 && currentLength + length > budget) {
+      chunks.push(current);
+      current = [];
+      currentLength = 0;
+    }
+    current.push(value);
+    currentLength += length;
+  }
+  if (current.length > 0) chunks.push(current);
+  return chunks;
+}
 
 function resolvePnpmInvocation() {
   const npmExecPath = process.env.npm_execpath;
@@ -285,7 +305,15 @@ function runVitest(args, label) {
   mkdirSync(env.PAPERCLIP_HOME, { recursive: true });
   mkdirSync(env.TMPDIR, { recursive: true });
   const pnpm = resolvePnpmInvocation();
-  const commandArgs = [...pnpm.prefixArgs, "exec", "vitest", "run", ...args];
+  const commandArgs = [
+    ...pnpm.prefixArgs,
+    "exec",
+    "vitest",
+    "run",
+    "--exclude",
+    "**/dist/**",
+    ...args,
+  ];
   // The direct Node + npx-cli path above handles normal Windows installs. Keep
   // this fallback for unusual environments that expose only npx.cmd.
   const needsWindowsCmdWrapper = process.platform === "win32" && pnpm.command.toLowerCase() === "npx.cmd";
@@ -345,6 +373,22 @@ function runGeneralGroup(routeTests, groupName, shardIndex = null, shardCount = 
         ],
         `${groupName} shard ${shardIndex + 1}/${shardCount}`,
       );
+      return;
+    }
+
+    if (process.platform === "win32") {
+      const batches = chunkValuesByLength(generalServerTestFiles);
+      for (let index = 0; index < batches.length; index += 1) {
+        runVitest(
+          [
+            "--project",
+            "@paperclipai/server",
+            ...serializedServerVitestArgs,
+            ...batches[index],
+          ],
+          `${groupName} Windows batch ${index + 1}/${batches.length}`,
+        );
+      }
       return;
     }
 
@@ -430,6 +474,7 @@ if (options.dryRun) {
         serializedSuiteCount: routeTests.length,
         selectedSerializedSuites: serializedSuites.map((routeTest) => routeTest.repoPath),
         generalServerSuiteCount: generalServerTestFiles.length,
+        windowsGeneralServerBatches: chunkValuesByLength(generalServerTestFiles),
         selectedGeneralServerSuites:
           options.mode === generalModeName &&
           options.group === generalServerGroupName &&

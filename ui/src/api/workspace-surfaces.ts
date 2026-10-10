@@ -3,7 +3,7 @@ import type {
   PluginDashboardWidgetSize,
   PluginInboxActionDeclaration,
   PluginWorkspaceShellDeclaration,
-} from "@paperclipai/shared";
+} from "../compat/paperclip/shared";
 import { api } from "./client";
 
 export type SpsWorkspaceShellProvider = {

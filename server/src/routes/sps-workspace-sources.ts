@@ -1,20 +1,23 @@
 import { Router, type Request } from "express";
 import { and, desc, eq, isNull } from "drizzle-orm";
-import type { Db } from "@paperclipai/db";
+import type { Db } from "../compat/paperclip/db.js";
 import {
   spsNodes,
   spsWorkspaceSourceNodeGrants,
   spsWorkspaceSources,
-} from "@paperclipai/db";
+} from "../compat/paperclip/db.js";
 import {
   createSpsWorkspaceSourceSchema,
   grantSpsWorkspaceSourceNodeSchema,
   updateSpsWorkspaceSourceSchema,
-} from "@paperclipai/shared";
+} from "../compat/paperclip/shared.js";
 import { badRequest, forbidden, notFound } from "../errors.js";
 import { hasTrustedDesktopOwnerBootstrap } from "../middleware/desktop-local-access.js";
-import { logActivity } from "../services/index.js";
-import { assertBoard, assertCompanyAccess } from "./authz.js";
+import {
+  assertBoard,
+  assertCompanyAccess,
+  logActivity,
+} from "../compat/paperclip/control-plane.js";
 import { validate } from "../middleware/validate.js";
 
 function actorUserId(req: Request) {

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import express from "express";
 import request from "supertest";
 import { MAX_ATTACHMENT_BYTES } from "../attachment-types.js";
@@ -9,6 +9,8 @@ const { createAssetMock, getAssetByIdMock, logActivityMock } = vi.hoisted(() => 
   getAssetByIdMock: vi.fn(),
   logActivityMock: vi.fn(),
 }));
+
+let assetRoutes: (typeof import("../routes/assets.js"))["assetRoutes"] | null = null;
 
 function registerModuleMocks() {
   vi.doMock("../services/activity-log.js", () => ({
@@ -92,7 +94,7 @@ function createStorageService(contentType = "image/png"): TestStorageService {
 }
 
 async function createApp(storage: ReturnType<typeof createStorageService>) {
-  const { assetRoutes } = await vi.importActual<typeof import("../routes/assets.js")>("../routes/assets.js");
+  if (!assetRoutes) throw new Error("Asset routes were not initialized by the test setup");
   const app = express();
   app.use((req, _res, next) => {
     req.actor = {
@@ -105,6 +107,20 @@ async function createApp(storage: ReturnType<typeof createStorageService>) {
   app.use("/api", assetRoutes({} as any, storage));
   return app;
 }
+
+// Load the route graph once; cold transforms must finish before per-request tests start.
+beforeAll(async () => {
+  vi.resetModules();
+  vi.doUnmock("../services/activity-log.js");
+  vi.doUnmock("../services/assets.js");
+  vi.doUnmock("../services/index.js");
+  vi.doUnmock("../routes/assets.js");
+  vi.doUnmock("../routes/authz.js");
+  vi.doUnmock("../middleware/index.js");
+  registerModuleMocks();
+
+  ({ assetRoutes } = await vi.importActual<typeof import("../routes/assets.js")>("../routes/assets.js"));
+}, 30_000);
 
 async function requestApp(
   app: express.Express,
@@ -135,14 +151,6 @@ async function requestApp(
 
 describe("POST /api/companies/:companyId/assets/images", () => {
   beforeEach(() => {
-    vi.resetModules();
-    vi.doUnmock("../services/activity-log.js");
-    vi.doUnmock("../services/assets.js");
-    vi.doUnmock("../services/index.js");
-    vi.doUnmock("../routes/assets.js");
-    vi.doUnmock("../routes/authz.js");
-    vi.doUnmock("../middleware/index.js");
-    registerModuleMocks();
     vi.clearAllMocks();
     createAssetMock.mockReset();
     getAssetByIdMock.mockReset();
@@ -199,12 +207,6 @@ describe("POST /api/companies/:companyId/assets/images", () => {
 
 describe("POST /api/companies/:companyId/logo", () => {
   beforeEach(() => {
-    vi.resetModules();
-    vi.doUnmock("../services/index.js");
-    vi.doUnmock("../routes/assets.js");
-    vi.doUnmock("../routes/authz.js");
-    vi.doUnmock("../middleware/index.js");
-    registerModuleMocks();
     vi.clearAllMocks();
     createAssetMock.mockReset();
     getAssetByIdMock.mockReset();

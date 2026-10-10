@@ -5027,7 +5027,16 @@ function readMarketplaceAssistantRunContext(
   return sessionId && userId && message ? { sessionId, userId, message } : null;
 }
 
-function resolveMarketplaceAssistantMcpEntryPath() {
+function resolveMarketplaceAssistantMcpEntryPath(
+  runtimeEnv: Record<string, string | undefined>,
+) {
+  const configured = runtimeEnv.SPS_MARKETPLACE_MCP_ENTRY?.trim();
+  if (configured) {
+    if (!path.isAbsolute(configured)) {
+      throw new Error("SPS_MARKETPLACE_MCP_ENTRY must be an absolute path.");
+    }
+    return configured;
+  }
   const servicesDir = path.dirname(fileURLToPath(import.meta.url));
   return path.resolve(
     servicesDir,
@@ -5055,7 +5064,11 @@ export function createMarketplaceAssistantExternalTools(input: {
   runId: string;
   companyId: string;
   remoteNode: boolean;
+  localEntryPath?: string;
 }) {
+  if (!input.remoteNode && !input.localEntryPath) {
+    throw new Error("Marketplace Assistant requires a local MCP entry path.");
+  }
   return {
     mcpServers: [{
       kind: "stdio" as const,
@@ -5071,7 +5084,7 @@ export function createMarketplaceAssistantExternalTools(input: {
             "--eval",
             "import { pathToFileURL } from 'node:url'; await import(pathToFileURL(process.env.SPS_MARKETPLACE_MCP_ENTRY).href);",
           ]
-        : [resolveMarketplaceAssistantMcpEntryPath()],
+        : [input.localEntryPath!],
       env: [
         { name: "SPS_API_BASE_URL", value: input.apiBaseUrl },
         { name: "SPS_SCOPED_BEARER_TOKEN", value: input.scopedToken },
@@ -12796,6 +12809,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             runId: run.id,
             companyId: agent.companyId,
             remoteNode: Boolean(spsNodeExecutionTarget),
+            localEntryPath: spsNodeExecutionTarget
+              ? undefined
+              : resolveMarketplaceAssistantMcpEntryPath(runtimeEnv),
           })
         : undefined;
       if (marketplaceAssistantContext && !runtimeEnv.PAPERCLIP_API_URL?.trim()) {

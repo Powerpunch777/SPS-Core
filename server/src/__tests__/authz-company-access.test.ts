@@ -298,6 +298,9 @@ describe("assertInstanceAdmin", () => {
         "x-sps-desktop-access": "desktop-launch-token",
         "x-sps-desktop-owner-bootstrap": "desktop-launch-token",
       })[name.toLowerCase()]) as Express.Request["header"];
+      Object.defineProperty(technicalHost, "socket", {
+        value: { remoteAddress: "127.0.0.1" },
+      });
 
       expect(() => assertInstanceAdmin(host)).not.toThrow();
       expect(() => assertInstanceAdmin(technicalHost)).not.toThrow();

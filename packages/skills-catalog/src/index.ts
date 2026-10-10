@@ -1,6 +1,8 @@
 import catalogManifestJson from "../generated/catalog.json" with { type: "json" };
 import type { CatalogManifest, CatalogSkill } from "./types.js";
 
+export { canonicalCatalogBytes } from "./canonical-bytes.js";
+
 export type {
   CatalogCompatibility,
   CatalogManifest,

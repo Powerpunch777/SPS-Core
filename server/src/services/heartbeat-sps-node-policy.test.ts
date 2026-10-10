@@ -43,6 +43,24 @@ describe("SPS Hub Node-only execution policy", () => {
     expect(markMarketplaceAssistantNodeRuntime(original, false)).toBe(original);
   });
 
+  it("uses the Desktop-provided absolute Marketplace MCP entry for a local run", () => {
+    const entry = process.platform === "win32"
+      ? "C:\\SPS\\runtime\\marketplace-assistant-stdio.js"
+      : "/opt/sps/runtime/marketplace-assistant-stdio.js";
+    const tools = createMarketplaceAssistantExternalTools({
+      apiBaseUrl: "http://127.0.0.1:31310/api",
+      scopedToken: "scoped-token",
+      runId: "run-local",
+      companyId: "company-1",
+      remoteNode: false,
+      localEntryPath: entry,
+    });
+
+    expect(tools.mcpServers[0].command).toBe(process.execPath);
+    expect(tools.mcpServers[0].args).toEqual([entry]);
+    expect(tools.mcpServers[0].env).not.toContainEqual({ name: "ELECTRON_RUN_AS_NODE", value: "1" });
+  });
+
   it("allows a local CLI adapter when the approved Node target exists", () => {
     expect(() => assertSpsNodeBindingRequiredForAdapter({
       requireSpsNodeExecution: true,

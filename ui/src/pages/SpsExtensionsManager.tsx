@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import type { PluginRecord } from "@paperclipai/shared";
+import type { PluginRecord } from "../compat/paperclip/shared";
 import { CheckCircle2, Power, Puzzle, Settings, ShieldCheck, Store, Trash } from "lucide-react";
 import { pluginsApi, type CompanyPluginActivation } from "@/api/plugins";
 import { PluginUninstallDialog, type PluginUninstallOptions } from "@/components/PluginUninstallDialog";

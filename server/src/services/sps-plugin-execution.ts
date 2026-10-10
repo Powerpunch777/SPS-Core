@@ -1,5 +1,5 @@
 import { and, desc, eq, gt, isNull } from "drizzle-orm";
-import type { Db } from "@paperclipai/db";
+import type { Db } from "../compat/paperclip/db.js";
 import {
   spsNodes,
   spsNodeRunnerProfiles,
@@ -8,8 +8,8 @@ import {
   spsPluginNodeRunEvents,
   spsPluginNodeRuns,
   spsWorkspaceSources,
-} from "@paperclipai/db";
-import { spsNodeExecutableRuntimeKindSchema } from "@paperclipai/shared";
+} from "../compat/paperclip/db.js";
+import { spsNodeExecutableRuntimeKindSchema } from "../compat/paperclip/shared.js";
 
 const ONLINE_WINDOW_MS = 2 * 60 * 1000;
 const RUNNER_COMMAND_BY_KIND = {

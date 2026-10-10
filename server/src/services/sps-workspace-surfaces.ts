@@ -1,17 +1,17 @@
 import { and, asc, desc, eq, isNull, or } from "drizzle-orm";
-import type { Db } from "@paperclipai/db";
+import type { Db } from "../compat/paperclip/db.js";
 import {
   spsDashboardLayoutItems,
   spsPluginInboxItems,
   spsPluginInboxUserStates,
   spsWorkspaceShellSettings,
-} from "@paperclipai/db";
+} from "../compat/paperclip/db.js";
 import type {
   PaperclipPluginManifestV1,
   PluginDashboardWidgetDeclaration,
   PluginRecord,
   PluginWorkspaceShellDeclaration,
-} from "@paperclipai/shared";
+} from "../compat/paperclip/shared.js";
 import { badRequest, notFound } from "../errors.js";
 import { resolvePluginCompanyActivation } from "./plugin-company-activation.js";
 import { pluginRegistryService } from "./plugin-registry.js";

@@ -1,7 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { and, asc, desc, eq, getTableColumns, gt, like, or, sql } from "drizzle-orm";
-import type { Db } from "@paperclipai/db";
-import { agentTaskSessions, spsMarketplaceAssistantMessages } from "@paperclipai/db";
+import type { Db } from "../compat/paperclip/db.js";
+import {
+  agentTaskSessions,
+  spsMarketplaceAssistantMessages,
+} from "../compat/paperclip/db.js";
 
 export const SPS_MARKETPLACE_ASSISTANT_TASK_KEY = "sps-marketplace-assistant";
 export const SPS_MARKETPLACE_ASSISTANT_TASK_KEY_PREFIX = `${SPS_MARKETPLACE_ASSISTANT_TASK_KEY}:`;

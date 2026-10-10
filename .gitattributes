@@ -1,0 +1,5 @@
+# Catalog manifests hash packaged bytes, so text inputs must be identical on every OS.
+packages/skills-catalog/catalog/** text=auto eol=lf
+packages/skills-catalog/generated/*.json text eol=lf
+packages/teams-catalog/catalog/** text=auto eol=lf
+packages/teams-catalog/generated/*.json text eol=lf

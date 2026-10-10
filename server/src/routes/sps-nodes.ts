@@ -1,7 +1,7 @@
 import { createHash, createPublicKey, verify } from "node:crypto";
 import { Router, type Request } from "express";
 import { and, desc, eq, inArray, isNull, lt } from "drizzle-orm";
-import type { Db } from "@paperclipai/db";
+import type { Db } from "../compat/paperclip/db.js";
 import {
   agents,
   projects,
@@ -20,7 +20,7 @@ import {
   spsNodeHeartbeats,
   spsNodeRunnerProfiles,
   spsNodes,
-} from "@paperclipai/db";
+} from "../compat/paperclip/db.js";
 import {
   bindSpsAgentNodeSchema,
   createSpsNodeSchema,
@@ -38,12 +38,17 @@ import {
   isAgentStatusAssignableToWork,
   upsertSpsHostProjectShareSchema,
   type SpsNodeRunnerProfile,
-} from "@paperclipai/shared";
+} from "../compat/paperclip/shared.js";
 import { badRequest, forbidden, notFound, unauthorized } from "../errors.js";
 import { validate } from "../middleware/validate.js";
 import { hasTrustedDesktopOwnerBootstrap } from "../middleware/desktop-local-access.js";
-import { accessService, logActivity } from "../services/index.js";
-import { assertBoard, assertCompanyAccess, hasSpsCoreHostAuthority } from "./authz.js";
+import {
+  accessService,
+  assertBoard,
+  assertCompanyAccess,
+  hasSpsCoreHostAuthority,
+  logActivity,
+} from "../compat/paperclip/control-plane.js";
 import { isSpsCoreBaselineModeEnabled } from "../ui-branding.js";
 
 function actorUserId(req: Request) {

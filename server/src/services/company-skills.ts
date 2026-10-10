@@ -88,6 +88,7 @@ import type {
   IssueDocument,
 } from "@paperclipai/shared";
 import { isUuidLike, normalizeAgentUrlKey, parseFrontmatterMarkdown } from "@paperclipai/shared";
+import { canonicalCatalogBytes } from "@paperclipai/skills-catalog/canonical-bytes";
 import { resolvePaperclipInstanceRoot } from "../home-paths.js";
 import { conflict, notFound, unprocessable } from "../errors.js";
 import { ghFetch, gitHubApiBase, resolveRawGitHubUrl } from "./github-fetch.js";
@@ -2192,7 +2193,14 @@ async function auditInstalledSkillBytes(skill: CompanySkill): Promise<CompanySki
     };
   }
 
-  const { files, findings } = await collectSkillFileBytes(skillDir);
+  const collected = await collectSkillFileBytes(skillDir);
+  const findings = collected.findings;
+  const files = skill.sourceType === "catalog"
+    ? collected.files.map((file) => {
+      const bytes = canonicalCatalogBytes(file.bytes);
+      return { ...file, bytes, sizeBytes: bytes.byteLength };
+    })
+    : collected.files;
   const actualPaths = files.map((file) => file.path).sort((left, right) => left.localeCompare(right));
   const expectedPaths = skill.fileInventory.map((entry) => normalizePortablePath(entry.path)).sort((left, right) => left.localeCompare(right));
   const installedHash = buildInventoryContentHash(files.map((file) => ({

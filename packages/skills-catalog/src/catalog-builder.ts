@@ -18,6 +18,7 @@ import type {
   CatalogSkillSource,
   CatalogTrustLevel,
 } from "./types.js";
+import { canonicalCatalogBytes } from "./canonical-bytes.js";
 
 const CATALOG_PACKAGE_NAME = "@paperclipai/skills-catalog";
 const CATALOG_SCHEMA_VERSION = 1;
@@ -590,8 +591,9 @@ async function collectReferencedSkillFiles(
       continue;
     }
 
-    const bytes = await fetchReferencedFileBytes(source, relativePath, prefix, errors);
-    if (!bytes) continue;
+    const fetchedBytes = await fetchReferencedFileBytes(source, relativePath, prefix, errors);
+    if (!fetchedBytes) continue;
+    const bytes = canonicalCatalogBytes(fetchedBytes);
     files.push({
       path: relativePath,
       kind: classifyCatalogFile(relativePath),
@@ -713,11 +715,11 @@ async function collectSkillFiles(
         errors.push(`${prefix}/${relativePath} exceeds ${MAX_CATALOG_FILE_BYTES} bytes.`);
       }
 
-      const contents = await fs.readFile(absolutePath);
+      const contents = canonicalCatalogBytes(await fs.readFile(absolutePath));
       files.push({
         path: relativePath,
         kind: classifyCatalogFile(relativePath),
-        sizeBytes: stat.size,
+        sizeBytes: contents.byteLength,
         sha256: sha256(contents),
       });
     }
