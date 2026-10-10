@@ -70,6 +70,10 @@ pnpm install --frozen-lockfile
 pnpm dev
 ```
 
+Commit dependency manifests and the matching `pnpm-lock.yaml` together. CI
+validates that exact lockfile with frozen installs; it must not generate a
+different dependency graph for tests or release packaging.
+
 The embedded development server normally listens on `http://localhost:3100`.
 SPS Desktop production builds launch Core as a private Owner Host runtime; the
 development URL is not the product access surface.
