@@ -245,7 +245,7 @@ import { environmentService } from "./environments.js";
 import { parseExecutionPolicyBootstrapEnv } from "./execution-policy-bootstrap.js";
 import { environmentRuntimeService } from "./environment-runtime.js";
 import { skillVersionSelectionMap } from "./runtime-skill-selections.js";
-import { applyPluginConversationRuntime } from "./plugin-conversation-runtime.js";
+import { applyPluginConversationRuntime, preparePluginConversationContext } from "./plugin-conversation-runtime.js";
 import { environmentRunOrchestrator } from "./environment-run-orchestrator.js";
 import { isUnsafeSessionWorkspaceCwd } from "./session-workspace-cwd.js";
 import {
@@ -12999,6 +12999,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
       let adapterResult: Awaited<ReturnType<typeof adapter.execute>>;
       try {
+        preparePluginConversationContext(context);
         adapterResult = await adapter.execute({
           runId: run.id,
           agent,

@@ -10,3 +10,9 @@ export function applyPluginConversationRuntime(config: RecordValue, context: Rec
     || !String(context.taskKey ?? "").startsWith(`plugin:${conversation.pluginKey}:session:`)) return config;
   return { ...config, promptTemplate: "{{context.spsPluginConversation.message}}" };
 }
+
+/** Resume adapters must not replace a plugin message with an issue wake delta. */
+export function preparePluginConversationContext(context: RecordValue): void {
+  const config = {};
+  if (applyPluginConversationRuntime(config, context) !== config) delete context.paperclipWake;
+}
