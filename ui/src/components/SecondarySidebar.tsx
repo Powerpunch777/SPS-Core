@@ -29,7 +29,7 @@ export function SecondarySidebar({
     <div
       data-secondary-sidebar=""
       className={cn(
-        "h-full w-60 shrink-0 overflow-y-auto border-r border-border bg-background",
+        "h-full w-60 shrink-0 overflow-y-auto border-r border-app-border bg-app-surface",
         className,
       )}
     >

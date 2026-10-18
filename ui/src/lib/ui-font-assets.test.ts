@@ -7,10 +7,10 @@ const uiRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..
 const fontDir = path.join(uiRoot, "public", "fonts");
 const cssPath = path.join(uiRoot, "src", "index.css");
 
-const fontFiles = ["InterVariable.woff2", "InterVariable-Italic.woff2"];
+const fontFiles = ["PretendardVariable.woff2", "InterVariable.woff2", "InterVariable-Italic.woff2"];
 
 describe("bundled UI font assets", () => {
-  it("ships the Inter variable font files used by the CSS", () => {
+  it("ships the variable font files used by the CSS", () => {
     const css = readFileSync(cssPath, "utf8");
 
     for (const fileName of fontFiles) {
@@ -18,10 +18,12 @@ describe("bundled UI font assets", () => {
       expect(existsSync(fontPath), `${fileName} should exist in ui/public/fonts`).toBe(true);
       expect(statSync(fontPath).isFile(), `${fileName} should be a file`).toBe(true);
       expect(readFileSync(fontPath).subarray(0, 4).toString("ascii")).toBe("wOF2");
-      expect(css).toContain(`url("../fonts/${fileName}")`);
+      expect(css).toContain(`url("/fonts/${fileName}")`);
     }
 
-    expect(css).toContain('--font-sans: "InterVariable"');
+    expect(css).toContain('--font-sans: "Pretendard Variable"');
+    const license = readFileSync(path.join(fontDir, "Pretendard-LICENSE.txt"), "utf8");
+    expect(license).toContain("SIL OPEN FONT LICENSE");
   });
 
   it("includes redistribution notice text for the bundled Inter files", () => {

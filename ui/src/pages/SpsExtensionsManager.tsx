@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { PluginRecord } from "../compat/paperclip/shared";
-import { CheckCircle2, Power, Puzzle, Settings, ShieldCheck, Store, Trash } from "lucide-react";
+import { CheckCircle2, ChevronDown, Power, Puzzle, Settings, ShieldCheck, Store, Trash } from "lucide-react";
 import { pluginsApi, type CompanyPluginActivation } from "@/api/plugins";
 import { PluginUninstallDialog, type PluginUninstallOptions } from "@/components/PluginUninstallDialog";
 import { Button } from "@/components/ui/button";
@@ -52,7 +52,6 @@ function isLegacyPaperclipExtension(plugin: PluginRecord): boolean {
 function ExtensionRow({
   plugin,
   activation,
-  builtIn = false,
   changing = false,
   uninstalling = false,
   onToggle,
@@ -60,13 +59,12 @@ function ExtensionRow({
 }: {
   plugin: PluginRecord;
   activation: CompanyPluginActivation | null;
-  builtIn?: boolean;
   changing?: boolean;
   uninstalling?: boolean;
   onToggle: () => void;
   onUninstall: () => void;
 }) {
-  const state = plugin.status === "ready" ? "Ready" : plugin.status;
+  const state = plugin.status === "ready" ? "Ready" : plugin.status.replaceAll("_", " ");
   const companyEnabled = activation?.enabled ?? false;
   const canChangeUse = plugin.status !== "upgrade_pending" && plugin.status !== "uninstalled";
   const useLabel = companyEnabled
@@ -75,29 +73,26 @@ function ExtensionRow({
       ? "Use in this Workspace"
       : "Start and use";
   return (
-    <div className="flex items-start justify-between gap-4 px-4 py-4">
-      <div className="min-w-0">
-        <div className="flex flex-wrap items-center gap-2">
-          <strong className="truncate">{extensionName(plugin)}</strong>
-          <Badge variant="outline">{builtIn ? "SPS built-in" : "Custom"}</Badge>
-          <Badge className={plugin.status === "ready" ? "bg-emerald-600 hover:bg-emerald-700" : undefined} variant={plugin.status === "ready" ? "default" : "secondary"}>
-            {state}
-          </Badge>
-          <Badge variant={companyEnabled ? "default" : "secondary"} className={companyEnabled ? "bg-blue-600 hover:bg-blue-700" : undefined}>
-            {companyEnabled ? "Enabled in this Workspace" : "Disabled in this Workspace"}
+    <div className="flex flex-col gap-3 px-3 py-3 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
+      <div className="min-w-0 flex-1 space-y-1">
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+          <strong className="break-words">{extensionName(plugin)}</strong>
+          <Badge variant="outline" className="font-normal">Host: {state}</Badge>
+          <Badge variant="secondary" className="font-normal">
+            Workspace: {companyEnabled ? "Enabled" : "Disabled"}
           </Badge>
         </div>
-        <p className="mt-1 text-sm text-muted-foreground">
+        <p className="text-sm text-muted-foreground">
           {plugin.manifestJson.description || "No description provided."}
         </p>
-        <p className="mt-1 text-xs text-muted-foreground">v{plugin.manifestJson.version ?? plugin.version}</p>
+        <p className="text-xs text-muted-foreground">v{plugin.manifestJson.version ?? plugin.version}</p>
         {plugin.status === "upgrade_pending" ? (
-          <p className="mt-2 text-sm text-amber-700 dark:text-amber-300">
+          <p className="text-sm text-amber-700 dark:text-amber-300">
             This update is stopped for Host review. Open Settings to inspect and approve it.
           </p>
         ) : null}
       </div>
-      <div className="flex shrink-0 items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2 sm:shrink-0">
         <Button
           variant={companyEnabled ? "outline" : "default"}
           size="sm"
@@ -115,13 +110,15 @@ function ExtensionRow({
         </Button>
         <Button
           variant="outline"
-          size="sm"
-          className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+          size="icon"
+          className="text-muted-foreground hover:text-destructive"
           disabled={!canChangeUse || uninstalling}
           onClick={onUninstall}
+          aria-label={`Uninstall ${extensionName(plugin)}`}
+          title="Uninstall"
         >
-          <Trash className="h-4 w-4" />
-          Uninstall
+          <Trash className="h-4 w-4" aria-hidden="true" />
+          <span className="sr-only">Uninstall</span>
         </Button>
       </div>
     </div>
@@ -216,14 +213,13 @@ export function SpsExtensionsManager() {
   if (companyPluginsQuery.isLoading) return <div className="p-4 text-sm text-muted-foreground">Loading Workspace extensions...</div>;
   if (companyPluginsQuery.error) return <div className="p-4 text-sm text-destructive">Failed to load Workspace extension settings.</div>;
 
-  const renderExtension = (plugin: PluginRecord, builtIn: boolean) => {
+  const renderExtension = (plugin: PluginRecord) => {
     const activation = activationByPluginId.get(plugin.id) ?? null;
     return (
       <ExtensionRow
         key={plugin.id}
         plugin={plugin}
         activation={activation}
-        builtIn={builtIn}
         changing={activationMutation.isPending && activationMutation.variables?.plugin.id === plugin.id}
         uninstalling={uninstallMutation.isPending && uninstallMutation.variables?.pluginId === plugin.id}
         onToggle={() => activationMutation.mutate({ plugin, enabled: !activation?.enabled })}
@@ -233,7 +229,7 @@ export function SpsExtensionsManager() {
   };
 
   const sectionTabs = (
-    <div className="flex w-fit gap-1 rounded-md border bg-muted/40 p-1" role="tablist" aria-label="Plugin sections">
+    <div className="flex w-fit gap-1 rounded-md border bg-muted/40 p-0.5" role="tablist" aria-label="Plugin sections">
       <Button type="button" size="sm" variant={activeSection === "installed" ? "secondary" : "ghost"} role="tab" aria-selected={activeSection === "installed"} onClick={() => setActiveSection("installed")}>Installed</Button>
       <Button type="button" size="sm" variant={activeSection === "marketplace" ? "secondary" : "ghost"} role="tab" aria-selected={activeSection === "marketplace"} onClick={() => setActiveSection("marketplace")}>Marketplace</Button>
     </div>
@@ -255,88 +251,79 @@ export function SpsExtensionsManager() {
   }
 
   return (
-    <main data-sps-surface-owner="core" className="max-w-6xl space-y-6">
-      <header className="flex flex-wrap items-end justify-between gap-4 border-b border-border pb-5">
-        <div className="max-w-3xl space-y-2">
-          <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-primary">
+    <main data-sps-surface-owner="core" className="max-w-6xl space-y-4">
+      <header className="flex flex-wrap items-center justify-between gap-3 border-b border-border pb-3">
+        <div className="space-y-1">
+          <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
             <Puzzle className="h-4 w-4" aria-hidden="true" />
-            Core Platform
+            Core
           </div>
-          <div>
-            <h1 className="text-2xl font-semibold tracking-tight">Plugins</h1>
-            <p className="mt-1 text-sm leading-6 text-muted-foreground">
-              Core controls package review and lifecycle. Each Workspace chooses which installed plugins contribute UI and behavior.
-            </p>
-          </div>
+          <h1 className="text-xl font-semibold">Plugins</h1>
         </div>
         {sectionTabs}
       </header>
 
-      <section className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-muted/40 px-4 py-3 text-sm">
-        <Badge variant="secondary">Core surface</Badge>
-        <p className="text-muted-foreground">
-          Installed plugins remain plugin-owned surfaces and appear only while they are active in this Workspace.
-        </p>
-      </section>
-
       {activeSection === "marketplace" ? (
         <>
-          <Card className="border-blue-500/20 bg-blue-500/[0.035]">
-            <CardContent className="flex flex-wrap items-center justify-between gap-4 py-4">
-              <div className="flex min-w-0 gap-3">
-                <ShieldCheck className="mt-0.5 h-5 w-5 shrink-0 text-blue-700 dark:text-blue-300" />
-                <div className="space-y-1 text-sm">
-                  <p className="font-medium">Host-controlled installation</p>
-                  <p className="text-muted-foreground">
-                    Marketplace search and Assistant recommendations never install code. The Host must stage, review, and apply an exact signed version.
-                  </p>
-                  {registryError ? <p role="alert" className="text-destructive">{registryError}</p> : null}
-                </div>
-              </div>
+          <section className="flex flex-col gap-3 border-b border-border pb-3 sm:flex-row sm:items-start sm:justify-between">
+            <details className="group min-w-0 text-sm">
+              <summary className="flex cursor-pointer list-none items-center gap-2 font-medium">
+                <ShieldCheck className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+                Host-controlled installation
+                <ChevronDown className="ml-auto h-4 w-4 shrink-0 text-muted-foreground transition-transform group-open:rotate-180" aria-hidden="true" />
+              </summary>
+              <p className="mt-2 max-w-3xl text-muted-foreground">
+                Marketplace search and Assistant recommendations never install code. The Host must stage, review, and apply an exact signed version.
+              </p>
+            </details>
+            <div className="flex flex-wrap items-center gap-3 sm:shrink-0">
               {getDesktopPluginRegistryBridge() ? (
                 <Button type="button" onClick={() => void openSecureInstallReview()} disabled={registryOpening}>
                   {registryOpening ? "Opening review..." : "Open secure install review"}
                 </Button>
               ) : (
-                <Badge variant="secondary">Host Desktop required to install</Badge>
+                <span className="text-sm text-muted-foreground">Host Desktop required to install</span>
               )}
-            </CardContent>
-          </Card>
+              {registryError ? <p role="alert" className="text-sm text-destructive">{registryError}</p> : null}
+            </div>
+          </section>
           <SpsMarketplacePanel companyId={selectedCompany.id} />
         </>
       ) : (
         <>
-      <Card className="border-blue-500/20 bg-blue-500/[0.035]">
-        <CardContent className="flex gap-3 py-4">
-          <ShieldCheck className="mt-0.5 h-5 w-5 shrink-0 text-blue-700 dark:text-blue-300" />
-          <div className="space-y-1 text-sm">
-            <p className="font-medium">Signed Registry only</p>
-            <p className="text-muted-foreground">
-              Package discovery, signature review, staging, and explicit enablement happen in SPS Desktop. Direct npm installation is intentionally not available here.
-            </p>
-          </div>
-        </CardContent>
-      </Card>
+      <details className="group text-sm">
+        <summary className="flex cursor-pointer list-none items-center gap-2 font-medium text-muted-foreground">
+          <ShieldCheck className="h-4 w-4" aria-hidden="true" />
+          Plugin lifecycle and installation
+          <ChevronDown className="ml-auto h-4 w-4 shrink-0 transition-transform group-open:rotate-180" aria-hidden="true" />
+        </summary>
+        <div className="mt-2 space-y-1 pl-6 text-muted-foreground">
+          <p>Installed plugins remain plugin-owned surfaces and appear only while they are active in this Workspace.</p>
+          <p>Core controls package review and lifecycle. Each Workspace chooses which installed plugins contribute UI and behavior.</p>
+          <p><strong className="font-medium text-foreground">Signed Registry only.</strong> Package discovery, signature review, staging, and explicit enablement happen in SPS Desktop. Direct npm installation is intentionally not available here.</p>
+          <p>Host-controlled installation: Marketplace search and Assistant recommendations never install code. The Host must stage, review, and apply an exact signed version.</p>
+        </div>
+      </details>
 
-      <section className="space-y-3">
+      <section className="space-y-2">
         <div className="flex items-center gap-2">
-          <CheckCircle2 className="h-5 w-5 text-muted-foreground" />
-          <h2 className="text-base font-semibold">Built-in SPS components</h2>
+          <CheckCircle2 className="h-4 w-4 text-muted-foreground" />
+          <h2 className="text-sm font-semibold">Built-in SPS components</h2>
         </div>
         {bundled.length ? (
-          <Card className="py-0"><div className="divide-y">{bundled.map((plugin) => renderExtension(plugin, true))}</div></Card>
+          <Card className="py-0"><div className="divide-y">{bundled.map((plugin) => renderExtension(plugin))}</div></Card>
         ) : (
           <Card className="bg-muted/30"><CardContent className="py-5 text-sm text-muted-foreground">SPS is starting its built-in components. Refresh this page in a moment.</CardContent></Card>
         )}
       </section>
 
-      <section className="space-y-3">
+      <section className="space-y-2">
         <div className="flex items-center gap-2">
-          <Store className="h-5 w-5 text-muted-foreground" />
-          <h2 className="text-base font-semibold">Registry extensions</h2>
+          <Store className="h-4 w-4 text-muted-foreground" />
+          <h2 className="text-sm font-semibold">Registry extensions</h2>
         </div>
         <Card className="py-0">
-          {custom.length ? <div className="divide-y">{custom.map((plugin) => renderExtension(plugin, false))}</div> : (
+          {custom.length ? <div className="divide-y">{custom.map((plugin) => renderExtension(plugin))}</div> : (
             <CardContent className="py-5 text-sm text-muted-foreground">
               No Registry extensions are installed. Open Marketplace, then use <strong>Open secure install review</strong> to stage a trusted release.
             </CardContent>

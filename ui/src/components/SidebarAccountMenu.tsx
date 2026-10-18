@@ -183,7 +183,7 @@ export function SidebarAccountMenu({
   }
 
   return (
-    <div className="border-t border-r border-border bg-background px-3 py-2">
+    <div className="border-t border-border/60 bg-app-surface px-3 py-2">
       <Popover open={open} onOpenChange={setOpen}>
         <PopoverTrigger asChild>
           <button
