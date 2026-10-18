@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 const packageRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -17,8 +17,13 @@ function runNpm(args: string[], options: Parameters<typeof execFileSync>[2]) {
 
 function runPnpm(args: string[], options: Parameters<typeof execFileSync>[2]) {
   const pnpmCli = process.env.npm_execpath;
-  if (pnpmCli && existsSync(pnpmCli)) return execFileSync(process.execPath, [pnpmCli, ...args], options);
-  return execFileSync(process.platform === "win32" ? "pnpm.cmd" : "pnpm", args, options);
+  if (pnpmCli && /(?:^|[\\/])pnpm(?:\.c?js)?$/i.test(pnpmCli) && existsSync(pnpmCli)) {
+    return execFileSync(process.execPath, [pnpmCli, ...args], options);
+  }
+  if (process.platform === "win32") {
+    return runNpm(["exec", "--yes", "--package=pnpm@11.9.0", "--", "pnpm", ...args], options);
+  }
+  return execFileSync("pnpm", args, options);
 }
 
 function readPackMetadata(packDestination: string) {
@@ -43,20 +48,23 @@ describe("skills catalog package artifacts", () => {
   }
 
   afterEach(async () => {
+    vi.unstubAllEnvs();
     await Promise.all(cleanup.map((entry) => rm(entry, { force: true, recursive: true })));
     cleanup.length = 0;
   });
 
-  it("packs dist manifest and catalog files for npm artifact consumers", () => {
-    let metadata = readPackMetadata(createPackDestination());
+  it("does not execute a non-pnpm npm_execpath as pnpm", () => {
+    vi.stubEnv("npm_execpath", fileURLToPath(import.meta.url));
+    const version = String(runPnpm(["--version"], { cwd: packageRoot, encoding: "utf8" })).trim();
+    expect(version).toMatch(/^\d+\.\d+\.\d+$/);
+  }, 30_000);
 
-    if (!metadata.files.some((entry) => entry.path === "dist/generated/catalog.json")) {
-      runPnpm(["--filter", "@paperclipai/skills-catalog", "build"], {
-        cwd: packageRoot,
-        stdio: "ignore",
-      });
-      metadata = readPackMetadata(createPackDestination());
-    }
+  it("packs dist manifest and catalog files for npm artifact consumers", () => {
+    runPnpm(["--filter", "@paperclipai/skills-catalog", "build"], {
+      cwd: packageRoot,
+      stdio: "pipe",
+    });
+    const metadata = readPackMetadata(createPackDestination());
 
     const paths = metadata.files.map((entry) => entry.path);
 
