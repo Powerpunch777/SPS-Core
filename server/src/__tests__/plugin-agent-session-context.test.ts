@@ -587,6 +587,9 @@ describePostgres("plugin agent session context", () => {
       .from(agentTaskSessions)
       .where(eq(agentTaskSessions.id, session.sessionId));
     expect(mockWakeup.mock.calls[0]?.[1]?.contextSnapshot?.taskKey).toBe(dbRow?.taskKey);
+    expect(mockWakeup.mock.calls[0]?.[1]?.contextSnapshot?.spsPluginConversation).toEqual({
+      pluginKey: "paperclip.session-context-test", sessionId: session.sessionId, message: "Hello Agent",
+    });
     expect(dbRow?.lastRunId).toBe(mockRunId);
     expect(dbRow?.lastError).toBeNull();
   });

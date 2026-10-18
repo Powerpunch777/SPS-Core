@@ -45,6 +45,12 @@ A bundled plugin may be enabled by default without becoming a Core invariant.
 
 ## Compatibility Boundary
 
+Plugin Agent sessions carry their message as generic conversation context.
+Their adapter invocation must not inherit the default issue/heartbeat work
+mandate. Agent model, approved instructions, workspace, secrets, and execution
+safety remain unchanged. Conversation UI and Lead/Worker semantics remain
+plugin-owned; ordinary issue runs retain their compatibility behavior.
+
 The current implementation is transitioning from Paperclip-derived internals.
 The following may remain temporarily:
 

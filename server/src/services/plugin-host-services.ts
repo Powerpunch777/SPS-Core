@@ -2999,6 +2999,7 @@ export function buildHostServices(
           payload: { prompt: params.prompt },
           contextSnapshot: {
             taskKey: session.taskKey,
+            spsPluginConversation: { pluginKey, sessionId: session.id, message: params.prompt },
             wakeSource: "automation",
             wakeTriggerDetail: "system",
             ...(session.contextJson ? session.contextJson : {}),
