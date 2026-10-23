@@ -2,6 +2,7 @@ export type { Db } from "@paperclipai/db";
 export {
   agents,
   agentTaskSessions,
+  heartbeatRuns,
   authSessions,
   authUsers,
   projects,

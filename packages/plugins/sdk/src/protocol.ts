@@ -1639,6 +1639,14 @@ export interface WorkerToHostMethods {
   ];
 
   // Agent Sessions
+  "agents.sessions.getRun": [
+    params: { sessionId: string; companyId: string; runId: string },
+    result: import("./types.js").AgentSessionRunState,
+  ];
+  "agents.sessions.cancel": [
+    params: { sessionId: string; companyId: string; runId: string },
+    result: import("./types.js").AgentSessionRunState,
+  ];
   "agents.sessions.create": [
     params: { agentId: string; companyId: string; taskKey?: string; reason?: string; context?: AgentSessionContext },
     result: { sessionId: string; agentId: string; companyId: string; status: "active" | "closed"; createdAt: string; context?: AgentSessionContext; lastRunId: string | null; lastError: string | null },

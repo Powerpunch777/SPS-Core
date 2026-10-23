@@ -72,6 +72,21 @@ of bypassing this gate.
 
 ## Change Rules
 
+Agent sessions separately expose `agents.sessions.getRun` (`agent.sessions.read`)
+and `agents.sessions.cancel` (`agent.sessions.cancel`). These require explicit
+Workspace, session and run IDs and verify the exact Plugin namespace, Agent and
+conversation context. They do not cancel all runs for an Agent or delete sessions.
+The safe read model includes technical status, cancellationRequested and
+termination (`not_applicable`, `pending`, `confirmed`), not output or credentials.
+Cancellation status alone is not a termination receipt. Remote commands keep a
+durable cancellation marker and lose their lease; completion is acknowledged by
+the signed Node. Local completion checks the recorded process scope. Unknown or
+disconnected execution remains pending. Repeating a pending request can resume a
+failed control-plane operation; it never retries the underlying AI task. A durable
+cancellation suppresses inherited automatic run-recovery retries.
+These additions remain unreleased pinned-source contracts. They do not change
+workflow ownership, undo file changes, or define child task cancellation policy.
+
 Neutral plugin execution exposes additive `sps.runs.list` (read capability) and
 `sps.runs.cancel` (separate cancellation capability). Both are Workspace- and
 Plugin-scoped; they do not control Agent sessions or grant access to another

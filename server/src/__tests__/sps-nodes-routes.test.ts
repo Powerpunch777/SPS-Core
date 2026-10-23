@@ -6,6 +6,9 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   activityLog,
   agents,
+  agentTaskSessions,
+  heartbeatRuns,
+  heartbeatRunEvents,
   companies,
   companyMemberships,
   createDb,
@@ -34,6 +37,7 @@ import {
 } from "./helpers/embedded-postgres.js";
 import { resolveSpsNodeExecutionTarget } from "../services/sps-node-execution.js";
 import { spsPluginExecutionService } from "../services/sps-plugin-execution.js";
+import { spsAgentSessionRunService } from "../services/sps-agent-session-runs.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -201,6 +205,9 @@ describeEmbeddedPostgres("SPS Node routes", () => {
     await db.delete(spsWorkspaceSourceNodeGrants);
     await db.delete(spsWorkspaceSources);
     await db.delete(spsNodes);
+    await db.delete(agentTaskSessions);
+    await db.delete(heartbeatRunEvents);
+    await db.delete(heartbeatRuns);
     await db.delete(agents);
     await db.delete(projects);
     await db.delete(companyMemberships);
@@ -903,6 +910,60 @@ describeEmbeddedPostgres("SPS Node routes", () => {
       }));
     expect(complete.status, JSON.stringify(complete.body)).toBe(200);
     expect(complete.body.status).toBe("succeeded");
+  });
+
+  it("keeps Agent-session cancellation pending until signed Node completion and rejects late output", async () => {
+    const fixture = await createCompanyFixture(db);
+    const app = await createApp(db, boardActor(fixture.company.id, fixture.ownerUserId, "owner"));
+    const node = createNodePayload();
+    const registered = await request(app).post(`/api/companies/${fixture.company.id}/sps-nodes`).send(node.payload);
+    await request(app).post(`/api/sps-nodes/${registered.body.id}/heartbeat`).send(createSignedHeartbeat(registered.body.id, node.privateKey));
+    await request(app).post(`/api/sps-nodes/${registered.body.id}/approve`).send({});
+    await request(app).put(`/api/sps-nodes/${registered.body.id}/agent-grants/${fixture.agent.id}`).send({});
+    await request(app).put(`/api/agents/${fixture.agent.id}/sps-node-binding`).send({ nodeId: registered.body.id });
+    const pluginKey = "sps.test-session";
+    const taskKey = `plugin:${pluginKey}:session:test`;
+    const session = await db.insert(agentTaskSessions).values({ companyId: fixture.company.id, agentId: fixture.agent.id, adapterType: "codex_local", taskKey }).returning().then(rows => rows[0]!);
+    const run = await db.insert(heartbeatRuns).values({ companyId: fixture.company.id, agentId: fixture.agent.id, status: "running",
+      contextSnapshot: { taskKey, spsPluginConversation: { pluginKey, sessionId: session.id } },
+    }).returning().then(rows => rows[0]!);
+    const command = await db.insert(spsNodeCommands).values({ companyId: fixture.company.id, nodeId: registered.body.id, agentId: fixture.agent.id,
+      heartbeatRunId: run.id, command: "codex", args: ["exec"], env: {}, status: "running", claimedAt: new Date(), startedAt: new Date(),
+    }).returning().then(rows => rows[0]!);
+    const scoped = spsAgentSessionRunService(db, pluginKey, async () => { throw new Error("Must not finalize before Node acknowledgement"); });
+    const params = { companyId: fixture.company.id, sessionId: session.id, runId: run.id };
+    expect(await scoped.cancel(params)).toMatchObject({ status: "running", termination: "pending" });
+    expect(await scoped.cancel(params)).toMatchObject({ termination: "pending" });
+    const leasePath = `/sps-nodes/${registered.body.id}/commands/${command.id}/lease`;
+    const lease = await request(app).post(`/api${leasePath}`).send(createSignedNodeRequest(registered.body.id, node.privateKey, leasePath, {}));
+    expect(lease.status, JSON.stringify(lease.body)).toBe(200);
+    expect(lease.body).toMatchObject({ active: false, status: "cancelling" });
+    expect(await scoped.getRun(params)).toMatchObject({ status: "running", termination: "pending" });
+    const completePath = `/sps-nodes/${registered.body.id}/commands/${command.id}/complete`;
+    const completion = { status: "failed", exitCode: 1, signal: "SIGTERM", timedOut: false, error: "Lease was cancelled" };
+    const complete = await request(app).post(`/api${completePath}`).send(createSignedNodeRequest(registered.body.id, node.privateKey, completePath, completion));
+    expect(complete.status, JSON.stringify(complete.body)).toBe(200);
+    expect(await scoped.getRun(params)).toMatchObject({ status: "cancelled", termination: "confirmed" });
+    const replay = await request(app).post(`/api${completePath}`).send(createSignedNodeRequest(registered.body.id, node.privateKey, completePath, completion));
+    expect(replay.status).toBe(200);
+    const eventPath = `/sps-nodes/${registered.body.id}/commands/${command.id}/events`;
+    const late = await request(app).post(`/api${eventPath}`).send(createSignedNodeRequest(registered.body.id, node.privateKey, eventPath, { sequence: 1, stream: "stdout", body: "late" }));
+    expect(late.status).toBe(403);
+    expect(await scoped.getRun(params)).toMatchObject({ termination: "confirmed" });
+    const target = await resolveSpsNodeExecutionTarget({ db, companyId: fixture.company.id, agentId: fixture.agent.id, adapterType: "codex_local", heartbeatRunId: run.id, projectId: null });
+    await expect(target!.runner.execute({ command: "codex", args: ["exec"], env: {}, cwd: "." })).rejects.toThrow("no longer accepting remote dispatch");
+    // Completion can arrive before the parent adapter observes it. A later
+    // cancellation must use that signed receipt, not wait forever for a replay.
+    const next = await db.insert(heartbeatRuns).values({ companyId: fixture.company.id, agentId: fixture.agent.id, status: "running",
+      contextSnapshot: { taskKey, spsPluginConversation: { pluginKey, sessionId: session.id } },
+    }).returning().then(rows => rows[0]!);
+    const nextCommand = await db.insert(spsNodeCommands).values({ companyId: fixture.company.id, nodeId: registered.body.id, agentId: fixture.agent.id,
+      heartbeatRunId: next.id, command: "codex", args: ["exec"], env: {}, status: "running", claimedAt: new Date(),
+    }).returning().then(rows => rows[0]!);
+    const nextCompletePath = `/sps-nodes/${registered.body.id}/commands/${nextCommand.id}/complete`;
+    expect((await request(app).post(`/api${nextCompletePath}`).send(createSignedNodeRequest(registered.body.id, node.privateKey, nextCompletePath, completion))).status).toBe(200);
+    const laterCancel = spsAgentSessionRunService(db, pluginKey, async runId => { await db.update(heartbeatRuns).set({ status: "cancelled" }).where(eq(heartbeatRuns.id, runId)); });
+    expect(await laterCancel.cancel({ ...params, runId: next.id })).toMatchObject({ cancellationRequested: true, termination: "confirmed" });
   });
 
   it("claims a plugin-owned run without requiring a Paperclip Agent and invalidates it when its grant is revoked", async () => {

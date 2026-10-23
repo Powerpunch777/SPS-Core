@@ -81,6 +81,7 @@ import { sanitizeRecord } from "../redaction.js";
 import { isCoreManagedMemoryLifecycleSubscription } from "./memory-providers.js";
 import { spsPluginExecutionService } from "./sps-plugin-execution.js";
 import { spsWorkspaceSurfaceService } from "./sps-workspace-surfaces.js";
+import { spsAgentSessionRunService } from "./sps-agent-session-runs.js";
 
 // ---------------------------------------------------------------------------
 // SSRF protection for plugin HTTP fetch
@@ -2837,6 +2838,16 @@ export function buildHostServices(
     },
 
     agentSessions: {
+      async getRun(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        return spsAgentSessionRunService(db, pluginKey, runId => heartbeat.cancelRun(runId)).getRun({ ...params, companyId });
+      },
+      async cancel(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        return spsAgentSessionRunService(db, pluginKey, runId => heartbeat.cancelRun(runId)).cancel({ ...params, companyId });
+      },
       async create(params) {
         const companyId = ensureCompanyId(params.companyId);
         await ensurePluginAvailableForCompany(companyId);
@@ -2962,7 +2973,7 @@ export function buildHostServices(
             and(
               eq(agentTaskSessionsTable.agentId, params.agentId),
               eq(agentTaskSessionsTable.companyId, companyId),
-              like(agentTaskSessionsTable.taskKey, `plugin:${pluginKey}:session:%`),
+              sql`starts_with(${agentTaskSessionsTable.taskKey}, ${`plugin:${pluginKey}:session:`})`,
             ),
           )
           .orderBy(desc(agentTaskSessionsTable.createdAt));
@@ -2996,7 +3007,7 @@ export function buildHostServices(
             and(
               eq(agentTaskSessionsTable.id, params.sessionId),
               eq(agentTaskSessionsTable.companyId, companyId),
-              like(agentTaskSessionsTable.taskKey, `plugin:${pluginKey}:session:%`),
+              sql`starts_with(${agentTaskSessionsTable.taskKey}, ${`plugin:${pluginKey}:session:`})`,
             ),
           )
           .then((rows) => rows[0] ?? null);
@@ -3026,7 +3037,7 @@ export function buildHostServices(
             and(
               eq(agentTaskSessionsTable.id, params.sessionId),
               eq(agentTaskSessionsTable.companyId, companyId),
-              like(agentTaskSessionsTable.taskKey, `plugin:${pluginKey}:session:%`),
+              sql`starts_with(${agentTaskSessionsTable.taskKey}, ${`plugin:${pluginKey}:session:`})`,
             ),
           );
 
@@ -3089,7 +3100,8 @@ export function buildHostServices(
                   and(
                     eq(agentTaskSessionsTable.id, params.sessionId),
                     eq(agentTaskSessionsTable.companyId, companyId),
-                    like(agentTaskSessionsTable.taskKey, `plugin:${pluginKey}:session:%`),
+                    sql`starts_with(${agentTaskSessionsTable.taskKey}, ${`plugin:${pluginKey}:session:`})`,
+                    eq(agentTaskSessionsTable.lastRunId, run.id),
                   ),
                 );
             } catch (error) {
@@ -3207,7 +3219,7 @@ export function buildHostServices(
             and(
               eq(agentTaskSessionsTable.id, params.sessionId),
               eq(agentTaskSessionsTable.companyId, companyId),
-              like(agentTaskSessionsTable.taskKey, `plugin:${pluginKey}:session:%`),
+              sql`starts_with(${agentTaskSessionsTable.taskKey}, ${`plugin:${pluginKey}:session:`})`,
             ),
           )
           .returning()

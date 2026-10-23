@@ -296,6 +296,8 @@ export interface HostServices {
 
   /** Provides `agents.sessions.create`, `agents.sessions.list`, `agents.sessions.sendMessage`, `agents.sessions.close`. */
   agentSessions: {
+    getRun(params: WorkerToHostMethods["agents.sessions.getRun"][0]): Promise<WorkerToHostMethods["agents.sessions.getRun"][1]>;
+    cancel(params: WorkerToHostMethods["agents.sessions.cancel"][0]): Promise<WorkerToHostMethods["agents.sessions.cancel"][1]>;
     create(params: WorkerToHostMethods["agents.sessions.create"][0]): Promise<WorkerToHostMethods["agents.sessions.create"][1]>;
     list(params: WorkerToHostMethods["agents.sessions.list"][0]): Promise<WorkerToHostMethods["agents.sessions.list"][1]>;
     sendMessage(params: WorkerToHostMethods["agents.sessions.sendMessage"][0]): Promise<WorkerToHostMethods["agents.sessions.sendMessage"][1]>;
@@ -522,6 +524,8 @@ const METHOD_CAPABILITY_MAP: Record<WorkerToHostMethodName, PluginCapability | n
   "agents.sessions.create": "agent.sessions.create",
   "agents.sessions.list": "agent.sessions.list",
   "agents.sessions.sendMessage": "agent.sessions.send",
+  "agents.sessions.getRun": "agent.sessions.read",
+  "agents.sessions.cancel": "agent.sessions.cancel",
   "agents.sessions.close": "agent.sessions.close",
 
   // Goals
@@ -1040,6 +1044,8 @@ export function createHostClientHandlers(
     "agents.sessions.sendMessage": gated("agents.sessions.sendMessage", async (params) => {
       return services.agentSessions.sendMessage(params);
     }),
+    "agents.sessions.getRun": gated("agents.sessions.getRun", async (params) => services.agentSessions.getRun(params)),
+    "agents.sessions.cancel": gated("agents.sessions.cancel", async (params) => services.agentSessions.cancel(params)),
     "agents.sessions.close": gated("agents.sessions.close", async (params) => {
       return services.agentSessions.close(params);
     }),

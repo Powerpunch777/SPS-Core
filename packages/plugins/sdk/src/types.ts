@@ -1859,6 +1859,15 @@ export interface AgentSessionSendResult {
  * Requires `agent.sessions.create` for create, `agent.sessions.list` for list,
  * `agent.sessions.send` for sendMessage, `agent.sessions.close` for close.
  */
+export interface AgentSessionRunState {
+  runId: string;
+  status: string;
+  cancellationRequested: boolean;
+  termination: "not_applicable" | "pending" | "confirmed";
+  errorCode: string | null;
+  error: string | null;
+}
+
 export interface PluginAgentSessionsClient {
   /** Create a new conversational session with an agent. Requires `agent.sessions.create`. */
   create(agentId: string, companyId: string, opts?: {
@@ -1869,6 +1878,11 @@ export interface PluginAgentSessionsClient {
 
   /** List active sessions for an agent owned by this plugin. Requires `agent.sessions.list`. */
   list(agentId: string, companyId: string): Promise<AgentSession[]>;
+
+  /** Read one owned session run. Requires `agent.sessions.read`. */
+  getRun(sessionId: string, companyId: string, runId: string): Promise<AgentSessionRunState>;
+  /** Request cancellation of this exact run, not the whole Agent or session. */
+  cancel(sessionId: string, companyId: string, runId: string): Promise<AgentSessionRunState>;
 
   /**
    * Send a message to a session and receive streaming events via the `onEvent` callback.

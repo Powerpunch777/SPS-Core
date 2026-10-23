@@ -152,6 +152,7 @@ import { buildPlanReviewContext } from "./plan-review-context.js";
 import { executionWorkspaceService, mergeExecutionWorkspaceConfig } from "./execution-workspaces.js";
 import { workspaceOperationService, type WorkspaceOperationRecorder } from "./workspace-operations.js";
 import { isProcessGroupAlive, terminateLocalService } from "./local-service-supervisor.js";
+import { hasSpsSessionCancellation, preserveSpsSessionCancellationContext } from "./sps-agent-session-runs.js";
 import {
   isSpsNodeExecutionAdapterType,
   resolveSpsNodeExecutionTarget,
@@ -8335,6 +8336,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     agent: typeof agents.$inferSelect,
     now: Date,
   ) {
+    if (hasSpsSessionCancellation(await getRun(run.id))) return null;
     const existingRetry = await db
       .select()
       .from(heartbeatRuns)
@@ -8959,6 +8961,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       delayMs?: number;
     },
   ) {
+    if (hasSpsSessionCancellation(await getRun(run.id))) {
+      return { outcome: "not_scheduled" as const, reason: "Agent session cancellation requested", errorCode: "cancelled" as const, issueId: null };
+    }
     const now = opts?.now ?? new Date();
     const retryReason = opts?.retryReason ?? BOUNDED_TRANSIENT_HEARTBEAT_RETRY_REASON;
     const wakeReason = opts?.wakeReason ?? BOUNDED_TRANSIENT_HEARTBEAT_RETRY_WAKE_REASON;
@@ -12151,7 +12156,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       await db
         .update(heartbeatRuns)
         .set({
-          contextSnapshot: context,
+          contextSnapshot: preserveSpsSessionCancellationContext(context),
           updatedAt: new Date(),
         })
         .where(eq(heartbeatRuns.id, run.id));
@@ -12303,7 +12308,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     await db
       .update(heartbeatRuns)
       .set({
-        contextSnapshot: context,
+        contextSnapshot: preserveSpsSessionCancellationContext(context),
         updatedAt: new Date(),
       })
       .where(eq(heartbeatRuns.id, run.id));
@@ -12512,7 +12517,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         .set({
           startedAt,
           sessionIdBefore: runtimeForAdapter.sessionDisplayId ?? runtimeForAdapter.sessionId,
-          contextSnapshot: context,
+          contextSnapshot: preserveSpsSessionCancellationContext(context),
           updatedAt: new Date(),
         })
         .where(eq(heartbeatRuns.id, run.id))
@@ -12724,7 +12729,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         await db
           .update(heartbeatRuns)
           .set({
-            contextSnapshot: context,
+            contextSnapshot: preserveSpsSessionCancellationContext(context),
             updatedAt: new Date(),
           })
           .where(eq(heartbeatRuns.id, run.id));
@@ -12999,6 +13004,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
       let adapterResult: Awaited<ReturnType<typeof adapter.execute>>;
       try {
+        if (hasSpsSessionCancellation(await getRun(run.id))) {
+          await cancelRunInternal(run.id);
+          await db.update(heartbeatRuns).set({ contextSnapshot: sql`coalesce(${heartbeatRuns.contextSnapshot}, '{}'::jsonb) || '{"spsSessionCancellationTermination":"confirmed"}'::jsonb` }).where(eq(heartbeatRuns.id, run.id));
+          return;
+        }
         preparePluginConversationContext(context);
         adapterResult = await adapter.execute({
           runId: run.id,
@@ -13018,7 +13028,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             await recordCurrentHeartbeatRunRuntimeProgress(run, progress, issueId);
           },
           onSpawn: async (meta) => {
-            await persistRunProcessMetadata(run.id, {
+            const spawned = await persistRunProcessMetadata(run.id, {
               pid: meta.pid,
               processGroupId:
                 "processGroupId" in meta && typeof meta.processGroupId === "number"
@@ -13026,6 +13036,12 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
                   : null,
               startedAt: meta.startedAt,
             });
+            if (hasSpsSessionCancellation(spawned)) {
+              await terminateHeartbeatRunProcess({ pid: meta.pid, processGroupId: spawned?.processGroupId });
+              if (!isProcessAlive(meta.pid) && !isProcessGroupAlive(spawned?.processGroupId ?? null)) {
+                await db.update(heartbeatRuns).set({ contextSnapshot: sql`coalesce(${heartbeatRuns.contextSnapshot}, '{}'::jsonb) || '{"spsSessionCancellationTermination":"confirmed"}'::jsonb` }).where(eq(heartbeatRuns.id, run.id));
+              }
+            }
           },
           authToken: authToken ?? undefined,
         });
@@ -13080,7 +13096,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         await db
           .update(heartbeatRuns)
           .set({
-            contextSnapshot: context,
+            contextSnapshot: preserveSpsSessionCancellationContext(context),
             updatedAt: new Date(),
           })
           .where(eq(heartbeatRuns.id, run.id));

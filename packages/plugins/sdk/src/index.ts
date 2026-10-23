@@ -312,6 +312,7 @@ export type {
   PluginAuthorizationDecisionResult,
   PluginAuthorizationAuditEntry,
   PluginAgentSessionsClient,
+  AgentSessionRunState,
   PluginPlatformClient,
   PluginPlatformThreadClient,
   PluginPlatformStoreClient,

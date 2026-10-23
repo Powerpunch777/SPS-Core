@@ -10,9 +10,11 @@ import {
   spsNodeCommands,
   spsNodeRunnerProfiles,
   spsNodes,
+  heartbeatRuns,
 } from "../compat/paperclip/db.js";
 import { spsNodeCapabilityForAdapter, spsNodeSupportsAdapter } from "../compat/paperclip/shared.js";
 import type { AdapterSpsNodeExecutionTarget } from "../compat/paperclip/adapter-runtime.js";
+import { hasSpsSessionCancellation } from "./sps-agent-session-runs.js";
 
 const NODE_ONLINE_WINDOW_MS = 2 * 60 * 1000;
 const COMMAND_RESULT_GRACE_MS = 90 * 1000;
@@ -239,7 +241,12 @@ export async function resolveSpsNodeExecutionTarget(input: {
           projectId: input.projectId,
           nodeId: node.id,
         });
-        const created = await input.db
+        const created = await input.db.transaction(async tx => {
+          if (input.heartbeatRunId) {
+            const parent = await tx.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, input.heartbeatRunId)).for("update").then(rows => rows[0]);
+            if (!parent || !["queued", "running"].includes(parent.status) || hasSpsSessionCancellation(parent)) throw new Error("Session run is no longer accepting remote dispatch");
+          }
+          return tx
           .insert(spsNodeCommands)
           .values({
             companyId: input.companyId,
@@ -258,6 +265,7 @@ export async function resolveSpsNodeExecutionTarget(input: {
           })
           .returning()
           .then((rows) => rows[0]!);
+        });
 
         let latestSequence = 0;
         let stdout = "";

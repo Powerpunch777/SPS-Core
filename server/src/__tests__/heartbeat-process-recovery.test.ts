@@ -556,6 +556,16 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     return { companyId, agentId, runId, wakeupRequestId, issueId };
   }
 
+  it("does not automatically retry an orphaned session with a durable cancellation request", async () => {
+    const { runId } = await seedRunFixture({ includeIssue: false, contextSnapshot: { spsSessionCancellationRequested: true, spsSessionCancellationTermination: "pending" } });
+    const service = heartbeatService(db);
+    await service.reapOrphanedRuns();
+    const retries = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.retryOfRunId, runId));
+    expect(retries).toHaveLength(0);
+    const original = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId)).then(rows => rows[0]!);
+    expect(original.contextSnapshot).toMatchObject({ spsSessionCancellationRequested: true, spsSessionCancellationTermination: "pending" });
+  });
+
   async function seedEnvironmentLeaseFixture(input: {
     companyId: string;
     runId: string;

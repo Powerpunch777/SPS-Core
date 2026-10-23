@@ -19,16 +19,18 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
 import { buildHostServices } from "../services/plugin-host-services.js";
+import { preserveSpsSessionCancellationContext } from "../services/sps-agent-session-runs.js";
 import { publishLiveEvent } from "../services/live-events.js";
 
 // Mock heartbeatService to avoid launching agent processes in this host-service test.
-const { mockWakeup } = vi.hoisted(() => ({ mockWakeup: vi.fn() }));
+const { mockWakeup, mockCancelRun } = vi.hoisted(() => ({ mockWakeup: vi.fn(), mockCancelRun: vi.fn() }));
 
 vi.mock("../services/heartbeat.js", () => {
   return {
     heartbeatService: vi.fn().mockImplementation(() => {
       return {
         wakeup: mockWakeup,
+        cancelRun: mockCancelRun,
       };
     }),
   };
@@ -99,6 +101,7 @@ describePostgres("plugin agent session context", () => {
 
   afterEach(async () => {
     mockWakeup.mockClear();
+    mockCancelRun.mockReset();
     for (const service of activeServices) {
       try {
         service.dispose();
@@ -173,6 +176,73 @@ describePostgres("plugin agent session context", () => {
     });
     return agentId;
   }
+
+  async function seedSessionRun(status = "running") {
+    const fixture = await seedCompanyAndPlugin();
+    const agentId = await seedAgent(fixture.companyId);
+    const session = await fixture.services.agentSessions.create({ agentId, companyId: fixture.companyId });
+    const stored = await db.select().from(agentTaskSessions).where(eq(agentTaskSessions.id, session.sessionId)).then(rows => rows[0]!);
+    const run = await db.insert(heartbeatRuns).values({ companyId: fixture.companyId, agentId, status,
+      contextSnapshot: { taskKey: stored.taskKey, spsPluginConversation: { pluginKey: fixture.pluginManifest.id, sessionId: session.sessionId } },
+    }).returning().then(rows => rows[0]!);
+    return { ...fixture, agentId, session, run, params: { companyId: fixture.companyId, sessionId: session.sessionId, runId: run.id } };
+  }
+
+  it("reads only the exact owned session run, without output, paths or adapter secrets", async () => {
+    const { services, params, run } = await seedSessionRun();
+    await db.update(heartbeatRuns).set({ stdoutExcerpt: "private output", resultJson: { apiKey: "secret" } }).where(eq(heartbeatRuns.id, run.id));
+    expect(await services.agentSessions.getRun(params)).toEqual({ runId: run.id, status: "running", cancellationRequested: false, termination: "not_applicable", errorCode: null, error: null });
+    for (const patch of [{ companyId: randomUUID() }, { sessionId: randomUUID() }, { runId: randomUUID() }, { runId: "invalid" }]) {
+      await expect(services.agentSessions.getRun({ ...params, ...patch })).rejects.toThrow();
+      await expect(services.agentSessions.cancel({ ...params, ...patch })).rejects.toThrow();
+    }
+    expect(mockCancelRun).not.toHaveBeenCalled();
+  });
+
+  it.each(["taskKey", "pluginKey", "sessionId", "agentId"])("rejects mismatched %s on a session run", async field => {
+    const { services, params, run } = await seedSessionRun();
+    const context = structuredClone(run.contextSnapshot!);
+    if (field === "taskKey") context.taskKey = "plugin:other:session:owned";
+    else if (field === "agentId") {
+      await db.update(heartbeatRuns).set({ agentId: await seedAgent(params.companyId) }).where(eq(heartbeatRuns.id, run.id));
+    } else (context.spsPluginConversation as Record<string, unknown>)[field] = "other";
+    await db.update(heartbeatRuns).set({ contextSnapshot: context }).where(eq(heartbeatRuns.id, run.id));
+    await expect(services.agentSessions.cancel(params)).rejects.toThrow("Session run not found");
+    expect(mockCancelRun).not.toHaveBeenCalled();
+  });
+
+  it("cancels queued runs once and keeps repeated cancellation idempotent", async () => {
+    const { services, params } = await seedSessionRun("queued");
+    mockCancelRun.mockImplementation(async runId => { await db.update(heartbeatRuns).set({ status: "cancelled", finishedAt: new Date(), errorCode: "cancelled" }).where(eq(heartbeatRuns.id, runId)); });
+    const results = await Promise.all([services.agentSessions.cancel(params), services.agentSessions.cancel(params)]);
+    expect(results.some(result => result.status === "cancelled" && result.termination === "confirmed")).toBe(true);
+    expect(await services.agentSessions.cancel(params)).toMatchObject({ termination: "confirmed" });
+    expect(mockCancelRun).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not equate a control-plane cancellation with proof of process exit", async () => {
+    const { services, params } = await seedSessionRun();
+    mockCancelRun.mockImplementation(async runId => { await db.update(heartbeatRuns).set({ status: "cancelled" }).where(eq(heartbeatRuns.id, runId)); });
+    expect(await services.agentSessions.cancel(params)).toMatchObject({ status: "cancelled", termination: "pending" });
+    expect(await services.agentSessions.getRun(params)).toMatchObject({ termination: "pending" });
+    await db.update(heartbeatRuns).set({ contextSnapshot: preserveSpsSessionCancellationContext({ taskKey: "stale" }) }).where(eq(heartbeatRuns.id, params.runId));
+    const preserved = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, params.runId)).then(rows => rows[0]!);
+    expect(preserved.contextSnapshot).toMatchObject({ spsSessionCancellationRequested: true, spsSessionCancellationTermination: "pending" });
+  });
+
+  it("preserves already-completed runs without a cancellation claim", async () => {
+    const { services, params } = await seedSessionRun("succeeded");
+    expect(await services.agentSessions.cancel(params)).toMatchObject({ status: "succeeded", cancellationRequested: false, termination: "not_applicable" });
+    expect(mockCancelRun).not.toHaveBeenCalled();
+  });
+  it("resumes a pending cancellation after a control-plane failure", async () => {
+    const { services, params } = await seedSessionRun("queued");
+    mockCancelRun.mockRejectedValueOnce(new Error("temporary cancellation failure"));
+    await expect(services.agentSessions.cancel(params)).rejects.toThrow("temporary");
+    mockCancelRun.mockImplementation(async runId => { await db.update(heartbeatRuns).set({ status: "cancelled" }).where(eq(heartbeatRuns.id, runId)); });
+    expect(await services.agentSessions.cancel(params)).toMatchObject({ status: "cancelled", termination: "confirmed" });
+    expect(mockCancelRun).toHaveBeenCalledTimes(2);
+  });
 
   it("creates, persists normalized context, and returns it; list returns same context", async () => {
     const { companyId, services } = await seedCompanyAndPlugin();

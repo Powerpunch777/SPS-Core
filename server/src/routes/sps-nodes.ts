@@ -4,6 +4,7 @@ import { and, desc, eq, inArray, isNull, lt, sql } from "drizzle-orm";
 import type { Db } from "../compat/paperclip/db.js";
 import {
   agents,
+  heartbeatRuns,
   projects,
   spsAgentNodeBindings,
   spsHostProjectShareNodeGrants,
@@ -48,8 +49,10 @@ import {
   assertCompanyAccess,
   hasSpsCoreHostAuthority,
   logActivity,
+  heartbeatService,
 } from "../compat/paperclip/control-plane.js";
 import { isSpsCoreBaselineModeEnabled } from "../ui-branding.js";
+import { hasSpsSessionCancellation } from "../services/sps-agent-session-runs.js";
 
 function actorUserId(req: Request) {
   return req.actor.type === "board" ? req.actor.userId ?? "local-board" : null;
@@ -1703,6 +1706,10 @@ export function spsNodeRoutes(db: Db) {
     if (command.status !== "claimed" && command.status !== "running") {
       return res.json({ active: false, status: command.status, error: command.error ?? null });
     }
+    const parent = command.heartbeatRunId ? await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, command.heartbeatRunId)).then(rows => rows[0] ?? null) : null;
+    if (command.heartbeatRunId && (!parent || !["queued", "running"].includes(parent.status) || hasSpsSessionCancellation(parent))) {
+      return res.json({ active: false, status: "cancelling", error: "Agent session cancellation requested" });
+    }
     if (!await commandHasCurrentAuthority(node, command)) {
       await failActiveNodeCommands({
         nodeId: node.id,
@@ -1744,16 +1751,16 @@ export function spsNodeRoutes(db: Db) {
     }
     const now = new Date();
     await db.transaction(async (tx) => {
+      const accepted = await tx.update(spsNodeCommands).set({ status: "running", lastEventSeq: event.sequence, updatedAt: now })
+        .where(and(eq(spsNodeCommands.id, command.id), inArray(spsNodeCommands.status, ["claimed", "running"]), eq(spsNodeCommands.lastEventSeq, event.sequence - 1)))
+        .returning({ id: spsNodeCommands.id });
+      if (!accepted.length) throw forbidden("SPS Node command stopped accepting output");
       await tx.insert(spsNodeCommandEvents).values({
         commandId: command.id,
         sequence: event.sequence,
         stream: event.stream,
         body: event.body,
       });
-      await tx
-        .update(spsNodeCommands)
-        .set({ status: "running", lastEventSeq: event.sequence, updatedAt: now })
-        .where(eq(spsNodeCommands.id, command.id));
     });
     res.status(204).end();
   });
@@ -1785,20 +1792,28 @@ export function spsNodeRoutes(db: Db) {
         .then((rows) => rows[0]!);
       return res.json(failed);
     }
-    const updated = await db
-      .update(spsNodeCommands)
-      .set({
-        status: completion.status,
-        exitCode: completion.exitCode,
-        signal: completion.signal ?? null,
-        timedOut: completion.timedOut ? 1 : 0,
-        error: completion.error ?? null,
-        finishedAt: new Date(),
-        updatedAt: new Date(),
-      })
-      .where(eq(spsNodeCommands.id, command.id))
-      .returning()
-      .then((rows) => rows[0]!);
+    const { updated, cancelled } = await db.transaction(async tx => {
+      const parent = command.heartbeatRunId ? await tx.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, command.heartbeatRunId)).for("update").then(rows => rows[0]) : null;
+      const updated = await tx.update(spsNodeCommands).set({
+          status: completion.status, exitCode: completion.exitCode, signal: completion.signal ?? null,
+          timedOut: completion.timedOut ? 1 : 0, error: completion.error ?? null, finishedAt: new Date(), updatedAt: new Date(),
+        }).where(and(eq(spsNodeCommands.id, command.id), inArray(spsNodeCommands.status, ["claimed", "running"])))
+        .returning().then(rows => rows[0] ?? null);
+      if (!updated) return { updated: command, cancelled: false };
+      if (parent) {
+        const receipts = { ...(parent.contextSnapshot?.spsNodeCompletionReceipts as Record<string, unknown> | undefined), [command.id]: true };
+        await tx.update(heartbeatRuns).set({ contextSnapshot: { ...parent.contextSnapshot, spsNodeCompletionReceipts: receipts } }).where(eq(heartbeatRuns.id, parent.id));
+        if (!hasSpsSessionCancellation(parent)) return { updated, cancelled: false };
+        const others = await tx.select({ id: spsNodeCommands.id }).from(spsNodeCommands).where(and(
+          eq(spsNodeCommands.heartbeatRunId, parent.id), inArray(spsNodeCommands.status, ["claimed", "running"]),
+        )).limit(1);
+        if (others.length) return { updated, cancelled: false };
+        await tx.update(heartbeatRuns).set({ contextSnapshot: sql`coalesce(${heartbeatRuns.contextSnapshot}, '{}'::jsonb) || '{"spsSessionCancellationTermination":"confirmed"}'::jsonb` }).where(eq(heartbeatRuns.id, parent.id));
+        return { updated, cancelled: true };
+      }
+      return { updated, cancelled: false };
+    });
+    if (cancelled && command.heartbeatRunId) await heartbeatService(db).cancelRun(command.heartbeatRunId);
     res.json(updated);
   });
 

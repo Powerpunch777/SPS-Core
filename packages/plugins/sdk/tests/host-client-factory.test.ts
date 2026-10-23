@@ -372,4 +372,18 @@ describe("createHostClientHandlers invocation company scope", () => {
     await expect(allowed["sps.runs.cancel"](params)).resolves.toMatchObject({ status: "cancelling" });
     expect(cancelRun).toHaveBeenCalledWith(params);
   });
+  it("gates exact Agent-session run reads and cancellation independently", async () => {
+    const getRun = vi.fn(async () => ({ runId: "run-a", status: "running" }));
+    const cancel = vi.fn(async () => ({ runId: "run-a", status: "running", termination: "pending" }));
+    const services = { agentSessions: { getRun, cancel } } as unknown as HostServices;
+    const params = { companyId: "company-a", sessionId: "session-a", runId: "run-a" };
+    const read = createHostClientHandlers({ pluginId: "sps.example", capabilities: ["agent.sessions.read"], services });
+    await expect(read["agents.sessions.getRun"](params)).resolves.toMatchObject({ runId: "run-a" });
+    await expect(read["agents.sessions.cancel"](params)).rejects.toBeInstanceOf(CapabilityDeniedError);
+    const allowed = createHostClientHandlers({ pluginId: "sps.example", capabilities: ["agent.sessions.cancel"], services });
+    await expect(allowed["agents.sessions.cancel"]({ ...params, companyId: "company-b" }, { invocationScope: { companyId: "company-a" } })).rejects.toBeInstanceOf(InvocationScopeDeniedError);
+    expect(cancel).not.toHaveBeenCalled();
+    await expect(allowed["agents.sessions.cancel"](params)).resolves.toMatchObject({ termination: "pending" });
+    expect(cancel).toHaveBeenCalledWith(params);
+  });
 });

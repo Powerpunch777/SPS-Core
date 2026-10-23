@@ -986,6 +986,8 @@ export const PLUGIN_CAPABILITIES = [
   "agent.sessions.create",
   "agent.sessions.list",
   "agent.sessions.send",
+  "agent.sessions.read",
+  "agent.sessions.cancel",
   "agent.sessions.close",
   "activity.log.write",
   "metrics.write",

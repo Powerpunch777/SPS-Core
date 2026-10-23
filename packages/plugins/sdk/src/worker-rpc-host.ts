@@ -1182,6 +1182,12 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
         },
 
         sessions: {
+          async getRun(sessionId: string, companyId: string, runId: string) {
+            return callHost("agents.sessions.getRun", { sessionId, companyId, runId });
+          },
+          async cancel(sessionId: string, companyId: string, runId: string) {
+            return callHost("agents.sessions.cancel", { sessionId, companyId, runId });
+          },
           async create(agentId: string, companyId: string, opts?: { taskKey?: string; reason?: string; context?: AgentSessionContext }) {
             return callHost("agents.sessions.create", {
               agentId,
