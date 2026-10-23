@@ -873,6 +873,12 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
         },
       },
       runs: {
+        async list() {
+          throw new Error("The in-memory plugin test harness does not provide SPS Node infrastructure");
+        },
+        async cancel() {
+          throw new Error("The in-memory plugin test harness does not provide SPS Node infrastructure");
+        },
         async dispatch() {
           throw new Error("The in-memory plugin test harness does not provide SPS Node infrastructure");
         },

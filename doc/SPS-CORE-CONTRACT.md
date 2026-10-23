@@ -72,6 +72,21 @@ of bypassing this gate.
 
 ## Change Rules
 
+Neutral plugin execution exposes additive `sps.runs.list` (read capability) and
+`sps.runs.cancel` (separate cancellation capability). Both are Workspace- and
+Plugin-scoped; they do not control Agent sessions or grant access to another
+plugin's executions. Lists are bounded, descending UUID pages, not chronological
+history. Existing get/events/artifact methods remain unchanged.
+
+Queued work may become `cancelled` immediately. Claimed/running work becomes
+`cancelling`; it becomes `cancelled` only when the signed Node reports completion.
+An offline Node leaves cancellation pending. Neither an HTTP acknowledgement nor
+a timer is proof of process exit. Node completion is application-level evidence;
+workflow success and reassignment remain plugin-owned. New capability declarations
+are rejected by older Hosts that do not support them; unchanged protocol major
+versions do not imply availability. These additions are development-only until a
+new compatible Core/SDK release is published.
+
 1. Do not delete compatibility behavior without data migration, plugin impact,
    rollback, and release evidence.
 2. Do not add a second direct dependency on a legacy domain when a compatibility

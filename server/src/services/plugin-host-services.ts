@@ -1208,6 +1208,16 @@ export function buildHostServices(
     },
 
     sps: {
+      async listRuns(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        return spsExecution.listRuns({ ...params, companyId });
+      },
+      async cancelRun(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        return spsExecution.cancelRun({ companyId, runId: params.runId });
+      },
       async listWorkspaceSources(params) {
         const companyId = ensureCompanyId(params.companyId);
         await ensurePluginAvailableForCompany(companyId);

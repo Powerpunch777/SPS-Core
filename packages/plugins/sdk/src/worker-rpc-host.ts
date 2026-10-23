@@ -434,6 +434,8 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
           case "sps.executionGrants.revoke":
           case "sps.runs.dispatch":
           case "sps.runs.get":
+          case "sps.runs.list":
+          case "sps.runs.cancel":
           case "sps.runs.listEvents":
           case "sps.artifacts.publish":
           case "sps.artifacts.list":
@@ -467,6 +469,12 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
         },
       },
       runs: {
+        async list(companyId: string, options = {}) {
+          return spsTransport.request("sps.runs.list", { ...options, companyId }) as Promise<Awaited<ReturnType<PluginSpsClient["runs"]["list"]>>>;
+        },
+        async cancel(companyId: string, runId: string) {
+          return spsTransport.request("sps.runs.cancel", { companyId, runId }) as Promise<Awaited<ReturnType<PluginSpsClient["runs"]["cancel"]>>>;
+        },
         async dispatch(input) {
           return spsTransport.request("sps.runs.dispatch", input) as Promise<ReturnType<PluginSpsClient["runs"]["dispatch"]> extends Promise<infer T> ? T : never>;
         },

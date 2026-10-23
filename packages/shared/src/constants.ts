@@ -1017,6 +1017,7 @@ export const PLUGIN_CAPABILITIES = [
   "local.folders",
   "sps.executionGrants.write",
   "sps.runs.dispatch",
+  "sps.runs.cancel",
   "sps.artifacts.write",
   // Agent Tools
   "agent.tools.register",

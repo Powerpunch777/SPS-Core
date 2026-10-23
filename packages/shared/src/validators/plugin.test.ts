@@ -1,10 +1,16 @@
 import { describe, expect, it } from "vitest";
 import { PLUGIN_CAPABILITIES } from "../constants.js";
-import { pluginJobDeclarationSchema, pluginManagedRoutineDeclarationSchema, pluginManifestV1Schema, pluginUiSlotDeclarationSchema } from "./plugin.js";
+import { pluginJobDeclarationSchema, pluginManagedRoutineDeclarationSchema, pluginManifestV1Schema, pluginUiSlotDeclarationSchema, pluginSpsCoreDeclarationSchema, SPS_CORE_PRIMITIVE_CAPABILITIES } from "./plugin.js";
 
 describe("plugin capability constants", () => {
   it("exposes each capability once", () => {
     expect(new Set(PLUGIN_CAPABILITIES).size).toBe(PLUGIN_CAPABILITIES.length);
+  });
+  it("requires an independent capability for neutral run cancellation", () => {
+    expect(pluginSpsCoreDeclarationSchema.parse({ contractVersion: "2.0", primitives: ["runs.observe", "runs.cancel"] }).primitives).toEqual(["runs.observe", "runs.cancel"]);
+    expect(SPS_CORE_PRIMITIVE_CAPABILITIES["runs.cancel"]).toEqual(["sps.runs.cancel"]);
+    expect(SPS_CORE_PRIMITIVE_CAPABILITIES["runs.observe"]).toEqual(["sps.runs.read"]);
+    expect(PLUGIN_CAPABILITIES).toContain("sps.runs.cancel");
   });
 });
 

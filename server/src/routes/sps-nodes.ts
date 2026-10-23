@@ -1,6 +1,6 @@
 import { createHash, createPublicKey, verify } from "node:crypto";
 import { Router, type Request } from "express";
-import { and, desc, eq, inArray, isNull, lt } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, lt, sql } from "drizzle-orm";
 import type { Db } from "../compat/paperclip/db.js";
 import {
   agents,
@@ -1940,16 +1940,19 @@ export function spsNodeRoutes(db: Db) {
     }
     const now = new Date();
     await db.transaction(async (tx) => {
+      const accepted = await tx.update(spsPluginNodeRuns)
+        .set({ status: "running", lastEventSeq: event.sequence, updatedAt: now })
+        .where(and(eq(spsPluginNodeRuns.id, run.id),
+          inArray(spsPluginNodeRuns.status, ["claimed", "running"]),
+          eq(spsPluginNodeRuns.lastEventSeq, event.sequence - 1)))
+        .returning({ id: spsPluginNodeRuns.id });
+      if (!accepted.length) throw forbidden("SPS plugin run no longer accepts this output");
       await tx.insert(spsPluginNodeRunEvents).values({
         runId: run.id,
         sequence: event.sequence,
         stream: event.stream,
         body: event.body,
       });
-      await tx
-        .update(spsPluginNodeRuns)
-        .set({ status: "running", lastEventSeq: event.sequence, updatedAt: now })
-        .where(eq(spsPluginNodeRuns.id, run.id));
     });
     res.status(204).end();
   });
@@ -1964,11 +1967,11 @@ export function spsNodeRoutes(db: Db) {
       .where(and(eq(spsPluginNodeRuns.id, req.params.runId as string), eq(spsPluginNodeRuns.nodeId, node.id)))
       .then((rows) => rows[0] ?? null);
     if (!run) throw notFound("SPS plugin run not found");
-    if (run.status === "succeeded" || run.status === "failed") return res.json(run);
-    if (run.status !== "claimed" && run.status !== "running") {
+    if (["succeeded", "failed", "cancelled"].includes(run.status)) return res.json(run);
+    if (!["claimed", "running", "cancelling"].includes(run.status)) {
       throw forbidden("SPS plugin run is not active");
     }
-    if (!await pluginRunHasCurrentAuthority(node, run)) {
+    if (run.status !== "cancelling" && !await pluginRunHasCurrentAuthority(node, run)) {
       const error = "SPS plugin execution access was revoked or changed while this run was active.";
       await failActivePluginNodeRuns({
         nodeId: node.id,
@@ -1986,18 +1989,20 @@ export function spsNodeRoutes(db: Db) {
     const updated = await db
       .update(spsPluginNodeRuns)
       .set({
-        status: completion.status,
+        // A cancellation accepted before completion wins, even when this request
+        // originally read a running row. Keep the signed Node's exit details.
+        status: sql`case when ${spsPluginNodeRuns.status} = 'cancelling' then 'cancelled' else ${completion.status} end`,
         exitCode: completion.exitCode,
         signal: completion.signal ?? null,
         timedOut: completion.timedOut ? 1 : 0,
-        error: completion.error ?? null,
+        error: sql`case when ${spsPluginNodeRuns.status} = 'cancelling' then ${spsPluginNodeRuns.error} else ${completion.error ?? null} end`,
         finishedAt: new Date(),
         updatedAt: new Date(),
       })
-      .where(eq(spsPluginNodeRuns.id, run.id))
+      .where(and(eq(spsPluginNodeRuns.id, run.id), inArray(spsPluginNodeRuns.status, ["claimed", "running", "cancelling"])))
       .returning()
-      .then((rows) => rows[0]!);
-    res.json(updated);
+      .then((rows) => rows[0] ?? null);
+    res.json(updated ?? await db.select().from(spsPluginNodeRuns).where(eq(spsPluginNodeRuns.id, run.id)).then(rows => rows[0]));
   });
 
   return router;

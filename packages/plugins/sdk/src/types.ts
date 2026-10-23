@@ -653,6 +653,8 @@ export type PluginSpsRuntimeOperation =
   | "sps.executionGrants.revoke"
   | "sps.runs.dispatch"
   | "sps.runs.get"
+  | "sps.runs.list"
+  | "sps.runs.cancel"
   | "sps.runs.listEvents"
   | "sps.artifacts.publish"
   | "sps.artifacts.list";
@@ -700,6 +702,8 @@ export interface PluginSpsClient {
       timeoutMs?: number | null;
     }): Promise<PluginSpsRun>;
     get(companyId: string, runId: string): Promise<PluginSpsRun>;
+    list(companyId: string, options?: { subjectKey?: string | null; status?: string | null; limit?: number | null; beforeId?: string | null }): Promise<PluginSpsRun[]>;
+    cancel(companyId: string, runId: string): Promise<PluginSpsRun>;
     listEvents(companyId: string, runId: string, options?: { afterSequence?: number | null }): Promise<PluginSpsRunEvent[]>;
   };
   artifacts: {

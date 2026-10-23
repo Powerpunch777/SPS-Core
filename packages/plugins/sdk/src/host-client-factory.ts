@@ -130,6 +130,8 @@ export interface HostServices {
     revokeExecutionGrant(params: WorkerToHostMethods["sps.executionGrants.revoke"][0]): Promise<WorkerToHostMethods["sps.executionGrants.revoke"][1]>;
     dispatchRun(params: WorkerToHostMethods["sps.runs.dispatch"][0]): Promise<WorkerToHostMethods["sps.runs.dispatch"][1]>;
     getRun(params: WorkerToHostMethods["sps.runs.get"][0]): Promise<WorkerToHostMethods["sps.runs.get"][1]>;
+    listRuns(params: WorkerToHostMethods["sps.runs.list"][0]): Promise<WorkerToHostMethods["sps.runs.list"][1]>;
+    cancelRun(params: WorkerToHostMethods["sps.runs.cancel"][0]): Promise<WorkerToHostMethods["sps.runs.cancel"][1]>;
     listRunEvents(params: WorkerToHostMethods["sps.runs.listEvents"][0]): Promise<WorkerToHostMethods["sps.runs.listEvents"][1]>;
     publishArtifact(params: WorkerToHostMethods["sps.artifacts.publish"][0]): Promise<WorkerToHostMethods["sps.artifacts.publish"][1]>;
     listArtifacts(params: WorkerToHostMethods["sps.artifacts.list"][0]): Promise<WorkerToHostMethods["sps.artifacts.list"][1]>;
@@ -410,6 +412,8 @@ const METHOD_CAPABILITY_MAP: Record<WorkerToHostMethodName, PluginCapability | n
   "sps.executionGrants.revoke": "sps.executionGrants.write",
   "sps.runs.dispatch": "sps.runs.dispatch",
   "sps.runs.get": "sps.runs.read",
+  "sps.runs.list": "sps.runs.read",
+  "sps.runs.cancel": "sps.runs.cancel",
   "sps.runs.listEvents": "sps.runs.read",
   "sps.artifacts.publish": "sps.artifacts.write",
   "sps.artifacts.list": "sps.artifacts.read",
@@ -745,6 +749,14 @@ export function createHostClientHandlers(
     "sps.runs.get": gated("sps.runs.get", async (params) => {
       if (!services.sps) throw new Error("This SPS host does not expose plugin runtime dispatch");
       return services.sps.getRun(params);
+    }),
+    "sps.runs.list": gated("sps.runs.list", async (params) => {
+      if (!services.sps) throw new Error("This SPS host does not expose run listing");
+      return services.sps.listRuns(params);
+    }),
+    "sps.runs.cancel": gated("sps.runs.cancel", async (params) => {
+      if (!services.sps) throw new Error("This SPS host does not expose run cancellation");
+      return services.sps.cancelRun(params);
     }),
     "sps.runs.listEvents": gated("sps.runs.listEvents", async (params) => {
       if (!services.sps) throw new Error("This SPS host does not expose plugin runtime dispatch");

@@ -880,6 +880,7 @@ export const SPS_CORE_PRIMITIVES = [
   "runtimes.list",
   "runtimes.dispatch",
   "runs.observe",
+  "runs.cancel",
   "artifacts.write",
   "secrets.use",
 ] as const;
@@ -890,6 +891,7 @@ export const SPS_CORE_PRIMITIVE_CAPABILITIES = {
   "runtimes.list": ["sps.runtimes.read"],
   "runtimes.dispatch": ["sps.runs.dispatch"],
   "runs.observe": ["sps.runs.read"],
+  "runs.cancel": ["sps.runs.cancel"],
   "artifacts.write": ["sps.artifacts.write"],
   "secrets.use": ["secrets.read-ref"],
 } as const satisfies Record<(typeof SPS_CORE_PRIMITIVES)[number], readonly (typeof PLUGIN_CAPABILITIES)[number][]>;

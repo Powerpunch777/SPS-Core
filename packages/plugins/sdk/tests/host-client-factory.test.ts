@@ -355,4 +355,21 @@ describe("createHostClientHandlers invocation company scope", () => {
     await expect(allowed["sps.artifacts.publish"](params)).resolves.toMatchObject({ id: "artifact-a" });
     expect(publishArtifact).toHaveBeenCalledWith(params);
   });
+
+  it("keeps run listing read-only and cancellation behind an explicit capability", async () => {
+    const listRuns = vi.fn(async () => []);
+    const cancelRun = vi.fn(async () => ({ id: "run-a", status: "cancelling" }));
+    const services = { sps: { listRuns, cancelRun } } as unknown as HostServices;
+    const readOnly = createHostClientHandlers({ pluginId: "sps.example", capabilities: ["sps.runs.read"], services });
+    const params = { companyId: "company-a", runId: "run-a" };
+    await expect(readOnly["sps.runs.list"]({ companyId: "company-a", limit: 50 })).resolves.toEqual([]);
+    await expect(readOnly["sps.runs.cancel"](params)).rejects.toBeInstanceOf(CapabilityDeniedError);
+    expect(cancelRun).not.toHaveBeenCalled();
+    const allowed = createHostClientHandlers({ pluginId: "sps.example", capabilities: ["sps.runs.cancel"], services });
+    await expect(allowed["sps.runs.cancel"]({ companyId: "company-b", runId: "run-a" },
+      { invocationScope: { companyId: "company-a" } })).rejects.toBeInstanceOf(InvocationScopeDeniedError);
+    expect(cancelRun).not.toHaveBeenCalled();
+    await expect(allowed["sps.runs.cancel"](params)).resolves.toMatchObject({ status: "cancelling" });
+    expect(cancelRun).toHaveBeenCalledWith(params);
+  });
 });

@@ -1044,6 +1044,14 @@ export interface WorkerToHostMethods {
     params: { companyId: string; runId: string },
     result: PluginSpsRun,
   ];
+  "sps.runs.list": [
+    params: { companyId: string; subjectKey?: string | null; status?: string | null; limit?: number | null; beforeId?: string | null },
+    result: PluginSpsRun[],
+  ];
+  "sps.runs.cancel": [
+    params: { companyId: string; runId: string },
+    result: PluginSpsRun,
+  ];
   "sps.runs.listEvents": [
     params: { companyId: string; runId: string; afterSequence?: number | null },
     result: PluginSpsRunEvent[],

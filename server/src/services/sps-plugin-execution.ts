@@ -1,4 +1,4 @@
-import { and, desc, eq, gt, isNull } from "drizzle-orm";
+import { and, desc, eq, gt, isNull, lt, inArray } from "drizzle-orm";
 import type { Db } from "../compat/paperclip/db.js";
 import {
   spsNodes,
@@ -410,6 +410,36 @@ export function spsPluginExecutionService(db: Db, pluginKey: string) {
         })
         .returning()
         .then((rows) => rows[0]!);
+      return publicRun(run);
+    },
+
+    async listRuns(input: { companyId: string; subjectKey?: string | null; status?: string | null; limit?: number | null; beforeId?: string | null }) {
+      const limit = input.limit ?? 50;
+      if (!Number.isInteger(limit) || limit < 1 || limit > 200) throw new Error("limit must be an integer between 1 and 200");
+      const statuses = ["queued", "claimed", "running", "cancelling", "cancelled", "succeeded", "failed"];
+      if (input.status != null && !statuses.includes(input.status)) throw new Error("Unknown SPS run status");
+      if (input.beforeId != null && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(input.beforeId)) throw new Error("beforeId must be a run UUID");
+      const rows = await db.select().from(spsPluginNodeRuns).where(and(
+        eq(spsPluginNodeRuns.companyId, input.companyId),
+        eq(spsPluginNodeRuns.pluginKey, normalizedPluginKey),
+        input.subjectKey != null ? eq(spsPluginNodeRuns.subjectKey, requiredString(input.subjectKey, "subjectKey", 240)) : undefined,
+        input.status != null ? eq(spsPluginNodeRuns.status, input.status) : undefined,
+        input.beforeId != null ? lt(spsPluginNodeRuns.id, input.beforeId) : undefined,
+      )).orderBy(desc(spsPluginNodeRuns.id)).limit(limit);
+      return rows.map(publicRun);
+    },
+
+    async cancelRun(input: { companyId: string; runId: string }) {
+      const scope = and(eq(spsPluginNodeRuns.id, input.runId), eq(spsPluginNodeRuns.companyId, input.companyId),
+        eq(spsPluginNodeRuns.pluginKey, normalizedPluginKey));
+      // CAS updates prevent a queued cancellation from racing a successful claim.
+      const now = new Date();
+      await db.update(spsPluginNodeRuns).set({ status: "cancelled", error: "Cancelled before dispatch.", finishedAt: now, updatedAt: now })
+        .where(and(scope, eq(spsPluginNodeRuns.status, "queued")));
+      await db.update(spsPluginNodeRuns).set({ status: "cancelling", error: "Cancellation requested by the owning plugin.", updatedAt: now })
+        .where(and(scope, inArray(spsPluginNodeRuns.status, ["claimed", "running"])));
+      const run = await db.select().from(spsPluginNodeRuns).where(scope).then(rows => rows[0] ?? null);
+      if (!run) throw new Error("SPS plugin run was not found");
       return publicRun(run);
     },
 
