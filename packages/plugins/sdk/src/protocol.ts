@@ -77,6 +77,10 @@ import type {
   PluginAuthorizationPolicySummary,
   PluginMemoryLifecyclePublishInput,
   PluginSpsArtifact,
+  PluginSpsExecution,
+  PluginSpsExecutionCursor,
+  PluginSpsExecutionLane,
+  PluginSpsExecutionPage,
   PluginSpsExecutionGrant,
   PluginSpsRun,
   PluginSpsRunEvent,
@@ -1003,6 +1007,14 @@ export interface WorkerToHostMethods {
   ];
 
   // Workflow-neutral SPS infrastructure
+  "sps.executions.list": [
+    params: { companyId: string; lane?: PluginSpsExecutionLane; limit?: number; before?: PluginSpsExecutionCursor },
+    result: PluginSpsExecutionPage,
+  ];
+  "sps.executions.get": [
+    params: { companyId: string; lane: PluginSpsExecutionLane; runId: string },
+    result: PluginSpsExecution | null,
+  ];
   "sps.workspaceSources.list": [
     params: { companyId: string },
     result: PluginSpsWorkspaceSource[],

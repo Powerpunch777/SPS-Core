@@ -123,6 +123,15 @@ export interface HostServices {
 
   /** Provides workflow-neutral Host Sources, Node runtimes, and plugin runs. */
   sps?: {
+    listExecutions(
+      companyId: string,
+      options?: Omit<WorkerToHostMethods["sps.executions.list"][0], "companyId">,
+    ): Promise<WorkerToHostMethods["sps.executions.list"][1]>;
+    getExecution(
+      companyId: string,
+      lane: WorkerToHostMethods["sps.executions.get"][0]["lane"],
+      runId: string,
+    ): Promise<WorkerToHostMethods["sps.executions.get"][1]>;
     listWorkspaceSources(params: WorkerToHostMethods["sps.workspaceSources.list"][0]): Promise<WorkerToHostMethods["sps.workspaceSources.list"][1]>;
     listRuntimes(params: WorkerToHostMethods["sps.runtimes.list"][0]): Promise<WorkerToHostMethods["sps.runtimes.list"][1]>;
     listExecutionGrants(params: WorkerToHostMethods["sps.executionGrants.list"][0]): Promise<WorkerToHostMethods["sps.executionGrants.list"][1]>;
@@ -407,6 +416,8 @@ const METHOD_CAPABILITY_MAP: Record<WorkerToHostMethodName, PluginCapability | n
   "localFolders.deleteFile": "local.folders",
 
   // Workflow-neutral SPS infrastructure
+  "sps.executions.list": "sps.executions.read",
+  "sps.executions.get": "sps.executions.read",
   "sps.workspaceSources.list": "sps.workspaceSources.read",
   "sps.runtimes.list": "sps.runtimes.read",
   "sps.executionGrants.list": "sps.executionGrants.read",
@@ -726,6 +737,24 @@ export function createHostClientHandlers(
       return services.localFolders.deleteFile(params);
     }),
 
+    "sps.executions.list": gated("sps.executions.list", async (params) => {
+      if (!services.sps) throw new Error("This SPS host does not expose execution history");
+      if (!readNonEmptyString(params.companyId)) throw new TypeError("SPS execution history requires a non-empty companyId");
+      const options = {
+        ...(params.lane === undefined ? {} : { lane: params.lane }),
+        ...(params.limit === undefined ? {} : { limit: params.limit }),
+        ...(params.before === undefined ? {} : { before: params.before }),
+      };
+      return services.sps.listExecutions(
+        params.companyId,
+        Object.keys(options).length > 0 ? options : undefined,
+      );
+    }),
+    "sps.executions.get": gated("sps.executions.get", async (params) => {
+      if (!services.sps) throw new Error("This SPS host does not expose execution history");
+      if (!readNonEmptyString(params.companyId)) throw new TypeError("SPS execution history requires a non-empty companyId");
+      return services.sps.getExecution(params.companyId, params.lane, params.runId);
+    }),
     "sps.workspaceSources.list": gated("sps.workspaceSources.list", async (params) => {
       if (!services.sps) throw new Error("This SPS host does not expose workflow-neutral Workspace Sources");
       return services.sps.listWorkspaceSources(params);

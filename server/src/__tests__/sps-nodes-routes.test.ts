@@ -1,5 +1,5 @@
 import { createHash, generateKeyPairSync, randomBytes, randomUUID, sign } from "node:crypto";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import express from "express";
 import request from "supertest";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
@@ -38,6 +38,8 @@ import {
 import { resolveSpsNodeExecutionTarget } from "../services/sps-node-execution.js";
 import { spsPluginExecutionService } from "../services/sps-plugin-execution.js";
 import { spsAgentSessionRunService } from "../services/sps-agent-session-runs.js";
+import { spsExecutionHistoryService } from "../services/sps-execution-history.js";
+import { buildSpsUsageEvidence } from "../services/sps-execution-observation.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -1120,6 +1122,60 @@ describeEmbeddedPostgres("SPS Node routes", () => {
     await request(app).post(`/api${raceCompletePath}`).send(createSignedNodeRequest(registered.body.id, node.privateKey, raceCompletePath,
       { status: "succeeded", exitCode: 0, timedOut: false })).expect(200);
     expect((await service.getRun({ companyId: fixture.company.id, runId: racing.id })).status).toBe("cancelled");
+  });
+
+  it("paginates both execution lanes at millisecond precision and preserves own-plugin historical scope", async () => {
+    const fixture = await createCompanyFixture(db);
+    const app = await createApp(db, boardActor(fixture.company.id, fixture.ownerUserId, "owner"));
+    const node = createNodePayload();
+    const registered = await request(app).post(`/api/companies/${fixture.company.id}/sps-nodes`).send(node.payload).expect(201);
+    await request(app).post(`/api/sps-nodes/${registered.body.id}/heartbeat`).send(createSignedHeartbeat(registered.body.id, node.privateKey)).expect(200);
+    await request(app).post(`/api/sps-nodes/${registered.body.id}/approve`).send({}).expect(200);
+    const runner = await db.select().from(spsNodeRunnerProfiles).where(eq(spsNodeRunnerProfiles.nodeId, registered.body.id)).then(rows => rows.find(row => row.kind === "codex_cli")!);
+    const pluginKey = "sps.history_test";
+    const execution = spsPluginExecutionService(db, pluginKey);
+    const grant = await execution.upsertExecutionGrant({ companyId: fixture.company.id, subjectKey: "test", nodeId: registered.body.id, runnerProfileId: runner.id });
+    const remote = await execution.dispatchRun({ companyId: fixture.company.id, executionGrantId: grant.id, args: ["secret argument"], env: { TOKEN: "secret value" }, stdin: "secret prompt" });
+    const sessionId = randomUUID();
+    const context = { taskKey: `plugin:${pluginKey}:session:history`, spsPluginConversation: { pluginKey, sessionId, message: "secret prompt" }, spsExecutionRuntime: { adapterType: "codex_local" } };
+    const insertRun = (id: string, contextSnapshot = context) => db.insert(heartbeatRuns).values({ id, companyId: fixture.company.id, agentId: fixture.agent.id, invocationSource: "on_demand", status: "succeeded", contextSnapshot,
+      usageJson: { model: "gpt-6-luna", spsUsageEvidence: buildSpsUsageEvidence({ usage: { inputTokens: 12, outputTokens: 4 }, usageBasis: "per_run", billingType: "subscription_included" }) } });
+    await insertRun(remote.id); // A tie across the two independent primary-key spaces.
+    const secondId = randomUUID();
+    await insertRun(secondId);
+    const sameMillisecond = "2026-10-22T02:03:04.123";
+    await db.update(heartbeatRuns).set({ createdAt: sql`${sameMillisecond + "901Z"}::timestamptz` });
+    await db.update(spsPluginNodeRuns).set({ createdAt: sql`${sameMillisecond + "001Z"}::timestamptz` });
+    await insertRun(randomUUID(), { ...context, spsPluginConversation: { ...context.spsPluginConversation, pluginKey: "sps.other" } });
+    await insertRun(randomUUID(), { ...context, taskKey: "plugin:sps.historyXtest:session:not-owned" });
+    await insertRun(randomUUID(), { ...context, spsPluginConversation: { ...context.spsPluginConversation, sessionId: "invalid" } });
+    const history = spsExecutionHistoryService(db, pluginKey);
+    const all = await history.list(fixture.company.id);
+    expect(all.items).toHaveLength(3);
+    expect(all.nextCursor).toBeNull();
+    expect(all.items.map(item => item.sessionId).filter(Boolean)).toEqual([sessionId, sessionId]);
+    expect(all.items.filter(item => item.lane === "agent_session").every(item => item.usage.inputTokens.value === 12)).toBe(true);
+    expect(JSON.stringify(all)).not.toContain("secret");
+    const pages = [];
+    let before;
+    do {
+      const page = await history.list(fixture.company.id, { limit: 1, before });
+      pages.push(...page.items); before = page.nextCursor ?? undefined;
+    } while (before && pages.length < 6);
+    expect(pages).toEqual(all.items);
+    expect(new Set(pages.map(item => `${item.lane}:${item.runId}`)).size).toBe(3);
+    expect((await history.list(fixture.company.id, { lane: "node" })).items).toHaveLength(1);
+    expect((await history.list(fixture.company.id, { lane: "agent_session" })).items).toHaveLength(2);
+    expect(await history.get(fixture.company.id, "agent_session", remote.id)).toMatchObject({ sessionId }); // No live session row required.
+    expect(await history.get(randomUUID(), "node", remote.id)).toBeNull();
+    expect(await spsExecutionHistoryService(db, "other").get(fixture.company.id, "agent_session", remote.id)).toBeNull();
+    expect((await spsExecutionHistoryService(db, "other").list(fixture.company.id)).items).toEqual([]);
+    for (const limit of [0, -1, 101, 1.5, NaN, Infinity]) await expect(history.list(fixture.company.id, { limit })).rejects.toThrow("limit");
+    await expect(history.list(fixture.company.id, { lane: "invalid" as never })).rejects.toThrow("lane");
+    for (const cursor of [{ createdAt: "bad", runId: remote.id, lane: "node" }, { ...all.items[0], extra: true }, { createdAt: "2026-10-22T02:03:04Z", runId: remote.id, lane: "node" }]) {
+      await expect(history.list(fixture.company.id, { before: cursor as never })).rejects.toThrow("cursor");
+    }
+    await expect(history.get(fixture.company.id, "node", "bad")).rejects.toThrow("UUID");
   });
 
   it("exposes only safe Source metadata to a plugin while dispatching through its own execution grant", async () => {

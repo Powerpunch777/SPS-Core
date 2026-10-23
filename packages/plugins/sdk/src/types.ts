@@ -641,11 +641,55 @@ export interface PluginSpsArtifact {
   updatedAt: string;
 }
 
-/**
- * The finite Worker-to-Host operation set that forms SPS's public Runtime
- * transport contract. It intentionally excludes general plugin RPC methods.
- */
+export type PluginSpsExecutionLane = "node" | "agent_session";
+export interface PluginSpsUsageMetric {
+  value: number | null;
+  provenance: "reported" | "estimated" | "unavailable";
+}
+export interface PluginSpsUsageEvidence {
+  inputTokens: PluginSpsUsageMetric;
+  cachedInputTokens: PluginSpsUsageMetric;
+  outputTokens: PluginSpsUsageMetric;
+  costUsd: PluginSpsUsageMetric;
+  currency: "USD" | null;
+  billingType: "metered_api" | "subscription_included" | "subscription_overage" | "credits" | "fixed" | "unknown";
+  costBasis: "incremental_api" | "subscription_reference" | "unknown";
+}
+export interface PluginSpsExecutionCursor {
+  createdAt: string;
+  runId: string;
+  lane: PluginSpsExecutionLane;
+}
+/** Safe technical metadata. Reported usage means adapter-reported, not a bill. */
+export interface PluginSpsExecution {
+  lane: PluginSpsExecutionLane;
+  runId: string;
+  companyId: string;
+  pluginKey: string;
+  agentId: string | null;
+  sessionId: string | null;
+  subjectKey: string | null;
+  runtime: { kind: string | null; model: string | null; modelSource: "reported" | "unavailable" };
+  status: string;
+  phase: "queued" | "active" | "stopping" | "succeeded" | "failed" | "cancelled" | "interrupted" | "unknown";
+  cancellationRequested: boolean;
+  termination: "not_applicable" | "pending" | "confirmed";
+  failure: { category: "authorization" | "configuration" | "provider_limit" | "timeout" | "cancelled" | "execution" | "unknown"; code: string | null; retrySafety: "requires_review" } | null;
+  createdAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  elapsedMs: number | null;
+  usage: PluginSpsUsageEvidence;
+}
+export interface PluginSpsExecutionPage {
+  items: PluginSpsExecution[];
+  nextCursor: PluginSpsExecutionCursor | null;
+}
+
+/** Finite SPS Runtime operations, excluding general plugin RPC methods. */
 export type PluginSpsRuntimeOperation =
+  | "sps.executions.list"
+  | "sps.executions.get"
   | "sps.workspaceSources.list"
   | "sps.runtimes.list"
   | "sps.executionGrants.list"
@@ -675,6 +719,10 @@ export interface PluginSpsRuntimeTransport {
  * the calling plugin; Core does not interpret it as an Agent, Task, or role.
  */
 export interface PluginSpsClient {
+  executions: {
+    list(companyId: string, options?: { lane?: PluginSpsExecutionLane; limit?: number; before?: PluginSpsExecutionCursor }): Promise<PluginSpsExecutionPage>;
+    get(companyId: string, lane: PluginSpsExecutionLane, runId: string): Promise<PluginSpsExecution | null>;
+  };
   workspaceSources: {
     list(companyId: string): Promise<PluginSpsWorkspaceSource[]>;
   };
@@ -1866,6 +1914,8 @@ export interface AgentSessionRunState {
   termination: "not_applicable" | "pending" | "confirmed";
   errorCode: string | null;
   error: string | null;
+  /** Additive metadata; absent on older development Hosts. */
+  execution?: PluginSpsExecution;
 }
 
 export interface PluginAgentSessionsClient {

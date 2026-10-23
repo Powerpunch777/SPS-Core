@@ -82,6 +82,7 @@ import { isCoreManagedMemoryLifecycleSubscription } from "./memory-providers.js"
 import { spsPluginExecutionService } from "./sps-plugin-execution.js";
 import { spsWorkspaceSurfaceService } from "./sps-workspace-surfaces.js";
 import { spsAgentSessionRunService } from "./sps-agent-session-runs.js";
+import { spsExecutionHistoryService } from "./sps-execution-history.js";
 
 // ---------------------------------------------------------------------------
 // SSRF protection for plugin HTTP fetch
@@ -562,6 +563,7 @@ export function buildHostServices(
     manifest: options.manifest,
   });
   const spsExecution = spsPluginExecutionService(db, pluginKey);
+  const executionHistory = spsExecutionHistoryService(db, pluginKey);
   const workspaceSurfaces = spsWorkspaceSurfaceService(db);
   const heartbeat = heartbeatService(db, {
     pluginWorkerManager: options.pluginWorkerManager,
@@ -1209,6 +1211,16 @@ export function buildHostServices(
     },
 
     sps: {
+      async listExecutions(companyIdInput, options) {
+        const companyId = ensureCompanyId(companyIdInput);
+        await ensurePluginAvailableForCompany(companyId);
+        return executionHistory.list(companyId, options);
+      },
+      async getExecution(companyIdInput, lane, runId) {
+        const companyId = ensureCompanyId(companyIdInput);
+        await ensurePluginAvailableForCompany(companyId);
+        return executionHistory.get(companyId, lane, runId);
+      },
       async listRuns(params) {
         const companyId = ensureCompanyId(params.companyId);
         await ensurePluginAvailableForCompany(companyId);

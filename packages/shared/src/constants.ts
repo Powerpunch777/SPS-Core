@@ -942,6 +942,7 @@ export const PLUGIN_CAPABILITIES = [
   "sps.workspaceSources.read",
   "sps.runtimes.read",
   "sps.executionGrants.read",
+  "sps.executions.read",
   "sps.runs.read",
   "sps.artifacts.read",
   "issues.read",

@@ -427,6 +427,8 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
     const spsTransport: PluginSpsRuntimeTransport = Object.freeze({
       request(operation: PluginSpsRuntimeOperation, input: Record<string, unknown>): Promise<unknown> {
         switch (operation) {
+          case "sps.executions.list":
+          case "sps.executions.get":
           case "sps.workspaceSources.list":
           case "sps.runtimes.list":
           case "sps.executionGrants.list":
@@ -447,6 +449,14 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
     });
 
     const sps: PluginSpsClient = {
+      executions: {
+        async list(companyId, options = {}) {
+          return spsTransport.request("sps.executions.list", { ...options, companyId }) as Promise<Awaited<ReturnType<PluginSpsClient["executions"]["list"]>>>;
+        },
+        async get(companyId, lane, runId) {
+          return spsTransport.request("sps.executions.get", { companyId, lane, runId }) as Promise<Awaited<ReturnType<PluginSpsClient["executions"]["get"]>>>;
+        },
+      },
       workspaceSources: {
         async list(companyId: string) {
           return spsTransport.request("sps.workspaceSources.list", { companyId }) as Promise<ReturnType<PluginSpsClient["workspaceSources"]["list"]> extends Promise<infer T> ? T : never>;

@@ -73,6 +73,20 @@ describe("createTestHarness action context", () => {
   });
 });
 
+describe("createTestHarness SPS execution history", () => {
+  it("exposes the client methods but rejects calls without Host infrastructure", async () => {
+    const harness = createTestHarness({ manifest });
+    await expect(harness.ctx.sps.executions.list("company-1")).rejects.toThrow(
+      "The in-memory plugin test harness does not provide SPS Node infrastructure",
+    );
+    await expect(harness.ctx.sps.executions.get(
+      "company-1",
+      "agent_session",
+      "11111111-1111-4111-8111-111111111111",
+    )).rejects.toThrow("The in-memory plugin test harness does not provide SPS Node infrastructure");
+  });
+});
+
 describe("createTestHarness issue interactions", () => {
   it("creates request_checkbox_confirmation interactions through the typed host helper", async () => {
     const harness = createTestHarness({

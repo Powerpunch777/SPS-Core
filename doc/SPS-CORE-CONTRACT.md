@@ -72,6 +72,32 @@ of bypassing this gate.
 
 ## Change Rules
 
+Own-plugin cross-lane history is available through `sps.executions.list/get`
+under `sps.executions.read` (`executions.observe`). The existing `sps.runs.read`
+grant remains Node-only. Lists are bounded chronological pages with a composite
+millisecond timestamp / run UUID / lane cursor. They are live history, not a frozen
+accounting snapshot. Agent-session history uses the Core-written conversation
+ownership snapshot, not a live session row or current Agent configuration.
+Deleting that session does not itself delete the retained execution record.
+
+The common DTO exposes safe runtime/model metadata, technical phase, duration,
+cancellation intent/termination and coarse failure categories. `requires_review`
+is not permission to retry a task. Raw arguments, prompts, output, environment,
+paths and error messages are not part of this read model. Existing detailed APIs
+retain their separate access contracts.
+
+New Agent-session completions preserve a versioned usage-evidence snapshot:
+explicit per-run adapter values are `reported`; deltas derived from session totals
+are `estimated`; missing/invalid values are `unavailable` and null, never fabricated
+zero. Adapter reports are not provider invoices. Subscription reference cost is
+not an incremental API charge. Cost additionally requires explicit adapter
+`costUsdBasis: per_run`; token scope alone is insufficient. Existing adapters that
+do not supply cost scope retain unknown cost in this DTO (including legacy zero
+defaults); their raw ledger is unchanged. Old unmarked records and neutral Node usage remain
+unavailable in this DTO. No historical usage backfill, ledger replacement, receipt
+deduplication, budget enforcement or automatic business decisions are added here.
+These are unreleased pinned-source additions, not features of the published SDK tag.
+
 Agent sessions separately expose `agents.sessions.getRun` (`agent.sessions.read`)
 and `agents.sessions.cancel` (`agent.sessions.cancel`). These require explicit
 Workspace, session and run IDs and verify the exact Plugin namespace, Agent and

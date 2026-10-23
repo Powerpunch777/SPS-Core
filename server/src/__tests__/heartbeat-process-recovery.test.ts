@@ -1803,6 +1803,27 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     expect(comments).toHaveLength(0);
   });
 
+  it("persists runtime and usage provenance without changing the existing usage ledger", async () => {
+    mockAdapterExecute.mockResolvedValueOnce({
+      exitCode: 0, signal: null, timedOut: false, errorMessage: null, summary: "Usage fixture",
+      provider: "openai", model: "test-model", usage: { inputTokens: 12, outputTokens: 4 },
+      usageBasis: "per_run", billingType: "subscription_included", costUsd: 0.05, costUsdBasis: "per_run",
+    });
+    const { agentId, runId } = await seedQueuedIssueRunFixture();
+    const heartbeat = heartbeatService(db);
+    await heartbeat.resumeQueuedRuns();
+    await waitForRunToSettle(heartbeat, runId);
+    const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+    expect(run.status).toBe("succeeded");
+    expect(run.contextSnapshot).toMatchObject({ spsExecutionRuntime: { adapterType: "codex_local" } });
+    expect(run.usageJson).toMatchObject({ inputTokens: 12, cachedInputTokens: 0, outputTokens: 4,
+      spsUsageEvidence: { schemaVersion: 1, inputTokens: { value: 12, provenance: "reported" }, outputTokens: { value: 4, provenance: "reported" },
+        cachedInputTokens: { value: null, provenance: "unavailable" }, costUsd: { value: 0.05, provenance: "reported" }, costBasis: "subscription_reference" } });
+    await db.update(agents).set({ adapterType: "process" }).where(eq(agents.id, agentId));
+    const [unchanged] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+    expect(unchanged.contextSnapshot?.spsExecutionRuntime).toEqual({ adapterType: "codex_local" });
+  });
+
   it("schedules a bounded retry for codex transient upstream failures instead of blocking the issue immediately", async () => {
     mockAdapterExecute.mockResolvedValueOnce({
       exitCode: 1,

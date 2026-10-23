@@ -2,6 +2,7 @@ import { and, eq, sql } from "drizzle-orm";
 import { agentTaskSessions, heartbeatRuns, spsNodeCommands, type Db } from "../compat/paperclip/db.js";
 import type { AgentSessionRunState } from "../compat/paperclip/plugin-sdk.js";
 import { notFound } from "../errors.js";
+import { observeSpsAgentRun } from "./sps-execution-observation.js";
 
 const terminal = new Set(["succeeded", "failed", "cancelled", "interrupted", "timed_out"]);
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -53,7 +54,7 @@ export function spsAgentSessionRunService(db: Db, pluginKey: string, cancelRun: 
     const evidence = run.contextSnapshot?.spsSessionCancellationTermination;
     return { runId: run.id, status: run.status, cancellationRequested: requested,
       termination: requested ? evidence === "confirmed" ? "confirmed" : "pending" : "not_applicable",
-      errorCode: run.errorCode, error: run.error };
+      errorCode: run.errorCode, error: run.error, execution: observeSpsAgentRun(run, pluginKey) };
   }
   async function getRun(input: Scope) {
     const run = await owned(input);

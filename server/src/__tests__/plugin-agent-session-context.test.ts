@@ -189,13 +189,26 @@ describePostgres("plugin agent session context", () => {
   }
 
   it("reads only the exact owned session run, without output, paths or adapter secrets", async () => {
-    const { services, params, run } = await seedSessionRun();
+    const { services, params, run, pluginManifest } = await seedSessionRun();
     await db.update(heartbeatRuns).set({ stdoutExcerpt: "private output", resultJson: { apiKey: "secret" } }).where(eq(heartbeatRuns.id, run.id));
-    expect(await services.agentSessions.getRun(params)).toEqual({ runId: run.id, status: "running", cancellationRequested: false, termination: "not_applicable", errorCode: null, error: null });
+    expect(await services.agentSessions.getRun(params)).toMatchObject({ runId: run.id, status: "running", cancellationRequested: false, termination: "not_applicable", errorCode: null, error: null,
+      execution: { lane: "agent_session", runId: run.id, companyId: params.companyId, pluginKey: pluginManifest.id, phase: "active", usage: { costUsd: { value: null, provenance: "unavailable" } } } });
     for (const patch of [{ companyId: randomUUID() }, { sessionId: randomUUID() }, { runId: randomUUID() }, { runId: "invalid" }]) {
       await expect(services.agentSessions.getRun({ ...params, ...patch })).rejects.toThrow();
       await expect(services.agentSessions.cancel({ ...params, ...patch })).rejects.toThrow();
     }
+    expect(mockCancelRun).not.toHaveBeenCalled();
+  });
+
+  it("exposes read-only own-plugin history through Host services after a session is removed", async () => {
+    const { services, params, run } = await seedSessionRun();
+    const page = await services.sps!.listExecutions(params.companyId, { lane: "agent_session", limit: 1 });
+    expect(page.items).toHaveLength(1);
+    expect(page.items[0]).toMatchObject({ runId: run.id, lane: "agent_session" });
+    await db.delete(agentTaskSessions).where(eq(agentTaskSessions.id, params.sessionId));
+    expect(await services.sps!.getExecution(params.companyId, "agent_session", run.id)).toMatchObject({ runId: run.id });
+    expect(await services.sps!.getExecution(randomUUID(), "agent_session", run.id)).toBeNull();
+    expect((await services.sps!.listExecutions(randomUUID())).items).toEqual([]);
     expect(mockCancelRun).not.toHaveBeenCalled();
   });
 

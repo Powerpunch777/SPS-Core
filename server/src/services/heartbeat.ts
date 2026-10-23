@@ -153,6 +153,7 @@ import { executionWorkspaceService, mergeExecutionWorkspaceConfig } from "./exec
 import { workspaceOperationService, type WorkspaceOperationRecorder } from "./workspace-operations.js";
 import { isProcessGroupAlive, terminateLocalService } from "./local-service-supervisor.js";
 import { hasSpsSessionCancellation, preserveSpsSessionCancellationContext } from "./sps-agent-session-runs.js";
+import { buildSpsUsageEvidence } from "./sps-execution-observation.js";
 import {
   isSpsNodeExecutionAdapterType,
   resolveSpsNodeExecutionTarget,
@@ -12281,6 +12282,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     } else {
       delete context.paperclipScratch;
     }
+    context.spsExecutionRuntime = { adapterType: agent.adapterType };
     context.paperclipEnvironment = {
       id: selectedEnvironment.id,
       name: selectedEnvironment.name,
@@ -13215,6 +13217,15 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
               model: readNonEmptyString(adapterResult.model) ?? "unknown",
               ...(adapterResult.costUsd != null ? { costUsd: adapterResult.costUsd } : {}),
               billingType: normalizeLedgerBillingType(adapterResult.billingType),
+              spsUsageEvidence: buildSpsUsageEvidence({
+                usage: adapterResult.usage,
+                normalizedUsage,
+                usageBasis: adapterResult.usageBasis,
+                derivedFromSessionTotals: sessionUsageResolution.derivedFromSessionTotals,
+                costUsd: adapterResult.costUsd,
+                costUsdBasis: adapterResult.costUsdBasis,
+                billingType: adapterResult.billingType,
+              }),
             } as Record<string, unknown>)
           : null;
 

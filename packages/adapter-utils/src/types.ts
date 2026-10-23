@@ -95,6 +95,8 @@ export interface AdapterExecutionResult {
   model?: string | null;
   billingType?: AdapterBillingType | null;
   costUsd?: number | null;
+  /** Explicit cost scope; absent means unknown. Independent from token usageBasis. */
+  costUsdBasis?: "per_run" | "session_cumulative" | null;
   resultJson?: Record<string, unknown> | null;
   runtimeServices?: AdapterRuntimeServiceReport[];
   summary?: string | null;
