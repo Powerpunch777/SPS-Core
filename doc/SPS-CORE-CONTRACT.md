@@ -202,6 +202,33 @@ its registry identity is retained. More than 10,000 rows returns 422 rather than
 a partial success. Responses are not cached. The existing Plugin Settings Status
 surface consumes this endpoint; no new navigation or workflow policy is added.
 
+Host management also exposes read-only execution history through the existing
+safe history service and DTO:
+
+- `GET /api/companies/:companyId/sps-executions?pluginId=<registry UUID>` lists
+  recent executions. `limit` defaults to 20 and must be 1..100. Optional `lane`
+  is `node` or `agent_session`.
+- `GET /api/companies/:companyId/sps-executions/:lane/:runId?pluginId=<registry UUID>`
+  reads one scoped execution detail. `lane` is `node` or `agent_session`; `runId`
+  is a UUID.
+
+The list is ordered newest-first and paginates with the complete cursor tuple
+`beforeCreatedAt` (UTC millisecond precision), `beforeRunId` (UUID), and
+`beforeLane` (`node` or `agent_session`); cursor fields are supplied together.
+The `pluginId` is the retained Plugin registry UUID, from which Core derives the
+exact Plugin scope. Both local Host proof and Workspace access are required.
+History for a disabled Plugin remains readable while its registry identity is
+retained. These routes reuse the existing DTO and history service; they add no
+schema, SDK method, ledger, or business policy.
+
+The existing Plugin Settings > Status surface shows execution history below
+usage, using the latest pages, explicit manual refresh, lane filtering, and
+scoped detail. It adds no page or sidebar entry, polling, retry action,
+cancellation mutation, or cascade policy. The UI does not show raw prompts,
+arguments, environment, logs, raw errors, local paths, or arbitrary subject
+labels. Technical `succeeded` is not business acceptance, and unknown usage is
+not displayed as zero.
+
 Agent sessions separately expose `agents.sessions.getRun` (`agent.sessions.read`)
 and `agents.sessions.cancel` (`agent.sessions.cancel`). These require explicit
 Workspace, session and run IDs and verify the exact Plugin namespace, Agent and

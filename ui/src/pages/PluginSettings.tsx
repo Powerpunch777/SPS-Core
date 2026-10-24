@@ -13,6 +13,7 @@ import { isSpsCoreBaselineModeEnabled } from "@/lib/sps-core-baseline-mode";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { ChoosePathButton } from "@/components/PathInstructionsModal";
+import { SpsPluginExecutions } from "@/components/SpsPluginExecutions";
 import { SpsPluginUsage } from "@/components/SpsPluginUsage";
 import {
   Card,
@@ -325,11 +326,18 @@ export function PluginSettings() {
 
         <TabsContent value="status" className="space-y-6">
           {activeTab === "status" && selectedCompanyId && pluginId ? (
-            <SpsPluginUsage
-              key={`${selectedCompanyId}:${pluginId}`}
-              companyId={selectedCompanyId}
-              pluginId={pluginId}
-            />
+            <>
+              <SpsPluginUsage
+                key={`${selectedCompanyId}:${pluginId}`}
+                companyId={selectedCompanyId}
+                pluginId={pluginId}
+              />
+              <SpsPluginExecutions
+                key={`executions:${selectedCompanyId}:${pluginId}`}
+                companyId={selectedCompanyId}
+                pluginId={pluginId}
+              />
+            </>
           ) : null}
           <div className="grid gap-6 xl:grid-cols-(--gtc-39)">
             <div className="space-y-6">

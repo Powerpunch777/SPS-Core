@@ -22,6 +22,8 @@ const mockPluginsApi = vi.hoisted(() => ({
 
 const mockSpsExecutionsApi = vi.hoisted(() => ({
   summary: vi.fn(),
+  list: vi.fn(),
+  get: vi.fn(),
 }));
 
 const mockSetBreadcrumbs = vi.hoisted(() => vi.fn());
@@ -224,6 +226,7 @@ describe("PluginSettings", () => {
       },
       duration: { totalMs: null, knownExecutions: 0, unavailableExecutions: 0, overflowed: false },
     });
+    mockSpsExecutionsApi.list.mockResolvedValue({ items: [], nextCursor: null });
   });
 
   afterEach(() => {
@@ -265,7 +268,7 @@ describe("PluginSettings", () => {
     });
   });
 
-  it("mounts Plugin usage at the top of Status only", async () => {
+  it("mounts Plugin usage and execution history at the top of Status only", async () => {
     const root = await renderSettings(container);
 
     expect(container.querySelector('[data-testid="sps-plugin-usage"]')).toBeNull();
@@ -278,10 +281,21 @@ describe("PluginSettings", () => {
     await flushReact();
 
     expect(container.querySelector('[data-testid="sps-plugin-usage"]')).toBeTruthy();
+    expect(container.querySelector('[data-testid="sps-plugin-executions"]')).toBeTruthy();
+    expect(
+      container.querySelector('[data-testid="sps-plugin-usage"]')!.compareDocumentPosition(
+        container.querySelector('[data-testid="sps-plugin-executions"]')!,
+      ) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
     expect(mockSpsExecutionsApi.summary).toHaveBeenCalledWith(
       "company-1",
       "plugin-1",
       expect.objectContaining({ from: expect.any(String), to: expect.any(String), signal: expect.any(AbortSignal) }),
+    );
+    expect(mockSpsExecutionsApi.list).toHaveBeenCalledWith(
+      "company-1",
+      "plugin-1",
+      expect.objectContaining({ limit: 20, signal: expect.any(AbortSignal) }),
     );
 
     await act(async () => {

@@ -1298,6 +1298,25 @@ describeEmbeddedPostgres("SPS Node routes", () => {
       manifestJson: { id: pluginKey, apiVersion: 1, version: "0.0.1", displayName: "History fixture", author: "SPS", categories: [], capabilities: [] },
     }).returning();
     const hostApp = await createApp(db, boardActor(fixture.company.id, fixture.ownerUserId, "owner", { source: "local_implicit" }));
+    const historyEndpoint = `/api/companies/${fixture.company.id}/sps-executions`;
+    const hostPages = [];
+    let hostCursor;
+    do {
+      const response = await request(hostApp).get(historyEndpoint).query({ pluginId: registryPlugin.id, limit: 1,
+        ...(hostCursor ? { beforeCreatedAt: hostCursor.createdAt, beforeRunId: hostCursor.runId, beforeLane: hostCursor.lane } : {}) }).expect(200);
+      expect(response.headers["cache-control"]).toBe("no-store");
+      expect(JSON.stringify(response.body)).not.toContain("secret");
+      hostPages.push(...response.body.items);
+      hostCursor = response.body.nextCursor;
+    } while (hostCursor && hostPages.length < 6);
+    expect(hostPages).toEqual(all.items);
+    const hostNodePage = await request(hostApp).get(historyEndpoint).query({ pluginId: registryPlugin.id, lane: "node" }).expect(200);
+    expect(hostNodePage.body.items.map((run: { lane: string }) => run.lane)).toEqual(["node"]);
+    const hostDetail = await request(hostApp).get(`${historyEndpoint}/agent_session/${secondId}`).query({ pluginId: registryPlugin.id }).expect(200);
+    expect(hostDetail.headers["cache-control"]).toBe("no-store");
+    expect(hostDetail.body.usage.inputTokens).toMatchObject({ value: 12, provenance: "reported" });
+    expect(JSON.stringify(hostDetail.body)).not.toContain("secret");
+    await request(hostApp).get(`${historyEndpoint}/node/${randomUUID()}`).query({ pluginId: registryPlugin.id }).expect(404);
     const endpoint = `/api/companies/${fixture.company.id}/sps-executions/summary`;
     const apiSummary = await request(hostApp).get(endpoint).query({ pluginId: registryPlugin.id, ...summaryWindow }).expect(200);
     expect(apiSummary.body.tokens).toEqual(summary.tokens);
@@ -1313,6 +1332,9 @@ describeEmbeddedPostgres("SPS Node routes", () => {
     const emptySummary = await request(hostApp).get(endpoint).query({ pluginId: unrelatedPlugin.id, ...summaryWindow }).expect(200);
     expect(emptySummary.body.executionCount).toBe(0);
     expect(emptySummary.body.tokens.inputTokens.reported).toBeNull();
+    const unrelatedHistory = await request(hostApp).get(historyEndpoint).query({ pluginId: unrelatedPlugin.id }).expect(200);
+    expect(unrelatedHistory.body.items).toEqual([]);
+    await request(hostApp).get(`${historyEndpoint}/agent_session/${secondId}`).query({ pluginId: unrelatedPlugin.id }).expect(404);
     expect((await history.summarize(fixture.company.id, { ...summaryWindow, agentId: fixture.agent.id })).executionCount).toBe(2);
     expect((await history.summarize(fixture.company.id, { ...summaryWindow, lane: "node" })).executionCount).toBe(1);
     expect((await history.summarize(fixture.company.id, { from: sameMillisecond + "Z", to: "2026-10-22T02:03:04.124Z" })).executionCount).toBe(3);
