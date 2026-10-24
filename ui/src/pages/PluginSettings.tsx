@@ -111,7 +111,7 @@ export function PluginSettings() {
   const configSchema = plugin?.manifestJson?.instanceConfigSchema as JsonSchemaNode | undefined;
   const hasConfigSchema = configSchema && configSchema.properties && Object.keys(configSchema.properties).length > 0;
 
-  const { data: configData, isLoading: configLoading } = useQuery({
+  const { data: configData, isLoading: configLoading, error: configError, refetch: refetchConfig } = useQuery({
     queryKey: queryKeys.plugins.config(pluginId!),
     queryFn: () => pluginsApi.getConfig(pluginId!),
     enabled: !!pluginId && !!hasConfigSchema,
@@ -293,6 +293,8 @@ export function PluginSettings() {
                   schema={configSchema!}
                   initialValues={configData?.configJson}
                   isLoading={configLoading}
+                  loadError={Boolean(configError)}
+                  onRetry={() => void refetchConfig()}
                   pluginStatus={plugin.status}
                   supportsConfigTest={(plugin as unknown as { supportsConfigTest?: boolean }).supportsConfigTest === true}
                 />
@@ -1490,6 +1492,8 @@ interface PluginConfigFormProps {
   schema: JsonSchemaNode;
   initialValues?: Record<string, unknown>;
   isLoading?: boolean;
+  loadError?: boolean;
+  onRetry?: () => void;
   /** Current plugin lifecycle status — "Test Configuration" only available when `ready`. */
   pluginStatus?: string;
   /** Whether the plugin worker implements `validateConfig`. */
@@ -1503,7 +1507,7 @@ interface PluginConfigFormProps {
  * Separated from PluginSettings to isolate re-render scope — only the form
  * re-renders on field changes, not the entire page.
  */
-function PluginConfigForm({ pluginId, schema, initialValues, isLoading, pluginStatus, supportsConfigTest }: PluginConfigFormProps) {
+function PluginConfigForm({ pluginId, schema, initialValues, isLoading, loadError, onRetry, pluginStatus, supportsConfigTest }: PluginConfigFormProps) {
   const queryClient = useQueryClient();
 
   // Form values: start with saved values, fall back to schema defaults
@@ -1576,6 +1580,7 @@ function PluginConfigForm({ pluginId, schema, initialValues, isLoading, pluginSt
   }, []);
 
   const handleSave = useCallback(() => {
+    if (loadError || isLoading) return;
     // Validate before saving
     const validationErrors = validateJsonSchemaForm(schema, values);
     if (Object.keys(validationErrors).length > 0) {
@@ -1584,9 +1589,10 @@ function PluginConfigForm({ pluginId, schema, initialValues, isLoading, pluginSt
     }
     setErrors({});
     saveMutation.mutate(values);
-  }, [schema, values, saveMutation]);
+  }, [schema, values, saveMutation, loadError, isLoading]);
 
   const handleTestConnection = useCallback(() => {
+    if (loadError || isLoading) return;
     // Validate before testing
     const validationErrors = validateJsonSchemaForm(schema, values);
     if (Object.keys(validationErrors).length > 0) {
@@ -1596,7 +1602,14 @@ function PluginConfigForm({ pluginId, schema, initialValues, isLoading, pluginSt
     setErrors({});
     setTestResult(null);
     testMutation.mutate(values);
-  }, [schema, values, testMutation]);
+  }, [schema, values, testMutation, loadError, isLoading]);
+
+  if (loadError) {
+    return <div role="alert" className="space-y-3 py-4 text-sm">
+      <p className="text-destructive">Could not load saved configuration. Saving is unavailable until it can be read.</p>
+      <Button type="button" variant="outline" size="sm" onClick={onRetry} disabled={isLoading}>Retry configuration</Button>
+    </div>;
+  }
 
   if (isLoading) {
     return (

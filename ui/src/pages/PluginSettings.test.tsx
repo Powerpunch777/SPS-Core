@@ -274,6 +274,21 @@ describe("PluginSettings", () => {
     });
   });
 
+  it("does not offer a default-valued save when existing configuration cannot be read", async () => {
+    mockPluginsApi.get.mockResolvedValue(configurablePlugin("plugin-1"));
+    mockPluginsApi.getConfig.mockRejectedValueOnce(new Error("offline"));
+    const root = await renderSettings(container);
+    expect(container.textContent).toContain("Could not load saved configuration");
+    expect(container.querySelector('input[type="text"]')).toBeNull();
+    expect(container.textContent).not.toContain("Save Configuration");
+    expect(mockPluginsApi.saveConfig).not.toHaveBeenCalled();
+    mockPluginsApi.getConfig.mockResolvedValue({ pluginId: "plugin-1", configJson: { endpoint: "Saved endpoint" } });
+    act(() => [...container.querySelectorAll<HTMLButtonElement>("button")].find(button => button.textContent === "Retry configuration")?.click());
+    await flushReact(); await flushReact();
+    expect(container.querySelector<HTMLInputElement>('input[type="text"]')?.value).toBe("Saved endpoint");
+    await act(async () => root.unmount());
+  });
+
   it("remounts a cached config form when navigating between plugins", async () => {
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     queryClient.setQueryData(["plugins", "plugin-a"], configurablePlugin("plugin-a"));
