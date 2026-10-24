@@ -91,8 +91,21 @@ A bundled plugin may be enabled by default without becoming a Core invariant.
 A successfully loaded empty or terminated-only Agent list leaves the neutral
 Workspace home usable; Agent registration is an explicit action, not an automatic
 redirect. Existing Agent settings, APIs, deep links and plugin choices are retained.
-This does not yet remove the retained Core navigation or implement the complete
-optional Primary/Extension shell target.
+In the SPS baseline (basic + Core baseline, not legacy Workplane mode), the
+Workspace root without a selected usable Shell now renders an independent empty
+entry, not the compatibility Layout, Agent directory or Dashboard. It queries
+only the route Workspace's Shell selection. A selection/list error is an error
+with explicit retry, never evidence of an empty Workspace; cached selections
+must be revalidated before redirecting to Plugin UI.
+
+The entry offers an explicit Plugin management link, without selecting, enabling,
+installing or creating anything. Existing selected Shell manifests still open
+their prior default route and compatibility chrome; missing/root-valued legacy
+default routes fall back to the explicit Dashboard rather than a redirect loop.
+Existing Dashboard, Inbox, Agent and settings deep links, data and APIs remain.
+This does not yet implement standalone Plugin presentation, optional chrome for
+selected Plugin pages, or the complete Primary/Extension manifest contract.
+Default bundled-plugin choices are not silently rewritten.
 
 Desktop's independent Native Core Settings stores the Host plugin recovery
 preference outside the Core database. Saving the preference does not restart the

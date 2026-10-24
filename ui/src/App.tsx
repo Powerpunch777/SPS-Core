@@ -1,6 +1,5 @@
 import { Suspense } from "react";
 import { Navigate, Outlet, Route, Routes, useLocation, useParams } from "@/lib/router";
-import { useQuery } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { useTranslation } from "@/i18n";
 import { ConferenceRoomChatGate } from "./components/ConferenceRoomChatGate";
@@ -17,13 +16,13 @@ import {
 import { normalizeRememberedInstanceSettingsPath } from "./lib/instance-settings";
 import { isWorkplaneModeEnabled } from "./lib/workplane-mode";
 import { isSpsCoreBaselineModeEnabled } from "./lib/sps-core-baseline-mode";
-import { workspaceSurfacesApi } from "./api/workspace-surfaces";
-import { queryKeys } from "./lib/queryKeys";
+import { isSpsBasicModeEnabled } from "./lib/sps-basic-mode";
 import { workspaceShellRoute } from "./lib/workspace-shell-route";
 import { AGENT_FILTER_TABS } from "./lib/agent-filter-tabs";
 import { lazyNamed } from "./lib/lazy-named";
 
-const Layout = lazyNamed(() => import("./components/Layout"), "Layout");
+const SpsWorkspaceLayout = lazyNamed(() => import("./components/SpsWorkspaceLayout"), "SpsWorkspaceLayout");
+const SpsEmptyWorkspace = lazyNamed(() => import("./pages/SpsEmptyWorkspace"), "SpsEmptyWorkspace");
 const OnboardingWizardVariant = lazyNamed(
   () => import("./components/OnboardingWizardVariant"),
   "OnboardingWizardVariant",
@@ -187,27 +186,10 @@ const JoinRequestQueue = lazyNamed(
   "JoinRequestQueue",
 );
 
-function CoreBaselineIndexRedirect() {
-  const { selectedCompanyId, selectedCompany } = useCompany();
-  const { companyPrefix } = useParams<{ companyPrefix?: string }>();
-  const { data: shell, isLoading } = useQuery({
-    queryKey: queryKeys.workspaceSurfaces.shell(selectedCompanyId ?? ""),
-    queryFn: () => workspaceSurfacesApi.getShell(selectedCompanyId!),
-    enabled: Boolean(selectedCompanyId),
-  });
-
-  if (isLoading) return null;
-  const target = workspaceShellRoute(
-    shell?.mode === "plugin" ? shell.shell?.defaultRoute : null,
-    companyPrefix ?? selectedCompany?.issuePrefix,
-  );
-  return <Navigate to={target} replace />;
-}
-
 function coreBaselineRoutes() {
   return (
     <>
-      <Route index element={<CoreBaselineIndexRedirect />} />
+      <Route index element={<Navigate to="/dashboard" replace />} />
       <Route path="dashboard" element={<SpsCoreWorkspaceHome />} />
       <Route path="inbox" element={<SpsWorkspaceInbox />} />
       <Route path="assistants/new" element={<NewAgent />} />
@@ -523,18 +505,17 @@ function OnboardingRoutePage() {
 }
 
 function CompanyRootRedirect() {
-  const { companies, selectedCompany, loading } = useCompany();
+  const { companies, selectedCompany, loading, error, reloadCompanies } = useCompany();
   const location = useLocation();
   const targetCompany = selectedCompany ?? companies[0] ?? null;
-  const coreBaseline = isSpsCoreBaselineModeEnabled();
-  const { data: shell, isLoading: shellLoading } = useQuery({
-    queryKey: queryKeys.workspaceSurfaces.shell(targetCompany?.id ?? ""),
-    queryFn: () => workspaceSurfacesApi.getShell(targetCompany!.id),
-    enabled: coreBaseline && Boolean(targetCompany),
-  });
+  const coreBaseline = isSpsBasicModeEnabled() && isSpsCoreBaselineModeEnabled() && !isWorkplaneModeEnabled();
 
-  if (loading || (coreBaseline && shellLoading)) {
+  if (loading) {
     return <div className="mx-auto max-w-xl py-10 text-sm text-muted-foreground">Loading...</div>;
+  }
+
+  if (coreBaseline && error) {
+    return <SpsEmptyWorkspace workspaceName="Workspace" status="unavailable" onRetry={() => void reloadCompanies()} />;
   }
 
   if (!targetCompany) {
@@ -549,10 +530,7 @@ function CompanyRootRedirect() {
     return <NoCompaniesStartPage />;
   }
 
-  const target = workspaceShellRoute(
-    shell?.mode === "plugin" ? shell.shell?.defaultRoute : null,
-    targetCompany.issuePrefix,
-  );
+  const target = coreBaseline ? `/${targetCompany.issuePrefix}` : workspaceShellRoute(null, targetCompany.issuePrefix);
   return <Navigate to={target} replace />;
 }
 
@@ -689,7 +667,7 @@ export function App() {
           <Route path="execution-workspaces/:workspaceId/runtime-logs" element={<UnprefixedBoardRedirect />} />
           <Route path="execution-workspaces/:workspaceId/issues" element={<UnprefixedBoardRedirect />} />
           <Route path="execution-workspaces/:workspaceId/routines" element={<UnprefixedBoardRedirect />} />
-          <Route path=":companyPrefix" element={<Layout />}>
+          <Route path=":companyPrefix" element={<SpsWorkspaceLayout />}>
             {boardRoutes()}
           </Route>
           <Route path="*" element={<NotFoundPage scope="global" />} />

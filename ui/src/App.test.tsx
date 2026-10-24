@@ -255,6 +255,12 @@ describe("Plugin page routes", () => {
 });
 
 describe("SPS Core legacy settings routes", () => {
+  it("separates the baseline Workspace entry from the compatibility Layout", () => {
+    expect(appSource).toContain('path=":companyPrefix" element={<SpsWorkspaceLayout />}');
+    expect(appSource).not.toContain("function CoreBaselineIndexRedirect");
+    expect(appSource).toContain('coreBaseline ? `/${targetCompany.issuePrefix}`');
+  });
+
   it("loads the Agents directory in baseline settings while retaining Assistant routes", () => {
     const baselineRoutes = appSource.slice(
       appSource.indexOf("function coreBaselineRoutes()"),
