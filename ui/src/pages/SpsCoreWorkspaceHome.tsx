@@ -10,7 +10,7 @@ import {
   Puzzle,
 } from "lucide-react";
 import type { PluginDashboardWidgetSize } from "../compat/paperclip/shared";
-import { Link, Navigate } from "@/lib/router";
+import { Link } from "@/lib/router";
 import { agentsApi } from "@/api/agents";
 import { pluginsApi } from "@/api/plugins";
 import {
@@ -75,8 +75,6 @@ export function SpsCoreWorkspaceHome() {
   const {
     data: assistants,
     isLoading: assistantsLoading,
-    isSuccess: assistantsLoaded,
-    isFetching: assistantsFetching,
     error: assistantsError,
     refetch: refetchAssistants,
   } = useQuery({
@@ -136,12 +134,6 @@ export function SpsCoreWorkspaceHome() {
   });
 
   const activeAssistants = (assistants ?? []).filter((agent) => agent.status !== "terminated");
-
-  // Keep the setup route stable while a just-created Assistant replaces the
-  // cached empty list. Redirecting during that refetch reopens setup forever.
-  if (assistantsLoaded && !assistantsFetching && activeAssistants.length === 0) {
-    return <Navigate to="/assistants/new" replace />;
-  }
 
   function updateWidget(
     target: SpsDashboardWidget,

@@ -86,6 +86,34 @@ Plugins own domain semantics, including:
 
 A bundled plugin may be enabled by default without becoming a Core invariant.
 
+### Empty Workspaces and Native Recovery
+
+A successfully loaded empty or terminated-only Agent list leaves the neutral
+Workspace home usable; Agent registration is an explicit action, not an automatic
+redirect. Existing Agent settings, APIs, deep links and plugin choices are retained.
+This does not yet remove the retained Core navigation or implement the complete
+optional Primary/Extension shell target.
+
+Desktop's independent Native Core Settings stores the Host plugin recovery
+preference outside the Core database. Saving the preference does not restart the
+Host or change persisted plugin activation. An authorized local Host user must
+separately confirm a restart to apply it. Core accepts
+`SPS_PLUGIN_RECOVERY_MODE=all-disabled` at process startup; an invalid nonempty
+value also blocks plugin code rather than enabling it.
+
+Recovery startup suppresses plugin discovery, executable manifest imports,
+installation/upgrade builds and migrations, worker loading, jobs, subscriptions,
+tools, dev watchers and plugin UI assets. The plugin API retains authenticated
+package status and explicit disable operations; blocked operations return
+`plugin_recovery_active`. Saved package data and Workspace choices are not reset.
+This is a recovery mechanism, not OS isolation, a global Workspace stop, a
+replacement for authentication, or proof of remote process termination.
+
+The approved future protected execution lane must reject unsupported plugins.
+Legacy same-user execution may remain only as an explicitly selected temporary
+trusted lane, never a silent fallback with protected-mode guarantees. That new
+lane is not implemented by this recovery preference.
+
 ## Compatibility Boundary
 
 Plugin Agent sessions carry their message as generic conversation context.

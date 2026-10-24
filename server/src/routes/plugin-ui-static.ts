@@ -34,6 +34,11 @@ import crypto from "node:crypto";
 import type { Db } from "@paperclipai/db";
 import { pluginRegistryService } from "../services/plugin-registry.js";
 import { logger } from "../middleware/logger.js";
+import {
+  resolvePluginRecoveryState,
+  sendPluginRecoveryResponse,
+  type PluginRecoveryState,
+} from "../services/sps-plugin-recovery.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -190,6 +195,7 @@ export interface PluginUiStaticRouteOptions {
    * Defaults to the standard `~/.paperclip/plugins/` location.
    */
   localPluginDir: string;
+  recoveryState?: PluginRecoveryState;
 }
 
 /**
@@ -209,6 +215,7 @@ export function pluginUiStaticRoutes(db: Db, options: PluginUiStaticRouteOptions
   const router = Router();
   const registry = pluginRegistryService(db);
   const log = logger.child({ service: "plugin-ui-static" });
+  const recoveryState = options.recoveryState ?? resolvePluginRecoveryState();
 
   /**
    * GET /_plugins/:pluginId/ui/*
@@ -226,6 +233,10 @@ export function pluginUiStaticRoutes(db: Db, options: PluginUiStaticRouteOptions
    * - Other files → must-revalidate with ETag
    */
   router.get("/_plugins/:pluginId/ui/*filePath", async (req, res) => {
+    if (recoveryState.enabled) {
+      sendPluginRecoveryResponse(res, recoveryState);
+      return;
+    }
     const { pluginId } = req.params;
 
     // Extract the relative file path from the named wildcard.

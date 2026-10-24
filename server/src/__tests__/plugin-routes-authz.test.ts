@@ -1,11 +1,13 @@
 import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { resolvePluginRecoveryState, type PluginRecoveryState } from "../services/sps-plugin-recovery.js";
 
 const mockRegistry = vi.hoisted(() => ({
   getById: vi.fn(),
   getByKey: vi.fn(),
   listInstalled: vi.fn(),
+  listByStatus: vi.fn(),
   upsertConfig: vi.fn(),
   getCompanySettings: vi.fn(),
   upsertCompanySettings: vi.fn(),
@@ -64,6 +66,7 @@ async function createApp(
     toolDeps?: unknown;
     bridgeDeps?: unknown;
     diagnosticsDeps?: unknown;
+    recoveryState?: PluginRecoveryState;
     captureJsonContext?: (context: unknown, body: unknown) => void;
   } = {},
 ) {
@@ -104,6 +107,7 @@ async function createApp(
     undefined,
     undefined,
     routeOverrides.diagnosticsDeps as never,
+    routeOverrides.recoveryState,
   ));
   app.use(errorHandler);
 
@@ -1696,5 +1700,101 @@ describe.sequential("plugin tool and bridge authz", () => {
     const response = await request(app).get(`/api/plugins/${pluginId}/diagnostics`);
     expect(response.status).toBe(403);
     expect(diagnostics.snapshot).not.toHaveBeenCalled();
+  });
+});
+
+describe.sequential("plugin recovery gate routes", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockRegistry.listInstalled.mockResolvedValue([]);
+  });
+
+  const recoveryState = () => resolvePluginRecoveryState("all-disabled");
+  const pluginRecord = (status = "ready") => ({
+    id: pluginId,
+    pluginKey: "paperclip.example",
+    packageName: "@example/plugin",
+    version: "1.0.0",
+    apiVersion: 1,
+    categories: [],
+    status,
+    installOrder: 1,
+    packagePath: "C:/plugins/example",
+    lastError: "plugin-provided detail",
+    manifestJson: {
+      id: "paperclip.example",
+      version: "1.0.0",
+      ui: { slots: [{ type: "page", routePath: "/example" }] },
+    },
+    installedAt: new Date("2026-01-01T00:00:00.000Z"),
+    updatedAt: new Date("2026-01-02T00:00:00.000Z"),
+  });
+
+  it("returns sanitized package status without manifest contributions or host paths", async () => {
+    mockRegistry.listInstalled.mockResolvedValue([pluginRecord()]);
+    const { app } = await createApp(boardActor(), {}, { recoveryState: recoveryState() });
+
+    const response = await request(app).get("/api/plugins");
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject([{
+      id: pluginId,
+      pluginKey: "paperclip.example",
+      packageName: "@example/plugin",
+      status: "ready",
+      manifestJson: null,
+    }]);
+    expect(response.body[0]).not.toHaveProperty("packagePath");
+    expect(response.body[0]).not.toHaveProperty("lastError");
+  });
+
+  it("blocks UI contributions and installation, and still requires authentication", async () => {
+    const loaderInstall = vi.fn();
+    const { app, loader } = await createApp(boardActor(), { installPlugin: loaderInstall }, {
+      recoveryState: recoveryState(),
+    });
+
+    const contributions = await request(app).get("/api/plugins/ui-contributions");
+    const install = await request(app).post("/api/plugins/install").send({ packageName: "@example/plugin" });
+
+    expect(contributions.status).toBe(423);
+    expect(contributions.body.code).toBe("plugin_recovery_active");
+    expect(install.status).toBe(423);
+    expect(loader.installPlugin).not.toHaveBeenCalled();
+    expect(mockRegistry.listByStatus).not.toHaveBeenCalled();
+
+    const anonymous = await createApp({ type: "none" }, {}, { recoveryState: recoveryState() });
+    const unauthenticated = await request(anonymous.app).post("/api/plugins/install").send({});
+    expect(unauthenticated.status).toBe(401);
+  });
+
+  it("retains package-status and Host-disable authorization checks", async () => {
+    const unauthorizedApp = await createApp({ type: "none" }, {}, { recoveryState: recoveryState() });
+    const status = await request(unauthorizedApp.app).get("/api/plugins");
+    expect(status.status).toBe(403);
+    expect(mockRegistry.listInstalled).not.toHaveBeenCalled();
+
+    const memberApp = await createApp(boardActor(), {}, { recoveryState: recoveryState() });
+    const disable = await request(memberApp.app).post(`/api/plugins/${pluginId}/disable`).send({});
+    expect(disable.status).toBe(403);
+    expect(mockLifecycle.disable).not.toHaveBeenCalled();
+  });
+
+  it("keeps the authenticated Host disable action available", async () => {
+    const ready = pluginRecord();
+    const disabled = pluginRecord("disabled");
+    mockRegistry.getById.mockResolvedValue(ready);
+    mockRegistry.listInstalled.mockResolvedValue([ready]);
+    mockLifecycle.disable.mockResolvedValue(disabled);
+    const { app } = await createApp(boardActor({ source: "local_implicit", companyIds: [] }), {}, {
+      recoveryState: recoveryState(),
+    });
+
+    const response = await request(app)
+      .post(`/api/plugins/${pluginId}/disable`)
+      .send({ reason: "recovery" });
+
+    expect(response.status).toBe(200);
+    expect(mockLifecycle.disable).toHaveBeenCalledWith(pluginId, "recovery");
   });
 });

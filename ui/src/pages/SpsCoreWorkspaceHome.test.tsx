@@ -195,7 +195,7 @@ describe("SpsCoreWorkspaceHome", () => {
     expect(container.querySelector('a[href="/assistants/new"]')?.textContent).toContain("Add Agent");
   });
 
-  it("keeps Add Assistant available and does not redirect while an empty cache is refetching", async () => {
+  it("keeps the empty Workspace visible while an empty Agent list refetches", async () => {
     let resolveAgents!: (value: ReturnType<typeof assistant>[]) => void;
     apiMocks.agentsList.mockImplementationOnce(() => new Promise((resolve) => {
       resolveAgents = resolve;
@@ -211,16 +211,31 @@ describe("SpsCoreWorkspaceHome", () => {
     expect(container.querySelector('a[href="/assistants/new"]')?.textContent).toContain("Add Agent");
 
     await act(async () => {
-      resolveAgents([assistant()]);
+      resolveAgents([]);
       await Promise.resolve();
     });
     await settle();
 
     expect(container.querySelector('[data-redirect="/assistants/new"]')).toBeNull();
-    expect(container.querySelector('a[href="/assistants/assistant-1"]')).not.toBeNull();
+    expect(container.textContent).toContain("No active Agents.");
+    expect(container.querySelector('a[href="/company/settings/agents"]')).not.toBeNull();
+    expect(apiMocks.agentsList).toHaveBeenCalledTimes(1);
   });
 
-  it("redirects to Assistant setup after the settled list has no nonterminated Agents", async () => {
+  it("renders an explicit empty state when there are zero Agents", async () => {
+    apiMocks.agentsList.mockResolvedValue([]);
+    render();
+    await settle();
+    await settle();
+
+    expect(container.textContent).toContain("No active Agents.");
+    expect(container.querySelector('[data-redirect="/assistants/new"]')).toBeNull();
+    expect(container.querySelector('a[href="/assistants/new"]')?.textContent).toContain("Add Agent");
+    expect(container.querySelector('a[href="/company/settings/agents"]')?.textContent).toBe("Manage Agents");
+    expect(apiMocks.agentsList).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders an explicit empty state when all Agents are terminated", async () => {
     apiMocks.agentsList.mockResolvedValue([
       assistant({ id: "assistant-old", status: "terminated" }),
     ]);
@@ -228,7 +243,12 @@ describe("SpsCoreWorkspaceHome", () => {
     await settle();
     await settle();
 
-    expect(container.querySelector('[data-redirect="/assistants/new"]')).not.toBeNull();
+    expect(container.textContent).toContain("No active Agents.");
+    expect(container.querySelector('a[href="/assistants/assistant-old"]')).toBeNull();
+    expect(container.querySelector('[data-redirect="/assistants/new"]')).toBeNull();
+    expect(container.querySelector('a[href="/assistants/new"]')?.textContent).toContain("Add Agent");
+    expect(container.querySelector('a[href="/company/settings/agents"]')?.textContent).toBe("Manage Agents");
+    expect(apiMocks.agentsList).toHaveBeenCalledTimes(1);
   });
 
   it("offers independent retry when Agents or Dashboard cannot load", async () => {

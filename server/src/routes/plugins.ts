@@ -112,6 +112,14 @@ import {
   PLUGIN_SECRET_REFS_DISABLED_MESSAGE,
 } from "../services/plugin-secrets-handler.js";
 import { badRequest, forbidden, notFound, unauthorized, unprocessable } from "../errors.js";
+import {
+  isPluginRecoveryDisableRequest,
+  isPluginRecoveryStatusRequest,
+  projectPluginRecoveryStatus,
+  resolvePluginRecoveryState,
+  sendPluginRecoveryResponse,
+  type PluginRecoveryState,
+} from "../services/sps-plugin-recovery.js";
 
 /** UI slot declaration extracted from plugin manifest */
 type PluginUiSlotDeclaration = NonNullable<NonNullable<PaperclipPluginManifestV1["ui"]>["slots"]>[number];
@@ -552,8 +560,29 @@ export function pluginRoutes(
   registryStagingDeps?: PluginRouteRegistryStagingDeps,
   lifecycleManager?: PluginLifecycleManager,
   diagnosticsDeps?: PluginRouteDiagnosticsDeps,
+  recoveryState: PluginRecoveryState = resolvePluginRecoveryState(),
 ) {
   const router = Router();
+  router.use((req, res, next) => {
+    if (!recoveryState.enabled || !(req.path === "/plugins" || req.path.startsWith("/plugins/"))) {
+      next();
+      return;
+    }
+    if (
+      isPluginRecoveryStatusRequest(req.method, req.path)
+      || isPluginRecoveryDisableRequest(req.method, req.path)
+    ) {
+      next();
+      return;
+    }
+    try {
+      assertAuthenticated(req);
+    } catch (error) {
+      next(error);
+      return;
+    }
+    sendPluginRecoveryResponse(res, recoveryState);
+  });
   const registry = pluginRegistryService(db);
   const lifecycle = lifecycleManager ?? pluginLifecycleManager(db, {
     loader,
@@ -983,7 +1012,7 @@ export function pluginRoutes(
     const plugins = status
       ? await registry.listByStatus(status)
       : await registry.listInstalled();
-    res.json(plugins);
+    res.json(recoveryState.enabled ? plugins.map(projectPluginRecoveryStatus) : plugins);
   });
 
   /**
@@ -2511,12 +2540,14 @@ export function pluginRoutes(
     }
 
     // Enrich with worker capabilities when available
-    const worker = bridgeDeps?.workerManager.getWorker(plugin.id);
+    const worker = recoveryState.enabled ? null : bridgeDeps?.workerManager.getWorker(plugin.id);
     const supportsConfigTest = worker
       ? worker.supportedMethods.includes("validateConfig")
       : false;
 
-    res.json({ ...plugin, supportsConfigTest });
+    res.json(recoveryState.enabled
+      ? { ...projectPluginRecoveryStatus(plugin), supportsConfigTest: false }
+      : { ...plugin, supportsConfigTest });
   });
 
   /**
