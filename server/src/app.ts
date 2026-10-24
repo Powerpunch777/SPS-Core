@@ -59,7 +59,7 @@ import { spsMarketplaceRoutes } from "./routes/sps-marketplace.js";
 import { pluginRoutes } from "./routes/plugins.js";
 import { adapterRoutes } from "./routes/adapters.js";
 import { pluginUiStaticRoutes } from "./routes/plugin-ui-static.js";
-import { readBrandedStaticIndexHtml } from "./static-index-html.js";
+import { createBrandedStaticIndexHandler } from "./static-index-html.js";
 import { resolveStaticUiDist } from "./static-ui-dist.js";
 import { applyUiBranding } from "./ui-branding.js";
 import { logger } from "./middleware/logger.js";
@@ -407,13 +407,7 @@ export async function createApp(
   if (opts.uiMode === "static") {
     const uiDist = resolveStaticUiDist(__dirname);
     if (uiDist) {
-      const sendBrandedStaticIndex = (_req: express.Request, res: express.Response) => {
-        res
-          .status(200)
-          .set("Content-Type", "text/html")
-          .set("Cache-Control", "no-cache")
-          .end(readBrandedStaticIndexHtml(uiDist));
-      };
+      const sendBrandedStaticIndex = createBrandedStaticIndexHandler(uiDist);
       // express.static would otherwise serve the raw index before runtime
       // branding and Workplane mode metadata can be injected.
       app.get(["/", "/index.html"], sendBrandedStaticIndex);
@@ -447,16 +441,12 @@ export async function createApp(
       // with a MIME-type error, and cache that broken response. Return 404
       // instead. The index.html response itself is no-cache so a subsequent
       // deploy's updated asset hashes are picked up on next load.
-      app.get(/.*/, (req, res) => {
+      app.get(/.*/, (req, res, next) => {
         if (req.path.startsWith("/assets/")) {
           res.status(404).end();
           return;
         }
-        res
-          .status(200)
-          .set("Content-Type", "text/html")
-          .set("Cache-Control", "no-cache")
-          .end(readBrandedStaticIndexHtml(uiDist));
+        sendBrandedStaticIndex(req, res, next);
       });
     } else {
       console.warn("[paperclip] UI dist not found; running in API-only mode");
