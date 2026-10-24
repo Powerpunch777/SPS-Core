@@ -6,6 +6,8 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PluginSettings } from "./PluginSettings";
 
+const mockRouterState = vi.hoisted(() => ({ pluginId: "plugin-1" }));
+
 const mockPluginsApi = vi.hoisted(() => ({
   get: vi.fn(),
   diagnostics: vi.fn(),
@@ -16,6 +18,7 @@ const mockPluginsApi = vi.hoisted(() => ({
   pendingUpdate: vi.fn(),
   upgrade: vi.fn(),
   getConfig: vi.fn(),
+  saveConfig: vi.fn(),
   listLocalFolders: vi.fn(),
   configureLocalFolder: vi.fn(),
 }));
@@ -52,7 +55,7 @@ vi.mock("@/context/CompanyContext", () => ({
 vi.mock("@/lib/router", () => ({
   Link: ({ to, children }: { to: string; children: React.ReactNode }) => <a href={to}>{children}</a>,
   Navigate: () => null,
-  useParams: () => ({ companyPrefix: "PAP", pluginId: "plugin-1" }),
+  useParams: () => ({ companyPrefix: "PAP", pluginId: mockRouterState.pluginId }),
 }));
 
 vi.mock("@/plugins/slots", () => ({
@@ -112,6 +115,28 @@ function basePlugin(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function configurablePlugin(id: string) {
+  return basePlugin({
+    id,
+    pluginKey: `test.${id}`,
+    packageName: `@test/${id}`,
+    status: "ready",
+    manifestJson: {
+      displayName: id,
+      version: "1.0.0",
+      description: `${id} plugin`,
+      author: "SPS",
+      capabilities: [],
+      instanceConfigSchema: {
+        type: "object",
+        properties: {
+          endpoint: { type: "string", title: "Endpoint" },
+        },
+      },
+    },
+  });
+}
+
 function wikiFolderDeclaration() {
   return {
     folderKey: "wiki-root",
@@ -143,11 +168,10 @@ function folderStatus(overrides: Record<string, unknown> = {}) {
   };
 }
 
-async function renderSettings(container: HTMLDivElement) {
+async function renderSettings(container: HTMLDivElement, queryClient = new QueryClient({
+  defaultOptions: { queries: { retry: false } },
+})) {
   const root = createRoot(container);
-  const queryClient = new QueryClient({
-    defaultOptions: { queries: { retry: false } },
-  });
 
   await act(async () => {
     root.render(
@@ -165,6 +189,7 @@ describe("PluginSettings", () => {
   let container: HTMLDivElement;
 
   beforeEach(() => {
+    mockRouterState.pluginId = "plugin-1";
     container = document.createElement("div");
     document.body.appendChild(container);
 
@@ -198,6 +223,7 @@ describe("PluginSettings", () => {
     mockPluginsApi.migrationPlan.mockResolvedValue(null);
     mockPluginsApi.pendingUpdate.mockResolvedValue(null);
     mockPluginsApi.upgrade.mockResolvedValue({ ok: true });
+    mockPluginsApi.saveConfig.mockResolvedValue({ ok: true });
     mockPluginsApi.listLocalFolders.mockResolvedValue({
       pluginId: "plugin-1",
       companyId: "company-1",
@@ -246,6 +272,62 @@ describe("PluginSettings", () => {
     await act(async () => {
       root.unmount();
     });
+  });
+
+  it("remounts a cached config form when navigating between plugins", async () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    queryClient.setQueryData(["plugins", "plugin-a"], configurablePlugin("plugin-a"));
+    queryClient.setQueryData(["plugins", "plugin-a", "config"], {
+      pluginId: "plugin-a",
+      configJson: { endpoint: "Saved A endpoint" },
+    });
+    queryClient.setQueryData(["plugins", "plugin-b"], configurablePlugin("plugin-b"));
+    queryClient.setQueryData(["plugins", "plugin-b", "config"], {
+      pluginId: "plugin-b",
+      configJson: { endpoint: "Saved B endpoint" },
+    });
+    mockPluginsApi.get.mockImplementation(async (pluginId: string) => configurablePlugin(pluginId));
+    mockPluginsApi.getConfig.mockImplementation(async (pluginId: string) => ({
+      pluginId,
+      configJson: { endpoint: `Saved ${pluginId.slice(-1).toUpperCase()} endpoint` },
+    }));
+    mockRouterState.pluginId = "plugin-a";
+
+    const root = await renderSettings(container, queryClient);
+    const endpointInput = container.querySelector<HTMLInputElement>('input[type="text"]');
+    expect(endpointInput?.value).toBe("Saved A endpoint");
+
+    await act(async () => {
+      if (endpointInput) {
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+        setter?.call(endpointInput, "Unsaved A edit");
+        endpointInput.dispatchEvent(new Event("input", { bubbles: true }));
+        endpointInput.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+    });
+    const saveButton = Array.from(container.querySelectorAll("button"))
+      .find((button) => button.textContent?.includes("Save Configuration"));
+    expect(saveButton?.disabled).toBe(false);
+
+    await act(async () => {
+      mockRouterState.pluginId = "plugin-b";
+      root.render(
+        <QueryClientProvider client={queryClient}>
+          <PluginSettings />
+        </QueryClientProvider>,
+      );
+    });
+    await flushReact();
+    await flushReact();
+
+    const navigatedInput = container.querySelector<HTMLInputElement>('input[type="text"]');
+    const navigatedSaveButton = Array.from(container.querySelectorAll("button"))
+      .find((button) => button.textContent?.includes("Save Configuration"));
+    expect(navigatedInput?.value).toBe("Saved B endpoint");
+    expect(navigatedSaveButton?.disabled).toBe(true);
+    expect(mockPluginsApi.saveConfig).not.toHaveBeenCalled();
+
+    await act(async () => root.unmount());
   });
 
   it("renders canonical safe diagnostics without requiring a console", async () => {

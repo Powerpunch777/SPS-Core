@@ -127,15 +127,13 @@ export function NewAgent() {
 
   useEffect(() => {
     setBreadcrumbs([
-      ...(initialAssistantMode ? [{ label: "Workspace", href: "/dashboard" }] : [{ label: "Agents", href: "/agents" }]),
-      { label: initialAssistantMode ? "Add Assistant" : "New Agent" },
+      { label: "Agents", href: initialAssistantMode ? "/company/settings/agents" : "/agents" },
+      { label: initialAssistantMode ? "Add Agent" : "New Agent" },
     ]);
   }, [initialAssistantMode, setBreadcrumbs]);
 
   useEffect(() => {
     if (initialAssistantMode) {
-      if (!name) setName("Assistant");
-      if (!title) setTitle("Assistant");
       return;
     }
     if (isFirstAgent) {
@@ -224,19 +222,19 @@ export function NewAgent() {
   return (
     <div className="mx-auto max-w-2xl space-y-6">
       <div>
-        <h1 className="text-lg font-semibold">{initialAssistantMode ? "Add Assistant" : "New Agent"}</h1>
+        <h1 className="text-lg font-semibold">{initialAssistantMode ? "Add Agent" : "New Agent"}</h1>
         <p className="text-sm text-muted-foreground mt-1">
           {initialAssistantMode
-            ? "Choose the runtime used by Marketplace Assistant and AI-enabled plugins. Workflow roles belong to the plugins you enable later."
+            ? "Choose a runtime and default working folder. Agents can share an existing CLI login while keeping separate settings."
             : "Advanced agent configuration"}
         </p>
       </div>
 
-      <div className="border border-border">
+      <div className="rounded-md border border-border">
         {/* Name */}
         <div className="px-4 pt-4 pb-2">
           <input
-            aria-label={initialAssistantMode ? "Assistant name" : "Agent name"}
+            aria-label="Agent name"
             className="w-full text-lg font-semibold bg-transparent outline-none placeholder:text-muted-foreground/50"
             placeholder="Agent name"
             value={name}
@@ -248,8 +246,9 @@ export function NewAgent() {
         {/* Title */}
         <div className="px-4 pb-2">
           <input
+            aria-label="Agent description"
             className="w-full bg-transparent outline-none text-sm text-muted-foreground placeholder:text-muted-foreground/40"
-            placeholder="Title (e.g. VP of Engineering)"
+            placeholder={initialAssistantMode ? "Description (optional)" : "Title (e.g. VP of Engineering)"}
             value={title}
             onChange={(e) => setTitle(e.target.value)}
           />
@@ -381,7 +380,7 @@ export function NewAgent() {
               <AdapterEnvironmentResult result={testAgentFeedback.result} />
             )}
             <div className="flex items-center justify-between gap-2">
-              <Button variant="outline" size="sm" onClick={() => navigate(initialAssistantMode ? "/dashboard" : "/agents")}>
+              <Button variant="outline" size="sm" disabled={createAgent.isPending} onClick={() => navigate(initialAssistantMode ? "/company/settings/agents" : "/agents")}>
                 Cancel
               </Button>
               <div className="flex items-center gap-2">
@@ -399,7 +398,7 @@ export function NewAgent() {
                   disabled={!name.trim() || createAgent.isPending}
                   onClick={handleSubmit}
                 >
-                  {createAgent.isPending ? "Creating..." : initialAssistantMode ? "Add Assistant" : "Create agent"}
+                  {createAgent.isPending ? "Creating..." : initialAssistantMode ? "Add Agent" : "Create agent"}
                 </Button>
               </div>
             </div>

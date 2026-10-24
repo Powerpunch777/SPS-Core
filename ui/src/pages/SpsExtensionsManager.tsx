@@ -287,7 +287,7 @@ export function SpsExtensionsManager() {
               {registryError ? <p role="alert" className="text-sm text-destructive">{registryError}</p> : null}
             </div>
           </section>
-          <SpsMarketplacePanel companyId={selectedCompany.id} />
+          <SpsMarketplacePanel key={selectedCompany.id} companyId={selectedCompany.id} />
         </>
       ) : (
         <>

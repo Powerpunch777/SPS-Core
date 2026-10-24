@@ -312,6 +312,7 @@ describe("CompanySettingsSidebar", () => {
     await flushReact();
 
     expect(container.textContent).toContain("Host settings");
+    expect(container.textContent).toContain("Agents");
     expect(container.textContent).toContain("Sources");
     expect(container.textContent).toContain("Nodes");
     expect(container.textContent).toContain("Plugins");
@@ -324,6 +325,9 @@ describe("CompanySettingsSidebar", () => {
     expect(container.textContent).not.toContain("Experimental");
     expect(sidebarNavItemMock).toHaveBeenCalledWith(
       expect.objectContaining({ to: "/company/settings/project-sources", label: "Sources", end: true }),
+    );
+    expect(sidebarNavItemMock).toHaveBeenCalledWith(
+      expect.objectContaining({ to: "/company/settings/agents", label: "Agents", end: true }),
     );
 
     await act(async () => {

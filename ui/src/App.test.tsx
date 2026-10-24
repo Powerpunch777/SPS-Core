@@ -255,6 +255,21 @@ describe("Plugin page routes", () => {
 });
 
 describe("SPS Core legacy settings routes", () => {
+  it("loads the Agents directory in baseline settings while retaining Assistant routes", () => {
+    const baselineRoutes = appSource.slice(
+      appSource.indexOf("function coreBaselineRoutes()"),
+      appSource.indexOf("function boardRoutes()"),
+    );
+    expect(appSource).toContain('lazyNamed(() => import("./pages/SpsCoreAgents"), "SpsCoreAgents")');
+    expect(baselineRoutes).toContain('path="company/settings/agents" element={<SpsCoreAgents />}');
+    expect(baselineRoutes).toContain('path="assistants/new" element={<NewAgent />}');
+    expect(baselineRoutes).toContain('path="assistants/:agentId" element={<SpsCoreAssistantDetail />}');
+    expect(baselineRoutes).toContain('path="assistants/:agentId/:tab" element={<SpsCoreAssistantDetail />}');
+    expect(baselineRoutes.indexOf('path="company/settings/agents"')).toBeLessThan(
+      baselineRoutes.indexOf('path="company/settings/:settingsRoutePath/*"'),
+    );
+  });
+
   it("redirects the retired Workspace Appearance route to Plugins", () => {
     expect(appSource).toContain(
       'path="company/settings/workspace-appearance" element={<Navigate to="/company/settings/instance/plugins" replace />}',

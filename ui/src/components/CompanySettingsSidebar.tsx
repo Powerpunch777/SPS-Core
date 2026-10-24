@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import {
+  Bot,
   ChevronLeft,
   Clock3,
   CloudUpload,
@@ -115,6 +116,7 @@ export function CompanySettingsSidebar() {
             <SidebarNavItem to="/company/settings" label="Overview" icon={SlidersHorizontal} end />
             <SidebarNavItem to="/company/settings/sps-server" label="SPS Server" icon={ServerCog} end />
             <SidebarNavItem to="/company/settings/team" label="Team access" icon={Users} end />
+            <SidebarNavItem to="/company/settings/agents" label="Agents" icon={Bot} end />
             <SidebarNavItem to="/company/settings/project-sources" label="Sources" icon={FolderCog} end />
             <SidebarNavItem to="/company/settings/nodes" label="Nodes" icon={Network} end />
           </div>

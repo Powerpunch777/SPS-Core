@@ -197,7 +197,7 @@ export function Sidebar() {
             <SidebarCompanyMenu />
           </div>
 
-          <SidebarSection label="Core Workspace">
+          <SidebarSection label="Workspace">
             <SidebarNavItem to="/dashboard" label="Dashboard" icon={LayoutDashboard} />
             <SidebarNavItem
               to="/inbox"
@@ -233,7 +233,7 @@ export function Sidebar() {
           ) : null}
 
           {canManageCoreHost ? (
-            <SidebarSection label="Core Platform" collapsible={{ open: companyOpen, onOpenChange: setCompanyOpen }}>
+            <SidebarSection label="Host" collapsible={{ open: companyOpen, onOpenChange: setCompanyOpen }}>
               <SidebarNavItem to="/company/settings" label="Host settings" icon={Settings} />
             </SidebarSection>
           ) : null}

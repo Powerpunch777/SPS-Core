@@ -1,11 +1,17 @@
 import { useEffect } from "react";
-import { FolderCog, Network, Puzzle, ServerCog, UsersRound } from "lucide-react";
+import { Bot, FolderCog, Network, Puzzle, ServerCog, UsersRound } from "lucide-react";
 import { Link } from "@/lib/router";
 import { useCompany } from "@/context/CompanyContext";
 import { useBreadcrumbs } from "@/context/BreadcrumbContext";
 import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 
 const settings = [
+  {
+    to: "/company/settings/agents",
+    title: "Agents",
+    description: "View Agents and configure their runtimes and default working folders.",
+    icon: Bot,
+  },
   {
     to: "/company/settings/sps-server",
     title: "SPS Server",
@@ -57,11 +63,11 @@ export function SpsCoreHostSettings() {
           <h1 className="text-xl font-semibold">Host settings</h1>
         </div>
         <p className="max-w-2xl text-sm text-muted-foreground">
-          Technical settings for this Host and Workspace. Workflow roles, tasks, approvals, and memory belong to plugins.
+          Manage Agents, shared folders, team access, and plugins for this Workspace.
         </p>
       </div>
 
-      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
         {settings.map((setting) => {
           const Icon = setting.icon;
           return (

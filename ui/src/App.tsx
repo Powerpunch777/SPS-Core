@@ -62,6 +62,7 @@ const SpsCoreHostSettings = lazyNamed(
   () => import("./pages/SpsCoreHostSettings"),
   "SpsCoreHostSettings",
 );
+const SpsCoreAgents = lazyNamed(() => import("./pages/SpsCoreAgents"), "SpsCoreAgents");
 const SpsCoreWorkspaceSources = lazyNamed(
   () => import("./pages/SpsCoreWorkspaceSources"),
   "SpsCoreWorkspaceSources",
@@ -213,6 +214,7 @@ function coreBaselineRoutes() {
       <Route path="assistants/:agentId" element={<SpsCoreAssistantDetail />} />
       <Route path="assistants/:agentId/:tab" element={<SpsCoreAssistantDetail />} />
       <Route path="company/settings" element={<SpsCoreHostSettings />} />
+      <Route path="company/settings/agents" element={<SpsCoreAgents />} />
       <Route path="company/settings/workspace-appearance" element={<Navigate to="/company/settings/instance/plugins" replace />} />
       <Route path="company/settings/sps-server" element={<SpsCoreServerSettings />} />
       <Route path="company/settings/team" element={<SpsCoreTeamAccess />} />

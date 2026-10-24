@@ -123,9 +123,10 @@ describe("SpsCoreWorkspaceHome", () => {
     await settle();
     await settle();
 
-    expect(container.textContent).toContain("Core keeps the Workspace available");
-    expect(container.textContent).toContain("Plugins own their workflow UI");
-    expect(container.textContent).toContain("No Dashboard widgets yet");
+    expect(container.textContent).toContain("Manage your Agents");
+    expect(container.textContent).not.toContain("Core contract");
+    expect(container.textContent).toContain("No plugin updates to show");
+    expect(container.querySelector('a[href="/company/settings/agents"]')).not.toBeNull();
     expect(container.innerHTML).toContain('href="/company/settings/instance/plugins"');
     expect(container.querySelector('[data-sps-surface-owner="core"]')).not.toBeNull();
     expect(container.innerHTML).not.toContain("agent-rooms");
@@ -141,7 +142,7 @@ describe("SpsCoreWorkspaceHome", () => {
     await settle();
     await settle();
 
-    expect(container.textContent).toContain("Neutral Shell restored");
+    expect(container.textContent).toContain("Default Workspace restored");
     expect(container.textContent).toContain("The selected shell is no longer active.");
     expect(container.innerHTML).toContain('href="/company/settings/instance/plugins"');
     expect(container.innerHTML).not.toContain("workspace-appearance");
@@ -191,7 +192,7 @@ describe("SpsCoreWorkspaceHome", () => {
     expect(container.textContent).toContain("Status: idle");
     expect(container.textContent).toContain("Status: paused");
     expect(container.textContent).toContain("Adapter: codex_local");
-    expect(container.querySelector('a[href="/assistants/new"]')?.textContent).toContain("Add Assistant");
+    expect(container.querySelector('a[href="/assistants/new"]')?.textContent).toContain("Add Agent");
   });
 
   it("keeps Add Assistant available and does not redirect while an empty cache is refetching", async () => {
@@ -207,7 +208,7 @@ describe("SpsCoreWorkspaceHome", () => {
     await settle();
 
     expect(container.querySelector('[data-redirect="/assistants/new"]')).toBeNull();
-    expect(container.querySelector('a[href="/assistants/new"]')?.textContent).toContain("Add Assistant");
+    expect(container.querySelector('a[href="/assistants/new"]')?.textContent).toContain("Add Agent");
 
     await act(async () => {
       resolveAgents([assistant()]);
@@ -228,5 +229,20 @@ describe("SpsCoreWorkspaceHome", () => {
     await settle();
 
     expect(container.querySelector('[data-redirect="/assistants/new"]')).not.toBeNull();
+  });
+
+  it("offers independent retry when Agents or Dashboard cannot load", async () => {
+    apiMocks.agentsList.mockRejectedValueOnce(new Error("offline"));
+    apiMocks.getDashboard.mockRejectedValueOnce(new Error("offline"));
+    render(); await settle(); await settle();
+    expect(container.textContent).toContain("Could not load Agents.");
+    expect(container.textContent).toContain("Could not load Dashboard.");
+    const buttons = [...container.querySelectorAll<HTMLButtonElement>("button")];
+    act(() => buttons.find(button => button.textContent === "Retry Agents")?.click());
+    act(() => buttons.find(button => button.textContent === "Retry Dashboard")?.click());
+    await settle(); await settle();
+    expect(apiMocks.agentsList).toHaveBeenCalledTimes(2);
+    expect(apiMocks.getDashboard).toHaveBeenCalledTimes(2);
+    expect(container.textContent).not.toContain("Could not load Agents.");
   });
 });

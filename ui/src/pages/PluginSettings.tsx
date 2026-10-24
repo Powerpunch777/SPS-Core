@@ -288,6 +288,7 @@ export function PluginSettings() {
                 </div>
               ) : hasConfigSchema ? (
                 <PluginConfigForm
+                  key={pluginId}
                   pluginId={pluginId!}
                   schema={configSchema!}
                   initialValues={configData?.configJson}
