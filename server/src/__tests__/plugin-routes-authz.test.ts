@@ -1768,6 +1768,62 @@ describe.sequential("plugin recovery gate routes", () => {
     expect(unauthenticated.status).toBe(401);
   });
 
+  it("blocks unsupported package and activation mutations without changing persisted choices", async () => {
+    const persisted = {
+      package: { status: "ready", version: "1.0.0", configJson: { retained: true } },
+      activation: { enabled: true, settingsJson: { retained: true } },
+    };
+    const before = structuredClone(persisted);
+    const loaderInstall = vi.fn().mockImplementation(async () => {
+      persisted.package.status = "ready";
+      persisted.package.version = "2.0.0";
+      return { manifest: { id: "paperclip.example" } };
+    });
+    mockLifecycle.upgrade.mockImplementation(async () => {
+      persisted.package.version = "2.0.0";
+    });
+    mockLifecycle.enable.mockImplementation(async () => {
+      persisted.package.status = "ready";
+    });
+    mockLifecycle.unload.mockImplementation(async () => {
+      persisted.package.status = "uninstalled";
+    });
+    mockRegistry.upsertConfig.mockImplementation(async (_pluginId, configJson) => {
+      persisted.package.configJson = configJson;
+    });
+    mockRegistry.upsertCompanySettings.mockImplementation(async (_pluginId, _companyId, settings) => {
+      persisted.activation = settings;
+    });
+    const { app, loader } = await createApp(
+      boardActor({ isInstanceAdmin: true }),
+      { installPlugin: loaderInstall },
+      { recoveryState: recoveryState() },
+    );
+
+    const attempts = [
+      request(app).post("/api/plugins/install").send({ packageName: "@example/plugin" }),
+      request(app).post(`/api/plugins/${pluginId}/upgrade`).send({}),
+      request(app).post(`/api/plugins/${pluginId}/enable`).send({}),
+      request(app).post(`/api/plugins/${pluginId}/config`).send({ configJson: { changed: true } }),
+      request(app).delete(`/api/plugins/${pluginId}`),
+      request(app).put(`/api/plugins/${pluginId}/companies/${companyA}/activation`).send({ enabled: false }),
+      request(app).get("/api/plugins/tools"),
+      request(app).post(`/api/plugins/${pluginId}/data/health`).send({}),
+    ];
+    const responses = await Promise.all(attempts);
+
+    expect(responses.map((response) => [response.status, response.body.code])).toEqual(
+      responses.map(() => [423, "plugin_recovery_active"]),
+    );
+    expect(persisted).toEqual(before);
+    expect(loader.installPlugin).not.toHaveBeenCalled();
+    expect(mockLifecycle.upgrade).not.toHaveBeenCalled();
+    expect(mockLifecycle.enable).not.toHaveBeenCalled();
+    expect(mockLifecycle.unload).not.toHaveBeenCalled();
+    expect(mockRegistry.upsertConfig).not.toHaveBeenCalled();
+    expect(mockRegistry.upsertCompanySettings).not.toHaveBeenCalled();
+  });
+
   it("retains package-status and Host-disable authorization checks", async () => {
     const unauthorizedApp = await createApp({ type: "none" }, {}, { recoveryState: recoveryState() });
     const status = await request(unauthorizedApp.app).get("/api/plugins");
