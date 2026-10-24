@@ -1,4 +1,5 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { type ChildProcess } from "node:child_process";
+import { spawnAdapterProcess } from "./adapter-process-spawn.js";
 import { createHash, randomUUID } from "node:crypto";
 import { constants as fsConstants, promises as fs, type Dirent } from "node:fs";
 import os from "node:os";
@@ -2030,22 +2031,11 @@ export async function resolveCommandForLogs(
   return (await resolveCommandPath(command, cwd, env)) ?? command;
 }
 
-function quoteForCmd(arg: string) {
-  if (!arg.length) return '""';
-  const escaped = arg.replace(/"/g, '""');
-  return /[\s"&<>|^()]/.test(escaped) ? `"${escaped}"` : escaped;
-}
-
 export function sanitizeSshRemoteEnv(
   env: Record<string, string>,
   inheritedEnv: NodeJS.ProcessEnv = process.env,
 ): Record<string, string> {
   return sanitizeRemoteExecutionEnv(env, inheritedEnv);
-}
-
-function resolveWindowsCmdShell(env: NodeJS.ProcessEnv): string {
-  const fallbackRoot = env.SystemRoot || process.env.SystemRoot || "C:\\Windows";
-  return path.join(fallbackRoot, "System32", "cmd.exe");
 }
 
 async function resolveSpawnTarget(
@@ -2085,17 +2075,6 @@ async function resolveSpawnTarget(
 
   if (process.platform !== "win32") {
     return { command: executable, args };
-  }
-
-  if (/\.(cmd|bat)$/i.test(executable)) {
-    // Always use cmd.exe for .cmd/.bat wrappers. Some environments override
-    // ComSpec to PowerShell, which breaks cmd-specific flags like /d /s /c.
-    const shell = resolveWindowsCmdShell(env);
-    const commandLine = [quoteForCmd(executable), ...args.map(quoteForCmd)].join(" ");
-    return {
-      command: shell,
-      args: ["/d", "/s", "/c", commandLine],
-    };
   }
 
   return { command: executable, args };
@@ -2928,7 +2907,7 @@ export async function runChildProcess(
       remoteEnv: opts.remoteExecution ? opts.env : null,
     })
       .then((target) => {
-        const child = spawn(target.command, target.args, {
+        const child = spawnAdapterProcess(target.command, target.args, {
           cwd: target.cwd ?? opts.cwd,
           env: mergedEnv,
           detached: process.platform !== "win32",
