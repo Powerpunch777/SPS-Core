@@ -204,9 +204,9 @@ export function SidebarShell({
           // Overlay styling only while the panel is wider than its reserved
           // spacer (i.e. peeking) so it floats above content without reflow.
           open
-            ? "rounded-pane border border-app-border bg-app-panel shadow-panel"
+            ? "bg-app-surface"
             : "z-0",
-          isOverlay && "z-30",
+          isOverlay && "z-30 rounded-r-pane border-r border-app-border shadow-panel",
         )}
         style={panelStyle}
         data-sidebar-overlay={isOverlay ? "" : undefined}

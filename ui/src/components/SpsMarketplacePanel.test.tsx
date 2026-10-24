@@ -25,13 +25,60 @@ async function flushReact() {
   await new Promise((resolve) => window.setTimeout(resolve, 0));
 }
 
-async function renderPanel(container: HTMLDivElement) {
+async function renderPanel(container: HTMLDivElement, companyId = "workspace-1") {
   const root = createRoot(container);
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   await act(async () => {
-    root.render(<QueryClientProvider client={queryClient}><SpsMarketplacePanel companyId="workspace-1" /></QueryClientProvider>);
+    root.render(<QueryClientProvider client={queryClient}><SpsMarketplacePanel companyId={companyId} /></QueryClientProvider>);
   });
-  return root;
+  return { root, queryClient };
+}
+
+async function renderWorkspace(root: ReturnType<typeof createRoot>, queryClient: QueryClient, companyId: string) {
+  await act(async () => {
+    root.render(<QueryClientProvider client={queryClient}><SpsMarketplacePanel companyId={companyId} /></QueryClientProvider>);
+  });
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+async function selectAssistantAgent(container: HTMLDivElement) {
+  await waitForText(container, "Choose an Agent");
+  const select = container.querySelector<HTMLSelectElement>("#marketplace-assistant-agent");
+  expect(select).not.toBeNull();
+  await act(async () => {
+    if (select) {
+      select.value = "agent-1";
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+  });
+}
+
+async function openAssistantSession(container: HTMLDivElement) {
+  await selectAssistantAgent(container);
+  const button = Array.from(container.querySelectorAll("button")).find((candidate) => candidate.textContent === "Open");
+  expect(button).toBeTruthy();
+  await act(async () => button?.click());
+  await waitForText(container, "Conversation");
+}
+
+function changeAssistantDraft(container: HTMLDivElement, value: string) {
+  const textarea = container.querySelector<HTMLTextAreaElement>("textarea[aria-label='Assistant message']");
+  expect(textarea).not.toBeNull();
+  if (!textarea) return null;
+  const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
+  setter?.call(textarea, value);
+  textarea.dispatchEvent(new Event("input", { bubbles: true }));
+  textarea.dispatchEvent(new Event("change", { bubbles: true }));
+  return textarea;
 }
 
 async function waitForText(container: HTMLDivElement, text: string) {
@@ -74,7 +121,7 @@ describe("SpsMarketplacePanel", () => {
   });
 
   it("keeps public Marketplace search independent from the Assistant", async () => {
-    const root = await renderPanel(container);
+    const { root } = await renderPanel(container);
     await waitForText(container, "Example Plugin");
     expect(marketplace.list).toHaveBeenCalledWith("workspace-1", { query: "", limit: 50 });
     expect(marketplace.listAssistantAgents).toHaveBeenCalledWith("workspace-1");
@@ -92,7 +139,7 @@ describe("SpsMarketplacePanel", () => {
         { id: "message-2", sessionId: "session-1", runId: "run-1", idempotencyKey: "key-2", role: "assistant", content: "Example Plugin matches your request.", metadata: {}, createdAt: "2026-07-31T00:00:01.000Z" },
       ], nextCursor: null,
     }));
-    const root = await renderPanel(container);
+    const { root } = await renderPanel(container);
     await waitForText(container, "Choose an Agent");
     const agentSelect = container.querySelector<HTMLSelectElement>("#marketplace-assistant-agent");
     expect(agentSelect).not.toBeNull();
@@ -135,7 +182,7 @@ describe("SpsMarketplacePanel", () => {
 
   it("shows an explicit no-Agent state and does not create a session", async () => {
     marketplace.listAssistantAgents.mockResolvedValue({ agents: [] });
-    const root = await renderPanel(container);
+    const { root } = await renderPanel(container);
     await waitForText(container, "No Agent is available for Marketplace Assistant.");
     expect(container.textContent).toContain("No Agent is available for Marketplace Assistant.");
     expect(marketplace.openAssistantSession).not.toHaveBeenCalled();
@@ -156,7 +203,7 @@ describe("SpsMarketplacePanel", () => {
       }],
       nextCursor: null,
     });
-    const root = await renderPanel(container);
+    const { root } = await renderPanel(container);
     await waitForText(container, "Choose an Agent");
     const agentSelect = container.querySelector<HTMLSelectElement>("#marketplace-assistant-agent");
     await act(async () => {
@@ -170,6 +217,91 @@ describe("SpsMarketplacePanel", () => {
     await waitForText(container, "Marketplace Assistant failed: provider unavailable");
     expect(container.textContent).toContain("Marketplace Assistant failed: provider unavailable");
     expect(container.textContent).not.toContain("Working");
+    await act(async () => root.unmount());
+  });
+
+  it("resets Workspace session state and ignores deferred open, send, and close results after switching", async () => {
+    const deferredOpen = deferred<{ session: { id: string } }>();
+    marketplace.openAssistantSession.mockReturnValueOnce(deferredOpen.promise);
+    const { root, queryClient } = await renderPanel(container);
+    await selectAssistantAgent(container);
+
+    const openButton = Array.from(container.querySelectorAll("button")).find((button) => button.textContent === "Open");
+    expect(openButton).toBeTruthy();
+    await act(async () => openButton?.click());
+    expect((openButton as HTMLButtonElement).disabled).toBe(true);
+    await act(async () => openButton?.click());
+    expect(marketplace.openAssistantSession).toHaveBeenCalledTimes(1);
+
+    await renderWorkspace(root, queryClient, "workspace-2");
+    await waitForText(container, "Choose an Agent");
+    deferredOpen.resolve({ session: { id: "old-open-session" } });
+    await act(async () => deferredOpen.promise);
+    await flushReact();
+    expect(container.querySelector('[aria-label="Assistant transcript"]')).toBeNull();
+    expect(container.querySelector('[aria-label="New conversation"]')).toBeNull();
+
+    await openAssistantSession(container);
+    const deferredSend = deferred<{ run: { id: string } }>();
+    marketplace.sendAssistantMessage.mockReturnValueOnce(deferredSend.promise);
+    await act(async () => changeAssistantDraft(container, "old Workspace question"));
+    const sendButton = Array.from(container.querySelectorAll("button")).find((button) => button.textContent?.includes("Send"));
+    expect(sendButton).toBeTruthy();
+    await act(async () => sendButton?.click());
+    expect((sendButton as HTMLButtonElement).disabled).toBe(true);
+    await act(async () => sendButton?.click());
+    expect(marketplace.sendAssistantMessage).toHaveBeenCalledTimes(1);
+
+    await renderWorkspace(root, queryClient, "workspace-3");
+    await waitForText(container, "Choose an Agent");
+    deferredSend.resolve({ run: { id: "old-send-run" } });
+    await act(async () => deferredSend.promise);
+    await flushReact();
+    expect(container.querySelector('[aria-label="Assistant transcript"]')).toBeNull();
+    expect(container.querySelector('[aria-label="New conversation"]')).toBeNull();
+
+    await openAssistantSession(container);
+    const deferredClose = deferred<{ session: { id: string; status: string } }>();
+    marketplace.closeAssistantSession.mockReturnValueOnce(deferredClose.promise);
+    const newConversationButton = container.querySelector<HTMLButtonElement>('[aria-label="New conversation"]');
+    expect(newConversationButton).not.toBeNull();
+    await act(async () => newConversationButton?.click());
+    expect(newConversationButton?.disabled).toBe(true);
+    await act(async () => newConversationButton?.click());
+    expect(marketplace.closeAssistantSession).toHaveBeenCalledTimes(1);
+
+    await renderWorkspace(root, queryClient, "workspace-4");
+    await waitForText(container, "Choose an Agent");
+    deferredClose.resolve({ session: { id: "session-1", status: "closed" } });
+    await act(async () => deferredClose.promise);
+    await flushReact();
+    expect(container.querySelector('[aria-label="Assistant transcript"]')).toBeNull();
+    expect(container.querySelector('[aria-label="New conversation"]')).toBeNull();
+
+    await act(async () => root.unmount());
+  });
+
+  it("locks duplicate sends and keeps the draft when the send request fails", async () => {
+    const deferredSend = deferred<never>();
+    marketplace.sendAssistantMessage.mockReturnValueOnce(deferredSend.promise);
+    const { root } = await renderPanel(container);
+    await openAssistantSession(container);
+
+    await act(async () => changeAssistantDraft(container, "Keep this draft"));
+    const textarea = container.querySelector<HTMLTextAreaElement>("textarea[aria-label='Assistant message']");
+    const sendButton = Array.from(container.querySelectorAll("button")).find((button) => button.textContent?.includes("Send"));
+    await act(async () => sendButton?.click());
+    expect(textarea?.disabled).toBe(true);
+    expect((sendButton as HTMLButtonElement).disabled).toBe(true);
+    await act(async () => sendButton?.click());
+    expect(marketplace.sendAssistantMessage).toHaveBeenCalledTimes(1);
+
+    deferredSend.reject(new Error("Assistant is unavailable."));
+    await act(async () => deferredSend.promise.catch(() => undefined));
+    await flushReact();
+    expect(textarea?.value).toBe("Keep this draft");
+    expect(container.textContent).toContain("Assistant is unavailable.");
+    expect(textarea?.disabled).toBe(false);
     await act(async () => root.unmount());
   });
 });

@@ -410,11 +410,11 @@ async function collectTeamFiles(
         errors.push(`${prefix}/${relativePath} exceeds ${MAX_CATALOG_FILE_BYTES} bytes.`);
       }
 
-      const contents = await fs.readFile(absolutePath);
+      const contents = canonicalCatalogBytes(await fs.readFile(absolutePath));
       files.push({
         path: relativePath,
         kind: classifyCatalogFile(relativePath),
-        sizeBytes: stat.size,
+        sizeBytes: contents.byteLength,
         sha256: sha256(contents),
       });
     }
@@ -925,6 +925,16 @@ async function sortedDirEntries(dir: string) {
 
 function sameManifestExceptGeneratedAt(a: CatalogManifest, b: CatalogManifest) {
   return JSON.stringify({ ...a, generatedAt: "" }) === JSON.stringify({ ...b, generatedAt: "" });
+}
+
+function canonicalCatalogBytes(contents: Buffer) {
+  if (contents.includes(0)) return contents;
+  try {
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(contents);
+    return Buffer.from(text.replace(/\r\n?/g, "\n"), "utf8");
+  } catch {
+    return contents;
+  }
 }
 
 function sha256(contents: Buffer) {

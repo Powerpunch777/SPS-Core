@@ -1,9 +1,10 @@
 import { createHash, createPublicKey, verify } from "node:crypto";
 import { Router, type Request } from "express";
-import { and, desc, eq, inArray, isNull, lt } from "drizzle-orm";
-import type { Db } from "@paperclipai/db";
+import { and, desc, eq, inArray, isNull, lt, sql } from "drizzle-orm";
+import type { Db } from "../compat/paperclip/db.js";
 import {
   agents,
+  heartbeatRuns,
   projects,
   spsAgentNodeBindings,
   spsHostProjectShareNodeGrants,
@@ -20,7 +21,7 @@ import {
   spsNodeHeartbeats,
   spsNodeRunnerProfiles,
   spsNodes,
-} from "@paperclipai/db";
+} from "../compat/paperclip/db.js";
 import {
   bindSpsAgentNodeSchema,
   createSpsNodeSchema,
@@ -28,6 +29,7 @@ import {
   spsNodeHeartbeatMessage,
   spsNodeHeartbeatSchema,
   spsNodeCommandCompleteSchema,
+  spsPluginNodeRunCompleteSchema,
   spsNodeCommandEventSchema,
   spsNodeSignedRequestMessage,
   spsNodeSignedRequestSchema,
@@ -38,13 +40,22 @@ import {
   isAgentStatusAssignableToWork,
   upsertSpsHostProjectShareSchema,
   type SpsNodeRunnerProfile,
-} from "@paperclipai/shared";
+} from "../compat/paperclip/shared.js";
 import { badRequest, forbidden, notFound, unauthorized } from "../errors.js";
 import { validate } from "../middleware/validate.js";
 import { hasTrustedDesktopOwnerBootstrap } from "../middleware/desktop-local-access.js";
-import { accessService, logActivity } from "../services/index.js";
-import { assertBoard, assertCompanyAccess, hasSpsCoreHostAuthority } from "./authz.js";
+import {
+  accessService,
+  assertBoard,
+  assertCompanyAccess,
+  hasSpsCoreHostAuthority,
+  logActivity,
+  heartbeatService,
+} from "../compat/paperclip/control-plane.js";
 import { isSpsCoreBaselineModeEnabled } from "../ui-branding.js";
+import { hasSpsSessionCancellation } from "../services/sps-agent-session-runs.js";
+import { createSpsNodeUsageReceipt } from "../services/sps-node-usage.js";
+import { normalizeSpsPluginExecutionTimeout } from "../services/sps-execution-timeout.js";
 
 function actorUserId(req: Request) {
   return req.actor.type === "board" ? req.actor.userId ?? "local-board" : null;
@@ -1698,6 +1709,10 @@ export function spsNodeRoutes(db: Db) {
     if (command.status !== "claimed" && command.status !== "running") {
       return res.json({ active: false, status: command.status, error: command.error ?? null });
     }
+    const parent = command.heartbeatRunId ? await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, command.heartbeatRunId)).then(rows => rows[0] ?? null) : null;
+    if (command.heartbeatRunId && (!parent || !["queued", "running"].includes(parent.status) || hasSpsSessionCancellation(parent))) {
+      return res.json({ active: false, status: "cancelling", error: "Agent session cancellation requested" });
+    }
     if (!await commandHasCurrentAuthority(node, command)) {
       await failActiveNodeCommands({
         nodeId: node.id,
@@ -1739,16 +1754,16 @@ export function spsNodeRoutes(db: Db) {
     }
     const now = new Date();
     await db.transaction(async (tx) => {
+      const accepted = await tx.update(spsNodeCommands).set({ status: "running", lastEventSeq: event.sequence, updatedAt: now })
+        .where(and(eq(spsNodeCommands.id, command.id), inArray(spsNodeCommands.status, ["claimed", "running"]), eq(spsNodeCommands.lastEventSeq, event.sequence - 1)))
+        .returning({ id: spsNodeCommands.id });
+      if (!accepted.length) throw forbidden("SPS Node command stopped accepting output");
       await tx.insert(spsNodeCommandEvents).values({
         commandId: command.id,
         sequence: event.sequence,
         stream: event.stream,
         body: event.body,
       });
-      await tx
-        .update(spsNodeCommands)
-        .set({ status: "running", lastEventSeq: event.sequence, updatedAt: now })
-        .where(eq(spsNodeCommands.id, command.id));
     });
     res.status(204).end();
   });
@@ -1780,20 +1795,28 @@ export function spsNodeRoutes(db: Db) {
         .then((rows) => rows[0]!);
       return res.json(failed);
     }
-    const updated = await db
-      .update(spsNodeCommands)
-      .set({
-        status: completion.status,
-        exitCode: completion.exitCode,
-        signal: completion.signal ?? null,
-        timedOut: completion.timedOut ? 1 : 0,
-        error: completion.error ?? null,
-        finishedAt: new Date(),
-        updatedAt: new Date(),
-      })
-      .where(eq(spsNodeCommands.id, command.id))
-      .returning()
-      .then((rows) => rows[0]!);
+    const { updated, cancelled } = await db.transaction(async tx => {
+      const parent = command.heartbeatRunId ? await tx.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, command.heartbeatRunId)).for("update").then(rows => rows[0]) : null;
+      const updated = await tx.update(spsNodeCommands).set({
+          status: completion.status, exitCode: completion.exitCode, signal: completion.signal ?? null,
+          timedOut: completion.timedOut ? 1 : 0, error: completion.error ?? null, finishedAt: new Date(), updatedAt: new Date(),
+        }).where(and(eq(spsNodeCommands.id, command.id), inArray(spsNodeCommands.status, ["claimed", "running"])))
+        .returning().then(rows => rows[0] ?? null);
+      if (!updated) return { updated: command, cancelled: false };
+      if (parent) {
+        const receipts = { ...(parent.contextSnapshot?.spsNodeCompletionReceipts as Record<string, unknown> | undefined), [command.id]: true };
+        await tx.update(heartbeatRuns).set({ contextSnapshot: { ...parent.contextSnapshot, spsNodeCompletionReceipts: receipts } }).where(eq(heartbeatRuns.id, parent.id));
+        if (!hasSpsSessionCancellation(parent)) return { updated, cancelled: false };
+        const others = await tx.select({ id: spsNodeCommands.id }).from(spsNodeCommands).where(and(
+          eq(spsNodeCommands.heartbeatRunId, parent.id), inArray(spsNodeCommands.status, ["claimed", "running"]),
+        )).limit(1);
+        if (others.length) return { updated, cancelled: false };
+        await tx.update(heartbeatRuns).set({ contextSnapshot: sql`coalesce(${heartbeatRuns.contextSnapshot}, '{}'::jsonb) || '{"spsSessionCancellationTermination":"confirmed"}'::jsonb` }).where(eq(heartbeatRuns.id, parent.id));
+        return { updated, cancelled: true };
+      }
+      return { updated, cancelled: false };
+    });
+    if (cancelled && command.heartbeatRunId) await heartbeatService(db).cancelRun(command.heartbeatRunId);
     res.json(updated);
   });
 
@@ -1810,15 +1833,8 @@ export function spsNodeRoutes(db: Db) {
     await assertSignedNodeRequest(req, node);
 
     const now = new Date();
-    const staleBefore = new Date(now.getTime() - 10 * 60 * 1000);
-    await db
-      .update(spsPluginNodeRuns)
-      .set({ status: "queued", claimedAt: null, startedAt: null, updatedAt: now })
-      .where(and(
-        eq(spsPluginNodeRuns.nodeId, node.id),
-        eq(spsPluginNodeRuns.status, "claimed"),
-        lt(spsPluginNodeRuns.updatedAt, staleBefore),
-      ));
+    // Silence is not proof that a claimed process stopped. Never requeue an
+    // uncertain execution: its Node must acknowledge completion/cancellation.
 
     while (true) {
       const candidate = await db
@@ -1829,6 +1845,15 @@ export function spsNodeRoutes(db: Db) {
         .limit(1)
         .then((rows) => rows[0] ?? null);
       if (!candidate) return res.status(204).end();
+
+      let timeoutMs: number | null;
+      try {
+        timeoutMs = normalizeSpsPluginExecutionTimeout(candidate.timeoutMs);
+      } catch {
+        await db.update(spsPluginNodeRuns).set({ status: "failed", error: "Invalid SPS plugin execution timeout.", finishedAt: now, updatedAt: now })
+          .where(and(eq(spsPluginNodeRuns.id, candidate.id), eq(spsPluginNodeRuns.status, "queued")));
+        continue;
+      }
 
       if (!await pluginRunHasCurrentAuthority(node, candidate)) {
         await db
@@ -1874,7 +1899,7 @@ export function spsNodeRoutes(db: Db) {
       }
       const claimed = await db
         .update(spsPluginNodeRuns)
-        .set({ status: "claimed", claimedAt: now, startedAt: now, updatedAt: now })
+        .set({ status: "claimed", claimedAt: now, startedAt: now, updatedAt: now, timeoutMs })
         .where(and(eq(spsPluginNodeRuns.id, candidate.id), eq(spsPluginNodeRuns.status, "queued")))
         .returning()
         .then((rows) => rows[0] ?? null);
@@ -1935,16 +1960,19 @@ export function spsNodeRoutes(db: Db) {
     }
     const now = new Date();
     await db.transaction(async (tx) => {
+      const accepted = await tx.update(spsPluginNodeRuns)
+        .set({ status: "running", lastEventSeq: event.sequence, updatedAt: now })
+        .where(and(eq(spsPluginNodeRuns.id, run.id),
+          inArray(spsPluginNodeRuns.status, ["claimed", "running"]),
+          eq(spsPluginNodeRuns.lastEventSeq, event.sequence - 1)))
+        .returning({ id: spsPluginNodeRuns.id });
+      if (!accepted.length) throw forbidden("SPS plugin run no longer accepts this output");
       await tx.insert(spsPluginNodeRunEvents).values({
         runId: run.id,
         sequence: event.sequence,
         stream: event.stream,
         body: event.body,
       });
-      await tx
-        .update(spsPluginNodeRuns)
-        .set({ status: "running", lastEventSeq: event.sequence, updatedAt: now })
-        .where(eq(spsPluginNodeRuns.id, run.id));
     });
     res.status(204).end();
   });
@@ -1952,18 +1980,20 @@ export function spsNodeRoutes(db: Db) {
   router.post("/sps-nodes/:nodeId/plugin-runs/:runId/complete", async (req, res) => {
     const node = await getNode(req.params.nodeId as string);
     await assertSignedNodeRequest(req, node);
-    const completion = spsNodeCommandCompleteSchema.parse(req.body ?? {});
+    const parsedCompletion = spsPluginNodeRunCompleteSchema.safeParse(req.body ?? {});
+    if (!parsedCompletion.success) throw badRequest("Invalid SPS plugin completion report");
+    const completion = parsedCompletion.data;
     const run = await db
       .select()
       .from(spsPluginNodeRuns)
       .where(and(eq(spsPluginNodeRuns.id, req.params.runId as string), eq(spsPluginNodeRuns.nodeId, node.id)))
       .then((rows) => rows[0] ?? null);
     if (!run) throw notFound("SPS plugin run not found");
-    if (run.status === "succeeded" || run.status === "failed") return res.json(run);
-    if (run.status !== "claimed" && run.status !== "running") {
+    if (["succeeded", "failed", "cancelled"].includes(run.status)) return res.json(run);
+    if (!["claimed", "running", "cancelling"].includes(run.status)) {
       throw forbidden("SPS plugin run is not active");
     }
-    if (!await pluginRunHasCurrentAuthority(node, run)) {
+    if (run.status !== "cancelling" && !await pluginRunHasCurrentAuthority(node, run)) {
       const error = "SPS plugin execution access was revoked or changed while this run was active.";
       await failActivePluginNodeRuns({
         nodeId: node.id,
@@ -1978,21 +2008,32 @@ export function spsNodeRoutes(db: Db) {
         .then((rows) => rows[0]!);
       return res.json(failed);
     }
+    let usageJson: Record<string, unknown> | null = null;
+    if (completion.usageReport !== undefined) {
+      try {
+        usageJson = createSpsNodeUsageReceipt(run, completion.usageReport);
+      } catch {
+        throw badRequest("SPS usage report does not match this execution");
+      }
+    }
     const updated = await db
       .update(spsPluginNodeRuns)
       .set({
-        status: completion.status,
+        // A cancellation accepted before completion wins, even when this request
+        // originally read a running row. Keep the signed Node's exit details.
+        status: sql`case when ${spsPluginNodeRuns.status} = 'cancelling' then 'cancelled' else ${completion.status} end`,
         exitCode: completion.exitCode,
         signal: completion.signal ?? null,
         timedOut: completion.timedOut ? 1 : 0,
-        error: completion.error ?? null,
+        error: sql`case when ${spsPluginNodeRuns.status} = 'cancelling' then ${spsPluginNodeRuns.error} else ${completion.error ?? null} end`,
+        usageJson,
         finishedAt: new Date(),
         updatedAt: new Date(),
       })
-      .where(eq(spsPluginNodeRuns.id, run.id))
+      .where(and(eq(spsPluginNodeRuns.id, run.id), inArray(spsPluginNodeRuns.status, ["claimed", "running", "cancelling"])))
       .returning()
-      .then((rows) => rows[0]!);
-    res.json(updated);
+      .then((rows) => rows[0] ?? null);
+    res.json(updated ?? await db.select().from(spsPluginNodeRuns).where(eq(spsPluginNodeRuns.id, run.id)).then(rows => rows[0]));
   });
 
   return router;

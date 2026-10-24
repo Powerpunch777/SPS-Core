@@ -353,6 +353,29 @@ describeEmbeddedPostgres("companySkillService.installFromCatalog", () => {
     expect(rows).toHaveLength(1);
   });
 
+  it("does not report Windows CRLF checkout bytes as catalog modifications", async () => {
+    const companyId = await createCompany();
+    const installed = await svc.installFromCatalog(companyId, { catalogSkillId: sampleCatalogSkill.id });
+    for (const [relativePath, contents] of [
+      ["SKILL.md", sampleSkillMarkdown],
+      ["references/checklist.md", sampleReferenceMarkdown],
+    ] as const) {
+      await fs.writeFile(
+        path.join(installed.skill.sourceLocator!, relativePath),
+        contents.replace(/\n/g, "\r\n"),
+        "utf8",
+      );
+    }
+
+    const status = await svc.updateStatus(companyId, installed.skill.id);
+
+    expect(status).toMatchObject({
+      installedHash: sampleCatalogSkill.contentHash,
+      updateHoldReason: null,
+      auditVerdict: "pass",
+    });
+  });
+
   it("detects installed catalog drift during update checks", async () => {
     const companyId = await createCompany();
     const installed = await svc.installFromCatalog(companyId, { catalogSkillId: sampleCatalogSkill.id });

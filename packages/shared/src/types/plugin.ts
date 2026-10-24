@@ -723,6 +723,7 @@ export interface PluginSpsCoreDeclaration {
     | "runtimes.list"
     | "runtimes.dispatch"
     | "runs.observe"
+    | "runs.cancel"
     | "artifacts.write"
     | "secrets.use"
   >;

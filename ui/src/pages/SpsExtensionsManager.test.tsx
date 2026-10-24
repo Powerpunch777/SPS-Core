@@ -83,6 +83,10 @@ describe("SpsExtensionsManager", () => {
     await flushReact();
 
     expect(container.querySelector('[data-sps-surface-owner="core"]')).not.toBeNull();
+    expect(container.textContent).toContain("Host: error");
+    expect(container.textContent).toContain("Workspace: Disabled");
+    expect(container.querySelector("details")?.open).toBe(false);
+    expect(container.querySelector('[aria-label="Uninstall SPS Team Workplane"]')).not.toBeNull();
     expect(container.textContent).toContain("Installed plugins remain plugin-owned surfaces");
     const action = Array.from(container.querySelectorAll("button")).find((button) => button.textContent?.includes("Start and use"));
     expect(action).toBeTruthy();

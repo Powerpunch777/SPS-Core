@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
@@ -47,6 +48,17 @@ test("the general-server shards form a complete, non-overlapping partition", () 
   assert.equal(seen.size, total, "union of shards must cover the whole suite set");
 });
 
+test("the Windows general-server batches cover every suite without exceeding the command budget", () => {
+  const plan = dryRunJson(["--mode", "general", "--group", "general-server"]);
+  const flattened = plan.windowsGeneralServerBatches.flat();
+  assert.equal(flattened.length, plan.generalServerSuiteCount);
+  assert.equal(new Set(flattened).size, plan.generalServerSuiteCount);
+  assert.ok(plan.windowsGeneralServerBatches.length > 1);
+  for (const batch of plan.windowsGeneralServerBatches) {
+    assert.ok(batch.reduce((length, value) => length + value.length + 1, 0) <= 6000);
+  }
+});
+
 test("a route/authz suite never leaks into the general-server shards", () => {
   const shard = dryRunJson(["--mode", "general", "--group", "general-server", "--shard-index", "0", "--shard-count", SHARD_COUNT.toString()]);
   for (const file of shard.selectedGeneralServerSuites) {
@@ -55,6 +67,11 @@ test("a route/authz suite never leaks into the general-server shards", () => {
       `route/authz suite must stay in the serialized lane, not general-server: ${file}`,
     );
   }
+});
+
+test("stable test invocations never execute generated dist copies", () => {
+  const source = readFileSync(path.join(repoRoot, "scripts", "run-vitest-stable.mjs"), "utf8");
+  assert.match(source, /"--exclude",\s*"\*\*\/dist\/\*\*"/);
 });
 
 test("shard flags are rejected for the parallel workspace groups", () => {

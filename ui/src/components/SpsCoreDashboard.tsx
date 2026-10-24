@@ -1,5 +1,11 @@
 import { Link } from "@/lib/router";
-import type { ActivityEvent, Agent, DashboardSummary, Issue, Project } from "@paperclipai/shared";
+import type {
+  ActivityEvent,
+  Agent,
+  DashboardSummary,
+  Issue,
+  Project,
+} from "../compat/paperclip/shared";
 import { ArrowRight, Bot, CircleDot, FolderOpen, ListChecks, MessagesSquare, type LucideIcon } from "lucide-react";
 import { ActivityRow } from "./ActivityRow";
 import { ActiveAgentsPanel } from "./ActiveAgentsPanel";

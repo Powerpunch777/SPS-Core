@@ -6,6 +6,8 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PluginSettings } from "./PluginSettings";
 
+const mockRouterState = vi.hoisted(() => ({ pluginId: "plugin-1" }));
+
 const mockPluginsApi = vi.hoisted(() => ({
   get: vi.fn(),
   diagnostics: vi.fn(),
@@ -16,14 +18,25 @@ const mockPluginsApi = vi.hoisted(() => ({
   pendingUpdate: vi.fn(),
   upgrade: vi.fn(),
   getConfig: vi.fn(),
+  saveConfig: vi.fn(),
   listLocalFolders: vi.fn(),
   configureLocalFolder: vi.fn(),
+}));
+
+const mockSpsExecutionsApi = vi.hoisted(() => ({
+  summary: vi.fn(),
+  list: vi.fn(),
+  get: vi.fn(),
 }));
 
 const mockSetBreadcrumbs = vi.hoisted(() => vi.fn());
 
 vi.mock("@/api/plugins", () => ({
   pluginsApi: mockPluginsApi,
+}));
+
+vi.mock("@/api/sps-executions", () => ({
+  spsExecutionsApi: mockSpsExecutionsApi,
 }));
 
 vi.mock("@/context/BreadcrumbContext", () => ({
@@ -42,7 +55,7 @@ vi.mock("@/context/CompanyContext", () => ({
 vi.mock("@/lib/router", () => ({
   Link: ({ to, children }: { to: string; children: React.ReactNode }) => <a href={to}>{children}</a>,
   Navigate: () => null,
-  useParams: () => ({ companyPrefix: "PAP", pluginId: "plugin-1" }),
+  useParams: () => ({ companyPrefix: "PAP", pluginId: mockRouterState.pluginId }),
 }));
 
 vi.mock("@/plugins/slots", () => ({
@@ -102,6 +115,28 @@ function basePlugin(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function configurablePlugin(id: string) {
+  return basePlugin({
+    id,
+    pluginKey: `test.${id}`,
+    packageName: `@test/${id}`,
+    status: "ready",
+    manifestJson: {
+      displayName: id,
+      version: "1.0.0",
+      description: `${id} plugin`,
+      author: "SPS",
+      capabilities: [],
+      instanceConfigSchema: {
+        type: "object",
+        properties: {
+          endpoint: { type: "string", title: "Endpoint" },
+        },
+      },
+    },
+  });
+}
+
 function wikiFolderDeclaration() {
   return {
     folderKey: "wiki-root",
@@ -133,11 +168,10 @@ function folderStatus(overrides: Record<string, unknown> = {}) {
   };
 }
 
-async function renderSettings(container: HTMLDivElement) {
+async function renderSettings(container: HTMLDivElement, queryClient = new QueryClient({
+  defaultOptions: { queries: { retry: false } },
+})) {
   const root = createRoot(container);
-  const queryClient = new QueryClient({
-    defaultOptions: { queries: { retry: false } },
-  });
 
   await act(async () => {
     root.render(
@@ -155,6 +189,7 @@ describe("PluginSettings", () => {
   let container: HTMLDivElement;
 
   beforeEach(() => {
+    mockRouterState.pluginId = "plugin-1";
     container = document.createElement("div");
     document.body.appendChild(container);
 
@@ -188,12 +223,36 @@ describe("PluginSettings", () => {
     mockPluginsApi.migrationPlan.mockResolvedValue(null);
     mockPluginsApi.pendingUpdate.mockResolvedValue(null);
     mockPluginsApi.upgrade.mockResolvedValue({ ok: true });
+    mockPluginsApi.saveConfig.mockResolvedValue({ ok: true });
     mockPluginsApi.listLocalFolders.mockResolvedValue({
       pluginId: "plugin-1",
       companyId: "company-1",
       declarations: [],
       folders: [],
     });
+    mockSpsExecutionsApi.summary.mockResolvedValue({
+      companyId: "company-1",
+      pluginKey: "paperclip.e2b-sandbox-provider",
+      window: { from: "2026-07-30T00:00:00.000Z", to: "2026-07-31T00:00:00.000Z" },
+      generatedAt: "2026-07-31T00:00:00.000Z",
+      executionCount: 0,
+      terminalCount: 0,
+      inFlightCount: 0,
+      unknownPhaseCount: 0,
+      tokens: {
+        inputTokens: { reported: null, estimated: null, reportedExecutions: 0, estimatedExecutions: 0, unavailableExecutions: 0, overflowed: false },
+        cachedInputTokens: { reported: null, estimated: null, reportedExecutions: 0, estimatedExecutions: 0, unavailableExecutions: 0, overflowed: false },
+        outputTokens: { reported: null, estimated: null, reportedExecutions: 0, estimatedExecutions: 0, unavailableExecutions: 0, overflowed: false },
+      },
+      costs: {
+        currency: "USD",
+        incrementalApi: { reported: null, estimated: null, reportedExecutions: 0, estimatedExecutions: 0, unavailableExecutions: 0, overflowed: false },
+        subscriptionReference: { reported: null, estimated: null, reportedExecutions: 0, estimatedExecutions: 0, unavailableExecutions: 0, overflowed: false },
+        other: { reported: null, estimated: null, reportedExecutions: 0, estimatedExecutions: 0, unavailableExecutions: 0, overflowed: false },
+      },
+      duration: { totalMs: null, knownExecutions: 0, unavailableExecutions: 0, overflowed: false },
+    });
+    mockSpsExecutionsApi.list.mockResolvedValue({ items: [], nextCursor: null });
   });
 
   afterEach(() => {
@@ -215,6 +274,77 @@ describe("PluginSettings", () => {
     });
   });
 
+  it("does not offer a default-valued save when existing configuration cannot be read", async () => {
+    mockPluginsApi.get.mockResolvedValue(configurablePlugin("plugin-1"));
+    mockPluginsApi.getConfig.mockRejectedValueOnce(new Error("offline"));
+    const root = await renderSettings(container);
+    expect(container.textContent).toContain("Could not load saved configuration");
+    expect(container.querySelector('input[type="text"]')).toBeNull();
+    expect(container.textContent).not.toContain("Save Configuration");
+    expect(mockPluginsApi.saveConfig).not.toHaveBeenCalled();
+    mockPluginsApi.getConfig.mockResolvedValue({ pluginId: "plugin-1", configJson: { endpoint: "Saved endpoint" } });
+    act(() => [...container.querySelectorAll<HTMLButtonElement>("button")].find(button => button.textContent === "Retry configuration")?.click());
+    await flushReact(); await flushReact();
+    expect(container.querySelector<HTMLInputElement>('input[type="text"]')?.value).toBe("Saved endpoint");
+    await act(async () => root.unmount());
+  });
+
+  it("remounts a cached config form when navigating between plugins", async () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    queryClient.setQueryData(["plugins", "plugin-a"], configurablePlugin("plugin-a"));
+    queryClient.setQueryData(["plugins", "plugin-a", "config"], {
+      pluginId: "plugin-a",
+      configJson: { endpoint: "Saved A endpoint" },
+    });
+    queryClient.setQueryData(["plugins", "plugin-b"], configurablePlugin("plugin-b"));
+    queryClient.setQueryData(["plugins", "plugin-b", "config"], {
+      pluginId: "plugin-b",
+      configJson: { endpoint: "Saved B endpoint" },
+    });
+    mockPluginsApi.get.mockImplementation(async (pluginId: string) => configurablePlugin(pluginId));
+    mockPluginsApi.getConfig.mockImplementation(async (pluginId: string) => ({
+      pluginId,
+      configJson: { endpoint: `Saved ${pluginId.slice(-1).toUpperCase()} endpoint` },
+    }));
+    mockRouterState.pluginId = "plugin-a";
+
+    const root = await renderSettings(container, queryClient);
+    const endpointInput = container.querySelector<HTMLInputElement>('input[type="text"]');
+    expect(endpointInput?.value).toBe("Saved A endpoint");
+
+    await act(async () => {
+      if (endpointInput) {
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+        setter?.call(endpointInput, "Unsaved A edit");
+        endpointInput.dispatchEvent(new Event("input", { bubbles: true }));
+        endpointInput.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+    });
+    const saveButton = Array.from(container.querySelectorAll("button"))
+      .find((button) => button.textContent?.includes("Save Configuration"));
+    expect(saveButton?.disabled).toBe(false);
+
+    await act(async () => {
+      mockRouterState.pluginId = "plugin-b";
+      root.render(
+        <QueryClientProvider client={queryClient}>
+          <PluginSettings />
+        </QueryClientProvider>,
+      );
+    });
+    await flushReact();
+    await flushReact();
+
+    const navigatedInput = container.querySelector<HTMLInputElement>('input[type="text"]');
+    const navigatedSaveButton = Array.from(container.querySelectorAll("button"))
+      .find((button) => button.textContent?.includes("Save Configuration"));
+    expect(navigatedInput?.value).toBe("Saved B endpoint");
+    expect(navigatedSaveButton?.disabled).toBe(true);
+    expect(mockPluginsApi.saveConfig).not.toHaveBeenCalled();
+
+    await act(async () => root.unmount());
+  });
+
   it("renders canonical safe diagnostics without requiring a console", async () => {
     const root = await renderSettings(container);
     const statusButton = Array.from(container.querySelectorAll("button"))
@@ -229,6 +359,41 @@ describe("PluginSettings", () => {
     expect(container.textContent).toContain("Canonical Diagnostics");
     expect(container.textContent).toContain("SPS_PLUGIN_RUNTIME_READY");
     expect(container.textContent).toContain("Plugin runtime is ready.");
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it("mounts Plugin usage and execution history at the top of Status only", async () => {
+    const root = await renderSettings(container);
+
+    expect(container.querySelector('[data-testid="sps-plugin-usage"]')).toBeNull();
+    const statusButton = Array.from(container.querySelectorAll("button"))
+      .find((button) => button.textContent === "Status");
+    await act(async () => {
+      statusButton?.click();
+      await Promise.resolve();
+    });
+    await flushReact();
+
+    expect(container.querySelector('[data-testid="sps-plugin-usage"]')).toBeTruthy();
+    expect(container.querySelector('[data-testid="sps-plugin-executions"]')).toBeTruthy();
+    expect(
+      container.querySelector('[data-testid="sps-plugin-usage"]')!.compareDocumentPosition(
+        container.querySelector('[data-testid="sps-plugin-executions"]')!,
+      ) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(mockSpsExecutionsApi.summary).toHaveBeenCalledWith(
+      "company-1",
+      "plugin-1",
+      expect.objectContaining({ from: expect.any(String), to: expect.any(String), signal: expect.any(AbortSignal) }),
+    );
+    expect(mockSpsExecutionsApi.list).toHaveBeenCalledWith(
+      "company-1",
+      "plugin-1",
+      expect.objectContaining({ limit: 20, signal: expect.any(AbortSignal) }),
+    );
 
     await act(async () => {
       root.unmount();

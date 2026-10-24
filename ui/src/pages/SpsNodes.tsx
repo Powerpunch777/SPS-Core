@@ -1,6 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { isAgentStatusAssignableToWork, spsNodeCapabilityForAdapter, type Agent } from "@paperclipai/shared";
+import {
+  isAgentStatusAssignableToWork,
+  spsNodeCapabilityForAdapter,
+  type Agent,
+} from "../compat/paperclip/shared";
 import {
   CheckCircle2,
   CirclePause,
@@ -180,6 +184,16 @@ export function SpsNodes() {
 
   if (!selectedCompanyId) {
     return <div className="text-sm text-muted-foreground">Select a {spsCoreBaseline ? "Workspace" : "company"} to manage SPS Nodes.</div>;
+  }
+  if (boardAccessQuery.error) {
+    return (
+      <div className="space-y-3">
+        <p role="alert" className="text-sm text-destructive">Could not check SPS Node access: {errorMessage(boardAccessQuery.error, spsCoreBaseline)}</p>
+        <Button variant="outline" size="sm" onClick={() => void boardAccessQuery.refetch()} disabled={boardAccessQuery.isFetching}>
+          <RefreshCw className="mr-1.5 h-4 w-4" />Retry access
+        </Button>
+      </div>
+    );
   }
   if (boardAccessQuery.isLoading || canManageNodes === null) {
     return <div className="text-sm text-muted-foreground">Checking SPS Node access...</div>;

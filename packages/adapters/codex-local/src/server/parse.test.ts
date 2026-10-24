@@ -30,6 +30,7 @@ describe("parseCodexJsonl", () => {
         cachedInputTokens: 2,
         outputTokens: 4,
       },
+      usageReportedFields: ["inputTokens", "cachedInputTokens", "outputTokens"],
       errorMessage: "resume failed",
     });
   });
@@ -63,8 +64,43 @@ describe("parseCodexJsonl", () => {
         cachedInputTokens: 2,
         outputTokens: 4,
       },
+      usageReportedFields: ["inputTokens", "cachedInputTokens", "outputTokens"],
       errorMessage: null,
     });
+  });
+
+  it("reports only valid token fields from the last completed turn", () => {
+    const stdout = [
+      JSON.stringify({
+        type: "turn.completed",
+        usage: { input_tokens: 10, cached_input_tokens: 2, output_tokens: 4 },
+      }),
+      JSON.stringify({
+        type: "turn.completed",
+        usage: { input_tokens: 0, cached_input_tokens: "3", output_tokens: 1.5 },
+      }),
+    ].join("\n");
+
+    expect(parseCodexJsonl(stdout)).toMatchObject({
+      usage: { inputTokens: 0, cachedInputTokens: 2, outputTokens: 1.5 },
+      usageReportedFields: ["inputTokens"],
+    });
+  });
+
+  it("returns an empty reported-field mask when usage is absent or invalid", () => {
+    expect(parseCodexJsonl(JSON.stringify({ type: "turn.completed" }))).toMatchObject({
+      usage: { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 },
+      usageReportedFields: [],
+    });
+    expect(
+      parseCodexJsonl(
+        JSON.stringify({
+          type: "turn.completed",
+          usage: { input_tokens: "0", cached_input_tokens: -1, output_tokens: 1.25 },
+        }),
+      ).usageReportedFields,
+    ).toEqual([]);
+    expect(parseCodexJsonl("").usageReportedFields).toEqual([]);
   });
 });
 

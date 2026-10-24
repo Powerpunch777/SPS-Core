@@ -405,6 +405,8 @@ describe("worker SPS Runtime transport", () => {
     const hostReadline = createInterface({ input: workerToHost });
     const pending = new Map<string, (response: JsonRpcResponse) => void>();
     const outboundMethods: string[] = [];
+    const outboundRequests: Array<{ method: string; params: unknown; paperclipInvocationId?: string }> = [];
+    const executionPage = { items: [], nextCursor: null };
     let nextRequestId = 1;
 
     const plugin = definePlugin({
@@ -419,17 +421,28 @@ describe("worker SPS Runtime transport", () => {
         ctx.actions.register("legacy", async () => ({
           result: await ctx.sps.runtimes.list("company-1", { nodeId: "node-1" }),
         }));
+        ctx.actions.register("executions", async () => ({
+          page: await ctx.sps.executions.list("company-1", {
+            lane: "agent_session",
+            limit: 10,
+            before: { createdAt: "2026-10-22T12:34:56.789Z", runId: "11111111-1111-4111-8111-111111111111", lane: "node" },
+          }),
+          execution: await ctx.sps.executions.get("company-1", "node", "22222222-2222-4222-8222-222222222222"),
+        }));
         ctx.actions.register("unsupported", async () => {
           const unsafeTransport = ctx.spsTransport as unknown as {
             request(operation: string, input: Record<string, unknown>): Promise<unknown>;
           };
           return unsafeTransport.request("companies.list", {});
         });
+        ctx.actions.register("summary", async () => ({
+          summary: await ctx.sps.executions.summarize("company-1", { from: "2026-10-01T00:00:00.000Z", to: "2026-10-02T00:00:00.000Z" }),
+        }));
       },
     });
     const worker = startWorkerRpcHost({ plugin, stdin: hostToWorker, stdout: workerToHost });
 
-    function callWorker(method: string, params: unknown) {
+    function callWorker(method: string, params: unknown, invocation?: PluginInvocationContext) {
       const id = `host-sps-runtime-${nextRequestId++}`;
       const result = new Promise<unknown>((resolve, reject) => {
         pending.set(id, (response) => {
@@ -440,7 +453,8 @@ describe("worker SPS Runtime transport", () => {
           resolve((response as { result?: unknown }).result);
         });
       });
-      hostToWorker.write(serializeMessage(createRequest(method, params, id)));
+      const request = createRequest(method, params, id);
+      hostToWorker.write(serializeMessage(invocation ? { ...request, paperclipInvocation: invocation } : request));
       return result;
     }
 
@@ -453,11 +467,21 @@ describe("worker SPS Runtime transport", () => {
       }
       if (!isJsonRpcRequest(message)) return;
       outboundMethods.push(message.method);
+      outboundRequests.push({ method: message.method, params: message.params, paperclipInvocationId: message.paperclipInvocationId });
       if (message.method === "sps.runtimes.list") {
         hostToWorker.write(serializeMessage(createSuccessResponse(message.id, [{
           id: "runtime-1",
           nodeId: "node-1",
         }])));
+      }
+      if (message.method === "sps.executions.list") {
+        hostToWorker.write(serializeMessage(createSuccessResponse(message.id, executionPage)));
+      }
+      if (message.method === "sps.executions.get") {
+        hostToWorker.write(serializeMessage(createSuccessResponse(message.id, null)));
+      }
+      if (message.method === "sps.executions.summarize") {
+        hostToWorker.write(serializeMessage(createSuccessResponse(message.id, { executionCount: 0 })));
       }
     });
 
@@ -471,7 +495,7 @@ describe("worker SPS Runtime transport", () => {
           description: "Test plugin",
           author: "SPS",
           categories: ["automation"],
-          capabilities: ["sps.runtimes.read"],
+          capabilities: ["sps.runtimes.read", "sps.executions.read"],
           entrypoints: {},
         },
         config: {},
@@ -484,11 +508,39 @@ describe("worker SPS Runtime transport", () => {
       await expect(callWorker("performAction", { key: "legacy", params: {} })).resolves.toEqual({
         result: [{ id: "runtime-1", nodeId: "node-1" }],
       });
-      expect(outboundMethods).toEqual(["sps.runtimes.list", "sps.runtimes.list"]);
+      await expect(callWorker("performAction", { key: "executions", params: {} }, {
+        id: "invocation-execution-history",
+        scope: { companyId: "company-1" },
+      })).resolves.toEqual({ page: executionPage, execution: null });
+      expect(outboundMethods).toEqual([
+        "sps.runtimes.list", "sps.runtimes.list", "sps.executions.list", "sps.executions.get",
+      ]);
+      expect(outboundRequests[2]).toEqual({
+        method: "sps.executions.list",
+        params: {
+          companyId: "company-1",
+          lane: "agent_session",
+          limit: 10,
+          before: { createdAt: "2026-10-22T12:34:56.789Z", runId: "11111111-1111-4111-8111-111111111111", lane: "node" },
+        },
+        paperclipInvocationId: "invocation-execution-history",
+      });
+      expect(outboundRequests[3]).toEqual({
+        method: "sps.executions.get",
+        params: { companyId: "company-1", lane: "node", runId: "22222222-2222-4222-8222-222222222222" },
+        paperclipInvocationId: "invocation-execution-history",
+      });
 
       await expect(callWorker("performAction", { key: "unsupported", params: {} }))
         .rejects.toThrow(/Unsupported SPS Runtime operation/);
-      expect(outboundMethods).toEqual(["sps.runtimes.list", "sps.runtimes.list"]);
+      expect(outboundMethods).toEqual([
+        "sps.runtimes.list", "sps.runtimes.list", "sps.executions.list", "sps.executions.get",
+      ]);
+      await expect(callWorker("performAction", { key: "summary", params: {} }, {
+        id: "invocation-summary", scope: { companyId: "company-1" },
+      })).resolves.toEqual({ summary: { executionCount: 0 } });
+      expect(outboundRequests.at(-1)).toEqual({ method: "sps.executions.summarize", paperclipInvocationId: "invocation-summary",
+        params: { companyId: "company-1", from: "2026-10-01T00:00:00.000Z", to: "2026-10-02T00:00:00.000Z" } });
     } finally {
       worker.stop();
       hostReadline.close();

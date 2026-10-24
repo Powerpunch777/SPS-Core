@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Bot, CheckCircle2, Loader2, Plus, Search, Send, ShieldCheck, X } from "lucide-react";
 import { spsMarketplaceApi, type SpsMarketplaceAssistantMessage } from "@/api/sps-marketplace";
@@ -20,8 +20,8 @@ function AssistantMessage({ message }: { message: SpsMarketplaceAssistantMessage
   const isSystem = message.role === "system";
   return (
     <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
-      <div className={`max-w-[90%] rounded-lg px-3 py-2 text-sm ${isUser ? "bg-primary text-primary-foreground" : isSystem ? "border border-destructive/25 bg-destructive/[0.06] text-destructive" : "bg-muted"}`}>
-        <div className="mb-1 text-[11px] font-medium opacity-70">{isUser ? "You" : isSystem ? "System" : "Marketplace Assistant"}</div>
+      <div className={`max-w-full rounded-lg px-3 py-2 text-sm sm:max-w-xl ${isUser ? "bg-primary text-primary-foreground" : isSystem ? "border border-destructive/25 bg-destructive/[0.06] text-destructive" : "bg-muted"}`}>
+        <div className="mb-1 text-micro font-medium opacity-70">{isUser ? "You" : isSystem ? "System" : "Marketplace Assistant"}</div>
         <p className="whitespace-pre-wrap break-words">{message.content}</p>
       </div>
     </div>
@@ -29,6 +29,10 @@ function AssistantMessage({ message }: { message: SpsMarketplaceAssistantMessage
 }
 
 export function SpsMarketplacePanel({ companyId }: { companyId: string }) {
+  return <SpsMarketplacePanelForCompany key={companyId} companyId={companyId} />;
+}
+
+function SpsMarketplacePanelForCompany({ companyId }: { companyId: string }) {
   const queryClient = useQueryClient();
   const [draftQuery, setDraftQuery] = useState("");
   const [query, setQuery] = useState("");
@@ -38,6 +42,29 @@ export function SpsMarketplacePanel({ companyId }: { companyId: string }) {
   const [draftMessage, setDraftMessage] = useState("");
   const [sessionError, setSessionError] = useState<string | null>(null);
   const [pendingRunId, setPendingRunId] = useState<string | null>(null);
+  const [sessionAction, setSessionAction] = useState<"open" | "send" | "close" | null>(null);
+  const sessionActionRef = useRef<"open" | "send" | "close" | null>(null);
+  const isMountedRef = useRef(false);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
+
+  function beginSessionAction(action: "open" | "send" | "close") {
+    if (sessionActionRef.current !== null) return false;
+    sessionActionRef.current = action;
+    if (isMountedRef.current) setSessionAction(action);
+    return true;
+  }
+
+  function endSessionAction(action: "open" | "send" | "close") {
+    if (sessionActionRef.current !== action) return;
+    sessionActionRef.current = null;
+    if (isMountedRef.current) setSessionAction(null);
+  }
 
   const catalog = useQuery({
     queryKey: ["sps-marketplace", companyId, query],
@@ -79,53 +106,70 @@ export function SpsMarketplacePanel({ companyId }: { companyId: string }) {
   }
 
   async function openSession() {
-    if (!selectedAgentId) return;
-    setSessionError(null);
+    if (!selectedAgentId || !beginSessionAction("open")) return;
+    if (isMountedRef.current) setSessionError(null);
     try {
       const result = await spsMarketplaceApi.openAssistantSession(companyId, selectedAgentId);
+      if (!isMountedRef.current) return;
       setSessionId(result.session.id);
       setPendingRunId(null);
     } catch (error) {
-      setSessionError(error instanceof Error ? error.message : "Could not open the Assistant session.");
+      if (isMountedRef.current) {
+        setSessionError(error instanceof Error ? error.message : "Could not open the Assistant session.");
+      }
+    } finally {
+      endSessionAction("open");
     }
   }
 
   async function closeAndReset() {
-    if (sessionId) {
+    if (!beginSessionAction("close")) return;
+    try {
       try {
-        await spsMarketplaceApi.closeAssistantSession(companyId, sessionId);
+        if (sessionId) {
+          await spsMarketplaceApi.closeAssistantSession(companyId, sessionId);
+        }
       } catch (error) {
-        setSessionError(error instanceof Error ? error.message : "Could not close the Assistant session.");
+        if (isMountedRef.current) {
+          setSessionError(error instanceof Error ? error.message : "Could not close the Assistant session.");
+        }
         return;
       }
+      if (!isMountedRef.current) return;
+      setSessionId(null);
+      setDraftMessage("");
+      setPendingRunId(null);
+      setSessionError(null);
+      await queryClient.invalidateQueries({ queryKey: ["sps-marketplace-assistant-agents", companyId] });
+    } finally {
+      endSessionAction("close");
     }
-    setSessionId(null);
-    setDraftMessage("");
-    setPendingRunId(null);
-    setSessionError(null);
-    await queryClient.invalidateQueries({ queryKey: ["sps-marketplace-assistant-agents", companyId] });
   }
 
   async function sendMessage(event: FormEvent) {
     event.preventDefault();
     const content = draftMessage.trim();
-    if (!sessionId || !content || pendingRunId) return;
+    if (!sessionId || !content || pendingRunId || !beginSessionAction("send")) return;
     setSessionError(null);
-    setDraftMessage("");
     try {
       const result = await spsMarketplaceApi.sendAssistantMessage(companyId, sessionId, content, newIdempotencyKey());
+      if (!isMountedRef.current) return;
+      setDraftMessage("");
       setPendingRunId(result.run.id);
       await queryClient.invalidateQueries({ queryKey: ["sps-marketplace-assistant-messages", companyId, sessionId] });
     } catch (error) {
-      setDraftMessage(content);
-      setSessionError(error instanceof Error ? error.message : "Could not send the message.");
+      if (isMountedRef.current) {
+        setSessionError(error instanceof Error ? error.message : "Could not send the message.");
+      }
+    } finally {
+      endSessionAction("send");
     }
   }
 
   return (
     <div className="space-y-5">
-      <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_380px]">
-        <section className="min-w-0 space-y-4">
+      <div className="grid gap-5 xl:grid-cols-3">
+        <section className="min-w-0 space-y-4 xl:col-span-2">
           <div>
             <h2 className="text-base font-semibold">Marketplace</h2>
             <p className="mt-1 text-sm text-muted-foreground">Browse verified public metadata. Nothing is installed or activated from this view.</p>
@@ -152,7 +196,7 @@ export function SpsMarketplacePanel({ companyId }: { companyId: string }) {
         <aside className="min-w-0 rounded-lg border bg-background">
           <div className="flex items-start justify-between gap-3 border-b p-4">
             <div><div className="flex items-center gap-2 font-medium"><Bot className="h-4 w-4" /> Marketplace Assistant</div><p className="mt-1 text-xs text-muted-foreground">Ask about verified Marketplace metadata using an approved Agent.</p></div>
-            {sessionId ? <Button type="button" variant="ghost" size="icon" aria-label="New conversation" title="New conversation" onClick={closeAndReset}><Plus className="h-4 w-4" /></Button> : null}
+            {sessionId ? <Button type="button" variant="ghost" size="icon" aria-label="New conversation" title="New conversation" onClick={closeAndReset} disabled={sessionAction !== null}><Plus className="h-4 w-4" /></Button> : null}
           </div>
           <div className="space-y-4 p-4">
             <div className="space-y-2">
@@ -166,24 +210,24 @@ export function SpsMarketplacePanel({ companyId }: { companyId: string }) {
                     <option value="">Choose an Agent</option>
                     {agents.data.agents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}{agent.title ? ` · ${agent.title}` : ""}</option>)}
                   </select>
-                  {!sessionId ? <Button type="button" onClick={openSession} disabled={!selectedAgentId || agents.isLoading}>Open</Button> : null}
+                  {!sessionId ? <Button type="button" onClick={openSession} disabled={!selectedAgentId || agents.isLoading || sessionAction !== null}>Open</Button> : null}
                 </div>
               ) : null}
             </div>
             {sessionError ? <div role="alert" className="flex items-start gap-2 rounded-md border border-destructive/25 bg-destructive/[0.06] p-3 text-sm text-destructive"><X className="mt-0.5 h-4 w-4 shrink-0" />{sessionError}</div> : null}
             {sessionId ? (
               <>
-                <div className="flex items-center justify-between text-xs text-muted-foreground"><span>Conversation</span>{pendingRunId ? <span className="flex items-center gap-1.5 text-primary"><Loader2 className="h-3.5 w-3.5 animate-spin" /> Working</span> : <span>Ready</span>}</div>
-                <div aria-label="Assistant transcript" className="flex min-h-[280px] max-h-[420px] flex-col gap-3 overflow-y-auto rounded-md border p-3">
+                <div className="flex items-center justify-between text-xs text-muted-foreground"><span>Conversation</span>{pendingRunId ? <span className="flex items-center gap-1.5 text-primary"><Loader2 className="h-3.5 w-3.5 animate-spin" /> Working</span> : sessionAction === "send" ? <span>Sending...</span> : <span>Ready</span>}</div>
+                <div aria-label="Assistant transcript" className="flex min-h-64 max-h-96 flex-col gap-3 overflow-y-auto rounded-md border p-3">
                   {messages.isLoading ? <p className="text-sm text-muted-foreground">Loading conversation...</p> : null}
-                  {!messages.isLoading && visibleMessages.length === 0 ? <p className="m-auto max-w-[240px] text-center text-sm text-muted-foreground">Ask which verified plugins fit your project or explain a plugin capability.</p> : null}
+                  {!messages.isLoading && visibleMessages.length === 0 ? <p className="m-auto max-w-60 text-center text-sm text-muted-foreground">Ask which verified plugins fit your project or explain a plugin capability.</p> : null}
                   {visibleMessages.map((message) => <AssistantMessage key={message.id} message={message} />)}
                 </div>
                 <form className="space-y-2" onSubmit={sendMessage}>
-                  <Textarea aria-label="Assistant message" value={draftMessage} onChange={(event) => setDraftMessage(event.target.value)} placeholder="Ask about Marketplace plugins..." disabled={Boolean(pendingRunId)} rows={3} />
-                  <Button type="submit" className="w-full gap-2" disabled={!draftMessage.trim() || Boolean(pendingRunId)}><Send className="h-4 w-4" /> Send</Button>
+                  <Textarea aria-label="Assistant message" value={draftMessage} onChange={(event) => setDraftMessage(event.target.value)} placeholder="Ask about Marketplace plugins..." disabled={Boolean(pendingRunId) || sessionAction !== null} rows={3} />
+                  <Button type="submit" className="w-full gap-2" disabled={!draftMessage.trim() || Boolean(pendingRunId) || sessionAction !== null}><Send className="h-4 w-4" /> Send</Button>
                 </form>
-                <Button type="button" variant="outline" className="w-full" onClick={closeAndReset}>New conversation</Button>
+                <Button type="button" variant="outline" className="w-full" onClick={closeAndReset} disabled={sessionAction !== null}>New conversation</Button>
               </>
             ) : (
               <div className="space-y-3 rounded-md bg-muted/30 p-3 text-sm text-muted-foreground">
@@ -195,7 +239,7 @@ export function SpsMarketplacePanel({ companyId }: { companyId: string }) {
           </div>
         </aside>
 
-        {selectedPluginId ? <Card className="py-0 xl:col-start-1"><CardContent className="space-y-3 p-4">{selectedPlugin.isLoading ? <p className="text-sm text-muted-foreground">Loading details...</p> : null}{selectedPlugin.error ? <p className="text-sm text-destructive">Could not load plugin details.</p> : null}{selectedPlugin.data ? <><div><h3 className="font-semibold">{selectedPlugin.data.plugin.displayName}</h3><p className="text-xs text-muted-foreground">{selectedPlugin.data.plugin.pluginId}</p></div><p className="text-sm text-muted-foreground">{selectedPlugin.data.plugin.description}</p><dl className="space-y-2 text-xs"><div><dt className="font-medium">Publisher</dt><dd className="text-muted-foreground">{selectedPlugin.data.plugin.publisher}</dd></div><div><dt className="font-medium">SPS compatibility</dt><dd className="text-muted-foreground">{selectedPlugin.data.plugin.compatibility.sps ?? "Not declared"}</dd></div><div><dt className="font-medium">Capabilities</dt><dd className="mt-1 flex flex-wrap gap-1">{selectedPlugin.data.plugin.capabilities.map((capability) => <Badge key={capability} variant="outline">{capability}</Badge>)}</dd></div></dl></> : null}</CardContent></Card> : null}
+        {selectedPluginId ? <Card className="py-0 xl:col-start-1 xl:col-span-2"><CardContent className="space-y-3 p-4">{selectedPlugin.isLoading ? <p className="text-sm text-muted-foreground">Loading details...</p> : null}{selectedPlugin.error ? <p className="text-sm text-destructive">Could not load plugin details.</p> : null}{selectedPlugin.data ? <><div><h3 className="font-semibold">{selectedPlugin.data.plugin.displayName}</h3><p className="text-xs text-muted-foreground">{selectedPlugin.data.plugin.pluginId}</p></div><p className="text-sm text-muted-foreground">{selectedPlugin.data.plugin.description}</p><dl className="space-y-2 text-xs"><div><dt className="font-medium">Publisher</dt><dd className="text-muted-foreground">{selectedPlugin.data.plugin.publisher}</dd></div><div><dt className="font-medium">SPS compatibility</dt><dd className="text-muted-foreground">{selectedPlugin.data.plugin.compatibility.sps ?? "Not declared"}</dd></div><div><dt className="font-medium">Capabilities</dt><dd className="mt-1 flex flex-wrap gap-1">{selectedPlugin.data.plugin.capabilities.map((capability) => <Badge key={capability} variant="outline">{capability}</Badge>)}</dd></div></dl></> : null}</CardContent></Card> : null}
       </div>
     </div>
   );

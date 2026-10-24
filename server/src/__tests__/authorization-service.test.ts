@@ -289,6 +289,41 @@ describeEmbeddedPostgres("authorization service", () => {
     })).resolves.toMatchObject({ allowed: false, reason: "deny_policy_restricted" });
   });
 
+  it("routes board configuration actions through protected grants before the unmapped fallback", async () => {
+    const company = await createCompany(db, "BoardConfigDispatch");
+    const target = await createAgent(db, company.id);
+    const authz = authorizationService(db);
+    for (const action of ["agent_config:read", "agent_config:update", "skill_config:update"] as const) {
+      const userId = await createUser(db);
+      await grantUserPermission(db, company.id, userId, action === "skill_config:update" ? "skills:create" : "agents:configure");
+      const decision = await authz.decide({
+        actor: { type: "board", userId, source: "session" }, action,
+        resource: { type: "agent", companyId: company.id, agentId: target.id },
+      });
+      expect(decision).toMatchObject({ allowed: true, reason: action === "agent_config:read" ? "allow_explicit_grant" : "allow_direct_change" });
+    }
+  });
+
+  it("keeps board configuration updates grant-scoped and suggest changes consent-bound", async () => {
+    const company = await createCompany(db, "BoardConfigConsent");
+    const target = await createAgent(db, company.id);
+    const userId = await createUser(db);
+    await grantUserPermission(db, company.id, userId, "agents:suggest-changes");
+    const request = {
+      actor: { type: "board", userId, source: "session" } as const,
+      action: "agent_config:update" as const,
+      resource: { type: "agent", companyId: company.id, agentId: target.id } as const,
+    };
+    const authz = authorizationService(db);
+    await expect(authz.decide(request)).resolves.toMatchObject({ allowed: false, reason: "deny_missing_consent" });
+    await expect(authz.decide({ ...request, scope: { consentedChange: true } })).resolves.toMatchObject({ allowed: true, reason: "allow_consented_change" });
+    const foreign = await createCompany(db, "BoardConfigForeign");
+    await expect(authz.decide({ ...request, resource: { ...request.resource, companyId: foreign.id } })).resolves.toMatchObject({ allowed: false });
+    const ungrantedUser = await createUser(db);
+    await db.insert(companyMemberships).values({ companyId: company.id, principalType: "user", principalId: ungrantedUser, status: "active", membershipRole: "operator" });
+    await expect(authz.decide({ ...request, actor: { ...request.actor, userId: ungrantedUser } })).resolves.toMatchObject({ allowed: false, reason: "deny_no_grant" });
+  });
+
   it("allows suggest grants to read peer agent configuration", async () => {
     const company = await createCompany(db, "AgentReadGrant");
     const actorAgent = await createAgent(db, company.id);

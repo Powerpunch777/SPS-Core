@@ -107,7 +107,7 @@
   {
     "dir": "packages/plugins/plugin-mcp-connector",
     "name": "@sps/plugin-mcp-connector",
-    "publishFromCi": true
+    "publishFromCi": false
   },
   {
     "dir": "packages/plugins/create-paperclip-plugin",

@@ -46,6 +46,8 @@ import {
 } from "@paperclipai/adapter-utils/server-utils";
 import {
   claudeModelUsageTotals,
+  claudeModelUsageReportedFields,
+  claudeUsageReportedFields,
   parseClaudeStreamJson,
   describeClaudeFailure,
   detectClaudeLoginRequired,
@@ -929,6 +931,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     }
 
     const fallbackModelUsageTotals = parsedStream.usage ? null : claudeModelUsageTotals(parsed.modelUsage);
+    const fallbackUsageReportedFields = fallbackModelUsageTotals
+      ? claudeModelUsageReportedFields(parsed.modelUsage)
+      : claudeUsageReportedFields(parsed.usage);
     const usage =
       parsedStream.usage ??
       fallbackModelUsageTotals ??
@@ -940,6 +945,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           outputTokens: asNumber(usageObj.output_tokens, 0),
         };
       })();
+    const usageReportedFields = parsedStream.usage
+      ? parsedStream.usageReportedFields
+      : fallbackUsageReportedFields;
     const usageBasis = parsedStream.usage
       ? parsedStream.usageBasis
       : fallbackModelUsageTotals
@@ -1059,6 +1067,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       retryNotBefore: transientRetryNotBefore ? transientRetryNotBefore.toISOString() : null,
       errorMeta,
       usage,
+      usageReportedFields,
       ...(usageBasis ? { usageBasis } : {}),
       sessionId: resolvedSessionId,
       sessionParams: resolvedSessionParams,

@@ -34,14 +34,15 @@ const mockAssistant = vi.hoisted(() => ({
   closeSession: vi.fn(),
 }));
 
-vi.mock("../services/index.js", () => ({
-  accessService: () => mockAccess,
-  logActivity: vi.fn().mockResolvedValue(undefined),
-}));
-
-vi.mock("../services/heartbeat.js", () => ({
-  heartbeatService: () => mockHeartbeat,
-}));
+vi.mock("../compat/paperclip/control-plane.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../compat/paperclip/control-plane.js")>();
+  return {
+    ...actual,
+    accessService: () => mockAccess,
+    heartbeatService: () => mockHeartbeat,
+    logActivity: vi.fn().mockResolvedValue(undefined),
+  };
+});
 
 vi.mock("../services/sps-marketplace-assistant.js", () => ({
   createSpsMarketplaceAssistantService: () => mockAssistant,

@@ -170,4 +170,54 @@ describe("SpsWorkspaceInbox", () => {
     await settle();
     expect(apiMocks.performInboxAction).toHaveBeenCalledWith("workspace-1", "unread", "acknowledge");
   });
+
+  it("leaves nested action keyboard events available to their native controls", async () => {
+    render();
+    await settle();
+    await settle();
+    const archive = container.querySelector<HTMLButtonElement>('button[aria-label="Archive Build needs review"]')!;
+    const action = Array.from(container.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent === "Acknowledge")!;
+
+    for (const target of [archive, action]) {
+      target.focus();
+      for (const key of ["Enter", "ArrowDown", "ArrowUp", "j", "k"]) {
+        const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+        act(() => { target.dispatchEvent(event); });
+        expect(event.defaultPrevented).toBe(false);
+      }
+    }
+    expect(routerMock.navigate).not.toHaveBeenCalled();
+    expect(apiMocks.setInboxState).not.toHaveBeenCalled();
+    expect(apiMocks.performInboxAction).not.toHaveBeenCalled();
+
+    // jsdom does not synthesize the browser's button click from Enter.
+    act(() => archive.click());
+    await settle();
+    act(() => action.click());
+    await settle();
+    expect(apiMocks.setInboxState).toHaveBeenCalledWith("workspace-1", "unread", { archived: true });
+    expect(apiMocks.performInboxAction).toHaveBeenCalledWith("workspace-1", "unread", "acknowledge");
+    expect(routerMock.navigate).not.toHaveBeenCalled();
+  });
+
+  it.each([["ArrowDown", "ArrowUp"], ["j", "k"]])("keeps %s/%s navigation and Enter working on the list itself", async (down, up) => {
+    render();
+    await settle();
+    await settle();
+    const list = container.querySelector<HTMLDivElement>('[aria-label="Workspace Inbox items"]')!;
+    list.focus();
+    const press = (key: string) => {
+      const event = new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+      act(() => { list.dispatchEvent(event); });
+      expect(event.defaultPrevented).toBe(true);
+    };
+    press(down);
+    press("Enter");
+    expect(routerMock.navigate).toHaveBeenLastCalledWith("/work/read");
+    press(up);
+    press("Enter");
+    await settle();
+    expect(routerMock.navigate).toHaveBeenLastCalledWith("/work/unread");
+    expect(apiMocks.setInboxState).toHaveBeenCalledWith("workspace-1", "unread", { read: true });
+  });
 });

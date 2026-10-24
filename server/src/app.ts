@@ -53,12 +53,14 @@ import { authRoutes } from "./routes/auth.js";
 import { assetRoutes } from "./routes/assets.js";
 import { accessRoutes } from "./routes/access.js";
 import { spsNodeRoutes } from "./routes/sps-nodes.js";
+import { spsExecutionRoutes } from "./routes/sps-executions.js";
 import { spsWorkspaceSourceRoutes } from "./routes/sps-workspace-sources.js";
 import { spsMarketplaceRoutes } from "./routes/sps-marketplace.js";
 import { pluginRoutes } from "./routes/plugins.js";
 import { adapterRoutes } from "./routes/adapters.js";
 import { pluginUiStaticRoutes } from "./routes/plugin-ui-static.js";
-import { readBrandedStaticIndexHtml } from "./static-index-html.js";
+import { createBrandedStaticIndexHandler } from "./static-index-html.js";
+import { resolveStaticUiDist } from "./static-ui-dist.js";
 import { applyUiBranding } from "./ui-branding.js";
 import { logger } from "./middleware/logger.js";
 import { DEFAULT_LOCAL_PLUGIN_DIR, pluginLoader } from "./services/plugin-loader.js";
@@ -77,6 +79,11 @@ import { createPluginHostServiceCleanup } from "./services/plugin-host-service-c
 import { createPluginCanonicalDiagnostics } from "./services/plugin-canonical-diagnostics.js";
 import { pluginRegistryService } from "./services/plugin-registry.js";
 import { installConfiguredBundledPlugins, parseBundledPluginPaths } from "./services/bundled-plugin-bootstrap.js";
+import {
+  pluginRecoveryMessage,
+  resolvePluginRecoveryState,
+  runPluginStartupUnlessRecovering,
+} from "./services/sps-plugin-recovery.js";
 import { createHostClientHandlers } from "@paperclipai/plugin-sdk";
 import type { BetterAuthSessionResult } from "./auth/better-auth.js";
 import { createCachedViteHtmlRenderer } from "./vite-html-renderer.js";
@@ -174,6 +181,7 @@ export async function createApp(
     spsIdentityHandler?: express.RequestHandler;
   },
 ) {
+  const pluginRecoveryState = resolvePluginRecoveryState();
   const app = express();
   app.locals.paperclipDb = db;
   const captureRawBody = (req: express.Request, _res: express.Response, buf: Buffer) => {
@@ -289,7 +297,9 @@ export async function createApp(
     databaseBackupService: opts.databaseBackupService,
   });
   const memoryProviderRuntime = createCompanyMemoryProviderRuntime({ db, workerManager });
-  eventBus.observe((event) => memoryProviderRuntime.handleEvent(event));
+  if (!pluginRecoveryState.enabled) {
+    eventBus.observe((event) => memoryProviderRuntime.handleEvent(event));
+  }
   const scheduler = createPluginJobScheduler({
     db,
     jobStore,
@@ -313,6 +323,7 @@ export async function createApp(
     {
       localPluginDir: opts.localPluginDir ?? DEFAULT_LOCAL_PLUGIN_DIR,
       migrationDb: opts.pluginMigrationDb,
+      recoveryState: pluginRecoveryState,
     },
     {
       workerManager,
@@ -376,11 +387,13 @@ export async function createApp(
       },
       lifecycle,
       { diagnostics: canonicalPluginDiagnostics },
+      pluginRecoveryState,
     ),
   );
   api.use(spsWorkspaceSurfaceRoutes(db, workerManager));
   api.use(adapterRoutes());
   api.use(spsNodeRoutes(db));
+  api.use(spsExecutionRoutes(db));
   api.use(spsWorkspaceSourceRoutes(db));
   api.use(spsMarketplaceRoutes(db, workerManager));
   api.use(
@@ -398,24 +411,14 @@ export async function createApp(
   });
   app.use(pluginUiStaticRoutes(db, {
     localPluginDir: opts.localPluginDir ?? DEFAULT_LOCAL_PLUGIN_DIR,
+    recoveryState: pluginRecoveryState,
   }));
 
   const __dirname = path.dirname(fileURLToPath(import.meta.url));
   if (opts.uiMode === "static") {
-    // Try published location first (server/ui-dist/), then monorepo dev location (../../ui/dist)
-    const candidates = [
-      path.resolve(__dirname, "../ui-dist"),
-      path.resolve(__dirname, "../../ui/dist"),
-    ];
-    const uiDist = candidates.find((p) => fs.existsSync(path.join(p, "index.html")));
+    const uiDist = resolveStaticUiDist(__dirname);
     if (uiDist) {
-      const sendBrandedStaticIndex = (_req: express.Request, res: express.Response) => {
-        res
-          .status(200)
-          .set("Content-Type", "text/html")
-          .set("Cache-Control", "no-cache")
-          .end(readBrandedStaticIndexHtml(uiDist));
-      };
+      const sendBrandedStaticIndex = createBrandedStaticIndexHandler(uiDist);
       // express.static would otherwise serve the raw index before runtime
       // branding and Workplane mode metadata can be injected.
       app.get(["/", "/index.html"], sendBrandedStaticIndex);
@@ -449,16 +452,12 @@ export async function createApp(
       // with a MIME-type error, and cache that broken response. Return 404
       // instead. The index.html response itself is no-cache so a subsequent
       // deploy's updated asset hashes are picked up on next load.
-      app.get(/.*/, (req, res) => {
+      app.get(/.*/, (req, res, next) => {
         if (req.path.startsWith("/assets/")) {
           res.status(404).end();
           return;
         }
-        res
-          .status(200)
-          .set("Content-Type", "text/html")
-          .set("Cache-Control", "no-cache")
-          .end(readBrandedStaticIndexHtml(uiDist));
+        sendBrandedStaticIndex(req, res, next);
       });
     } else {
       console.warn("[paperclip] UI dist not found; running in API-only mode");
@@ -511,8 +510,15 @@ export async function createApp(
 
   app.use(errorHandler);
 
-  jobCoordinator.start();
-  scheduler.start();
+  if (!pluginRecoveryState.enabled) {
+    jobCoordinator.start();
+    scheduler.start();
+  } else {
+    logger.warn(
+      { invalidConfiguration: pluginRecoveryState.invalidConfiguration },
+      pluginRecoveryMessage(pluginRecoveryState),
+    );
+  }
   let feedbackExportShuttingDown = false;
   let feedbackExportTimer: ReturnType<typeof setInterval> | null = null;
   const disableFeedbackExportFlushes = () => {
@@ -545,13 +551,17 @@ export async function createApp(
   if (opts.feedbackExportService) {
     void flushPendingFeedbackExports();
   }
-  void toolDispatcher.initialize().catch((err) => {
-    logger.error({ err }, "Failed to initialize plugin tool dispatcher");
-  });
-  const devWatcher = createPluginDevWatcher(
-    lifecycle,
-    async (pluginId) => (await pluginRegistry.getById(pluginId))?.packagePath ?? null,
-  );
+  if (!pluginRecoveryState.enabled) {
+    void toolDispatcher.initialize().catch((err) => {
+      logger.error({ err }, "Failed to initialize plugin tool dispatcher");
+    });
+  }
+  const devWatcher = pluginRecoveryState.enabled
+    ? null
+    : createPluginDevWatcher(
+      lifecycle,
+      async (pluginId) => (await pluginRegistry.getById(pluginId))?.packagePath ?? null,
+    );
   // Auto-install the bundled kubernetes sandbox-provider plugin so the
   // "kubernetes" sandbox provider is registered for agent runs. The plugin is
   // excluded from the pnpm workspace and built standalone into the image (see
@@ -635,18 +645,21 @@ export async function createApp(
       pluginRegistry,
     }, { installMissing: false });
   };
-  void ensureBundledKubernetesPlugin()
-    .then(() => ensureConfiguredBundledPlugins())
-    .then(() => refreshConfiguredBundledPlugins())
-    .then(() => loader.loadAll())
-    .then((result) => {
-    if (!result) return;
-    for (const loaded of result.results) {
-      if (devWatcher && loaded.success && loaded.plugin.packagePath) {
-        devWatcher.watch(loaded.plugin.id, loaded.plugin.packagePath);
-      }
-    }
-  }).catch((err) => {
+  const pluginStartup = runPluginStartupUnlessRecovering(pluginRecoveryState, () =>
+    ensureBundledKubernetesPlugin()
+      .then(() => ensureConfiguredBundledPlugins())
+      .then(() => refreshConfiguredBundledPlugins())
+      .then(() => loader.loadAll())
+      .then((result) => {
+        if (!result) return;
+        for (const loaded of result.results) {
+          if (devWatcher && loaded.success && loaded.plugin.packagePath) {
+            devWatcher.watch(loaded.plugin.id, loaded.plugin.packagePath);
+          }
+        }
+      }),
+  );
+  void pluginStartup?.catch((err) => {
     logger.error({ err }, "Failed to load ready plugins on startup");
   });
   let appServicesShutdown = false;

@@ -215,7 +215,7 @@ function GenericPluginManager() {
           <div className="flex items-center gap-2"><Puzzle className="h-6 w-6 text-muted-foreground" /><h1 className="text-xl font-semibold">Plugins</h1></div>
           {sectionTabs}
         </div>
-        {selectedCompany?.id ? <SpsMarketplacePanel companyId={selectedCompany.id} /> : <p className="text-sm text-muted-foreground">Choose a Workspace to open Marketplace.</p>}
+        {selectedCompany?.id ? <SpsMarketplacePanel key={selectedCompany.id} companyId={selectedCompany.id} /> : <p className="text-sm text-muted-foreground">Choose a Workspace to open Marketplace.</p>}
       </div>
     );
   }

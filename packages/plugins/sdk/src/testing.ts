@@ -545,6 +545,7 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
   const localFolderFiles = new Map<string, string>();
 
   const sessions = new Map<string, AgentSession>();
+  const sessionRuns = new Map<string, { sessionId: string; cancelled: boolean }>();
   const sessionEventCallbacks = new Map<string, (event: AgentSessionEvent) => void>();
 
   const events: EventRegistration[] = [];
@@ -851,6 +852,17 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
       },
     },
     sps: {
+      executions: {
+        async summarize() {
+          throw new Error("The in-memory plugin test harness does not provide SPS execution summaries");
+        },
+        async list() {
+          throw new Error("The in-memory plugin test harness does not provide SPS Node infrastructure");
+        },
+        async get() {
+          throw new Error("The in-memory plugin test harness does not provide SPS Node infrastructure");
+        },
+      },
       workspaceSources: {
         async list() {
           throw new Error("The in-memory plugin test harness does not provide SPS Node infrastructure");
@@ -873,6 +885,12 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
         },
       },
       runs: {
+        async list() {
+          throw new Error("The in-memory plugin test harness does not provide SPS Node infrastructure");
+        },
+        async cancel() {
+          throw new Error("The in-memory plugin test harness does not provide SPS Node infrastructure");
+        },
         async dispatch() {
           throw new Error("The in-memory plugin test harness does not provide SPS Node infrastructure");
         },
@@ -2309,6 +2327,21 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
         },
       },
       sessions: {
+        async getRun(sessionId, companyId, runId) {
+          requireCapability(manifest, capabilitySet, "agent.sessions.read");
+          const session = sessions.get(sessionId);
+          const run = sessionRuns.get(runId);
+          if (!session || session.companyId !== requireCompanyId(companyId) || run?.sessionId !== sessionId) throw new Error("Session run not found");
+          return { runId, status: run.cancelled ? "cancelled" : "running", cancellationRequested: run.cancelled, termination: run.cancelled ? "confirmed" : "not_applicable", error: null, errorCode: run.cancelled ? "cancelled" : null };
+        },
+        async cancel(sessionId, companyId, runId) {
+          requireCapability(manifest, capabilitySet, "agent.sessions.cancel");
+          const session = sessions.get(sessionId);
+          const run = sessionRuns.get(runId);
+          if (!session || session.companyId !== requireCompanyId(companyId) || run?.sessionId !== sessionId) throw new Error("Session run not found");
+          run.cancelled = true;
+          return { runId, status: "cancelled", cancellationRequested: true, termination: "confirmed", error: null, errorCode: "cancelled" };
+        },
         async create(agentId, companyId, opts) {
           requireCapability(manifest, capabilitySet, "agent.sessions.create");
           const cid = requireCompanyId(companyId);
@@ -2344,6 +2377,7 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
             sessionEventCallbacks.set(sessionId, opts.onEvent);
           }
           const runId = randomUUID();
+          sessionRuns.set(runId, { sessionId, cancelled: false });
           session.lastRunId = runId;
           session.lastError = null;
           return { runId };

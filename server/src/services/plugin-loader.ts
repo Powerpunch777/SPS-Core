@@ -24,7 +24,7 @@
  * @see PLUGIN_SPEC.md §10 — Package Contract
  * @see PLUGIN_SPEC.md §12 — Process Model
  */
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { cp, mkdir, readdir, readFile, rm, stat } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -63,6 +63,11 @@ import {
   hasSpsPluginPackageMetadata,
   resolveSpsPluginPackageMetadata,
 } from "./plugin-package-metadata.js";
+import {
+  assertPluginRuntimeAllowed,
+  resolvePluginRecoveryState,
+  type PluginRecoveryState,
+} from "./sps-plugin-recovery.js";
 
 const execFileAsync = promisify(execFile);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -81,21 +86,90 @@ function npmInvocation(args: string[]) {
   return { file: "npm", args };
 }
 
-function pnpmInvocation(args: readonly string[], processEnv: NodeJS.ProcessEnv) {
-  const pnpmCli = processEnv["SPS_PNPM_CLI"]?.trim()
-    || (processEnv["npm_execpath"]?.toLowerCase().includes("pnpm")
-      ? processEnv["npm_execpath"]?.trim()
-      : "");
-  const nodeCommand = processEnv["SPS_PLUGIN_NODE_COMMAND"]?.trim() || process.execPath;
-  if (
-    pnpmCli
-    && path.isAbsolute(pnpmCli)
-    && existsSync(pnpmCli)
-    && path.isAbsolute(nodeCommand)
-    && existsSync(nodeCommand)
-  ) {
-    return { file: nodeCommand, args: [pnpmCli, ...args] };
+function resolvePnpmCliFromWindowsShim(shimPath: string): string | null {
+  let shimContents: string;
+  try {
+    shimContents = readFileSync(shimPath, "utf8");
+  } catch {
+    return null;
   }
+
+  const shimDirectory = path.dirname(shimPath);
+  const cliPaths = shimContents.matchAll(
+    /"((?:%~dp0|[A-Za-z]:[\\/])[^"\r\n]*\bpnpm\.(?:cjs|mjs|js))"/gi,
+  );
+  for (const match of cliPaths) {
+    const expandedPath = match[1]!.replace(/%~dp0/gi, `${shimDirectory}${path.sep}`);
+    const cliPath = path.resolve(expandedPath.replace(/[\\/]+/g, path.sep));
+    if (existsSync(cliPath)) return cliPath;
+  }
+  return null;
+}
+
+export function resolvePnpmInvocation(
+  args: readonly string[],
+  processEnv: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform = process.platform,
+) {
+  const configuredPnpmCli = processEnv["SPS_PNPM_CLI"]?.trim();
+  const npmExecPath = processEnv["npm_execpath"]?.trim();
+  const pnpmCli = configuredPnpmCli
+    || (npmExecPath?.toLowerCase().includes("pnpm") ? npmExecPath : "");
+  const configuredNodeCommand = processEnv["SPS_PLUGIN_NODE_COMMAND"]?.trim();
+  const nodeCommand = configuredNodeCommand
+    && path.isAbsolute(configuredNodeCommand)
+    && existsSync(configuredNodeCommand)
+    ? configuredNodeCommand
+    : process.execPath;
+
+  const invocationForCliPath = (cliPath: string) => {
+    if (!path.isAbsolute(cliPath) || !existsSync(cliPath)) return null;
+
+    const extension = path.extname(cliPath).toLowerCase();
+    if (platform === "win32" && extension === ".exe") {
+      return { file: cliPath, args: [...args] };
+    }
+    if (platform === "win32" && [".cmd", ".bat"].includes(extension)) {
+      const resolvedCliPath = resolvePnpmCliFromWindowsShim(cliPath);
+      return resolvedCliPath
+        ? { file: nodeCommand, args: [resolvedCliPath, ...args] }
+        : null;
+    }
+    return { file: nodeCommand, args: [cliPath, ...args] };
+  };
+
+  if (pnpmCli) {
+    const invocation = invocationForCliPath(pnpmCli);
+    if (invocation) return invocation;
+  }
+
+  if (platform === "win32") {
+    const pathValue = processEnv["PATH"] ?? processEnv["Path"] ?? "";
+    let unresolvedShim: string | null = null;
+    for (const entry of pathValue.split(";")) {
+      const directory = entry.trim().replace(/^"|"$/g, "");
+      if (!directory) continue;
+
+      const executablePath = path.join(directory, "pnpm.exe");
+      if (existsSync(executablePath)) {
+        return { file: executablePath, args: [...args] };
+      }
+
+      for (const extension of [".cmd", ".bat"]) {
+        const shimPath = path.join(directory, `pnpm${extension}`);
+        if (!existsSync(shimPath)) continue;
+        const resolvedCliPath = resolvePnpmCliFromWindowsShim(shimPath);
+        if (resolvedCliPath) return { file: nodeCommand, args: [resolvedCliPath, ...args] };
+        unresolvedShim ??= shimPath;
+      }
+    }
+
+    if (unresolvedShim) {
+      throw new Error(`Could not resolve the JavaScript CLI referenced by Windows pnpm shim: ${unresolvedShim}`);
+    }
+    throw new Error("Could not find a directly executable pnpm CLI on Windows PATH; set SPS_PNPM_CLI to its JavaScript entrypoint.");
+  }
+
   return { file: "pnpm", args: [...args] };
 }
 
@@ -340,6 +414,9 @@ export interface PluginLoaderOptions {
    * Defaults to true.
    */
   enableNpmDiscovery?: boolean;
+
+  /** Disable all package inspection and runtime paths during Core recovery. */
+  recoveryState?: PluginRecoveryState;
 
   /**
    * Future: URL of the remote plugin registry to query.
@@ -980,7 +1057,7 @@ export async function ensureLocalPluginBuilt(
     ? (command: LocalPluginBuildCommand) => command
     : (command: LocalPluginBuildCommand) => (
       command.file === "pnpm"
-        ? { ...command, ...pnpmInvocation(command.args, processEnv) }
+        ? { ...command, ...resolvePnpmInvocation(command.args, processEnv) }
         : command
     );
   const buildCommands = buildLocalPluginBuildCommands(packageRoot, pkgJson, {
@@ -1233,6 +1310,8 @@ export function pluginLoader(
     enableLocalFilesystem = true,
     enableNpmDiscovery = true,
   } = options;
+  const recoveryState = options.recoveryState ?? resolvePluginRecoveryState();
+  const assertRuntimeAllowed = (action: string) => assertPluginRuntimeAllowed(recoveryState, action);
 
   const registry = pluginRegistryService(db);
   const manifestValidator = pluginManifestValidator();
@@ -1670,6 +1749,7 @@ export function pluginLoader(
     // -----------------------------------------------------------------------
 
     async discoverAll(npmSearchDirs?: string[]): Promise<PluginDiscoveryResult> {
+      assertRuntimeAllowed("plugin discovery");
       const allDiscovered: DiscoveredPlugin[] = [];
       const allErrors: Array<{ packagePath: string; packageName: string; error: string }> = [];
       const sources: PluginSource[] = [];
@@ -1720,6 +1800,7 @@ export function pluginLoader(
     // -----------------------------------------------------------------------
 
     async discoverFromLocalFilesystem(dir?: string): Promise<PluginDiscoveryResult> {
+      assertRuntimeAllowed("local plugin discovery");
       const scanDir = dir ?? localPluginDir;
       const discovered: DiscoveredPlugin[] = [];
       const errors: Array<{ packagePath: string; packageName: string; error: string }> = [];
@@ -1802,6 +1883,7 @@ export function pluginLoader(
     // -----------------------------------------------------------------------
 
     async discoverFromNpm(searchDirs?: string[]): Promise<PluginDiscoveryResult> {
+      assertRuntimeAllowed("npm plugin discovery");
       const discovered: DiscoveredPlugin[] = [];
       const errors: Array<{ packagePath: string; packageName: string; error: string }> = [];
 
@@ -1897,6 +1979,7 @@ export function pluginLoader(
     // -----------------------------------------------------------------------
 
     async loadManifest(packagePath: string): Promise<PaperclipPluginManifestV1 | null> {
+      assertRuntimeAllowed("plugin manifest import");
       const pkgJson = await readPackageJson(packagePath);
       if (!pkgJson) return null;
 
@@ -1919,6 +2002,7 @@ export function pluginLoader(
     // -----------------------------------------------------------------------
 
     async installPlugin(installOptions: PluginInstallOptions): Promise<DiscoveredPlugin> {
+      assertRuntimeAllowed("plugin installation");
       const discovered = await fetchAndValidate(installOptions);
       const manifest = discovered.manifest!;
 
@@ -1965,6 +2049,7 @@ export function pluginLoader(
     },
 
     async previewRegistryPluginEnable({ localPath, staticManifest }): Promise<DiscoveredPlugin> {
+      assertRuntimeAllowed("Registry plugin import");
       return await fetchAndValidate({
         localPath,
         registryStaticManifest: staticManifest,
@@ -1993,6 +2078,7 @@ export function pluginLoader(
       pluginId: string,
       upgradeOptions: PluginUpgradeOptions,
     ): Promise<PreparedPluginUpgrade> {
+      assertRuntimeAllowed("plugin upgrade");
       const plugin = (await registry.getById(pluginId)) as {
         id: string;
         packageName: string;
@@ -2070,6 +2156,7 @@ export function pluginLoader(
       pluginId: string,
       upgradeOptions: PluginUpgradeOptions,
     ): Promise<PreparedPluginUpgrade> {
+      assertRuntimeAllowed("plugin upgrade preparation");
       return await preparePluginUpgrade(pluginId, upgradeOptions);
     },
 
@@ -2077,10 +2164,12 @@ export function pluginLoader(
       pluginId: string,
       prepared: PreparedPluginUpgrade,
     ): Promise<void> {
+      assertRuntimeAllowed("plugin upgrade commit");
       await commitPreparedPluginUpgrade(pluginId, prepared);
     },
 
     async inspectPluginMigrations(pluginId: string): Promise<PluginDatabaseMigrationPlan | null> {
+      assertRuntimeAllowed("plugin migration inspection");
       const plugin = (await registry.getById(pluginId)) as PluginRecord | null;
       if (!plugin) throw new Error(`Plugin not found: ${pluginId}`);
       const packageRoot = resolvePluginPackageRoot(plugin, localPluginDir);
@@ -2176,6 +2265,7 @@ export function pluginLoader(
      * @returns A promise that resolves with summary statistics of the load operation.
      */
     async loadAll(): Promise<PluginLoadAllResult> {
+      assertRuntimeAllowed("plugin activation");
       if (!runtimeServices) {
         throw new Error(
           "Cannot loadAll: no PluginRuntimeServices provided. " +
@@ -2251,6 +2341,7 @@ export function pluginLoader(
       pluginId: string,
       options: PluginLoadOptions = {},
     ): Promise<PluginLoadResult> {
+      assertRuntimeAllowed("plugin activation");
       if (!runtimeServices) {
         throw new Error(
           "Cannot loadSingle: no PluginRuntimeServices provided. " +

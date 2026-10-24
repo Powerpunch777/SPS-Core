@@ -9,8 +9,8 @@ import {
   LayoutDashboard,
   Puzzle,
 } from "lucide-react";
-import type { PluginDashboardWidgetSize } from "@paperclipai/shared";
-import { Link, Navigate } from "@/lib/router";
+import type { PluginDashboardWidgetSize } from "../compat/paperclip/shared";
+import { Link } from "@/lib/router";
 import { agentsApi } from "@/api/agents";
 import { pluginsApi } from "@/api/plugins";
 import {
@@ -24,7 +24,6 @@ import { queryKeys } from "@/lib/queryKeys";
 import { cn } from "@/lib/utils";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
 import {
   Select,
   SelectContent,
@@ -76,8 +75,8 @@ export function SpsCoreWorkspaceHome() {
   const {
     data: assistants,
     isLoading: assistantsLoading,
-    isSuccess: assistantsLoaded,
-    isFetching: assistantsFetching,
+    error: assistantsError,
+    refetch: refetchAssistants,
   } = useQuery({
     queryKey: queryKeys.agents.list(selectedCompanyId ?? ""),
     queryFn: () => agentsApi.list(selectedCompanyId!),
@@ -92,6 +91,7 @@ export function SpsCoreWorkspaceHome() {
     data: dashboard,
     isLoading: dashboardLoading,
     error: dashboardError,
+    refetch: refetchDashboard,
   } = useQuery({
     queryKey: queryKeys.workspaceSurfaces.dashboard(selectedCompanyId ?? ""),
     queryFn: () => workspaceSurfacesApi.getDashboard(selectedCompanyId!),
@@ -133,13 +133,7 @@ export function SpsCoreWorkspaceHome() {
     },
   });
 
-  const initialAssistant = (assistants ?? []).find((agent) => agent.status !== "terminated") ?? null;
-
-  // Keep the setup route stable while a just-created Assistant replaces the
-  // cached empty list. Redirecting during that refetch reopens setup forever.
-  if (assistantsLoaded && !assistantsFetching && !initialAssistant) {
-    return <Navigate to="/assistants/new" replace />;
-  }
+  const activeAssistants = (assistants ?? []).filter((agent) => agent.status !== "terminated");
 
   function updateWidget(
     target: SpsDashboardWidget,
@@ -170,19 +164,18 @@ export function SpsCoreWorkspaceHome() {
         <div className="max-w-3xl space-y-2">
           <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-primary">
             <Blocks className="h-4 w-4" aria-hidden="true" />
-            Core Workspace
+            Workspace
           </div>
           <div className="space-y-1">
             <h1 className="text-2xl font-semibold tracking-tight">{selectedCompany?.name ?? "Workspace"}</h1>
             <p className="text-sm leading-6 text-muted-foreground">
               {shell?.mode === "plugin" && shell.shell
-                ? `${shell.shell.displayName} organizes this Workspace. Core recovery paths remain available.`
-                : "Core keeps the Workspace available while active plugins contribute their own navigation, dashboards, and work surfaces."}
+                ? `${shell.shell.displayName} is active in this Workspace.`
+                : "Manage your Agents and open your enabled plugins."}
             </p>
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          <Badge variant="outline">Core surface</Badge>
           <Button variant="outline" size="sm" asChild>
             <Link to="/company/settings/instance/plugins">
               <Puzzle className="h-4 w-4" />
@@ -192,24 +185,12 @@ export function SpsCoreWorkspaceHome() {
         </div>
       </header>
 
-      <section className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-border bg-muted/40 px-4 py-3 text-sm">
-        <div className="flex min-w-0 items-center gap-2">
-          <Badge variant="secondary">Core contract</Badge>
-          <p className="text-muted-foreground">
-            Plugins own their workflow UI. Disabling one removes its contributed surfaces without removing this Workspace.
-          </p>
-        </div>
-        <span className="font-mono text-xs text-muted-foreground">
-          {shell?.mode === "plugin" ? "Plugin shell active" : "Neutral shell"}
-        </span>
-      </section>
-
       {shell?.fallbackReason ? (
         <section className="flex items-start justify-between gap-4 rounded-md border border-amber-500/35 bg-amber-500/10 px-4 py-3">
           <div className="flex min-w-0 gap-3">
             <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
             <div>
-              <p className="text-sm font-medium">Neutral Shell restored</p>
+              <p className="text-sm font-medium">Default Workspace restored</p>
               <p className="text-sm text-muted-foreground">{shell.fallbackReason}</p>
             </div>
           </div>
@@ -222,33 +203,47 @@ export function SpsCoreWorkspaceHome() {
       <section aria-labelledby="core-attention-title">
         <div className="mb-3 flex items-center justify-between">
           <div>
-            <h2 id="core-attention-title" className="text-sm font-semibold">Core attention</h2>
-            <p className="text-xs text-muted-foreground">Recovery and runtime access that no plugin can hide.</p>
+            <h2 id="core-attention-title" className="text-sm font-semibold">Agents</h2>
+            <p className="text-xs text-muted-foreground">Runtime, model, and default working folder settings.</p>
           </div>
         </div>
         <div className="rounded-md border border-border bg-card px-4 py-3">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="flex min-w-0 items-center gap-3">
+          <div className="mb-2 flex items-center justify-between gap-3">
+            <div className="flex min-w-0 items-center gap-2">
               <Bot className="h-4 w-4 shrink-0 text-muted-foreground" />
-              {assistantsLoading ? (
-                <p className="text-sm text-muted-foreground">Loading initial Assistant...</p>
-              ) : initialAssistant ? (
-                <div className="min-w-0">
-                  <Link className="block truncate text-sm font-medium hover:underline" to={`/assistants/${initialAssistant.id}`}>
-                    {initialAssistant.name}
-                  </Link>
-                  <p className="truncate text-xs text-muted-foreground">
-                    {initialAssistant.title || initialAssistant.adapterType}
-                  </p>
-                </div>
-              ) : null}
+              <Link to="/company/settings/agents" className="text-sm font-medium hover:underline">Manage Agents</Link>
             </div>
             <Button size="sm" variant="outline" asChild>
-              <Link to={initialAssistant ? `/assistants/${initialAssistant.id}` : "/assistants/new"}>
-                {initialAssistant ? "Open Assistant" : "Add Assistant"}
-              </Link>
+              <Link to="/assistants/new">Add Agent</Link>
             </Button>
           </div>
+          {assistantsLoading ? (
+            <p className="py-2 text-sm text-muted-foreground">Loading Agents...</p>
+          ) : assistantsError ? (
+            <div role="alert" className="flex flex-wrap items-center justify-between gap-2 py-2 text-sm text-destructive">
+              Could not load Agents.
+              <Button size="sm" variant="outline" onClick={() => void refetchAssistants()}>Retry Agents</Button>
+            </div>
+          ) : activeAssistants.length > 0 ? (
+            <ul className="divide-y divide-border">
+              {activeAssistants.map((assistant) => (
+                <li key={assistant.id} className="flex min-w-0 flex-col gap-1 py-2 first:pt-1 last:pb-1 sm:flex-row sm:items-center sm:justify-between sm:gap-3">
+                  <Link
+                    className="min-w-0 truncate text-sm font-medium hover:underline"
+                    to={`/assistants/${assistant.id}`}
+                  >
+                    {assistant.name}
+                  </Link>
+                  <div className="flex min-w-0 flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground sm:justify-end">
+                    <span>Status: {assistant.status}</span>
+                    <span>Adapter: {assistant.adapterType}</span>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="py-2 text-sm text-muted-foreground">No active Agents.</p>
+          )}
         </div>
       </section>
 
@@ -258,7 +253,7 @@ export function SpsCoreWorkspaceHome() {
             <LayoutDashboard className="h-4 w-4 text-muted-foreground" />
             Dashboard
           </h2>
-          <p className="text-xs text-muted-foreground">Each active plugin owns its data and actions; Core owns layout and failure isolation.</p>
+          <p className="text-xs text-muted-foreground">Updates from your enabled plugins.</p>
         </div>
 
         {dashboardLoading ? (
@@ -266,14 +261,15 @@ export function SpsCoreWorkspaceHome() {
             Loading Dashboard...
           </div>
         ) : dashboardError ? (
-          <div className="rounded-md border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm text-destructive">
-            Failed to load Dashboard: {dashboardError instanceof Error ? dashboardError.message : "Unknown error"}
+          <div role="alert" className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm text-destructive">
+            Could not load Dashboard.
+            <Button size="sm" variant="outline" onClick={() => void refetchDashboard()}>Retry Dashboard</Button>
           </div>
         ) : widgets.length === 0 ? (
           <div className="rounded-md border border-dashed border-border px-4 py-10 text-center">
-            <p className="text-sm font-medium">No Dashboard widgets yet</p>
+            <p className="text-sm font-medium">No plugin updates to show</p>
             <p className="mt-1 text-sm text-muted-foreground">
-              Enable a workflow plugin to add its own status and work surfaces.
+              Open an enabled plugin from the sidebar, or manage plugins in Settings.
             </p>
             <Button className="mt-4" size="sm" asChild>
               <Link to={shell?.shell?.emptyWorkspaceAction?.target ?? "/company/settings/instance/plugins"}>

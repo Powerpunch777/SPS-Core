@@ -70,4 +70,15 @@ describe("SPS Marketplace Assistant MCP", () => {
     await client.close();
     await server.close();
   });
+
+  it("preserves bounded structured Core denial details without exposing an arbitrary body", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      code: "marketplace_assistant_scope_denied",
+      error: "Marketplace Assistant tokens can only execute Core marketplace tools",
+      ignored: "scoped-token",
+    }), { status: 403, headers: { "content-type": "application/json" } })));
+
+    await expect(new MarketplaceAssistantClient(config).executeTool("search_marketplace_plugins", {}))
+      .rejects.toThrow(/403 \(marketplace_assistant_scope_denied:/);
+  });
 });

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import express from "express";
 import request from "supertest";
 import { privateHostnameGuard } from "../middleware/private-hostname-guard.js";
+import { desktopLocalAccessGuard } from "../middleware/desktop-local-access.js";
 
 const unknownHostname = "blocked-host.invalid";
 
@@ -76,4 +77,64 @@ describe("privateHostnameGuard", () => {
       expect.stringContaining("Add it to SPS_ALLOWED_HOSTNAMES and restart SPS."),
     );
   }, 20_000);
+
+  it("does not let a bare forwarded hostname bypass the combined Desktop boundary", async () => {
+    const app = express();
+    app.use(privateHostnameGuard({
+      enabled: true,
+      allowedHostnames: ["owner.tailnet.ts.net"],
+      bindHost: "127.0.0.1",
+    }));
+    app.use(desktopLocalAccessGuard({ token: "desktop-launch-token" }));
+    app.get("/SPS/projects", (_req, res) => res.status(200).send("ok"));
+
+    const res = await request(app)
+      .get("/SPS/projects")
+      .set("Host", "127.0.0.1:31310")
+      .set("X-Forwarded-Host", "owner.tailnet.ts.net");
+
+    expect(res.status).toBe(403);
+    expect(res.text).toContain("only through SPS Desktop");
+  });
+
+  it("does not let a direct Tailscale-looking Host bypass the loopback Desktop boundary", async () => {
+    const app = express();
+    app.use(privateHostnameGuard({
+      enabled: true,
+      allowedHostnames: ["owner.tailnet.ts.net"],
+      bindHost: "127.0.0.1",
+    }));
+    app.use(desktopLocalAccessGuard({ token: "desktop-launch-token" }));
+    app.get("/SPS/projects", (_req, res) => res.status(200).send("ok"));
+
+    const res = await request(app)
+      .get("/SPS/projects")
+      .set("Host", "owner.tailnet.ts.net");
+
+    expect(res.status).toBe(403);
+    expect(res.text).toContain("only through SPS Desktop");
+  });
+
+  it("allows the actual Tailscale Serve proxy shape through the combined boundary", async () => {
+    const app = express();
+    app.use(privateHostnameGuard({
+      enabled: true,
+      allowedHostnames: ["owner.tailnet.ts.net"],
+      bindHost: "127.0.0.1",
+    }));
+    app.use(desktopLocalAccessGuard({ token: "desktop-launch-token" }));
+    app.get("/SPS/projects", (_req, res) => res.status(200).send("ok"));
+
+    const res = await request(app)
+      .get("/SPS/projects")
+      .set("Host", "owner.tailnet.ts.net")
+      .set("X-Forwarded-Host", "owner.tailnet.ts.net")
+      .set("X-Forwarded-Proto", "https")
+      .set("X-Forwarded-For", "100.64.0.10")
+      .set("Tailscale-User-Login", "member@example.com")
+      .set("Tailscale-Headers-Info", "https://tailscale.com/s/serve-headers");
+
+    expect(res.status).toBe(200);
+    expect(res.text).toBe("ok");
+  });
 });

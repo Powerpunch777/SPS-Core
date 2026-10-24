@@ -22,6 +22,7 @@ export function parseCodexJsonl(stdout: string) {
     cachedInputTokens: 0,
     outputTokens: 0,
   };
+  let usageReportedFields: Array<"inputTokens" | "cachedInputTokens" | "outputTokens"> = [];
 
   for (const rawLine of stdout.split(/\r?\n/)) {
     const line = rawLine.trim();
@@ -56,6 +57,11 @@ export function parseCodexJsonl(stdout: string) {
       usage.inputTokens = asNumber(usageObj.input_tokens, usage.inputTokens);
       usage.cachedInputTokens = asNumber(usageObj.cached_input_tokens, usage.cachedInputTokens);
       usage.outputTokens = asNumber(usageObj.output_tokens, usage.outputTokens);
+      usageReportedFields = [
+        ...(isReportedTokenCount(usageObj.input_tokens) ? ["inputTokens" as const] : []),
+        ...(isReportedTokenCount(usageObj.cached_input_tokens) ? ["cachedInputTokens" as const] : []),
+        ...(isReportedTokenCount(usageObj.output_tokens) ? ["outputTokens" as const] : []),
+      ];
       continue;
     }
 
@@ -70,8 +76,13 @@ export function parseCodexJsonl(stdout: string) {
     sessionId,
     summary: finalMessage?.trim() ?? "",
     usage,
+    usageReportedFields,
     errorMessage,
   };
+}
+
+function isReportedTokenCount(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
 export function isCodexUnknownSessionError(stdout: string, stderr: string): boolean {

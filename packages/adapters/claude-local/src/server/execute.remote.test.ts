@@ -99,7 +99,26 @@ describe("claude remote execution", () => {
     await mkdir(alternateWorkspaceDir, { recursive: true });
     await writeFile(instructionsPath, "Use the remote workspace.\n", "utf8");
 
-    await execute({
+    runChildProcess.mockResolvedValueOnce({
+      exitCode: 0,
+      signal: null,
+      timedOut: false,
+      stdout: [
+        JSON.stringify({ type: "system", subtype: "init", session_id: "claude-session-1", model: "claude-sonnet" }),
+        JSON.stringify({
+          type: "result",
+          subtype: "success",
+          session_id: "claude-session-1",
+          result: "hello",
+          usage: { input_tokens: 0, output_tokens: 5 },
+        }),
+      ].join("\n"),
+      stderr: "",
+      pid: 123,
+      startedAt: new Date().toISOString(),
+    });
+
+    const result = await execute({
       runId: "run-1",
       agent: {
         id: "agent-1",
@@ -163,6 +182,8 @@ describe("claude remote execution", () => {
       },
       onLog: async () => {},
     });
+
+    expect(result.usageReportedFields).toEqual(["inputTokens", "outputTokens"]);
 
     expect(prepareWorkspaceForSshExecution).toHaveBeenCalledTimes(1);
     expect(prepareWorkspaceForSshExecution).toHaveBeenCalledWith(expect.objectContaining({

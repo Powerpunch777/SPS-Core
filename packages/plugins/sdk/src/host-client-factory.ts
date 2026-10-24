@@ -123,6 +123,19 @@ export interface HostServices {
 
   /** Provides workflow-neutral Host Sources, Node runtimes, and plugin runs. */
   sps?: {
+    summarizeExecutions(
+      companyId: string,
+      options: Omit<WorkerToHostMethods["sps.executions.summarize"][0], "companyId">,
+    ): Promise<WorkerToHostMethods["sps.executions.summarize"][1]>;
+    listExecutions(
+      companyId: string,
+      options?: Omit<WorkerToHostMethods["sps.executions.list"][0], "companyId">,
+    ): Promise<WorkerToHostMethods["sps.executions.list"][1]>;
+    getExecution(
+      companyId: string,
+      lane: WorkerToHostMethods["sps.executions.get"][0]["lane"],
+      runId: string,
+    ): Promise<WorkerToHostMethods["sps.executions.get"][1]>;
     listWorkspaceSources(params: WorkerToHostMethods["sps.workspaceSources.list"][0]): Promise<WorkerToHostMethods["sps.workspaceSources.list"][1]>;
     listRuntimes(params: WorkerToHostMethods["sps.runtimes.list"][0]): Promise<WorkerToHostMethods["sps.runtimes.list"][1]>;
     listExecutionGrants(params: WorkerToHostMethods["sps.executionGrants.list"][0]): Promise<WorkerToHostMethods["sps.executionGrants.list"][1]>;
@@ -130,6 +143,8 @@ export interface HostServices {
     revokeExecutionGrant(params: WorkerToHostMethods["sps.executionGrants.revoke"][0]): Promise<WorkerToHostMethods["sps.executionGrants.revoke"][1]>;
     dispatchRun(params: WorkerToHostMethods["sps.runs.dispatch"][0]): Promise<WorkerToHostMethods["sps.runs.dispatch"][1]>;
     getRun(params: WorkerToHostMethods["sps.runs.get"][0]): Promise<WorkerToHostMethods["sps.runs.get"][1]>;
+    listRuns(params: WorkerToHostMethods["sps.runs.list"][0]): Promise<WorkerToHostMethods["sps.runs.list"][1]>;
+    cancelRun(params: WorkerToHostMethods["sps.runs.cancel"][0]): Promise<WorkerToHostMethods["sps.runs.cancel"][1]>;
     listRunEvents(params: WorkerToHostMethods["sps.runs.listEvents"][0]): Promise<WorkerToHostMethods["sps.runs.listEvents"][1]>;
     publishArtifact(params: WorkerToHostMethods["sps.artifacts.publish"][0]): Promise<WorkerToHostMethods["sps.artifacts.publish"][1]>;
     listArtifacts(params: WorkerToHostMethods["sps.artifacts.list"][0]): Promise<WorkerToHostMethods["sps.artifacts.list"][1]>;
@@ -294,6 +309,8 @@ export interface HostServices {
 
   /** Provides `agents.sessions.create`, `agents.sessions.list`, `agents.sessions.sendMessage`, `agents.sessions.close`. */
   agentSessions: {
+    getRun(params: WorkerToHostMethods["agents.sessions.getRun"][0]): Promise<WorkerToHostMethods["agents.sessions.getRun"][1]>;
+    cancel(params: WorkerToHostMethods["agents.sessions.cancel"][0]): Promise<WorkerToHostMethods["agents.sessions.cancel"][1]>;
     create(params: WorkerToHostMethods["agents.sessions.create"][0]): Promise<WorkerToHostMethods["agents.sessions.create"][1]>;
     list(params: WorkerToHostMethods["agents.sessions.list"][0]): Promise<WorkerToHostMethods["agents.sessions.list"][1]>;
     sendMessage(params: WorkerToHostMethods["agents.sessions.sendMessage"][0]): Promise<WorkerToHostMethods["agents.sessions.sendMessage"][1]>;
@@ -403,6 +420,9 @@ const METHOD_CAPABILITY_MAP: Record<WorkerToHostMethodName, PluginCapability | n
   "localFolders.deleteFile": "local.folders",
 
   // Workflow-neutral SPS infrastructure
+  "sps.executions.list": "sps.executions.read",
+  "sps.executions.get": "sps.executions.read",
+  "sps.executions.summarize": "sps.executions.read",
   "sps.workspaceSources.list": "sps.workspaceSources.read",
   "sps.runtimes.list": "sps.runtimes.read",
   "sps.executionGrants.list": "sps.executionGrants.read",
@@ -410,6 +430,8 @@ const METHOD_CAPABILITY_MAP: Record<WorkerToHostMethodName, PluginCapability | n
   "sps.executionGrants.revoke": "sps.executionGrants.write",
   "sps.runs.dispatch": "sps.runs.dispatch",
   "sps.runs.get": "sps.runs.read",
+  "sps.runs.list": "sps.runs.read",
+  "sps.runs.cancel": "sps.runs.cancel",
   "sps.runs.listEvents": "sps.runs.read",
   "sps.artifacts.publish": "sps.artifacts.write",
   "sps.artifacts.list": "sps.artifacts.read",
@@ -518,6 +540,8 @@ const METHOD_CAPABILITY_MAP: Record<WorkerToHostMethodName, PluginCapability | n
   "agents.sessions.create": "agent.sessions.create",
   "agents.sessions.list": "agent.sessions.list",
   "agents.sessions.sendMessage": "agent.sessions.send",
+  "agents.sessions.getRun": "agent.sessions.read",
+  "agents.sessions.cancel": "agent.sessions.cancel",
   "agents.sessions.close": "agent.sessions.close",
 
   // Goals
@@ -718,6 +742,30 @@ export function createHostClientHandlers(
       return services.localFolders.deleteFile(params);
     }),
 
+    "sps.executions.summarize": gated("sps.executions.summarize", async (params) => {
+      if (!services.sps) throw new Error("This SPS host does not expose execution summaries");
+      if (!readNonEmptyString(params.companyId)) throw new TypeError("SPS execution summary requires a non-empty companyId");
+      const { companyId, ...options } = params;
+      return services.sps.summarizeExecutions(companyId, options);
+    }),
+    "sps.executions.list": gated("sps.executions.list", async (params) => {
+      if (!services.sps) throw new Error("This SPS host does not expose execution history");
+      if (!readNonEmptyString(params.companyId)) throw new TypeError("SPS execution history requires a non-empty companyId");
+      const options = {
+        ...(params.lane === undefined ? {} : { lane: params.lane }),
+        ...(params.limit === undefined ? {} : { limit: params.limit }),
+        ...(params.before === undefined ? {} : { before: params.before }),
+      };
+      return services.sps.listExecutions(
+        params.companyId,
+        Object.keys(options).length > 0 ? options : undefined,
+      );
+    }),
+    "sps.executions.get": gated("sps.executions.get", async (params) => {
+      if (!services.sps) throw new Error("This SPS host does not expose execution history");
+      if (!readNonEmptyString(params.companyId)) throw new TypeError("SPS execution history requires a non-empty companyId");
+      return services.sps.getExecution(params.companyId, params.lane, params.runId);
+    }),
     "sps.workspaceSources.list": gated("sps.workspaceSources.list", async (params) => {
       if (!services.sps) throw new Error("This SPS host does not expose workflow-neutral Workspace Sources");
       return services.sps.listWorkspaceSources(params);
@@ -745,6 +793,14 @@ export function createHostClientHandlers(
     "sps.runs.get": gated("sps.runs.get", async (params) => {
       if (!services.sps) throw new Error("This SPS host does not expose plugin runtime dispatch");
       return services.sps.getRun(params);
+    }),
+    "sps.runs.list": gated("sps.runs.list", async (params) => {
+      if (!services.sps) throw new Error("This SPS host does not expose run listing");
+      return services.sps.listRuns(params);
+    }),
+    "sps.runs.cancel": gated("sps.runs.cancel", async (params) => {
+      if (!services.sps) throw new Error("This SPS host does not expose run cancellation");
+      return services.sps.cancelRun(params);
     }),
     "sps.runs.listEvents": gated("sps.runs.listEvents", async (params) => {
       if (!services.sps) throw new Error("This SPS host does not expose plugin runtime dispatch");
@@ -1028,6 +1084,8 @@ export function createHostClientHandlers(
     "agents.sessions.sendMessage": gated("agents.sessions.sendMessage", async (params) => {
       return services.agentSessions.sendMessage(params);
     }),
+    "agents.sessions.getRun": gated("agents.sessions.getRun", async (params) => services.agentSessions.getRun(params)),
+    "agents.sessions.cancel": gated("agents.sessions.cancel", async (params) => services.agentSessions.cancel(params)),
     "agents.sessions.close": gated("agents.sessions.close", async (params) => {
       return services.agentSessions.close(params);
     }),

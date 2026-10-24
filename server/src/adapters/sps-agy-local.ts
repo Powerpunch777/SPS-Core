@@ -20,7 +20,7 @@ import {
   renderPaperclipWakePrompt,
   renderTemplate,
   DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE,
-} from "@paperclipai/adapter-utils/server-utils";
+} from "../compat/paperclip/adapter-runtime.js";
 import {
   adapterExecutionTargetIsSpsNode,
   adapterExecutionTargetRemoteCwd,
@@ -30,7 +30,7 @@ import {
   resolveAdapterExecutionTargetCommandForLogs,
   resolveAdapterExecutionTargetTimeoutSec,
   runAdapterExecutionTargetProcess,
-} from "@paperclipai/adapter-utils/execution-target";
+} from "../compat/paperclip/adapter-runtime.js";
 
 export const SPS_AGY_LOCAL_ADAPTER_TYPE = "sps_agy_local";
 const DEFAULT_MODEL = "auto";

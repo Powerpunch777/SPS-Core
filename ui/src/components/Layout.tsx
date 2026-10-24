@@ -619,7 +619,7 @@ export function Layout() {
               ref={mainContentRef}
               tabIndex={-1}
               className={cn(
-                "flex-1 outline-none bg-app-canvas p-4 md:m-2 md:rounded-pane md:border md:border-app-border md:bg-app-panel md:shadow-panel md:p-6",
+                "min-w-0 flex-1 outline-none bg-background p-4 md:mx-2 md:mb-2 md:rounded-pane md:border md:border-app-border md:bg-app-panel md:shadow-panel md:p-6 lg:p-8",
                 // Reserve the scrollbar gutter on desktop so pages whose height
                 // changes (e.g. switching skill-detail tabs) don't widen/shift
                 // when the vertical scrollbar appears or disappears (PAP-10907).
