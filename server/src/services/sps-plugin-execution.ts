@@ -10,6 +10,7 @@ import {
   spsWorkspaceSources,
 } from "../compat/paperclip/db.js";
 import { spsNodeExecutableRuntimeKindSchema } from "../compat/paperclip/shared.js";
+import { normalizeSpsPluginExecutionTimeout } from "./sps-execution-timeout.js";
 
 const ONLINE_WINDOW_MS = 2 * 60 * 1000;
 const RUNNER_COMMAND_BY_KIND = {
@@ -388,7 +389,7 @@ export function spsPluginExecutionService(db: Db, pluginKey: string) {
         workspaceSourceId: grant.workspaceSourceId,
         requireRunnable: true,
       });
-      const timeoutMs = input.timeoutMs == null ? null : Math.max(1_000, Math.min(Math.floor(input.timeoutMs), 4 * 60 * 60 * 1000));
+      const timeoutMs = normalizeSpsPluginExecutionTimeout(input.timeoutMs);
       const stdin = input.stdin == null ? null : String(input.stdin);
       if (stdin !== null && stdin.length > 1_000_000) throw new Error("stdin must not exceed 1,000,000 characters");
       const run = await db

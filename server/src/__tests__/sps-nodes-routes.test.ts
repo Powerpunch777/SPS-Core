@@ -1128,6 +1128,57 @@ describeEmbeddedPostgres("SPS Node routes", () => {
     expect((await service.getRun({ companyId: fixture.company.id, runId: racing.id })).status).toBe("cancelled");
   });
 
+  it("bounds execution timeouts and never redispatches an uncertain silent claim", async () => {
+    const fixture = await createCompanyFixture(db);
+    const app = await createApp(db, boardActor(fixture.company.id, fixture.ownerUserId, "owner"));
+    const node = createNodePayload();
+    const registered = await request(app).post(`/api/companies/${fixture.company.id}/sps-nodes`).send(node.payload).expect(201);
+    const nodeId = registered.body.id;
+    await request(app).post(`/api/sps-nodes/${nodeId}/heartbeat`).send(createSignedHeartbeat(nodeId, node.privateKey)).expect(200);
+    await request(app).post(`/api/sps-nodes/${nodeId}/approve`).send({}).expect(200);
+    const runner = await db.select().from(spsNodeRunnerProfiles).where(eq(spsNodeRunnerProfiles.nodeId, nodeId))
+      .then(rows => rows.find(row => row.kind === "codex_cli")!);
+    const service = spsPluginExecutionService(db, "sps.limit-test");
+    const grant = await service.upsertExecutionGrant({ companyId: fixture.company.id, subjectKey: "execution", nodeId, runnerProfileId: runner.id });
+    const dispatch = (timeoutMs?: number | null) => service.dispatchRun({ companyId: fixture.company.id, executionGrantId: grant.id, args: [], timeoutMs });
+    for (const timeout of [0, -1, 1.5, NaN, Infinity, -Infinity, Number.MAX_SAFE_INTEGER + 1, "1000", true, {}]) {
+      await expect(dispatch(timeout as number)).rejects.toThrow("timeout");
+    }
+    expect(await service.listRuns({ companyId: fixture.company.id })).toHaveLength(0);
+    const first = await dispatch(1);
+    const [stored] = await db.select().from(spsPluginNodeRuns).where(eq(spsPluginNodeRuns.id, first.id));
+    expect(stored.timeoutMs).toBe(1000);
+    const claimPath = `/sps-nodes/${nodeId}/plugin-runs/claim-next`;
+    const claim = () => request(app).post(`/api${claimPath}`).send(createSignedNodeRequest(nodeId, node.privateKey, claimPath, {}));
+    const concurrent = await Promise.all([claim(), claim(), claim()]);
+    expect(concurrent.filter(result => result.status === 200).map(result => result.body.id)).toEqual([first.id]);
+    expect(concurrent.filter(result => result.status === 204)).toHaveLength(2);
+    const old = new Date(Date.now() - 30 * 60000);
+    await db.update(spsPluginNodeRuns).set({ claimedAt: old, startedAt: old, updatedAt: old }).where(eq(spsPluginNodeRuns.id, first.id));
+    await claim().expect(204);
+    expect(await service.getRun({ companyId: fixture.company.id, runId: first.id })).toMatchObject({ status: "claimed", finishedAt: null });
+    const leasePath = `/sps-nodes/${nodeId}/plugin-runs/${first.id}/lease`;
+    await request(app).post(`/api${leasePath}`).send(createSignedNodeRequest(nodeId, node.privateKey, leasePath, {})).expect(200)
+      .expect(({ body }) => expect(body.active).toBe(true));
+    await service.cancelRun({ companyId: fixture.company.id, runId: first.id });
+    await claim().expect(204);
+    expect(await service.getRun({ companyId: fixture.company.id, runId: first.id })).toMatchObject({ status: "cancelling", finishedAt: null });
+    const completionPath = `/sps-nodes/${nodeId}/plugin-runs/${first.id}/complete`;
+    await request(app).post(`/api${completionPath}`).send(createSignedNodeRequest(nodeId, node.privateKey, completionPath,
+      { status: "failed", exitCode: null, signal: "SIGTERM", timedOut: false })).expect(200);
+    expect((await service.getRun({ companyId: fixture.company.id, runId: first.id })).status).toBe("cancelled");
+    await claim().expect(204); // No implicit retry even after termination acknowledgement.
+
+    const invalid = await dispatch();
+    await db.update(spsPluginNodeRuns).set({ timeoutMs: 0 }).where(eq(spsPluginNodeRuns.id, invalid.id));
+    const bounded = await dispatch(24 * 60 * 60 * 1000);
+    const boundedClaim = await claim().expect(200);
+    expect(boundedClaim.body).toMatchObject({ id: bounded.id, timeoutMs: 4 * 60 * 60 * 1000 });
+    expect((await service.getRun({ companyId: fixture.company.id, runId: invalid.id })).status).toBe("failed");
+    const defaultRun = await dispatch(null);
+    expect((await claim().expect(200)).body).toMatchObject({ id: defaultRun.id, timeoutMs: null });
+  });
+
   it("accepts signed Node usage exactly once with the terminal write and exposes it only to the owning Plugin", async () => {
     const fixture = await createCompanyFixture(db);
     const app = await createApp(db, boardActor(fixture.company.id, fixture.ownerUserId, "owner"));

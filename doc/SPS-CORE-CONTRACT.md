@@ -223,6 +223,37 @@ Plugin-scoped; they do not control Agent sessions or grant access to another
 plugin's executions. Lists are bounded, descending UUID pages, not chronological
 history. Existing get/events/artifact methods remain unchanged.
 
+### Neutral Plugin Execution Timeout and Node Ownership Guards
+
+Core validates an optional `timeoutMs` for neutral Plugin `dispatchRun` calls.
+When supplied and non-null it must be a positive safe integer; zero, negative,
+fractional, non-finite, unsafe, and non-number values are rejected before a run
+is inserted. Accepted values are clamped to 1 second through 4 hours. An
+omitted or null timeout remains unset; the Node applies its existing 30-minute
+default. The Node independently validates and clamps supplied values for
+neutral Plugin commands. Legacy Node commands retain their existing timeout
+handling.
+
+Before claiming a queued neutral Plugin run, Core validates the persisted
+timeout again. A corrupted or otherwise invalid queued value marks that run
+failed and claim processing skips it; invalid work is not sent to a process.
+Neutral Plugin claims are never silently requeued after 10 minutes without
+activity. Silence does not prove process termination: an old claim stays
+claimed, and an explicit cancellation stays `cancelling`, until the signed Node
+acknowledges completion. Uncertain process execution is not automatically
+retried. The legacy command lane's existing stale-claim behavior is unchanged.
+
+On the Local Node, an already-active command ID is rejected across all command
+lanes before it can replace the tracked entry, spawn another process, or emit a
+synthetic completion. Distinct IDs may execute concurrently; this identity guard
+is not a shared concurrency budget. Existing lease, Workspace Source, and
+authorization checks remain in force.
+
+These guards add no migration, API or SDK method, global concurrency default,
+or Workspace usage-budget enforcement. A configurable capacity limit and any
+admission/reservation policy require a separate explicit contract; they are not
+implied by timeout validation or duplicate-ID protection.
+
 Queued work may become `cancelled` immediately. Claimed/running work becomes
 `cancelling`; it becomes `cancelled` only when the signed Node reports completion.
 An offline Node leaves cancellation pending. Neither an HTTP acknowledgement nor

@@ -55,6 +55,7 @@ import {
 import { isSpsCoreBaselineModeEnabled } from "../ui-branding.js";
 import { hasSpsSessionCancellation } from "../services/sps-agent-session-runs.js";
 import { createSpsNodeUsageReceipt } from "../services/sps-node-usage.js";
+import { normalizeSpsPluginExecutionTimeout } from "../services/sps-execution-timeout.js";
 
 function actorUserId(req: Request) {
   return req.actor.type === "board" ? req.actor.userId ?? "local-board" : null;
@@ -1832,15 +1833,8 @@ export function spsNodeRoutes(db: Db) {
     await assertSignedNodeRequest(req, node);
 
     const now = new Date();
-    const staleBefore = new Date(now.getTime() - 10 * 60 * 1000);
-    await db
-      .update(spsPluginNodeRuns)
-      .set({ status: "queued", claimedAt: null, startedAt: null, updatedAt: now })
-      .where(and(
-        eq(spsPluginNodeRuns.nodeId, node.id),
-        eq(spsPluginNodeRuns.status, "claimed"),
-        lt(spsPluginNodeRuns.updatedAt, staleBefore),
-      ));
+    // Silence is not proof that a claimed process stopped. Never requeue an
+    // uncertain execution: its Node must acknowledge completion/cancellation.
 
     while (true) {
       const candidate = await db
@@ -1851,6 +1845,15 @@ export function spsNodeRoutes(db: Db) {
         .limit(1)
         .then((rows) => rows[0] ?? null);
       if (!candidate) return res.status(204).end();
+
+      let timeoutMs: number | null;
+      try {
+        timeoutMs = normalizeSpsPluginExecutionTimeout(candidate.timeoutMs);
+      } catch {
+        await db.update(spsPluginNodeRuns).set({ status: "failed", error: "Invalid SPS plugin execution timeout.", finishedAt: now, updatedAt: now })
+          .where(and(eq(spsPluginNodeRuns.id, candidate.id), eq(spsPluginNodeRuns.status, "queued")));
+        continue;
+      }
 
       if (!await pluginRunHasCurrentAuthority(node, candidate)) {
         await db
@@ -1896,7 +1899,7 @@ export function spsNodeRoutes(db: Db) {
       }
       const claimed = await db
         .update(spsPluginNodeRuns)
-        .set({ status: "claimed", claimedAt: now, startedAt: now, updatedAt: now })
+        .set({ status: "claimed", claimedAt: now, startedAt: now, updatedAt: now, timeoutMs })
         .where(and(eq(spsPluginNodeRuns.id, candidate.id), eq(spsPluginNodeRuns.status, "queued")))
         .returning()
         .then((rows) => rows[0] ?? null);
