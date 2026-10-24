@@ -51,7 +51,7 @@
     "postpack": "node ../../../scripts/restore-package-json.mjs"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@modelcontextprotocol/sdk": "^1.32.0",
     "@paperclipai/plugin-sdk": "workspace:*",
     "zod": "^3.24.2"
   },
