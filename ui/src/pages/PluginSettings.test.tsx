@@ -20,10 +20,18 @@ const mockPluginsApi = vi.hoisted(() => ({
   configureLocalFolder: vi.fn(),
 }));
 
+const mockSpsExecutionsApi = vi.hoisted(() => ({
+  summary: vi.fn(),
+}));
+
 const mockSetBreadcrumbs = vi.hoisted(() => vi.fn());
 
 vi.mock("@/api/plugins", () => ({
   pluginsApi: mockPluginsApi,
+}));
+
+vi.mock("@/api/sps-executions", () => ({
+  spsExecutionsApi: mockSpsExecutionsApi,
 }));
 
 vi.mock("@/context/BreadcrumbContext", () => ({
@@ -194,6 +202,28 @@ describe("PluginSettings", () => {
       declarations: [],
       folders: [],
     });
+    mockSpsExecutionsApi.summary.mockResolvedValue({
+      companyId: "company-1",
+      pluginKey: "paperclip.e2b-sandbox-provider",
+      window: { from: "2026-07-30T00:00:00.000Z", to: "2026-07-31T00:00:00.000Z" },
+      generatedAt: "2026-07-31T00:00:00.000Z",
+      executionCount: 0,
+      terminalCount: 0,
+      inFlightCount: 0,
+      unknownPhaseCount: 0,
+      tokens: {
+        inputTokens: { reported: null, estimated: null, reportedExecutions: 0, estimatedExecutions: 0, unavailableExecutions: 0, overflowed: false },
+        cachedInputTokens: { reported: null, estimated: null, reportedExecutions: 0, estimatedExecutions: 0, unavailableExecutions: 0, overflowed: false },
+        outputTokens: { reported: null, estimated: null, reportedExecutions: 0, estimatedExecutions: 0, unavailableExecutions: 0, overflowed: false },
+      },
+      costs: {
+        currency: "USD",
+        incrementalApi: { reported: null, estimated: null, reportedExecutions: 0, estimatedExecutions: 0, unavailableExecutions: 0, overflowed: false },
+        subscriptionReference: { reported: null, estimated: null, reportedExecutions: 0, estimatedExecutions: 0, unavailableExecutions: 0, overflowed: false },
+        other: { reported: null, estimated: null, reportedExecutions: 0, estimatedExecutions: 0, unavailableExecutions: 0, overflowed: false },
+      },
+      duration: { totalMs: null, knownExecutions: 0, unavailableExecutions: 0, overflowed: false },
+    });
   });
 
   afterEach(() => {
@@ -229,6 +259,30 @@ describe("PluginSettings", () => {
     expect(container.textContent).toContain("Canonical Diagnostics");
     expect(container.textContent).toContain("SPS_PLUGIN_RUNTIME_READY");
     expect(container.textContent).toContain("Plugin runtime is ready.");
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it("mounts Plugin usage at the top of Status only", async () => {
+    const root = await renderSettings(container);
+
+    expect(container.querySelector('[data-testid="sps-plugin-usage"]')).toBeNull();
+    const statusButton = Array.from(container.querySelectorAll("button"))
+      .find((button) => button.textContent === "Status");
+    await act(async () => {
+      statusButton?.click();
+      await Promise.resolve();
+    });
+    await flushReact();
+
+    expect(container.querySelector('[data-testid="sps-plugin-usage"]')).toBeTruthy();
+    expect(mockSpsExecutionsApi.summary).toHaveBeenCalledWith(
+      "company-1",
+      "plugin-1",
+      expect.objectContaining({ from: expect.any(String), to: expect.any(String), signal: expect.any(AbortSignal) }),
+    );
 
     await act(async () => {
       root.unmount();

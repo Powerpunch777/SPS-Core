@@ -1,6 +1,12 @@
 import type { PluginSpsExecution, PluginSpsExecutionSummary, PluginSpsExecutionSummaryOptions, PluginSpsUsageAggregateMetric, PluginSpsUsageMetric } from "../compat/paperclip/plugin-sdk.js";
 
 export const SPS_EXECUTION_SUMMARY_MAX_RUNS = 10_000;
+export class SpsExecutionSummaryLimitError extends Error {
+  constructor() {
+    super("Execution summary exceeds 10000 executions; narrow the time window");
+    this.name = "SpsExecutionSummaryLimitError";
+  }
+}
 const uuid = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
 export function validateSpsExecutionSummaryOptions(value: unknown): PluginSpsExecutionSummaryOptions {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Execution summary options are required");
@@ -46,7 +52,7 @@ export function summarizeSpsExecutions(companyId: string, pluginKey: string, opt
     const prior = seen.get(key);
     if (prior !== undefined) { if (prior !== identity) throw new Error("Conflicting execution snapshots"); continue; }
     seen.set(key, identity);
-    if (++summary.executionCount > SPS_EXECUTION_SUMMARY_MAX_RUNS) throw new Error("Execution summary exceeds 10000 executions; narrow the time window");
+    if (++summary.executionCount > SPS_EXECUTION_SUMMARY_MAX_RUNS) throw new SpsExecutionSummaryLimitError();
     if (["succeeded", "failed", "cancelled", "interrupted"].includes(row.phase)) summary.terminalCount++;
     else if (["queued", "active", "stopping"].includes(row.phase)) summary.inFlightCount++;
     else summary.unknownPhaseCount++;

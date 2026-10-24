@@ -113,7 +113,17 @@ zero is preserved. Overflow remains unknown rather than resetting a subtotal.
 Durations sum recorded elapsed times, not wall-clock duration or process-exit
 attestation. This is a live technical summary, not a provider invoice, immutable
 usage receipt ledger or budget/reservation implementation. No DB migration or
-legacy cost-event rewrite is included. Common management UI is a later consumer.
+legacy cost-event rewrite is included.
+
+Host management can read this same projection through
+`GET /api/companies/:companyId/sps-executions/summary`, with an installed registry
+`pluginId` and the same window/filter options. Core resolves the Plugin key from
+the registry; a supplied Plugin key cannot widen the query. Both local Host
+authority and Workspace access are required. Member/Agent access stays on its
+separate capability contracts. Disabled Plugin history remains readable while
+its registry identity is retained. More than 10,000 rows returns 422 rather than
+a partial success. Responses are not cached. The existing Plugin Settings Status
+surface consumes this endpoint; no new navigation or workflow policy is added.
 
 Agent sessions separately expose `agents.sessions.getRun` (`agent.sessions.read`)
 and `agents.sessions.cancel` (`agent.sessions.cancel`). These require explicit

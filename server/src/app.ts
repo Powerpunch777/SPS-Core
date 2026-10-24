@@ -53,12 +53,14 @@ import { authRoutes } from "./routes/auth.js";
 import { assetRoutes } from "./routes/assets.js";
 import { accessRoutes } from "./routes/access.js";
 import { spsNodeRoutes } from "./routes/sps-nodes.js";
+import { spsExecutionRoutes } from "./routes/sps-executions.js";
 import { spsWorkspaceSourceRoutes } from "./routes/sps-workspace-sources.js";
 import { spsMarketplaceRoutes } from "./routes/sps-marketplace.js";
 import { pluginRoutes } from "./routes/plugins.js";
 import { adapterRoutes } from "./routes/adapters.js";
 import { pluginUiStaticRoutes } from "./routes/plugin-ui-static.js";
 import { readBrandedStaticIndexHtml } from "./static-index-html.js";
+import { resolveStaticUiDist } from "./static-ui-dist.js";
 import { applyUiBranding } from "./ui-branding.js";
 import { logger } from "./middleware/logger.js";
 import { DEFAULT_LOCAL_PLUGIN_DIR, pluginLoader } from "./services/plugin-loader.js";
@@ -381,6 +383,7 @@ export async function createApp(
   api.use(spsWorkspaceSurfaceRoutes(db, workerManager));
   api.use(adapterRoutes());
   api.use(spsNodeRoutes(db));
+  api.use(spsExecutionRoutes(db));
   api.use(spsWorkspaceSourceRoutes(db));
   api.use(spsMarketplaceRoutes(db, workerManager));
   api.use(
@@ -402,12 +405,7 @@ export async function createApp(
 
   const __dirname = path.dirname(fileURLToPath(import.meta.url));
   if (opts.uiMode === "static") {
-    // Try published location first (server/ui-dist/), then monorepo dev location (../../ui/dist)
-    const candidates = [
-      path.resolve(__dirname, "../ui-dist"),
-      path.resolve(__dirname, "../../ui/dist"),
-    ];
-    const uiDist = candidates.find((p) => fs.existsSync(path.join(p, "index.html")));
+    const uiDist = resolveStaticUiDist(__dirname);
     if (uiDist) {
       const sendBrandedStaticIndex = (_req: express.Request, res: express.Response) => {
         res

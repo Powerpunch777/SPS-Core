@@ -40,6 +40,8 @@ import { spsPluginExecutionService } from "../services/sps-plugin-execution.js";
 import { spsAgentSessionRunService } from "../services/sps-agent-session-runs.js";
 import { spsExecutionHistoryService } from "../services/sps-execution-history.js";
 import { buildSpsUsageEvidence } from "../services/sps-execution-observation.js";
+import { plugins } from "@paperclipai/db";
+import { spsExecutionRoutes } from "../routes/sps-executions.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -75,6 +77,7 @@ async function createApp(db: Db, actor: ReturnType<typeof boardActor>) {
     next();
   });
   app.use("/api", spsNodeRoutes(db));
+  app.use("/api", spsExecutionRoutes(db));
   app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
     res.status(err.status ?? 500).json({ error: err.message ?? "Internal server error" });
   });
@@ -1163,6 +1166,26 @@ describeEmbeddedPostgres("SPS Node routes", () => {
       costs: { subscriptionReference: { reported: null, unavailableExecutions: 2 }, other: { reported: null, unavailableExecutions: 1 } } });
     const again = await history.summarize(fixture.company.id, summaryWindow);
     expect(again.tokens).toEqual(summary.tokens); // Read repetition never appends charges.
+    const [registryPlugin] = await db.insert(plugins).values({
+      pluginKey, packageName: "@sps/history-fixture", version: "0.0.1", status: "disabled",
+      manifestJson: { id: pluginKey, apiVersion: 1, version: "0.0.1", displayName: "History fixture", author: "SPS", categories: [], capabilities: [] },
+    }).returning();
+    const hostApp = await createApp(db, boardActor(fixture.company.id, fixture.ownerUserId, "owner", { source: "local_implicit" }));
+    const endpoint = `/api/companies/${fixture.company.id}/sps-executions/summary`;
+    const apiSummary = await request(hostApp).get(endpoint).query({ pluginId: registryPlugin.id, ...summaryWindow }).expect(200);
+    expect(apiSummary.body.tokens).toEqual(summary.tokens);
+    expect(apiSummary.body.executionCount).toBe(3);
+    expect(apiSummary.headers["cache-control"]).toBe("no-store");
+    expect(JSON.stringify(apiSummary.body)).not.toContain("secret");
+    const repeatSummary = await request(hostApp).get(endpoint).query({ pluginId: registryPlugin.id, ...summaryWindow }).expect(200);
+    expect(repeatSummary.body.tokens).toEqual(summary.tokens);
+    const unrelatedPlugin = await db.insert(plugins).values({
+      pluginKey: "sps.history-empty", packageName: "@sps/history-empty", version: "0.0.1",
+      manifestJson: { id: "sps.history-empty", apiVersion: 1, version: "0.0.1", displayName: "Empty fixture", author: "SPS", categories: [], capabilities: [] },
+    }).returning().then(rows => rows[0]!);
+    const emptySummary = await request(hostApp).get(endpoint).query({ pluginId: unrelatedPlugin.id, ...summaryWindow }).expect(200);
+    expect(emptySummary.body.executionCount).toBe(0);
+    expect(emptySummary.body.tokens.inputTokens.reported).toBeNull();
     expect((await history.summarize(fixture.company.id, { ...summaryWindow, agentId: fixture.agent.id })).executionCount).toBe(2);
     expect((await history.summarize(fixture.company.id, { ...summaryWindow, lane: "node" })).executionCount).toBe(1);
     expect((await history.summarize(fixture.company.id, { from: sameMillisecond + "Z", to: "2026-10-22T02:03:04.124Z" })).executionCount).toBe(3);
@@ -1197,6 +1220,7 @@ describeEmbeddedPostgres("SPS Node routes", () => {
       })));
     }
     await expect(history.summarize(fixture.company.id, { from: "2026-10-21T00:00:00.000Z", to: summaryWindow.from })).rejects.toThrow("narrow the time window");
+    await request(hostApp).get(endpoint).query({ pluginId: registryPlugin.id, from: "2026-10-21T00:00:00.000Z", to: summaryWindow.from }).expect(422);
   });
 
   it("exposes only safe Source metadata to a plugin while dispatching through its own execution grant", async () => {
