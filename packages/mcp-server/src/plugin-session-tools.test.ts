@@ -100,6 +100,7 @@ describe("Plugin session tools MCP", () => {
   it("exposes exactly the two generic tools and lists only descriptors owned by this plugin", async () => {
     const fetchMock = vi.fn().mockResolvedValue(jsonResponse([
       { pluginId: config.pluginKey, name: `${config.pluginKey}:do-work`, description: "Owned" },
+      { pluginId: "11111111-1111-4111-8111-111111111111", name: `${config.pluginKey}:uuid-owned`, description: "Core descriptor" },
       { pluginId: "other.plugin", name: "other.plugin:secret", description: "Foreign" },
       { pluginId: config.pluginKey, name: "other.plugin:mislabelled" },
     ]));
@@ -119,6 +120,7 @@ describe("Plugin session tools MCP", () => {
 
     expect(JSON.parse(firstText(result))).toEqual([
       { pluginId: config.pluginKey, name: `${config.pluginKey}:do-work`, description: "Owned" },
+      { pluginId: "11111111-1111-4111-8111-111111111111", name: `${config.pluginKey}:uuid-owned`, description: "Core descriptor" },
     ]);
     const [requestUrl, init] = fetchMock.mock.calls[0] as [URL, RequestInit];
     expect(requestUrl.toString()).toBe(

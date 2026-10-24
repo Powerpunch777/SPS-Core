@@ -125,8 +125,9 @@ export class PluginSessionToolsClient {
     return payload.filter((entry): entry is Record<string, unknown> => {
       if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
       const descriptor = entry as Record<string, unknown>;
-      return descriptor.pluginId === this.config.pluginKey
-        && typeof descriptor.name === "string"
+      // The retained API's pluginId is a database UUID, not the public key.
+      // The dispatcher binds that key in the canonical namespaced tool name.
+      return typeof descriptor.name === "string"
         && descriptor.name.startsWith(prefix)
         && descriptor.name.length > prefix.length;
     });
