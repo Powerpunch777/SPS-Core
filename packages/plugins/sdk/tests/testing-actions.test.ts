@@ -84,6 +84,9 @@ describe("createTestHarness SPS execution history", () => {
       "agent_session",
       "11111111-1111-4111-8111-111111111111",
     )).rejects.toThrow("The in-memory plugin test harness does not provide SPS Node infrastructure");
+    await expect(harness.ctx.sps.executions.summarize("company-1", {
+      from: "2026-10-01T00:00:00.000Z", to: "2026-10-02T00:00:00.000Z",
+    })).rejects.toThrow("The in-memory plugin test harness does not provide SPS execution summaries");
   });
 });
 

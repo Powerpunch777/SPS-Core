@@ -81,6 +81,8 @@ import type {
   PluginSpsExecutionCursor,
   PluginSpsExecutionLane,
   PluginSpsExecutionPage,
+  PluginSpsExecutionSummary,
+  PluginSpsExecutionSummaryOptions,
   PluginSpsExecutionGrant,
   PluginSpsRun,
   PluginSpsRunEvent,
@@ -1014,6 +1016,10 @@ export interface WorkerToHostMethods {
   "sps.executions.get": [
     params: { companyId: string; lane: PluginSpsExecutionLane; runId: string },
     result: PluginSpsExecution | null,
+  ];
+  "sps.executions.summarize": [
+    params: PluginSpsExecutionSummaryOptions & { companyId: string },
+    result: PluginSpsExecutionSummary,
   ];
   "sps.workspaceSources.list": [
     params: { companyId: string },

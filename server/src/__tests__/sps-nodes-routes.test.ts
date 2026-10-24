@@ -1156,6 +1156,20 @@ describeEmbeddedPostgres("SPS Node routes", () => {
     expect(all.items.map(item => item.sessionId).filter(Boolean)).toEqual([sessionId, sessionId]);
     expect(all.items.filter(item => item.lane === "agent_session").every(item => item.usage.inputTokens.value === 12)).toBe(true);
     expect(JSON.stringify(all)).not.toContain("secret");
+    const summaryWindow = { from: "2026-10-22T00:00:00.000Z", to: "2026-10-23T00:00:00.000Z" };
+    const summary = await history.summarize(fixture.company.id, summaryWindow);
+    expect(summary).toMatchObject({ executionCount: 3, terminalCount: 2, inFlightCount: 1,
+      tokens: { inputTokens: { reported: 24, reportedExecutions: 2, unavailableExecutions: 1 } },
+      costs: { subscriptionReference: { reported: null, unavailableExecutions: 2 }, other: { reported: null, unavailableExecutions: 1 } } });
+    const again = await history.summarize(fixture.company.id, summaryWindow);
+    expect(again.tokens).toEqual(summary.tokens); // Read repetition never appends charges.
+    expect((await history.summarize(fixture.company.id, { ...summaryWindow, agentId: fixture.agent.id })).executionCount).toBe(2);
+    expect((await history.summarize(fixture.company.id, { ...summaryWindow, lane: "node" })).executionCount).toBe(1);
+    expect((await history.summarize(fixture.company.id, { from: sameMillisecond + "Z", to: "2026-10-22T02:03:04.124Z" })).executionCount).toBe(3);
+    expect((await history.summarize(fixture.company.id, { from: summaryWindow.from, to: sameMillisecond + "Z" })).executionCount).toBe(0);
+    expect((await history.summarize(randomUUID(), summaryWindow)).executionCount).toBe(0);
+    expect((await spsExecutionHistoryService(db, "other").summarize(fixture.company.id, summaryWindow)).executionCount).toBe(0);
+    await expect(history.summarize(fixture.company.id, { ...summaryWindow, to: summaryWindow.from })).rejects.toThrow("window");
     const pages = [];
     let before;
     do {
@@ -1176,6 +1190,13 @@ describeEmbeddedPostgres("SPS Node routes", () => {
       await expect(history.list(fixture.company.id, { before: cursor as never })).rejects.toThrow("cursor");
     }
     await expect(history.get(fixture.company.id, "node", "bad")).rejects.toThrow("UUID");
+    for (let start = 0; start < 10001; start += 500) {
+      await db.insert(heartbeatRuns).values(Array.from({ length: Math.min(500, 10001 - start) }, () => ({
+        companyId: fixture.company.id, agentId: fixture.agent.id, invocationSource: "on_demand", status: "succeeded",
+        contextSnapshot: context, createdAt: new Date("2026-10-21T12:00:00.000Z"),
+      })));
+    }
+    await expect(history.summarize(fixture.company.id, { from: "2026-10-21T00:00:00.000Z", to: summaryWindow.from })).rejects.toThrow("narrow the time window");
   });
 
   it("exposes only safe Source metadata to a plugin while dispatching through its own execution grant", async () => {

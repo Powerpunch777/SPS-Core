@@ -435,6 +435,9 @@ describe("worker SPS Runtime transport", () => {
           };
           return unsafeTransport.request("companies.list", {});
         });
+        ctx.actions.register("summary", async () => ({
+          summary: await ctx.sps.executions.summarize("company-1", { from: "2026-10-01T00:00:00.000Z", to: "2026-10-02T00:00:00.000Z" }),
+        }));
       },
     });
     const worker = startWorkerRpcHost({ plugin, stdin: hostToWorker, stdout: workerToHost });
@@ -476,6 +479,9 @@ describe("worker SPS Runtime transport", () => {
       }
       if (message.method === "sps.executions.get") {
         hostToWorker.write(serializeMessage(createSuccessResponse(message.id, null)));
+      }
+      if (message.method === "sps.executions.summarize") {
+        hostToWorker.write(serializeMessage(createSuccessResponse(message.id, { executionCount: 0 })));
       }
     });
 
@@ -530,6 +536,11 @@ describe("worker SPS Runtime transport", () => {
       expect(outboundMethods).toEqual([
         "sps.runtimes.list", "sps.runtimes.list", "sps.executions.list", "sps.executions.get",
       ]);
+      await expect(callWorker("performAction", { key: "summary", params: {} }, {
+        id: "invocation-summary", scope: { companyId: "company-1" },
+      })).resolves.toEqual({ summary: { executionCount: 0 } });
+      expect(outboundRequests.at(-1)).toEqual({ method: "sps.executions.summarize", paperclipInvocationId: "invocation-summary",
+        params: { companyId: "company-1", from: "2026-10-01T00:00:00.000Z", to: "2026-10-02T00:00:00.000Z" } });
     } finally {
       worker.stop();
       hostReadline.close();

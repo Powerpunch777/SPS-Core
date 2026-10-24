@@ -209,6 +209,9 @@ describePostgres("plugin agent session context", () => {
     expect(await services.sps!.getExecution(params.companyId, "agent_session", run.id)).toMatchObject({ runId: run.id });
     expect(await services.sps!.getExecution(randomUUID(), "agent_session", run.id)).toBeNull();
     expect((await services.sps!.listExecutions(randomUUID())).items).toEqual([]);
+    const options = { from: new Date(run.createdAt.getTime() - 1).toISOString(), to: new Date(run.createdAt.getTime() + 1).toISOString() };
+    expect(await services.sps!.summarizeExecutions(params.companyId, options)).toMatchObject({ executionCount: 1, tokens: { inputTokens: { reported: null, unavailableExecutions: 1 } } });
+    expect((await services.sps!.summarizeExecutions(randomUUID(), options)).executionCount).toBe(0);
     expect(mockCancelRun).not.toHaveBeenCalled();
   });
 

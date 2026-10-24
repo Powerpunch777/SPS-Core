@@ -685,11 +685,41 @@ export interface PluginSpsExecutionPage {
   items: PluginSpsExecution[];
   nextCursor: PluginSpsExecutionCursor | null;
 }
+export interface PluginSpsUsageAggregateMetric {
+  reported: number | null;
+  estimated: number | null;
+  reportedExecutions: number;
+  estimatedExecutions: number;
+  unavailableExecutions: number;
+  overflowed: boolean;
+}
+export interface PluginSpsExecutionSummaryOptions {
+  /** Canonical UTC millisecond timestamps; createdAt window [from, to), at most 31 days. */
+  from: string;
+  to: string;
+  lane?: PluginSpsExecutionLane;
+  agentId?: string;
+}
+export interface PluginSpsExecutionSummary {
+  companyId: string;
+  pluginKey: string;
+  window: { from: string; to: string };
+  generatedAt: string;
+  executionCount: number;
+  terminalCount: number;
+  inFlightCount: number;
+  unknownPhaseCount: number;
+  tokens: { inputTokens: PluginSpsUsageAggregateMetric; cachedInputTokens: PluginSpsUsageAggregateMetric; outputTokens: PluginSpsUsageAggregateMetric };
+  /** Costs are adapter reports, not invoices. Never sum these three billing bases together. */
+  costs: { currency: "USD"; incrementalApi: PluginSpsUsageAggregateMetric; subscriptionReference: PluginSpsUsageAggregateMetric; other: PluginSpsUsageAggregateMetric };
+  duration: { totalMs: number | null; knownExecutions: number; unavailableExecutions: number; overflowed: boolean };
+}
 
 /** Finite SPS Runtime operations, excluding general plugin RPC methods. */
 export type PluginSpsRuntimeOperation =
   | "sps.executions.list"
   | "sps.executions.get"
+  | "sps.executions.summarize"
   | "sps.workspaceSources.list"
   | "sps.runtimes.list"
   | "sps.executionGrants.list"
@@ -722,6 +752,7 @@ export interface PluginSpsClient {
   executions: {
     list(companyId: string, options?: { lane?: PluginSpsExecutionLane; limit?: number; before?: PluginSpsExecutionCursor }): Promise<PluginSpsExecutionPage>;
     get(companyId: string, lane: PluginSpsExecutionLane, runId: string): Promise<PluginSpsExecution | null>;
+    summarize(companyId: string, options: PluginSpsExecutionSummaryOptions): Promise<PluginSpsExecutionSummary>;
   };
   workspaceSources: {
     list(companyId: string): Promise<PluginSpsWorkspaceSource[]>;

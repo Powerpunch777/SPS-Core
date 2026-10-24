@@ -853,6 +853,9 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
     },
     sps: {
       executions: {
+        async summarize() {
+          throw new Error("The in-memory plugin test harness does not provide SPS execution summaries");
+        },
         async list() {
           throw new Error("The in-memory plugin test harness does not provide SPS Node infrastructure");
         },

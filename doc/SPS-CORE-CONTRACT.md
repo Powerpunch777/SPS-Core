@@ -98,6 +98,23 @@ unavailable in this DTO. No historical usage backfill, ledger replacement, recei
 deduplication, budget enforcement or automatic business decisions are added here.
 These are unreleased pinned-source additions, not features of the published SDK tag.
 
+`sps.executions.summarize` shares `sps.executions.read` and returns an own-Plugin,
+Workspace-scoped projection over `createdAt` in `[from, to)`. Canonical UTC
+millisecond bounds are required, at most 31 days. Lane and Agent filters are
+optional; a neutral Node run has no Agent identity. Both lanes use one read-only
+repeatable-read DB snapshot. More than 10,000 matching executions is rejected;
+no truncated totals are presented as complete.
+
+The projection counts each lane/run identity once and never appends charges on a
+read. Reported and estimated token subtotals stay separate, with unavailable
+coverage counts. API incremental cost, subscription reference cost and other cost
+bases are never merged. All-unknown/empty subtotals are null; an explicit reported
+zero is preserved. Overflow remains unknown rather than resetting a subtotal.
+Durations sum recorded elapsed times, not wall-clock duration or process-exit
+attestation. This is a live technical summary, not a provider invoice, immutable
+usage receipt ledger or budget/reservation implementation. No DB migration or
+legacy cost-event rewrite is included. Common management UI is a later consumer.
+
 Agent sessions separately expose `agents.sessions.getRun` (`agent.sessions.read`)
 and `agents.sessions.cancel` (`agent.sessions.cancel`). These require explicit
 Workspace, session and run IDs and verify the exact Plugin namespace, Agent and

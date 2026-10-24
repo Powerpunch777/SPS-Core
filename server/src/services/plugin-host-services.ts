@@ -1211,6 +1211,11 @@ export function buildHostServices(
     },
 
     sps: {
+      async summarizeExecutions(companyIdInput, options) {
+        const companyId = ensureCompanyId(companyIdInput);
+        await ensurePluginAvailableForCompany(companyId);
+        return executionHistory.summarize(companyId, options);
+      },
       async listExecutions(companyIdInput, options) {
         const companyId = ensureCompanyId(companyIdInput);
         await ensurePluginAvailableForCompany(companyId);

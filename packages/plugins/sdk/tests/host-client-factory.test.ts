@@ -422,6 +422,19 @@ describe("createHostClientHandlers invocation company scope", () => {
     expect(listExecutions).toHaveBeenCalledTimes(2);
   });
 
+  it("gates summaries and preserves the authenticated Workspace scope", async () => {
+    const summarizeExecutions = vi.fn(async () => ({ executionCount: 0 }));
+    const services = { sps: { summarizeExecutions } } as unknown as HostServices;
+    const params = { companyId: "company-a", from: "2026-10-01T00:00:00.000Z", to: "2026-10-02T00:00:00.000Z" };
+    const denied = createHostClientHandlers({ pluginId: "sps.example", capabilities: [], services });
+    await expect(denied["sps.executions.summarize"](params)).rejects.toBeInstanceOf(CapabilityDeniedError);
+    const allowed = createHostClientHandlers({ pluginId: "sps.example", capabilities: ["sps.executions.read"], services });
+    await expect(allowed["sps.executions.summarize"](params, { invocationScope: { companyId: "company-b" } })).rejects.toBeInstanceOf(InvocationScopeDeniedError);
+    expect(summarizeExecutions).not.toHaveBeenCalled();
+    await expect(allowed["sps.executions.summarize"](params, { invocationScope: { companyId: "company-a" } })).resolves.toEqual({ executionCount: 0 });
+    expect(summarizeExecutions).toHaveBeenCalledWith("company-a", { from: params.from, to: params.to });
+  });
+
   it("gates exact Agent-session run reads and cancellation independently", async () => {
     const getRun = vi.fn(async () => ({ runId: "run-a", status: "running" }));
     const cancel = vi.fn(async () => ({ runId: "run-a", status: "running", termination: "pending" }));

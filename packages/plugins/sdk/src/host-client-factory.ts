@@ -123,6 +123,10 @@ export interface HostServices {
 
   /** Provides workflow-neutral Host Sources, Node runtimes, and plugin runs. */
   sps?: {
+    summarizeExecutions(
+      companyId: string,
+      options: Omit<WorkerToHostMethods["sps.executions.summarize"][0], "companyId">,
+    ): Promise<WorkerToHostMethods["sps.executions.summarize"][1]>;
     listExecutions(
       companyId: string,
       options?: Omit<WorkerToHostMethods["sps.executions.list"][0], "companyId">,
@@ -418,6 +422,7 @@ const METHOD_CAPABILITY_MAP: Record<WorkerToHostMethodName, PluginCapability | n
   // Workflow-neutral SPS infrastructure
   "sps.executions.list": "sps.executions.read",
   "sps.executions.get": "sps.executions.read",
+  "sps.executions.summarize": "sps.executions.read",
   "sps.workspaceSources.list": "sps.workspaceSources.read",
   "sps.runtimes.list": "sps.runtimes.read",
   "sps.executionGrants.list": "sps.executionGrants.read",
@@ -737,6 +742,12 @@ export function createHostClientHandlers(
       return services.localFolders.deleteFile(params);
     }),
 
+    "sps.executions.summarize": gated("sps.executions.summarize", async (params) => {
+      if (!services.sps) throw new Error("This SPS host does not expose execution summaries");
+      if (!readNonEmptyString(params.companyId)) throw new TypeError("SPS execution summary requires a non-empty companyId");
+      const { companyId, ...options } = params;
+      return services.sps.summarizeExecutions(companyId, options);
+    }),
     "sps.executions.list": gated("sps.executions.list", async (params) => {
       if (!services.sps) throw new Error("This SPS host does not expose execution history");
       if (!readNonEmptyString(params.companyId)) throw new TypeError("SPS execution history requires a non-empty companyId");

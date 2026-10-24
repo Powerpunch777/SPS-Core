@@ -1,7 +1,8 @@
-import { and, desc, eq, sql, type SQL } from "drizzle-orm";
+import { and, desc, eq, gte, lt, sql, type SQL } from "drizzle-orm";
 import { heartbeatRuns, spsPluginNodeRuns, type Db } from "../compat/paperclip/db.js";
-import type { PluginSpsExecution, PluginSpsExecutionCursor, PluginSpsExecutionLane, PluginSpsExecutionPage } from "../compat/paperclip/plugin-sdk.js";
+import type { PluginSpsExecution, PluginSpsExecutionCursor, PluginSpsExecutionLane, PluginSpsExecutionPage, PluginSpsExecutionSummaryOptions } from "../compat/paperclip/plugin-sdk.js";
 import { observeSpsAgentRun, observeSpsNodeRun } from "./sps-execution-observation.js";
+import { SPS_EXECUTION_SUMMARY_MAX_RUNS, summarizeSpsExecutions, validateSpsExecutionSummaryOptions } from "./sps-execution-summary.js";
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const laneValid = (value: unknown): value is PluginSpsExecutionLane => value === "node" || value === "agent_session";
@@ -85,5 +86,26 @@ export function spsExecutionHistoryService(db: Db, pluginKey: string) {
     const [run] = await db.select(nodeColumns).from(spsPluginNodeRuns).where(and(eq(spsPluginNodeRuns.companyId, companyId), eq(spsPluginNodeRuns.pluginKey, pluginKey), eq(spsPluginNodeRuns.id, runId))).limit(1);
     return run ? observeSpsNodeRun(run) : null;
   }
-  return { list, get };
+  async function summarize(companyId: string, input: PluginSpsExecutionSummaryOptions) {
+    companyId = requireUuid(companyId);
+    const options = validateSpsExecutionSummaryOptions(input);
+    const from = new Date(options.from), to = new Date(options.to), now = Date.now();
+    // Both lanes must come from one DB snapshot; never silently aggregate a
+    // truncated page or mutate the legacy cost ledger on a read.
+    return db.transaction(async tx => {
+      const items: PluginSpsExecution[] = [];
+      if (!options.lane || options.lane === "agent_session") {
+        const rows = await tx.select(agentColumns).from(heartbeatRuns).where(and(agentScope(companyId), gte(heartbeatRuns.createdAt, from), lt(heartbeatRuns.createdAt, to),
+          options.agentId ? eq(heartbeatRuns.agentId, options.agentId) : undefined)).limit(SPS_EXECUTION_SUMMARY_MAX_RUNS + 1);
+        items.push(...rows.map(run => observeSpsAgentRun(run, pluginKey, now)));
+      }
+      if ((!options.lane || options.lane === "node") && !options.agentId) {
+        const rows = await tx.select(nodeColumns).from(spsPluginNodeRuns).where(and(eq(spsPluginNodeRuns.companyId, companyId), eq(spsPluginNodeRuns.pluginKey, pluginKey),
+          gte(spsPluginNodeRuns.createdAt, from), lt(spsPluginNodeRuns.createdAt, to))).limit(SPS_EXECUTION_SUMMARY_MAX_RUNS + 1);
+        items.push(...rows.map(run => observeSpsNodeRun(run, now)));
+      }
+      return summarizeSpsExecutions(companyId, pluginKey, options, items, now);
+    }, { isolationLevel: "repeatable read", accessMode: "read only" });
+  }
+  return { list, get, summarize };
 }
