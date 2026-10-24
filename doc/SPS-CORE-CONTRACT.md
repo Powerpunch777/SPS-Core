@@ -53,6 +53,27 @@ request a minimized read-only comparison of a linked project and a selected
 Agent's saved Codex-local cwd. A matching string does not certify actual runtime
 cwd, file existence, login, authorization, sandbox containment or CLI availability.
 
+### Plugin Session Tools
+
+Local Plugin Agent conversations can receive an own-plugin stdio MCP bridge
+through adapters that support external stdio tools. Core transports tool
+discovery/execution; it does not decide when to delegate or what counts as a
+successful workflow. The Codex CLI lane passes bound MCP environment values to
+the child without embedding bearer tokens in command arguments or invocation
+metadata. Existing sandbox, model, reasoning and approval settings are retained.
+
+Projectless tool execution requires a run-bound Agent JWT, a running owned run,
+an active owned plugin session, matching persisted conversation/task keys, and
+the same tool-owning plugin. API keys, Board callers, closed/cancelling sessions
+and other plugins cannot use this path. Workspace activation, explicit tool
+grants and selected memory-provider checks still apply. The optional retained
+`ToolRunContext.projectId` is not a new Core project requirement; ordinary
+project-scoped calls retain their existing project authorization.
+
+This local transport is not remote Node/SSH certification. Adapter support and
+the current transport must be verified independently before claiming that a
+workflow can delegate on every runtime.
+
 ## Plugin-Owned Contracts
 
 Plugins own domain semantics, including:

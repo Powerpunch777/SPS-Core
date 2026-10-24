@@ -52,6 +52,7 @@ import { pluginDatabaseService } from "../services/plugin-database.js";
 import { listReadyMemoryProviders } from "../services/memory-providers.js";
 import type { CompanyMemoryProviderRuntime } from "../services/memory-provider-runtime.js";
 import { createPluginToolAccessService, pluginRequiresExplicitToolGrant } from "../services/plugin-tool-access.js";
+import { resolvePluginSessionToolScope } from "../services/plugin-session-tool-scope.js";
 import {
   resolvePluginCompanyActivation,
   setPluginCompanyActivation,
@@ -843,6 +844,7 @@ export function pluginRoutes(
   }
 
   async function validateToolRunContextScope(runContext: ToolRunContext): Promise<string | null> {
+    if (!runContext.projectId) return '"runContext.projectId" is required for project-scoped tools';
     const [agent] = await db
       .select({ companyId: agents.companyId })
       .from(agents)
@@ -1409,16 +1411,31 @@ export function pluginRoutes(
       return;
     }
 
-    if (!runContext.agentId || !runContext.runId || !runContext.companyId || !runContext.projectId) {
+    if (![runContext.agentId, runContext.runId, runContext.companyId].every(value => typeof value === "string" && value.trim())
+      || (runContext.projectId !== undefined && (typeof runContext.projectId !== "string" || !runContext.projectId))) {
       res.status(400).json({
-        error: '"runContext" must include agentId, runId, companyId, and projectId',
+        error: '"runContext" must include agentId, runId, companyId, and an optional valid projectId',
       });
       return;
     }
 
     assertAgentToolRunIdentity(req, runContext);
     assertCompanyAccess(req, runContext.companyId);
-    const scopeError = await validateToolRunContextScope(runContext);
+    let sessionPluginKey: string | null = null;
+    if (runContext.projectId === undefined) {
+      if (req.actor.type !== "agent" || req.actor.source !== "agent_jwt"
+        || req.actor.agentId !== runContext.agentId || req.actor.companyId !== runContext.companyId
+        || req.actor.runId !== runContext.runId) {
+        res.status(403).json({ error: "Projectless tools require the exact active Plugin Agent session." });
+        return;
+      }
+      sessionPluginKey = await resolvePluginSessionToolScope(db, runContext);
+      if (!sessionPluginKey) {
+        res.status(403).json({ error: "Projectless tools require the exact active Plugin Agent session." });
+        return;
+      }
+    }
+    const scopeError = runContext.projectId === undefined ? null : await validateToolRunContextScope(runContext);
     if (scopeError) {
       res.status(403).json({ error: scopeError });
       return;
@@ -1430,14 +1447,22 @@ export function pluginRoutes(
       res.status(404).json({ error: `Tool "${tool}" not found` });
       return;
     }
+    if (sessionPluginKey && registeredTool.pluginId !== sessionPluginKey) {
+      res.status(403).json({ error: "A projectless session can invoke only its own plugin's tools." });
+      return;
+    }
     const toolPlugin = await registry.getById(registeredTool.pluginDbId);
+    if (sessionPluginKey && (!toolPlugin || toolPlugin.pluginKey !== sessionPluginKey)) {
+      res.status(403).json({ error: "The session's plugin is unavailable." });
+      return;
+    }
     if (toolPlugin && !(await resolveCompanyPluginActivation(toolPlugin, runContext.companyId)).enabled) {
       await toolAccess.record({
         companyId: runContext.companyId,
         pluginId: registeredTool.pluginDbId,
         agentId: runContext.agentId,
         runId: runContext.runId,
-        projectId: runContext.projectId,
+        projectId: runContext.projectId ?? null,
         toolName: registeredTool.namespacedName,
         status: "denied",
         errorCode: "PLUGIN_DISABLED_FOR_COMPANY",
@@ -1456,7 +1481,7 @@ export function pluginRoutes(
           pluginId: registeredTool.pluginDbId,
           agentId: runContext.agentId,
           runId: runContext.runId,
-          projectId: runContext.projectId,
+          projectId: runContext.projectId ?? null,
           toolName: registeredTool.namespacedName,
           status: "denied",
           errorCode: "MEMORY_PROVIDER_NOT_SELECTED",
@@ -1475,7 +1500,7 @@ export function pluginRoutes(
         pluginId: registeredTool.pluginDbId,
         agentId: runContext.agentId,
         runId: runContext.runId,
-        projectId: runContext.projectId,
+        projectId: runContext.projectId ?? null,
         toolName: registeredTool.namespacedName,
         status: "denied",
         errorCode: "EXPLICIT_GRANT_REQUIRED",
@@ -1495,7 +1520,7 @@ export function pluginRoutes(
         pluginId: registeredTool.pluginDbId,
         agentId: runContext.agentId,
         runId: runContext.runId,
-        projectId: runContext.projectId,
+        projectId: runContext.projectId ?? null,
         toolName: registeredTool.namespacedName,
         status: "succeeded",
       });
@@ -1507,7 +1532,7 @@ export function pluginRoutes(
         pluginId: registeredTool.pluginDbId,
         agentId: runContext.agentId,
         runId: runContext.runId,
-        projectId: runContext.projectId,
+        projectId: runContext.projectId ?? null,
         toolName: registeredTool.namespacedName,
         status: "failed",
         errorCode: "PLUGIN_TOOL_EXECUTION_FAILED",

@@ -58,6 +58,11 @@ import { normalizeCodexAccountDirectory, resolveSelectedCodexHome } from "./code
 import { prepareCodexRuntimeConfig } from "./runtime-config.js";
 import { resolveCodexDesiredSkillNames } from "./skills.js";
 import { buildCodexExecArgs } from "./codex-args.js";
+import {
+  insertCodexExternalToolArgs,
+  mergeCodexExternalToolEnv,
+  prepareCodexExternalTools,
+} from "./codex-external-tools.js";
 import { SANDBOX_INSTALL_COMMAND } from "../index.js";
 import {
   CODEX_OUTPUT_INACTIVITY_MONITOR_SIGTERM_GRACE_MS,
@@ -356,6 +361,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   if (!engineSelection.explicit && engineSelection.fallbackReason) {
     await ctx.onLog("stderr", formatCodexAcpFallbackMessage(engineSelection.fallbackReason));
   }
+
+  const preparedExternalTools = prepareCodexExternalTools(
+    ctx.externalTools,
+    adapterExecutionTargetIsRemote(executionTarget),
+  );
 
   const { runId, agent, runtime, config, context, onLog, onMeta, onSpawn, authToken } = ctx;
 
@@ -674,6 +684,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         (entry): entry is [string, string] => typeof entry[1] === "string",
       ),
     );
+    // Check inherited runtime variables for collisions without exposing MCP secrets to probes.
+    mergeCodexExternalToolEnv(runtimeEnv, preparedExternalTools.env);
     await ensureAdapterExecutionTargetRuntimeCommandInstalled({
       runId,
       target: executionTarget,
@@ -686,12 +698,18 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       onLog,
     });
     await ensureAdapterExecutionTargetCommandResolvable(command, executionTarget, cwd, runtimeEnv);
-    const resolvedCommand = await resolveAdapterExecutionTargetCommandForLogs(command, executionTarget, cwd, runtimeEnv);
+    const resolvedCommand = await resolveAdapterExecutionTargetCommandForLogs(
+      command,
+      executionTarget,
+      cwd,
+      runtimeEnv,
+    );
     const loggedEnv = buildInvocationEnvForLogs(env, {
       runtimeEnv,
       includeRuntimeKeys: ["HOME"],
       resolvedCommand,
     });
+    const childEnv = mergeCodexExternalToolEnv(env, preparedExternalTools.env);
 
     const monitorResolution = resolveCodexInactivityTimeout(config.outputInactivityTimeoutMs);
     if (monitorResolution.mode === "disabled") {
@@ -864,7 +882,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           skipGitRepoCheck: executionTargetIsSandbox,
         },
       );
-      const args = execArgs.args;
+      const args = insertCodexExternalToolArgs(execArgs.args, preparedExternalTools.args);
       const commandNotesWithFastMode =
         execArgs.fastModeIgnoredReason == null
           ? commandNotes
@@ -943,7 +961,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       try {
         const proc = await runAdapterExecutionTargetProcess(runId, runtimeExecutionTarget, command, args, {
           cwd,
-          env,
+          env: childEnv,
           stdin: prompt,
           timeoutSec,
           graceSec,

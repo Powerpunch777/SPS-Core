@@ -264,8 +264,9 @@ export interface ToolRunContext {
   runId: string;
   /** UUID of the company the run belongs to. */
   companyId: string;
-  /** UUID of the project the run belongs to. */
-  projectId: string;
+  /** UUID of the retained project, when present. Projectless calls are limited
+   * to the invoking plugin's verified active Agent session. */
+  projectId?: string;
 }
 
 /**

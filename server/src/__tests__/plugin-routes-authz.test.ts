@@ -768,6 +768,68 @@ describe.sequential("plugin tool and bridge authz", () => {
     mockAccess.hasPermission.mockResolvedValue(false);
   });
 
+  it("permits a projectless owned active Plugin Agent session without creating a Core project", async () => {
+    readyPlugin();
+    const sessionId = "88888888-8888-4888-8888-888888888888";
+    const taskKey = "plugin:paperclip.example:session:conversation";
+    const executeTool = vi.fn().mockResolvedValue({ content: "ok" });
+    const { app } = await createApp(agentActor(), {}, {
+      db: createSelectQueueDb([
+        [{ companyId: companyA, status: "running" }],
+        [{ companyId: companyA, agentId: agentA, status: "running", contextSnapshot: {
+          taskKey, spsPluginConversation: { pluginKey: "paperclip.example", sessionId, message: "Hello" },
+        } }],
+        [{ id: sessionId, companyId: companyA, agentId: agentA, taskKey, status: "active", closedAt: null }],
+      ]),
+      toolDeps: { toolDispatcher: {
+        listToolsForAgent: vi.fn(),
+        getTool: vi.fn(() => ({ pluginId: "paperclip.example", pluginDbId: pluginId, name: "search" })),
+        executeTool,
+      } },
+    });
+    const res = await request(app).post("/api/plugins/tools/execute").send({
+      tool: "paperclip.example:search", parameters: {}, runContext: { agentId: agentA, companyId: companyA, runId: runA },
+    });
+    expect(res.status).toBe(200);
+    expect(executeTool).toHaveBeenCalledWith("paperclip.example:search", {}, { agentId: agentA, companyId: companyA, runId: runA });
+  });
+
+  it.each([boardActor(), agentActor({ runId: undefined }), agentActor({ runId: projectA }), agentActor({ source: "agent_key" })])(
+    "rejects a projectless caller without the exact run-bound Agent identity: %j", async actor => {
+      const executeTool = vi.fn();
+      const { app } = await createApp(actor, {}, { toolDeps: { toolDispatcher: {
+        listToolsForAgent: vi.fn(), getTool: vi.fn(), executeTool,
+      } } });
+      const res = await request(app).post("/api/plugins/tools/execute").send({
+        tool: "paperclip.example:search", parameters: {}, runContext: { agentId: agentA, companyId: companyA, runId: runA },
+      });
+      expect(res.status).toBe(403);
+      expect(executeTool).not.toHaveBeenCalled();
+    },
+  );
+
+  it("rejects another plugin's tool from a projectless session", async () => {
+    const sessionId = "88888888-8888-4888-8888-888888888888";
+    const taskKey = "plugin:paperclip.example:session:conversation";
+    const executeTool = vi.fn();
+    const { app } = await createApp(agentActor(), {}, {
+      db: createSelectQueueDb([
+        [{ companyId: companyA, status: "running" }],
+        [{ companyId: companyA, agentId: agentA, status: "running", contextSnapshot: {
+          taskKey, spsPluginConversation: { pluginKey: "paperclip.example", sessionId, message: "Hello" },
+        } }],
+        [{ id: sessionId, companyId: companyA, agentId: agentA, taskKey, status: "active", closedAt: null }],
+      ]),
+      toolDeps: { toolDispatcher: { listToolsForAgent: vi.fn(),
+        getTool: vi.fn(() => ({ pluginId: "other.plugin", pluginDbId: pluginId, name: "search" })), executeTool } },
+    });
+    const res = await request(app).post("/api/plugins/tools/execute").send({
+      tool: "other.plugin:search", runContext: { agentId: agentA, companyId: companyA, runId: runA },
+    });
+    expect(res.status).toBe(403);
+    expect(executeTool).not.toHaveBeenCalled();
+  });
+
   it("rejects tool execution when the board user cannot access runContext.companyId", async () => {
     const executeTool = vi.fn();
     const getTool = vi.fn();

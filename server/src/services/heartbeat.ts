@@ -249,7 +249,8 @@ import { environmentService } from "./environments.js";
 import { parseExecutionPolicyBootstrapEnv } from "./execution-policy-bootstrap.js";
 import { environmentRuntimeService } from "./environment-runtime.js";
 import { skillVersionSelectionMap } from "./runtime-skill-selections.js";
-import { applyPluginConversationRuntime, preparePluginConversationContext } from "./plugin-conversation-runtime.js";
+import { applyPluginConversationRuntime, preparePluginConversationContext, readPluginConversationContext } from "./plugin-conversation-runtime.js";
+import { createPluginConversationExternalTools } from "./plugin-conversation-tools.js";
 import { environmentRunOrchestrator } from "./environment-run-orchestrator.js";
 import { isUnsafeSessionWorkspaceCwd } from "./session-workspace-cwd.js";
 import {
@@ -12813,6 +12814,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       if (marketplaceAssistantContext && !authToken) {
         throw new Error("Marketplace Assistant requires a scoped local Agent token.");
       }
+      const pluginConversation = readPluginConversationContext(context);
       const externalTools = marketplaceAssistantContext && authToken
         ? createMarketplaceAssistantExternalTools({
             apiBaseUrl: runtimeEnv.PAPERCLIP_API_URL ?? "",
@@ -12824,7 +12826,14 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
               ? undefined
               : resolveMarketplaceAssistantMcpEntryPath(runtimeEnv),
           })
-        : undefined;
+        : pluginConversation && authToken && (!executionTarget || executionTarget.kind === "local")
+          && adapter.supportsExternalTools && adapter.acp?.supportsMcpStdio
+          ? createPluginConversationExternalTools({
+              apiBaseUrl: runtimeEnv.PAPERCLIP_API_URL ?? "",
+              authToken, runId: run.id, companyId: agent.companyId, agentId: agent.id,
+              pluginKey: pluginConversation.pluginKey,
+            })
+          : undefined;
       if (marketplaceAssistantContext && !runtimeEnv.PAPERCLIP_API_URL?.trim()) {
         throw new Error("Marketplace Assistant requires PAPERCLIP_API_URL.");
       }
