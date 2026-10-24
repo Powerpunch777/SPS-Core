@@ -1,53 +1,10 @@
-import type { PluginSpsExecution, PluginSpsUsageEvidence, PluginSpsUsageMetric } from "../compat/paperclip/plugin-sdk.js";
+import type { PluginSpsExecution } from "../compat/paperclip/plugin-sdk.js";
+import { readSpsUsageEvidence, unavailableSpsUsage } from "./sps-execution-usage.js";
+import { readSpsExecutionUsageReceipt } from "./sps-execution-usage-receipt.js";
+import { spsAgentUsageReceiptScope } from "./sps-execution-usage-context.js";
+export { buildSpsUsageEvidence, readSpsUsageEvidence, unavailableSpsUsage } from "./sps-execution-usage.js";
 
 const record = (value: unknown): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
-const billingTypes = new Set(["metered_api", "subscription_included", "subscription_overage", "credits", "fixed"]);
-function billingType(value: unknown): PluginSpsUsageEvidence["billingType"] {
-  const normalized = value === "api" ? "metered_api" : value === "subscription" ? "subscription_included" : value;
-  return typeof normalized === "string" && billingTypes.has(normalized) ? normalized as PluginSpsUsageEvidence["billingType"] : "unknown";
-}
-function number(value: unknown, integer: boolean) {
-  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= Number.MAX_SAFE_INTEGER && (!integer || Number.isSafeInteger(value)) ? value : null;
-}
-function metric(value: unknown, provenance: PluginSpsUsageMetric["provenance"], integer = true): PluginSpsUsageMetric {
-  const valid = provenance === "unavailable" ? null : number(value, integer);
-  return { value: valid, provenance: valid === null ? "unavailable" : provenance };
-}
-export function unavailableSpsUsage(): PluginSpsUsageEvidence {
-  return { inputTokens: metric(null, "unavailable"), cachedInputTokens: metric(null, "unavailable"), outputTokens: metric(null, "unavailable"),
-    costUsd: metric(null, "unavailable", false), currency: null, billingType: "unknown", costBasis: "unknown" };
-}
-
-/** Adapter reports are not provider invoices. Preserve unknown fields as null. */
-export function buildSpsUsageEvidence(input: {
-  usage?: unknown; normalizedUsage?: unknown; usageBasis?: unknown;
-  derivedFromSessionTotals?: boolean; costUsd?: unknown; costUsdBasis?: unknown; billingType?: unknown;
-}) {
-  const raw = record(input.usage), normalized = record(input.normalizedUsage);
-  const provenance = input.usageBasis === "per_run" ? "reported"
-    : input.usageBasis === "session_cumulative" || input.derivedFromSessionTotals ? "estimated" : "unavailable";
-  const tokens = (key: string) => metric(number(raw[key], true) === null ? null : provenance === "reported" ? raw[key] : normalized[key], provenance);
-  const billing = billingType(input.billingType);
-  const cost = metric(input.costUsd, input.costUsdBasis === "per_run" ? "reported" : "unavailable", false);
-  return { schemaVersion: 1, inputTokens: tokens("inputTokens"), cachedInputTokens: tokens("cachedInputTokens"), outputTokens: tokens("outputTokens"),
-    costUsd: cost, currency: cost.value === null ? null : "USD" as const, billingType: billing,
-    costBasis: billing === "metered_api" || billing === "subscription_overage" ? "incremental_api" as const
-      : billing === "subscription_included" ? "subscription_reference" as const : "unknown" as const };
-}
-
-export function readSpsUsageEvidence(usageJson: unknown): PluginSpsUsageEvidence {
-  const evidence = record(record(usageJson).spsUsageEvidence);
-  if (evidence.schemaVersion !== 1) return unavailableSpsUsage();
-  const readMetric = (value: unknown, integer = true) => {
-    const parsed = record(value);
-    return metric(parsed.value, parsed.provenance === "reported" || parsed.provenance === "estimated" ? parsed.provenance : "unavailable", integer);
-  };
-  const billing = billingType(evidence.billingType);
-  const cost = evidence.currency === "USD" ? readMetric(evidence.costUsd, false) : metric(null, "unavailable", false);
-  return { inputTokens: readMetric(evidence.inputTokens), cachedInputTokens: readMetric(evidence.cachedInputTokens), outputTokens: readMetric(evidence.outputTokens),
-    costUsd: cost, currency: cost.value === null ? null : "USD", billingType: billing,
-    costBasis: billing === "metered_api" || billing === "subscription_overage" ? "incremental_api" : billing === "subscription_included" ? "subscription_reference" : "unknown" };
-}
 
 function safeLabel(value: unknown) {
   return typeof value === "string" && /^[a-z0-9][a-z0-9._:/@+-]{0,119}$/i.test(value)
@@ -87,12 +44,18 @@ export function observeSpsAgentRun(run: ObservedAgentRun, pluginKey: string, now
   const requested = context.spsSessionCancellationRequested === true;
   const termination = !requested ? "not_applicable" : context.spsSessionCancellationTermination === "confirmed" ? "confirmed" : "pending";
   const model = safeLabel(record(run.usageJson).model);
+  const scope = spsAgentUsageReceiptScope(run, pluginKey);
+  const hasReceipt = Object.hasOwn(record(run.usageJson), "spsUsageReceipt");
+  const receipt = scope ? readSpsExecutionUsageReceipt(run.usageJson, scope) : null;
+  const usage = hasReceipt
+    ? receipt?.state === "valid" && receipt.usage ? receipt.usage : unavailableSpsUsage()
+    : readSpsUsageEvidence(run.usageJson);
   return { lane: "agent_session", runId: run.id, companyId: run.companyId, pluginKey, agentId: run.agentId,
     sessionId: typeof conversation.sessionId === "string" ? conversation.sessionId : null, subjectKey: null,
     runtime: { kind: safeLabel(runtime.adapterType), model, modelSource: model ? "reported" : "unavailable" },
     status: run.status, phase: phase(run.status, termination === "pending"), cancellationRequested: requested, termination,
     failure: failure(run.status, run.errorCode), createdAt: run.createdAt.toISOString(), startedAt: run.startedAt?.toISOString() ?? null,
-    finishedAt: run.finishedAt?.toISOString() ?? null, elapsedMs: elapsed(run.startedAt, run.finishedAt, now, run.status), usage: readSpsUsageEvidence(run.usageJson) };
+    finishedAt: run.finishedAt?.toISOString() ?? null, elapsedMs: elapsed(run.startedAt, run.finishedAt, now, run.status), usage };
 }
 const runtimeByCommand: Record<string, string> = { codex: "codex_cli", claude: "claude_cli", agy: "agy_cli", gemini: "gemini_cli", opencode: "opencode_cli", pi: "pi_cli", ollama: "ollama", lms: "lm_studio" };
 export function observeSpsNodeRun(run: ObservedNodeRun, now = Date.now()): PluginSpsExecution {

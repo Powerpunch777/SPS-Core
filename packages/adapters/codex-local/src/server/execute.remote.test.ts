@@ -97,7 +97,20 @@ describe("codex remote execution", () => {
     const alternateWorkspaceDir = path.join(rootDir, "alternate-workspace");
     await mkdir(alternateWorkspaceDir, { recursive: true });
 
-    await execute({
+    runChildProcess.mockResolvedValueOnce({
+      exitCode: 0,
+      signal: null,
+      timedOut: false,
+      stdout: JSON.stringify({
+        type: "turn.completed",
+        usage: { input_tokens: 0, cached_input_tokens: "2", output_tokens: 5 },
+      }),
+      stderr: "",
+      pid: 123,
+      startedAt: new Date().toISOString(),
+    });
+
+    const result = await execute({
       runId: "run-1",
       agent: {
         id: "agent-1",
@@ -158,6 +171,8 @@ describe("codex remote execution", () => {
       },
       onLog: async () => {},
     });
+
+    expect(result.usageReportedFields).toEqual(["inputTokens", "outputTokens"]);
 
     expect(prepareWorkspaceForSshExecution).toHaveBeenCalledTimes(1);
     expect(prepareWorkspaceForSshExecution).toHaveBeenCalledWith(expect.objectContaining({

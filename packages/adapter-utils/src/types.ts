@@ -77,6 +77,8 @@ export interface AdapterExecutionResult {
   retryNotBefore?: string | null;
   errorMeta?: Record<string, unknown>;
   usage?: UsageSummary;
+  /** Actually reported token fields, excluding parser defaults. Omit for legacy adapters. */
+  usageReportedFields?: Array<"inputTokens" | "cachedInputTokens" | "outputTokens">;
   /**
    * How `usage` totals are scoped. "per_run" means the tokens cover only this
    * execution; "session_cumulative" means they are running totals for the

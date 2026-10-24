@@ -29,11 +29,14 @@ const agentColumns = {
   id: heartbeatRuns.id, companyId: heartbeatRuns.companyId, agentId: heartbeatRuns.agentId, status: heartbeatRuns.status,
   createdAt: heartbeatRuns.createdAt, startedAt: heartbeatRuns.startedAt, finishedAt: heartbeatRuns.finishedAt, errorCode: heartbeatRuns.errorCode,
   contextSnapshot: sql<Record<string, unknown>>`jsonb_build_object(
-    'spsPluginConversation', jsonb_build_object('sessionId', ${heartbeatRuns.contextSnapshot}->'spsPluginConversation'->'sessionId'),
+    'taskKey', ${heartbeatRuns.contextSnapshot}->'taskKey',
+    'spsPluginConversation', jsonb_build_object('sessionId', ${heartbeatRuns.contextSnapshot}->'spsPluginConversation'->'sessionId',
+      'pluginKey', ${heartbeatRuns.contextSnapshot}->'spsPluginConversation'->'pluginKey'),
     'spsExecutionRuntime', jsonb_build_object('adapterType', ${heartbeatRuns.contextSnapshot}->'spsExecutionRuntime'->'adapterType'),
     'spsSessionCancellationRequested', ${heartbeatRuns.contextSnapshot}->'spsSessionCancellationRequested',
     'spsSessionCancellationTermination', ${heartbeatRuns.contextSnapshot}->'spsSessionCancellationTermination')`,
-  usageJson: sql<Record<string, unknown>>`jsonb_build_object('model', ${heartbeatRuns.usageJson}->'model', 'spsUsageEvidence', ${heartbeatRuns.usageJson}->'spsUsageEvidence')`,
+  usageJson: sql<Record<string, unknown>>`jsonb_build_object('model', ${heartbeatRuns.usageJson}->'model', 'spsUsageEvidence', ${heartbeatRuns.usageJson}->'spsUsageEvidence')
+    || case when ${heartbeatRuns.usageJson} ? 'spsUsageReceipt' then jsonb_build_object('spsUsageReceipt', ${heartbeatRuns.usageJson}->'spsUsageReceipt') else '{}'::jsonb end`,
 };
 const nodeColumns = {
   id: spsPluginNodeRuns.id, companyId: spsPluginNodeRuns.companyId, pluginKey: spsPluginNodeRuns.pluginKey,

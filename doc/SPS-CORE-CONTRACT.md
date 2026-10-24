@@ -94,9 +94,32 @@ not an incremental API charge. Cost additionally requires explicit adapter
 `costUsdBasis: per_run`; token scope alone is insufficient. Existing adapters that
 do not supply cost scope retain unknown cost in this DTO (including legacy zero
 defaults); their raw ledger is unchanged. Old unmarked records and neutral Node usage remain
-unavailable in this DTO. No historical usage backfill, ledger replacement, receipt
-deduplication, budget enforcement or automatic business decisions are added here.
+unavailable in this DTO. No historical usage backfill, ledger replacement, provider
+receipt reconciliation, budget enforcement or automatic business decisions are added here.
 These are unreleased pinned-source additions, not features of the published SDK tag.
+
+New Plugin Agent completions with usage also retain an internal
+`sps.execution-usage-receipt/v1` in the existing execution row. The bounded receipt
+binds Workspace, execution, Agent, Plugin and session IDs to the usage snapshot
+with a deterministic SHA-256 digest. Receipt and terminal transition use the same
+running-only conditional write: a repeated or late completion cannot overwrite
+the accepted report. This is Core adapter-completion evidence, not a provider
+signature, invoice, second ledger, or protection against a database administrator
+rewriting both payload and digest.
+
+History and summaries verify the receipt against persisted execution ownership.
+A present but malformed, mismatched or altered receipt yields unknown usage;
+unsealed sibling fields cannot override it. Rows without a receipt retain their
+previous versioned-evidence behavior. No usage or an already-terminal cancelled
+run may have no receipt; late provider usage is not recovered by this change.
+There is no migration or old-row backfill.
+
+Adapters may add `usageReportedFields` to distinguish real token fields from
+parser defaults. Codex and Claude populate it from the actual selected CLI usage
+event; missing or invalid fields stay unknown, including default zeroes. An
+explicit reported zero is preserved. Omitted metadata retains legacy adapter
+compatibility; malformed supplied metadata fails closed. This does not assert a
+new per-run scope for a provider or alter inherited accounting/delta behavior.
 
 `sps.executions.summarize` shares `sps.executions.read` and returns an own-Plugin,
 Workspace-scoped projection over `createdAt` in `[from, to)`. Canonical UTC

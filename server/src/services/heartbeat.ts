@@ -153,7 +153,9 @@ import { executionWorkspaceService, mergeExecutionWorkspaceConfig } from "./exec
 import { workspaceOperationService, type WorkspaceOperationRecorder } from "./workspace-operations.js";
 import { isProcessGroupAlive, terminateLocalService } from "./local-service-supervisor.js";
 import { hasSpsSessionCancellation, preserveSpsSessionCancellationContext } from "./sps-agent-session-runs.js";
-import { buildSpsUsageEvidence } from "./sps-execution-observation.js";
+import { buildSpsUsageEvidence } from "./sps-execution-usage.js";
+import { createSpsExecutionUsageReceipt } from "./sps-execution-usage-receipt.js";
+import { spsAgentUsageReceiptScope } from "./sps-execution-usage-context.js";
 import {
   isSpsNodeExecutionAdapterType,
   resolveSpsNodeExecutionTarget,
@@ -13221,6 +13223,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
                 usage: adapterResult.usage,
                 normalizedUsage,
                 usageBasis: adapterResult.usageBasis,
+                usageReportedFields: adapterResult.usageReportedFields,
                 derivedFromSessionTotals: sessionUsageResolution.derivedFromSessionTotals,
                 costUsd: adapterResult.costUsd,
                 costUsdBasis: adapterResult.costUsdBasis,
@@ -13228,6 +13231,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
               }),
             } as Record<string, unknown>)
           : null;
+
+      const usageReceiptScope = spsAgentUsageReceiptScope(run);
+      const sealedUsageJson = usageJson && usageReceiptScope
+        ? { ...usageJson, spsUsageReceipt: createSpsExecutionUsageReceipt(usageReceiptScope, usageJson.spsUsageEvidence) }
+        : usageJson;
 
       const persistedResultJson = mergeHeartbeatRunResultJson(
         mergeRunStopMetadataForAgent(agent, outcome, {
@@ -13254,7 +13262,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         errorCode: runErrorCode,
         exitCode: adapterResult.exitCode,
         signal: adapterResult.signal,
-        usageJson,
+        // Receipt and terminal transition are one guarded write. Duplicate or
+        // late callbacks cannot replace this execution's first accepted report.
+        usageJson: sealedUsageJson,
         resultJson: persistedResultJson,
         sessionIdAfter: nextSessionState.displayId ?? nextSessionState.legacySessionId,
         stdoutExcerpt,

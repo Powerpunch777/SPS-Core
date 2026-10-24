@@ -44,6 +44,9 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
 import { runningProcesses } from "../adapters/index.ts";
+import { logger } from "../middleware/logger.js";
+import { buildSpsUsageEvidence } from "../services/sps-execution-usage.js";
+import { createSpsExecutionUsageReceipt, readSpsExecutionUsageReceipt } from "../services/sps-execution-usage-receipt.js";
 const mockTelemetryClient = vi.hoisted(() => ({ track: vi.fn() }));
 const mockTrackAgentFirstHeartbeat = vi.hoisted(() => vi.fn());
 const mockTerminateLocalService = vi.hoisted(() => vi.fn());
@@ -1822,6 +1825,63 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
     await db.update(agents).set({ adapterType: "process" }).where(eq(agents.id, agentId));
     const [unchanged] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
     expect(unchanged.contextSnapshot?.spsExecutionRuntime).toEqual({ adapterType: "codex_local" });
+  });
+
+  it("seals plugin completion usage once and preserves explicit zeroes and missing fields", async () => {
+    mockAdapterExecute.mockResolvedValueOnce({
+      exitCode: 0, signal: null, timedOut: false, errorMessage: null, summary: "Receipt fixture",
+      provider: "test", model: "test-model", usage: { inputTokens: 0, cachedInputTokens: 0, outputTokens: 4 },
+      usageReportedFields: ["inputTokens", "outputTokens"], usageBasis: "per_run",
+    });
+    const { companyId, agentId, runId } = await seedQueuedIssueRunFixture();
+    const pluginKey = "sps.receipt-test", sessionId = randomUUID();
+    const scope = { companyId, agentId, runId, pluginKey, sessionId };
+    await db.update(heartbeatRuns).set({ contextSnapshot: {
+      taskKey: `plugin:${pluginKey}:session:fixture`, spsPluginConversation: { pluginKey, sessionId, message: "Receipt fixture" },
+    } }).where(eq(heartbeatRuns.id, runId));
+    const heartbeat = heartbeatService(db);
+    await heartbeat.resumeQueuedRuns();
+    await waitForRunToSettle(heartbeat, runId);
+    const accepted = await heartbeat.getRun(runId);
+    expect(accepted?.status).toBe("succeeded");
+    expect(readSpsExecutionUsageReceipt(accepted?.usageJson, scope)).toMatchObject({ state: "valid", usage: {
+      inputTokens: { value: 0, provenance: "reported" }, outputTokens: { value: 4, provenance: "reported" },
+      cachedInputTokens: { value: null, provenance: "unavailable" }, costUsd: { value: null, provenance: "unavailable" },
+    } });
+    const calls = mockAdapterExecute.mock.calls.length;
+    await db.update(agents).set({ adapterType: "process" }).where(eq(agents.id, agentId));
+    await heartbeat.resumeQueuedRuns();
+    expect(mockAdapterExecute.mock.calls).toHaveLength(calls);
+    expect((await heartbeat.getRun(runId))?.usageJson).toEqual(accepted?.usageJson);
+  });
+
+  it("does not let a late adapter completion overwrite an already accepted terminal receipt", async () => {
+    const { companyId, agentId, runId } = await seedQueuedIssueRunFixture();
+    const pluginKey = "sps.receipt-test", sessionId = randomUUID();
+    const scope = { companyId, agentId, runId, pluginKey, sessionId };
+    const evidence = buildSpsUsageEvidence({ usage: { inputTokens: 7 }, usageBasis: "per_run" });
+    const acceptedUsage = { spsUsageEvidence: evidence, spsUsageReceipt: createSpsExecutionUsageReceipt(scope, evidence) };
+    await db.update(heartbeatRuns).set({ contextSnapshot: {
+      taskKey: `plugin:${pluginKey}:session:fixture`, spsPluginConversation: { pluginKey, sessionId, message: "Late completion fixture" },
+    } }).where(eq(heartbeatRuns.id, runId));
+    mockAdapterExecute.mockImplementationOnce(async () => {
+      await db.update(heartbeatRuns).set({ status: "succeeded", finishedAt: new Date(), usageJson: acceptedUsage }).where(eq(heartbeatRuns.id, runId));
+      return { exitCode: 0, signal: null, timedOut: false, errorMessage: null, summary: "Late completion", provider: "test", model: "test-model",
+        usage: { inputTokens: 999 }, usageBasis: "per_run" };
+    });
+    const heartbeat = heartbeatService(db);
+    const finalized = vi.spyOn(logger, "info");
+    try {
+      await heartbeat.resumeQueuedRuns();
+      await vi.waitFor(() => expect(finalized).toHaveBeenCalledWith(
+        expect.objectContaining({ runId, attemptedStatus: "succeeded", currentStatus: "succeeded" }),
+        "skipping late run finalization because the run already left running state",
+      ));
+      expect((await heartbeat.getRun(runId))?.usageJson).toEqual(acceptedUsage);
+      expect(await db.select().from(costEvents).where(eq(costEvents.agentId, agentId))).toHaveLength(0);
+    } finally {
+      finalized.mockRestore();
+    }
   });
 
   it("schedules a bounded retry for codex transient upstream failures instead of blocking the issue immediately", async () => {

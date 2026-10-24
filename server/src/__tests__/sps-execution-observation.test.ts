@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { buildSpsUsageEvidence, readSpsUsageEvidence, observeSpsAgentRun, observeSpsNodeRun, unavailableSpsUsage } from "../services/sps-execution-observation.js";
+import { createSpsExecutionUsageReceipt } from "../services/sps-execution-usage-receipt.js";
+import { spsAgentUsageReceiptScope } from "../services/sps-execution-usage-context.js";
 
 const run = { id: "run", companyId: "workspace", agentId: "agent", status: "succeeded", createdAt: new Date(0), startedAt: new Date(10), finishedAt: new Date(100), contextSnapshot: null, usageJson: null, errorCode: null };
 describe("workflow-neutral execution observation", () => {
@@ -22,6 +24,17 @@ describe("workflow-neutral execution observation", () => {
     expect(readSpsUsageEvidence({ inputTokens: 0, costUsd: 0, billingType: "subscription" })).toEqual(unavailableSpsUsage());
     expect(buildSpsUsageEvidence({ usage: { inputTokens: 12 }, normalizedUsage: { inputTokens: 12 } }).inputTokens.value).toBeNull();
     expect(readSpsUsageEvidence({ spsUsageEvidence: { schemaVersion: 2 } })).toEqual(unavailableSpsUsage());
+  });
+  it("does not promote parser defaults to observed usage when a field report is present", () => {
+    const input = { usage: { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0 }, usageBasis: "per_run" };
+    expect(buildSpsUsageEvidence({ ...input, usageReportedFields: [] }).inputTokens.value).toBeNull();
+    expect(buildSpsUsageEvidence({ ...input, usageReportedFields: ["inputTokens"] })).toMatchObject({
+      inputTokens: { value: 0, provenance: "reported" }, outputTokens: { value: null, provenance: "unavailable" }, cachedInputTokens: { value: null, provenance: "unavailable" },
+    });
+    for (const usageReportedFields of [null, "inputTokens", {}, ["other"], ["inputTokens", "inputTokens"]]) {
+      expect(buildSpsUsageEvidence({ ...input, usageReportedFields }).inputTokens.value).toBeNull();
+    }
+    expect(buildSpsUsageEvidence(input).inputTokens.value).toBe(0); // Unchanged legacy opt-in behavior.
   });
   it("distinguishes subscription reference cost from incremental API cost", () => {
     expect(buildSpsUsageEvidence({ costUsd: 0.12, costUsdBasis: "per_run", billingType: "subscription_included" })).toMatchObject({ costUsd: { value: 0.12, provenance: "reported" }, costBasis: "subscription_reference" });
@@ -60,6 +73,29 @@ describe("workflow-neutral execution observation", () => {
     expect(observeSpsNodeRun(node)).toMatchObject({ runtime: { kind: "codex_cli", model: null }, usage: unavailableSpsUsage() });
     expect(observeSpsNodeRun({ ...node, status: "cancelling" })).toMatchObject({ phase: "stopping", termination: "pending" });
     expect(observeSpsNodeRun({ ...node, status: "failed", timedOut: 1 }).failure?.category).toBe("timeout");
+  });
+  it("reads bound receipts instead of mutable legacy evidence and fails closed on malformed receipts", () => {
+    const owned = { ...run, id: "11111111-1111-4111-8111-111111111111", companyId: "22222222-2222-4222-8222-222222222222",
+      agentId: "33333333-3333-4333-8333-333333333333", contextSnapshot: {
+        taskKey: "plugin:sps.test:session:conversation", spsPluginConversation: { pluginKey: "sps.test", sessionId: "44444444-4444-4444-8444-444444444444" },
+      } };
+    const scope = spsAgentUsageReceiptScope(owned, "sps.test")!;
+    const original = buildSpsUsageEvidence({ usage: { inputTokens: 0 }, usageBasis: "per_run" });
+    const changed = buildSpsUsageEvidence({ usage: { inputTokens: 999 }, usageBasis: "per_run" });
+    const receipt = createSpsExecutionUsageReceipt(scope, original);
+    const observe = (spsUsageReceipt: unknown) => observeSpsAgentRun({ ...owned, usageJson: { spsUsageReceipt, spsUsageEvidence: changed } }, "sps.test");
+    expect(observe(receipt).usage.inputTokens).toEqual({ value: 0, provenance: "reported" });
+    for (const invalid of [null, {}, { ...receipt, digest: "0".repeat(64) }, { ...receipt, unexpected: true }]) {
+      expect(observe(invalid).usage).toEqual(unavailableSpsUsage());
+    }
+    expect(observeSpsAgentRun({ ...owned, usageJson: { spsUsageReceipt: receipt } }, "sps.other").usage).toEqual(unavailableSpsUsage());
+    for (const key of ["runId", "companyId", "agentId", "sessionId", "pluginKey"] as const) {
+      const otherScope = { ...scope, [key]: key === "pluginKey" ? "sps.other" : "55555555-5555-4555-8555-555555555555" };
+      expect(observe(createSpsExecutionUsageReceipt(otherScope, original)).usage).toEqual(unavailableSpsUsage());
+    }
+    expect(observeSpsAgentRun({ ...owned, usageJson: { spsUsageEvidence: changed } }, "sps.test").usage.inputTokens.value).toBe(999);
+    expect(spsAgentUsageReceiptScope({ ...owned, contextSnapshot: null })).toBeNull();
+    expect(spsAgentUsageReceiptScope({ ...owned, contextSnapshot: { ...owned.contextSnapshot, taskKey: "plugin:sps.other:session:x" } })).toBeNull();
   });
   it("does not invent queued duration and rejects invalid clock intervals", () => {
     expect(observeSpsAgentRun({ ...run, startedAt: null }, "plugin").elapsedMs).toBeNull();

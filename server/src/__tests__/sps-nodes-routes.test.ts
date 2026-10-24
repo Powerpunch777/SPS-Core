@@ -40,6 +40,7 @@ import { spsPluginExecutionService } from "../services/sps-plugin-execution.js";
 import { spsAgentSessionRunService } from "../services/sps-agent-session-runs.js";
 import { spsExecutionHistoryService } from "../services/sps-execution-history.js";
 import { buildSpsUsageEvidence } from "../services/sps-execution-observation.js";
+import { createSpsExecutionUsageReceipt } from "../services/sps-execution-usage-receipt.js";
 import { plugins } from "@paperclipai/db";
 import { spsExecutionRoutes } from "../routes/sps-executions.js";
 
@@ -1146,6 +1147,10 @@ describeEmbeddedPostgres("SPS Node routes", () => {
     await insertRun(remote.id); // A tie across the two independent primary-key spaces.
     const secondId = randomUUID();
     await insertRun(secondId);
+    const receiptScope = { companyId: fixture.company.id, runId: secondId, agentId: fixture.agent.id, pluginKey, sessionId };
+    const receipt = createSpsExecutionUsageReceipt(receiptScope, buildSpsUsageEvidence({ usage: { inputTokens: 12, outputTokens: 4 }, usageBasis: "per_run", billingType: "subscription_included" }));
+    const receiptUsage = { spsUsageReceipt: receipt, spsUsageEvidence: buildSpsUsageEvidence({ usage: { inputTokens: 999 }, usageBasis: "per_run" }) };
+    await db.update(heartbeatRuns).set({ usageJson: receiptUsage }).where(eq(heartbeatRuns.id, secondId));
     const sameMillisecond = "2026-10-22T02:03:04.123";
     await db.update(heartbeatRuns).set({ createdAt: sql`${sameMillisecond + "901Z"}::timestamptz` });
     await db.update(spsPluginNodeRuns).set({ createdAt: sql`${sameMillisecond + "001Z"}::timestamptz` });
@@ -1204,6 +1209,11 @@ describeEmbeddedPostgres("SPS Node routes", () => {
     expect((await history.list(fixture.company.id, { lane: "node" })).items).toHaveLength(1);
     expect((await history.list(fixture.company.id, { lane: "agent_session" })).items).toHaveLength(2);
     expect(await history.get(fixture.company.id, "agent_session", remote.id)).toMatchObject({ sessionId }); // No live session row required.
+    expect(await history.get(fixture.company.id, "agent_session", secondId)).toMatchObject({ usage: { inputTokens: { value: 12, provenance: "reported" } } });
+    await db.update(heartbeatRuns).set({ usageJson: { ...receiptUsage, spsUsageReceipt: { ...receipt, digest: "0".repeat(64) } } }).where(eq(heartbeatRuns.id, secondId));
+    expect(await history.get(fixture.company.id, "agent_session", secondId)).toMatchObject({ usage: { inputTokens: { value: null, provenance: "unavailable" } } });
+    expect((await history.summarize(fixture.company.id, summaryWindow)).tokens.inputTokens).toMatchObject({ reported: 12, reportedExecutions: 1, unavailableExecutions: 2 });
+    await db.update(heartbeatRuns).set({ usageJson: receiptUsage }).where(eq(heartbeatRuns.id, secondId));
     expect(await history.get(randomUUID(), "node", remote.id)).toBeNull();
     expect(await spsExecutionHistoryService(db, "other").get(fixture.company.id, "agent_session", remote.id)).toBeNull();
     expect((await spsExecutionHistoryService(db, "other").list(fixture.company.id)).items).toEqual([]);
