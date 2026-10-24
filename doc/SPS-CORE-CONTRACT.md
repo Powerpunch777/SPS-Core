@@ -31,6 +31,28 @@ Core owns these cross-workflow contracts:
 Core contracts describe capabilities and safety. They do not prescribe how a
 team plans or assigns work.
 
+### Agent Defaults and CLI Accounts
+
+Multiple Agents may use the same existing CLI login while retaining independent
+runtime/model settings and default working folders. Shared provider accounts also
+share their provider limits; Agent registration is not account provisioning or a
+new quota. Explicit account/home/Node overrides retain their existing semantics.
+The Assistant setup flow does not copy credentials from another Agent.
+
+SPS Assistant create/edit surfaces expose the retained `adapterConfig.cwd` as a
+default working folder. This is a fallback setting, not a replacement for an
+authorized project/session workspace, a Source grant, or a filesystem sandbox.
+Plugins assign workflow roles and may select an Agent; Core does not assign a
+Lead/Worker role on registration. New neutral Assistant forms default unattended
+permission/sandbox bypass off, including adapter switching. Existing saved Agent
+settings are not silently rewritten.
+
+Host Desktop may return an explicitly chosen local directory to this form; the
+native picker neither saves Agent configuration nor starts a CLI. Builder may
+request a minimized read-only comparison of a linked project and a selected
+Agent's saved Codex-local cwd. A matching string does not certify actual runtime
+cwd, file existence, login, authorization, sandbox containment or CLI availability.
+
 ## Plugin-Owned Contracts
 
 Plugins own domain semantics, including:

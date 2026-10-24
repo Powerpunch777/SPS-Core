@@ -59,7 +59,7 @@ export function SpsCoreAssistantDetail() {
             <div className="min-w-0">
               <h1 className="truncate text-xl font-semibold">{assistant.name}</h1>
               <p className="truncate text-sm text-muted-foreground">
-                {assistant.title || "Initial Assistant"} · {assistant.adapterType} · {assistant.status}
+                {assistant.title || "Assistant"} · {assistant.adapterType} · {assistant.status}
               </p>
             </div>
           </div>
@@ -81,6 +81,7 @@ export function SpsCoreAssistantDetail() {
           isSaving={updateAssistant.isPending}
           showCreateRunPolicySection={false}
           hideWorkflowIdentityFields
+          showDefaultWorkingDirectory
           hidePromptTemplate
           sectionLayout="cards"
         />

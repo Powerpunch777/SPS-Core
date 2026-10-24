@@ -61,8 +61,19 @@ async function settle() {
   });
 }
 
-function assistant() {
-  return { id: "assistant-1", name: "Workspace Assistant", title: "Lead", status: "idle", adapterType: "codex_local" };
+function assistant(overrides: Partial<{
+  id: string;
+  name: string;
+  status: string;
+  adapterType: string;
+}> = {}) {
+  return {
+    id: "assistant-1",
+    name: "Workspace Assistant",
+    status: "idle",
+    adapterType: "codex_local",
+    ...overrides,
+  };
 }
 
 function neutralShell(overrides: Record<string, unknown> = {}) {
@@ -162,5 +173,60 @@ describe("SpsCoreWorkspaceHome", () => {
       expect.objectContaining({ widgetId: "second", position: 0 }),
       expect.objectContaining({ widgetId: "first", position: 1 }),
     ]);
+  });
+
+  it("lists every nonterminated Assistant with status, adapter, and its detail link", async () => {
+    apiMocks.agentsList.mockResolvedValue([
+      assistant(),
+      assistant({ id: "assistant-2", name: "Authoring Assistant", status: "paused", adapterType: "codex_local" }),
+      assistant({ id: "assistant-old", name: "Retired Assistant", status: "terminated" }),
+    ]);
+    render();
+    await settle();
+    await settle();
+
+    expect(container.querySelector('a[href="/assistants/assistant-1"]')?.textContent).toBe("Workspace Assistant");
+    expect(container.querySelector('a[href="/assistants/assistant-2"]')?.textContent).toBe("Authoring Assistant");
+    expect(container.querySelector('a[href="/assistants/assistant-old"]')).toBeNull();
+    expect(container.textContent).toContain("Status: idle");
+    expect(container.textContent).toContain("Status: paused");
+    expect(container.textContent).toContain("Adapter: codex_local");
+    expect(container.querySelector('a[href="/assistants/new"]')?.textContent).toContain("Add Assistant");
+  });
+
+  it("keeps Add Assistant available and does not redirect while an empty cache is refetching", async () => {
+    let resolveAgents!: (value: ReturnType<typeof assistant>[]) => void;
+    apiMocks.agentsList.mockImplementationOnce(() => new Promise((resolve) => {
+      resolveAgents = resolve;
+    }));
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    queryClient.setQueryData(["agents", "workspace-1"], []);
+    act(() => {
+      root.render(<QueryClientProvider client={queryClient}><SpsCoreWorkspaceHome /></QueryClientProvider>);
+    });
+    await settle();
+
+    expect(container.querySelector('[data-redirect="/assistants/new"]')).toBeNull();
+    expect(container.querySelector('a[href="/assistants/new"]')?.textContent).toContain("Add Assistant");
+
+    await act(async () => {
+      resolveAgents([assistant()]);
+      await Promise.resolve();
+    });
+    await settle();
+
+    expect(container.querySelector('[data-redirect="/assistants/new"]')).toBeNull();
+    expect(container.querySelector('a[href="/assistants/assistant-1"]')).not.toBeNull();
+  });
+
+  it("redirects to Assistant setup after the settled list has no nonterminated Agents", async () => {
+    apiMocks.agentsList.mockResolvedValue([
+      assistant({ id: "assistant-old", status: "terminated" }),
+    ]);
+    render();
+    await settle();
+    await settle();
+
+    expect(container.querySelector('[data-redirect="/assistants/new"]')).not.toBeNull();
   });
 });

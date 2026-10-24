@@ -133,11 +133,11 @@ export function SpsCoreWorkspaceHome() {
     },
   });
 
-  const initialAssistant = (assistants ?? []).find((agent) => agent.status !== "terminated") ?? null;
+  const activeAssistants = (assistants ?? []).filter((agent) => agent.status !== "terminated");
 
   // Keep the setup route stable while a just-created Assistant replaces the
   // cached empty list. Redirecting during that refetch reopens setup forever.
-  if (assistantsLoaded && !assistantsFetching && !initialAssistant) {
+  if (assistantsLoaded && !assistantsFetching && activeAssistants.length === 0) {
     return <Navigate to="/assistants/new" replace />;
   }
 
@@ -227,28 +227,37 @@ export function SpsCoreWorkspaceHome() {
           </div>
         </div>
         <div className="rounded-md border border-border bg-card px-4 py-3">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="flex min-w-0 items-center gap-3">
+          <div className="mb-2 flex items-center justify-between gap-3">
+            <div className="flex min-w-0 items-center gap-2">
               <Bot className="h-4 w-4 shrink-0 text-muted-foreground" />
-              {assistantsLoading ? (
-                <p className="text-sm text-muted-foreground">Loading initial Assistant...</p>
-              ) : initialAssistant ? (
-                <div className="min-w-0">
-                  <Link className="block truncate text-sm font-medium hover:underline" to={`/assistants/${initialAssistant.id}`}>
-                    {initialAssistant.name}
-                  </Link>
-                  <p className="truncate text-xs text-muted-foreground">
-                    {initialAssistant.title || initialAssistant.adapterType}
-                  </p>
-                </div>
-              ) : null}
+              <h3 className="text-sm font-medium">Assistants</h3>
             </div>
             <Button size="sm" variant="outline" asChild>
-              <Link to={initialAssistant ? `/assistants/${initialAssistant.id}` : "/assistants/new"}>
-                {initialAssistant ? "Open Assistant" : "Add Assistant"}
-              </Link>
+              <Link to="/assistants/new">Add Assistant</Link>
             </Button>
           </div>
+          {assistantsLoading ? (
+            <p className="py-2 text-sm text-muted-foreground">Loading Assistants...</p>
+          ) : activeAssistants.length > 0 ? (
+            <ul className="divide-y divide-border">
+              {activeAssistants.map((assistant) => (
+                <li key={assistant.id} className="flex min-w-0 flex-col gap-1 py-2 first:pt-1 last:pb-1 sm:flex-row sm:items-center sm:justify-between sm:gap-3">
+                  <Link
+                    className="min-w-0 truncate text-sm font-medium hover:underline"
+                    to={`/assistants/${assistant.id}`}
+                  >
+                    {assistant.name}
+                  </Link>
+                  <div className="flex min-w-0 flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground sm:justify-end">
+                    <span>Status: {assistant.status}</span>
+                    <span>Adapter: {assistant.adapterType}</span>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="py-2 text-sm text-muted-foreground">No active Assistants.</p>
+          )}
         </div>
       </section>
 

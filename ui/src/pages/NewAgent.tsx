@@ -42,12 +42,14 @@ import { isSpsCoreBaselineModeEnabled } from "../lib/sps-core-baseline-mode";
 
 function createValuesForAdapterType(
   adapterType: CreateConfigValues["adapterType"],
+  coreAssistantMode = false,
 ): CreateConfigValues {
   const { adapterType: _discard, ...defaults } = defaultCreateValues;
-  const nextValues: CreateConfigValues = { ...defaults, adapterType };
+  const nextValues: CreateConfigValues = { ...defaults, adapterType,
+    ...(coreAssistantMode ? { dangerouslySkipPermissions: false, dangerouslyBypassSandbox: false } : {}) };
   if (adapterType === "codex_local") {
     nextValues.dangerouslyBypassSandbox =
-      DEFAULT_CODEX_LOCAL_BYPASS_APPROVALS_AND_SANDBOX;
+      coreAssistantMode ? false : DEFAULT_CODEX_LOCAL_BYPASS_APPROVALS_AND_SANDBOX;
   } else if (adapterType === "gemini_local") {
     nextValues.model = DEFAULT_GEMINI_LOCAL_MODEL;
   } else if (adapterType === "cursor") {
@@ -72,7 +74,9 @@ export function NewAgent() {
   const [title, setTitle] = useState("");
   const [role, setRole] = useState("general");
   const [reportsTo, setReportsTo] = useState<string | null>(null);
-  const [configValues, setConfigValues] = useState<CreateConfigValues>(defaultCreateValues);
+  const [configValues, setConfigValues] = useState<CreateConfigValues>(() => coreBaselineMode
+    ? { ...defaultCreateValues, dangerouslySkipPermissions: false, dangerouslyBypassSandbox: false }
+    : defaultCreateValues);
   const [permissions, setPermissions] = useState<Partial<AgentPermissions>>(
     buildPermissionsForTrustPreset(null, "standard"),
   );
@@ -124,14 +128,14 @@ export function NewAgent() {
   useEffect(() => {
     setBreadcrumbs([
       ...(initialAssistantMode ? [{ label: "Workspace", href: "/dashboard" }] : [{ label: "Agents", href: "/agents" }]),
-      { label: initialAssistantMode ? "Initial Assistant" : "New Agent" },
+      { label: initialAssistantMode ? "Add Assistant" : "New Agent" },
     ]);
   }, [initialAssistantMode, setBreadcrumbs]);
 
   useEffect(() => {
     if (initialAssistantMode) {
       if (!name) setName("Assistant");
-      if (!title) setTitle("Initial Assistant");
+      if (!title) setTitle("Assistant");
       return;
     }
     if (isFirstAgent) {
@@ -146,9 +150,9 @@ export function NewAgent() {
     if (!isValidAdapterType(requested)) return;
     setConfigValues((prev) => {
       if (prev.adapterType === requested) return prev;
-      return createValuesForAdapterType(requested as CreateConfigValues["adapterType"]);
+      return createValuesForAdapterType(requested as CreateConfigValues["adapterType"], coreBaselineMode);
     });
-  }, [presetAdapterType]);
+  }, [presetAdapterType, coreBaselineMode]);
 
   const createAgent = useMutation({
     mutationFn: (data: Record<string, unknown>) =>
@@ -220,7 +224,7 @@ export function NewAgent() {
   return (
     <div className="mx-auto max-w-2xl space-y-6">
       <div>
-        <h1 className="text-lg font-semibold">{initialAssistantMode ? "Add initial Assistant" : "New Agent"}</h1>
+        <h1 className="text-lg font-semibold">{initialAssistantMode ? "Add Assistant" : "New Agent"}</h1>
         <p className="text-sm text-muted-foreground mt-1">
           {initialAssistantMode
             ? "Choose the runtime used by Marketplace Assistant and AI-enabled plugins. Workflow roles belong to the plugins you enable later."
@@ -232,6 +236,7 @@ export function NewAgent() {
         {/* Name */}
         <div className="px-4 pt-4 pb-2">
           <input
+            aria-label={initialAssistantMode ? "Assistant name" : "Agent name"}
             className="w-full text-lg font-semibold bg-transparent outline-none placeholder:text-muted-foreground/50"
             placeholder="Agent name"
             value={name}
@@ -317,6 +322,8 @@ export function NewAgent() {
           onTestActionChange={handleTestAgentActionChange}
           onTestActionStateChange={handleTestAgentStateChange}
           onTestFeedbackChange={handleTestAgentFeedbackChange}
+          hideWorkflowIdentityFields={initialAssistantMode}
+          showDefaultWorkingDirectory={initialAssistantMode}
         />
 
         {!initialAssistantMode ? <div className="border-t border-border px-4 py-4">
