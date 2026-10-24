@@ -2,6 +2,7 @@ import type { PluginSpsExecution } from "../compat/paperclip/plugin-sdk.js";
 import { readSpsUsageEvidence, unavailableSpsUsage } from "./sps-execution-usage.js";
 import { readSpsExecutionUsageReceipt } from "./sps-execution-usage-receipt.js";
 import { spsAgentUsageReceiptScope } from "./sps-execution-usage-context.js";
+import { readSpsNodeUsage } from "./sps-node-usage.js";
 export { buildSpsUsageEvidence, readSpsUsageEvidence, unavailableSpsUsage } from "./sps-execution-usage.js";
 
 const record = (value: unknown): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
@@ -37,7 +38,8 @@ function failure(status: string, code: string | null, timedOut = false): PluginS
 
 type Common = { id: string; companyId: string; status: string; createdAt: Date; startedAt: Date | null; finishedAt: Date | null };
 export type ObservedAgentRun = Common & { agentId: string; contextSnapshot: Record<string, unknown> | null; usageJson: Record<string, unknown> | null; errorCode: string | null };
-export type ObservedNodeRun = Common & { pluginKey: string; subjectKey: string; command: string; timedOut: number };
+export type ObservedNodeRun = Common & { pluginKey: string; subjectKey: string; command: string; timedOut: number;
+  nodeId?: string; runnerProfileId?: string; executionGrantId?: string; usageJson?: unknown };
 
 export function observeSpsAgentRun(run: ObservedAgentRun, pluginKey: string, now = Date.now()): PluginSpsExecution {
   const context = record(run.contextSnapshot), conversation = record(context.spsPluginConversation), runtime = record(context.spsExecutionRuntime);
@@ -60,10 +62,13 @@ export function observeSpsAgentRun(run: ObservedAgentRun, pluginKey: string, now
 const runtimeByCommand: Record<string, string> = { codex: "codex_cli", claude: "claude_cli", agy: "agy_cli", gemini: "gemini_cli", opencode: "opencode_cli", pi: "pi_cli", ollama: "ollama", lms: "lm_studio" };
 export function observeSpsNodeRun(run: ObservedNodeRun, now = Date.now()): PluginSpsExecution {
   const requested = run.status === "cancelling" || run.status === "cancelled";
+  const usage = run.nodeId && run.runnerProfileId && run.executionGrantId && ["succeeded", "failed", "cancelled"].includes(run.status)
+    ? readSpsNodeUsage({ ...run, nodeId: run.nodeId, runnerProfileId: run.runnerProfileId, executionGrantId: run.executionGrantId })
+    : unavailableSpsUsage();
   return { lane: "node", runId: run.id, companyId: run.companyId, pluginKey: run.pluginKey, agentId: null, sessionId: null, subjectKey: run.subjectKey,
     runtime: { kind: Object.hasOwn(runtimeByCommand, run.command) ? runtimeByCommand[run.command] : null, model: null, modelSource: "unavailable" },
     status: run.status, phase: phase(run.status, run.status === "cancelling"), cancellationRequested: requested,
     termination: requested ? run.status === "cancelled" ? "confirmed" : "pending" : "not_applicable",
     failure: failure(run.status, null, run.timedOut !== 0), createdAt: run.createdAt.toISOString(), startedAt: run.startedAt?.toISOString() ?? null,
-    finishedAt: run.finishedAt?.toISOString() ?? null, elapsedMs: elapsed(run.startedAt, run.finishedAt, now, run.status), usage: unavailableSpsUsage() };
+    finishedAt: run.finishedAt?.toISOString() ?? null, elapsedMs: elapsed(run.startedAt, run.finishedAt, now, run.status), usage };
 }

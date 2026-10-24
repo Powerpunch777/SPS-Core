@@ -90,6 +90,7 @@ export const spsPluginNodeRuns = pgTable(
     signal: text("signal"),
     timedOut: integer("timed_out").notNull().default(0),
     error: text("error"),
+    usageJson: jsonb("usage_json").$type<Record<string, unknown>>(),
     lastEventSeq: integer("last_event_seq").notNull().default(0),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

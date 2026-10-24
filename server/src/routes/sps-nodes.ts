@@ -29,6 +29,7 @@ import {
   spsNodeHeartbeatMessage,
   spsNodeHeartbeatSchema,
   spsNodeCommandCompleteSchema,
+  spsPluginNodeRunCompleteSchema,
   spsNodeCommandEventSchema,
   spsNodeSignedRequestMessage,
   spsNodeSignedRequestSchema,
@@ -53,6 +54,7 @@ import {
 } from "../compat/paperclip/control-plane.js";
 import { isSpsCoreBaselineModeEnabled } from "../ui-branding.js";
 import { hasSpsSessionCancellation } from "../services/sps-agent-session-runs.js";
+import { createSpsNodeUsageReceipt } from "../services/sps-node-usage.js";
 
 function actorUserId(req: Request) {
   return req.actor.type === "board" ? req.actor.userId ?? "local-board" : null;
@@ -1975,7 +1977,9 @@ export function spsNodeRoutes(db: Db) {
   router.post("/sps-nodes/:nodeId/plugin-runs/:runId/complete", async (req, res) => {
     const node = await getNode(req.params.nodeId as string);
     await assertSignedNodeRequest(req, node);
-    const completion = spsNodeCommandCompleteSchema.parse(req.body ?? {});
+    const parsedCompletion = spsPluginNodeRunCompleteSchema.safeParse(req.body ?? {});
+    if (!parsedCompletion.success) throw badRequest("Invalid SPS plugin completion report");
+    const completion = parsedCompletion.data;
     const run = await db
       .select()
       .from(spsPluginNodeRuns)
@@ -2001,6 +2005,14 @@ export function spsNodeRoutes(db: Db) {
         .then((rows) => rows[0]!);
       return res.json(failed);
     }
+    let usageJson: Record<string, unknown> | null = null;
+    if (completion.usageReport !== undefined) {
+      try {
+        usageJson = createSpsNodeUsageReceipt(run, completion.usageReport);
+      } catch {
+        throw badRequest("SPS usage report does not match this execution");
+      }
+    }
     const updated = await db
       .update(spsPluginNodeRuns)
       .set({
@@ -2011,6 +2023,7 @@ export function spsNodeRoutes(db: Db) {
         signal: completion.signal ?? null,
         timedOut: completion.timedOut ? 1 : 0,
         error: sql`case when ${spsPluginNodeRuns.status} = 'cancelling' then ${spsPluginNodeRuns.error} else ${completion.error ?? null} end`,
+        usageJson,
         finishedAt: new Date(),
         updatedAt: new Date(),
       })

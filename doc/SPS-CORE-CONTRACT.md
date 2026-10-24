@@ -93,8 +93,10 @@ zero. Adapter reports are not provider invoices. Subscription reference cost is
 not an incremental API charge. Cost additionally requires explicit adapter
 `costUsdBasis: per_run`; token scope alone is insufficient. Existing adapters that
 do not supply cost scope retain unknown cost in this DTO (including legacy zero
-defaults); their raw ledger is unchanged. Old unmarked records and neutral Node usage remain
-unavailable in this DTO. No historical usage backfill, ledger replacement, provider
+defaults); their raw ledger is unchanged. Old unmarked Agent-session records and
+Node runs without a valid bound receipt remain unavailable. The separate neutral
+Node ingestion contract below admits only validated Claude result reports. No
+historical usage backfill, ledger replacement, provider
 receipt reconciliation, budget enforcement or automatic business decisions are added here.
 These are unreleased pinned-source additions, not features of the published SDK tag.
 
@@ -112,7 +114,58 @@ A present but malformed, mismatched or altered receipt yields unknown usage;
 unsealed sibling fields cannot override it. Rows without a receipt retain their
 previous versioned-evidence behavior. No usage or an already-terminal cancelled
 run may have no receipt; late provider usage is not recovered by this change.
-There is no migration or old-row backfill.
+This Agent-session receipt slice has no migration or old-row backfill.
+
+### Neutral Plugin Node Claude Usage Ingestion
+
+Neutral Node usage is accepted only from `claude_cli` structured JSON Lines result
+records with `type: "result"` and a `modelUsage` object. The collector bounds a
+line to 64 KiB and accepts 1 through 64 model entries. It reads only
+`inputTokens`, `cacheCreationInputTokens`, `cacheReadInputTokens`, and
+`outputTokens`; for each aggregate, every model must provide a nonnegative safe
+integer or that aggregate is null. `inputTokens` includes cache-creation input;
+`cachedInputTokens` is the sum of cache reads. Valid token values are aggregated
+across models, not exposed with model identifiers.
+
+The last recognized result replaces the previous report; results are not
+accumulated across lines. A recognized result with absent or invalid usage,
+malformed JSON-like or truncated structured input, invalid UTF-8, or an oversized
+line clears stale usage. Ordinary plaintext, unrelated CLI output, other
+runtimes, and Claude top-level `usage` are not usage sources; plaintext does not
+create or revise a report. No scope is inferred from arguments or output text.
+
+The Node may add an optional strict `usageReport` to its signed completion. Its
+versioned report has exactly `schemaVersion: 1`, source
+`claude_model_usage_v1`, and the required nullable `inputTokens`,
+`cachedInputTokens`, and `outputTokens` fields; at least one count must be
+non-null. It uses no coercion or defaults. Older Nodes may omit it and older
+Hosts strip the unknown field. This is not a public SDK method change.
+
+The Host accepts a report only on a signed Node completion for the matching
+Claude run. It revalidates current execution authority for a non-cancelling run.
+It stores an internal
+`sps.node-usage-receipt/v1` bound to Workspace, run, Node, runner, execution
+grant, and Plugin, and writes the receipt with the terminal transition through
+an active-state compare-and-set. Duplicate or late completion cannot overwrite
+the accepted result. A cancellation that won first remains cancelled but may
+retain the actual usage from its completion acknowledgement. Revocation that
+made the run terminal does not append usage.
+
+The receipt digest detects inconsistency in the Node application report. It is
+not a provider signature or invoice, TPM/process-exit attestation, or defense
+against an administrator rewriting both data and digest. Scoped history,
+summaries, and Host usage UI use the bound receipt; an absent, malformed,
+mismatched, or altered receipt yields unknown usage rather than falling back to
+unbound fields.
+
+Migration `0162_sps_node_usage` adds only nullable `usage_json`; existing rows
+remain null and receive no backfill. Its generated snapshot reconciles the
+existing hand-authored SPS migration baseline; the SQL migration itself only
+adds the column. No second ledger, cost/model/billing/Agent attribution, budget,
+admission, or reservation behavior is introduced. Codex and other runtimes
+remain unknown: future support requires a separately reviewed, versioned source
+contract, bounded parser, strict schema, and tests. This Claude report does not
+authorize future Codex inference or budget enforcement.
 
 Adapters may add `usageReportedFields` to distinguish real token fields from
 parser defaults. Codex and Claude populate it from the actual selected CLI usage
@@ -135,8 +188,9 @@ bases are never merged. All-unknown/empty subtotals are null; an explicit report
 zero is preserved. Overflow remains unknown rather than resetting a subtotal.
 Durations sum recorded elapsed times, not wall-clock duration or process-exit
 attestation. This is a live technical summary, not a provider invoice, immutable
-usage receipt ledger or budget/reservation implementation. No DB migration or
-legacy cost-event rewrite is included.
+usage receipt ledger or budget/reservation implementation. The summary projection
+itself adds no migration or legacy cost-event rewrite; Node receipt storage is
+the separate additive migration described above.
 
 Host management can read this same projection through
 `GET /api/companies/:companyId/sps-executions/summary`, with an installed registry

@@ -9,6 +9,8 @@ export {
   reportSpsNodeRunnerAvailabilitySchema,
   spsNodeCapabilityForAdapter,
   spsNodeCommandCompleteSchema,
+  spsPluginNodeRunCompleteSchema,
+  spsNodeUsageReportSchema,
   spsNodeCommandEventSchema,
   spsNodeExecutableRuntimeKindSchema,
   spsNodeHeartbeatMessage,

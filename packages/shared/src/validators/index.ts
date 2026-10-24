@@ -678,6 +678,8 @@ export {
   spsNodeSignedRequestSchema,
   spsNodeCommandEventSchema,
   spsNodeCommandCompleteSchema,
+  spsNodeUsageReportSchema,
+  spsPluginNodeRunCompleteSchema,
   reportSpsNodeRunnerAvailabilitySchema,
   spsNodeSignedRequestMessage,
   type SpsNodeCapability,
@@ -694,6 +696,8 @@ export {
   type SpsNodeSignedRequest,
   type SpsNodeCommandEvent,
   type SpsNodeCommandComplete,
+  type SpsNodeUsageReport,
+  type SpsPluginNodeRunComplete,
   type ReportSpsNodeRunnerAvailability,
 } from "./sps-nodes.js";
 

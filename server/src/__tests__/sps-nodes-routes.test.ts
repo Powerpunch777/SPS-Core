@@ -1128,6 +1128,77 @@ describeEmbeddedPostgres("SPS Node routes", () => {
     expect((await service.getRun({ companyId: fixture.company.id, runId: racing.id })).status).toBe("cancelled");
   });
 
+  it("accepts signed Node usage exactly once with the terminal write and exposes it only to the owning Plugin", async () => {
+    const fixture = await createCompanyFixture(db);
+    const app = await createApp(db, boardActor(fixture.company.id, fixture.ownerUserId, "owner"));
+    const node = createNodePayload();
+    node.payload.capabilities.push({ kind: "claude_cli", label: "Claude", version: "fixture", models: [] });
+    const registered = await request(app).post(`/api/companies/${fixture.company.id}/sps-nodes`).send(node.payload).expect(201);
+    const nodeId = registered.body.id;
+    await request(app).post(`/api/sps-nodes/${nodeId}/heartbeat`).send(createSignedHeartbeat(nodeId, node.privateKey)).expect(200);
+    await request(app).post(`/api/sps-nodes/${nodeId}/approve`).send({}).expect(200);
+    const runners = await db.select().from(spsNodeRunnerProfiles).where(eq(spsNodeRunnerProfiles.nodeId, nodeId));
+    const pluginKey = "sps.node-usage", service = spsPluginExecutionService(db, pluginKey);
+    const grant = await service.upsertExecutionGrant({ companyId: fixture.company.id, subjectKey: "worker", nodeId, runnerProfileId: runners.find(row => row.kind === "claude_cli")!.id });
+    const history = spsExecutionHistoryService(db, pluginKey);
+    const usageReport = { schemaVersion: 1, source: "claude_model_usage_v1", inputTokens: 0, cachedInputTokens: null, outputTokens: 12 };
+    const claimPath = `/sps-nodes/${nodeId}/plugin-runs/claim-next`;
+    const dispatch = async () => {
+      const run = await service.dispatchRun({ companyId: fixture.company.id, executionGrantId: grant.id, args: ["--output-format", "stream-json"] });
+      await request(app).post(`/api${claimPath}`).send(createSignedNodeRequest(nodeId, node.privateKey, claimPath, {})).expect(200);
+      return run;
+    };
+    const first = await dispatch(), path = `/sps-nodes/${nodeId}/plugin-runs/${first.id}/complete`;
+    const completion = { status: "succeeded", exitCode: 0, timedOut: false, usageReport };
+    const signed = createSignedNodeRequest(nodeId, node.privateKey, path, completion);
+    await request(app).post(`/api${path}`).send({ ...signed, usageReport: { ...usageReport, outputTokens: 999 } }).expect(403);
+    const accepted = await request(app).post(`/api${path}`).send(createSignedNodeRequest(nodeId, node.privateKey, path, completion)).expect(200);
+    expect(accepted.body.usageJson.spsNodeUsageReceipt).toBeTruthy();
+    const duplicate = await request(app).post(`/api${path}`).send(createSignedNodeRequest(nodeId, node.privateKey, path,
+      { ...completion, usageReport: { ...usageReport, outputTokens: 999 } })).expect(200);
+    expect(duplicate.body.usageJson).toEqual(accepted.body.usageJson);
+    expect(await history.get(fixture.company.id, "node", first.id)).toMatchObject({ usage: {
+      inputTokens: { value: 0, provenance: "reported" }, outputTokens: { value: 12, provenance: "reported" },
+      cachedInputTokens: { value: null, provenance: "unavailable" }, costUsd: { value: null, provenance: "unavailable" },
+    } });
+    expect(await spsExecutionHistoryService(db, "sps.other").get(fixture.company.id, "node", first.id)).toBeNull();
+    expect(await history.get(randomUUID(), "node", first.id)).toBeNull();
+    const now = new Date(), from = new Date(now.getTime() - 3600000).toISOString(), to = new Date(now.getTime() + 3600000).toISOString();
+    expect(await history.summarize(fixture.company.id, { from, to })).toMatchObject({ executionCount: 1,
+      tokens: { inputTokens: { reported: 0 }, outputTokens: { reported: 12 } } });
+
+    const cancelled = await dispatch(), cancelledPath = `/sps-nodes/${nodeId}/plugin-runs/${cancelled.id}/complete`;
+    await service.cancelRun({ companyId: fixture.company.id, runId: cancelled.id });
+    await request(app).post(`/api${cancelledPath}`).send(createSignedNodeRequest(nodeId, node.privateKey, cancelledPath, completion)).expect(200);
+    expect(await history.get(fixture.company.id, "node", cancelled.id)).toMatchObject({ status: "cancelled", usage: { outputTokens: { value: 12 } } });
+
+    const oldNode = await dispatch(), oldPath = `/sps-nodes/${nodeId}/plugin-runs/${oldNode.id}/complete`;
+    const { usageReport: _unused, ...legacyCompletion } = completion;
+    await request(app).post(`/api${oldPath}`).send(createSignedNodeRequest(nodeId, node.privateKey, oldPath, legacyCompletion)).expect(200);
+    expect(await history.get(fixture.company.id, "node", oldNode.id)).toMatchObject({ usage: { inputTokens: { value: null } } });
+
+    const race = await dispatch(), racePath = `/sps-nodes/${nodeId}/plugin-runs/${race.id}/complete`;
+    for (const invalid of [null, { ...usageReport, outputTokens: -1 }, { ...usageReport, secret: "not allowed" }]) {
+      await request(app).post(`/api${racePath}`).send(createSignedNodeRequest(nodeId, node.privateKey, racePath, { ...completion, usageReport: invalid })).expect(400);
+    }
+    const raced = await Promise.all([14, 15].map(outputTokens => request(app).post(`/api${racePath}`)
+      .send(createSignedNodeRequest(nodeId, node.privateKey, racePath, { ...completion, usageReport: { ...usageReport, outputTokens } })).expect(200)));
+    expect(raced[0].body.usageJson).toEqual(raced[1].body.usageJson);
+    expect([14, 15]).toContain((await history.get(fixture.company.id, "node", race.id))?.usage.outputTokens.value);
+
+    const revoked = await dispatch(), revokedPath = `/sps-nodes/${nodeId}/plugin-runs/${revoked.id}/complete`;
+    await service.revokeExecutionGrant({ companyId: fixture.company.id, grantId: grant.id });
+    await request(app).post(`/api${revokedPath}`).send(createSignedNodeRequest(nodeId, node.privateKey, revokedPath, completion)).expect(200);
+    expect(await history.get(fixture.company.id, "node", revoked.id)).toMatchObject({ status: "failed", usage: { outputTokens: { value: null } } });
+
+    const codexGrant = await service.upsertExecutionGrant({ companyId: fixture.company.id, subjectKey: "unsupported", nodeId, runnerProfileId: runners.find(row => row.kind === "codex_cli")!.id });
+    const unsupported = await service.dispatchRun({ companyId: fixture.company.id, executionGrantId: codexGrant.id, args: [] });
+    await request(app).post(`/api${claimPath}`).send(createSignedNodeRequest(nodeId, node.privateKey, claimPath, {})).expect(200);
+    const unsupportedPath = `/sps-nodes/${nodeId}/plugin-runs/${unsupported.id}/complete`;
+    await request(app).post(`/api${unsupportedPath}`).send(createSignedNodeRequest(nodeId, node.privateKey, unsupportedPath, completion)).expect(400);
+    expect((await service.getRun({ companyId: fixture.company.id, runId: unsupported.id })).status).toBe("claimed");
+  });
+
   it("paginates both execution lanes at millisecond precision and preserves own-plugin historical scope", async () => {
     const fixture = await createCompanyFixture(db);
     const app = await createApp(db, boardActor(fixture.company.id, fixture.ownerUserId, "owner"));

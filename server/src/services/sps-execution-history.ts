@@ -41,6 +41,8 @@ const agentColumns = {
 const nodeColumns = {
   id: spsPluginNodeRuns.id, companyId: spsPluginNodeRuns.companyId, pluginKey: spsPluginNodeRuns.pluginKey,
   subjectKey: spsPluginNodeRuns.subjectKey, status: spsPluginNodeRuns.status, command: spsPluginNodeRuns.command,
+  nodeId: spsPluginNodeRuns.nodeId, runnerProfileId: spsPluginNodeRuns.runnerProfileId, executionGrantId: spsPluginNodeRuns.executionGrantId,
+  usageJson: spsPluginNodeRuns.usageJson,
   timedOut: spsPluginNodeRuns.timedOut, createdAt: spsPluginNodeRuns.createdAt, startedAt: spsPluginNodeRuns.startedAt, finishedAt: spsPluginNodeRuns.finishedAt,
 };
 
