@@ -528,11 +528,12 @@ export function createPluginWorkerHandle(
       return companyId ? { companyId } : null;
     }
 
-    // Scheduled plugin Jobs are instance-scoped unless their host-to-worker
-    // payload explicitly carries a company. They still need a durable
-    // invocation identity so nested host calls cannot be mistaken for an
-    // unscoped call while another company invocation is active.
-    if (method === "runJob") return {};
+    // Workspace jobs carry their tenant inside the job envelope. Legacy Host
+    // jobs have no tenant, but still need an explicit invocation identity.
+    if (method === "runJob") {
+      const companyId = isRecord(params.job) ? readNonEmptyString(params.job.companyId) : null;
+      return companyId ? { companyId } : {};
+    }
 
     return null;
   }

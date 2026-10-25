@@ -58,6 +58,11 @@ Core owns these cross-workflow contracts:
 Core contracts describe capabilities and safety. They do not prescribe how a
 team plans or assigns work.
 
+Workspace Job invocations derive their tenant from the Host-provided
+`job.companyId`. Nested Host calls cannot widen it to another Workspace.
+Legacy Host-scoped Jobs omit that field and retain their explicit instance
+invocation scope; this is not OS isolation or a Plugin workflow policy.
+
 ### Agent Defaults and CLI Accounts
 
 Multiple Agents may use the same existing CLI login while retaining independent
