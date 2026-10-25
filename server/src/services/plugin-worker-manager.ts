@@ -53,6 +53,7 @@ import type {
   InitializeParams,
 } from "@paperclipai/plugin-sdk";
 import { logger } from "../middleware/logger.js";
+import { describeSpsHostSupport } from "./sps-host-support.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -952,6 +953,7 @@ export function createPluginWorkerHandle(
       config: options.config,
       instanceInfo: options.instanceInfo,
       apiVersion: options.apiVersion,
+      spsHost: describeSpsHostSupport(options.hostHandlers),
       databaseNamespace: options.databaseNamespace ?? null,
     };
 

@@ -331,6 +331,11 @@ export interface InitializeParams {
   };
   /** Host API version. */
   apiVersion: number;
+  /** Optional registered RPC snapshot, not a capability grant or backend readiness. */
+  spsHost?: {
+    contractVersion: "1.0";
+    operations: string[];
+  };
   /** Host-derived plugin database namespace, when the manifest declares database access. */
   databaseNamespace?: string | null;
 }

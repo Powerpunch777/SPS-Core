@@ -51,6 +51,19 @@ remain separate; dispatch still checks
 its grant and current Node/Runner/Source state. Discovery performs no execution,
 credential read, or remote probe and checks both Node and Runner tenant IDs.
 
+Worker initialization may include `spsHost: { contractVersion: "1.0", operations }`.
+This is a snapshot of registered own Host handlers from a finite public Runtime
+and Agent-session API list. It is generated again on Worker restart and contains
+no tenant data, paths, provider configuration or secrets. It is deliberately
+separate from the Worker callback `supportedMethods` returned to the Host.
+Registration is not capability approval, Workspace activation, resource access,
+credential availability, backend support or live health. Invocation checks remain
+authoritative, including after permission or Node state changes. Older Hosts may
+omit the snapshot; consumers must treat missing/unknown contracts as unknown,
+not infer support from the SDK, Host version or JSON-RPC protocol version.
+Model requests, OCE control and secret resolution are not advertised by this
+first snapshot. This is not complete backend capability negotiation.
+
 ## Core-Owned Contracts
 
 Core owns these cross-workflow contracts:
