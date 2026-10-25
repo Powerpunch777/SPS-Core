@@ -1,4 +1,5 @@
 export type { Company } from "./company.js";
+export type { SpsMemberDevice, SpsMemberDeviceEvent, SpsMemberDeviceStatus } from "./sps-member-devices.js";
 export type {
   AttentionDecisionVerb,
   AttentionDetailImage,

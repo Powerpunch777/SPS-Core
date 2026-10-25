@@ -1,6 +1,7 @@
 export type { Db } from "@paperclipai/db";
 export {
   companies,
+  companyMemberships,
   companySecretBindings,
   companySecretProviderConfigs,
   companySecrets,
@@ -25,6 +26,8 @@ export {
   spsNodeHeartbeats,
   spsNodeRunnerProfiles,
   spsNodes,
+  spsMemberDevices,
+  spsMemberDeviceEvents,
   spsModelConnections,
   spsModelGrants,
   spsModelRuns,

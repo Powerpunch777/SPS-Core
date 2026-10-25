@@ -49,6 +49,7 @@ const apiPrefixes: Record<string, string> = {
   "sps-executions.ts": "/api",
   "sps-marketplace.ts": "/api",
   "sps-model-connections.ts": "/api",
+  "sps-member-devices.ts": "/api",
   "sps-nodes.ts": "/api",
   "sps-workspace-surfaces.ts": "/api",
   "sps-workspace-sources.ts": "/api",
@@ -241,6 +242,38 @@ describe("openapi routes", () => {
       const success = operation.responses["200"] ?? operation.responses["201"] ?? operation.responses["204"];
       expect(success.headers["Cache-Control"].schema).toEqual({ type: "string", enum: ["no-store"] });
     }
+  });
+
+  it("keeps optional Native device management session-only and separates local Host proofs from pending registration", () => {
+    const { spec } = loadSpecRoutes();
+    const userSecurity = [{ SpsIdentitySessionAuth: [] }, { BoardSessionAuth: [] }];
+    const hostSecurity = userSecurity.map((session) => ({
+      ...session, SpsDesktopAccessAuth: [], SpsDesktopOwnerBootstrapAuth: [],
+    }));
+    const hostOperations = [
+      ["get", "/api/sps/member-devices"],
+      ["get", "/api/sps/member-devices/{deviceId}/events"],
+      ["post", "/api/sps/member-devices/{deviceId}/approve"],
+      ["post", "/api/sps/member-devices/{deviceId}/revoke"],
+    ];
+    for (const [method, path] of hostOperations) {
+      const operation = spec.paths[path][method];
+      expect(operation.security).toEqual(hostSecurity);
+      expect(operation["x-sps-authorization"]).toEqual({ actor: "user_session", localDesktopHost: true, hostScoped: true });
+      expect(operation.description).toContain("nativeConnectivityHostId");
+      expect(operation.description).toContain("No LAN listener");
+    }
+    const path = "/api/companies/{companyId}/sps-member-device-requests";
+    for (const method of ["get", "post"]) {
+      const operation = spec.paths[path][method];
+      expect(operation.security).toEqual(userSecurity);
+      expect(operation["x-sps-authorization"]).toEqual({ actor: "user_session", currentWorkspaceMembership: true, pendingOnly: true });
+    }
+    const create = spec.paths[path].post;
+    expect(create.requestBody.content["application/json"].schema.additionalProperties).toBe(false);
+    expect(create.requestBody.content["application/json"].schema.required).toEqual(["displayName", "certificate"]);
+    expect(create.responses["201"].content["application/json"].schema.properties).not.toHaveProperty("certificate");
+    expect(create.responses["201"].content["application/json"].schema.additionalProperties).toBe(false);
   });
 
   it("documents execution metadata, model-request lane, and bounded history/summary filters", () => {

@@ -101,6 +101,7 @@ export {
   spsNodeCommands,
   spsNodeCommandEvents,
 } from "./sps_nodes.js";
+export { spsMemberDevices, spsMemberDeviceEvents } from "./sps_member_devices.js";
 export {
   spsWorkspaceSources,
   spsWorkspaceSourceNodeGrants,

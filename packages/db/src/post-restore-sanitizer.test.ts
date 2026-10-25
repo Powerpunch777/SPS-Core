@@ -72,6 +72,19 @@ describe("sanitizePostRestoreDatabaseWithExecutor", () => {
     );
   });
 
+  it("removes restored Member device trust while retaining non-authorizing events", async () => {
+    const executor = fakeExecutor({
+      tables: ["sps_member_devices", "sps_member_device_events"],
+    });
+
+    const result = await run(executor);
+
+    expect(executor.calls).toContain('DELETE FROM "sps_member_devices"');
+    expect(executor.calls).not.toContain('DELETE FROM "sps_member_device_events"');
+    expect(executor.calls.some((query) => query.includes('"sps_member_device_events"'))).toBe(false);
+    expect(result.scrubbedTables).toEqual({ sps_member_devices: 1 });
+  });
+
   it("preserves history tables and closes their active rows", async () => {
     const mutableHistory = [
       "heartbeat_runs",

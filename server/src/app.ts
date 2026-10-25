@@ -55,6 +55,7 @@ import { accessRoutes } from "./routes/access.js";
 import { spsNodeRoutes } from "./routes/sps-nodes.js";
 import { spsExecutionRoutes } from "./routes/sps-executions.js";
 import { spsModelConnectionRoutes } from "./routes/sps-model-connections.js";
+import { spsMemberDeviceRoutes } from "./routes/sps-member-devices.js";
 import { getSpsModelBroker } from "./services/sps-model-broker.js";
 import { spsWorkspaceSourceRoutes } from "./routes/sps-workspace-sources.js";
 import { spsMarketplaceRoutes } from "./routes/sps-marketplace.js";
@@ -173,6 +174,7 @@ export async function createApp(
     authReady: boolean;
     companyDeletionEnabled: boolean;
     instanceId?: string;
+    nativeConnectivityHostId?: string;
     hostVersion?: string;
     localPluginDir?: string;
     registryStagingDir?: string;
@@ -397,6 +399,9 @@ export async function createApp(
   api.use(spsNodeRoutes(db));
   api.use(spsExecutionRoutes(db));
   api.use(spsModelConnectionRoutes(db));
+  if (opts.nativeConnectivityHostId) {
+    api.use(spsMemberDeviceRoutes(db, { hostId: opts.nativeConnectivityHostId }));
+  }
   getSpsModelBroker(db); // Recovery never replays inputs or starts a provider request.
   api.use(spsWorkspaceSourceRoutes(db));
   api.use(spsMarketplaceRoutes(db, workerManager));

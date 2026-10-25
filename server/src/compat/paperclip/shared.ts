@@ -1,5 +1,6 @@
 export {
   createSpsModelConnectionSchema,
+  createSpsMemberDeviceRequestSchema,
   updateSpsModelConnectionStatusSchema,
   grantSpsModelConnectionSchema,
   bindSpsAgentNodeSchema,
@@ -26,6 +27,9 @@ export {
 } from "@paperclipai/shared";
 export type {
   PaperclipPluginManifestV1,
+  SpsMemberDevice,
+  SpsMemberDeviceEvent,
+  SpsMemberDeviceStatus,
   PluginDashboardWidgetDeclaration,
   PluginRecord,
   PluginWorkspaceShellDeclaration,

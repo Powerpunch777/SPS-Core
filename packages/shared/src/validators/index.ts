@@ -1,5 +1,13 @@
 export { createSpsModelConnectionSchema, updateSpsModelConnectionStatusSchema, grantSpsModelConnectionSchema, type CreateSpsModelConnection } from "./sps-model-connections.js";
 export {
+  approveSpsMemberDeviceSchema,
+  createSpsMemberDeviceRequestSchema,
+  revokeSpsMemberDeviceSchema,
+  type ApproveSpsMemberDevice,
+  type CreateSpsMemberDeviceRequest,
+  type RevokeSpsMemberDevice,
+} from "./sps-member-devices.js";
+export {
   instanceSettingsSchema,
   instanceGeneralSettingsSchema,
   patchInstanceGeneralSettingsSchema,

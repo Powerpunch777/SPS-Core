@@ -36,6 +36,7 @@ const TABLES_TO_DELETE = [
   "sps_node_runner_profiles",
   "sps_node_heartbeats",
   "sps_nodes",
+  "sps_member_devices",
   "environment_leases",
 ] as const;
 

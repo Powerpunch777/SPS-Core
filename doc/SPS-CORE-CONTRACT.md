@@ -13,6 +13,45 @@ non-AI programs. Core remains private and the Plugin SDK public. AI, OpenClaw,
 OCE and Agent registration are not mandatory. Current Windows/Tailscale access,
 identity and recovery contracts remain unchanged by this direction.
 
+### Inactive Native Member connectivity foundation
+
+Windows Native LAN is not supported by the current product startup. The new
+Host-scoped device registry, transport helper and optional event-WebSocket
+guard are source foundations, not an enabled listener or enrollment protocol.
+
+Device requests require an authenticated user with current active Workspace
+membership and create `pending` state only. The Host UUID is trusted constructor
+configuration, never a request selector. Local management additionally requires
+both per-launch Desktop proofs and a real session; API keys, implicit Board
+access and legacy admin roles do not substitute for these proofs. These routes
+are mounted only when `createApp` receives `nativeConnectivityHostId`, which the
+checked-in startup does not currently supply.
+
+Approval/revocation and redacted audit events commit together. Certificate and
+SPKI are immutable; a revoked key is terminal. Approval grants no Workspace
+membership, Plugin permission, Agent/Node execution or Source access. Authority
+joins current Workspace/user membership, device state and certificate validity.
+The public metadata projection excludes stored certificate material. Restore
+deletes device trust and retains non-authorizing event history with a nullable
+device reference.
+
+Registration is not private-key possession. `sps-member-transport` requires a
+real authorized TLS 1.3 clientAuth peer, validates its certificate fingerprint
+against current authority on every call, and fences admissions across revocation.
+Tracked socket disposal is local process behavior, not distributed revocation
+or reversal of previously accepted work. The current global admission fence
+can also reject an unrelated in-flight lookup during a revocation.
+
+The optional WebSocket guard is for a dedicated authenticated Native ingress,
+not the existing local/Agent/Tailscale listener. It checks admission and resolves
+the same user session plus current device authority before event delivery;
+revocation/invalid sessions stop delivery. There is no product call site yet.
+Host identity persistence, certificate issuance/key storage, one-time pairing,
+complete HTTP/subresource/other-upgrade coverage, bounded ingress lifecycle,
+zero-Plugin management UI and physical two-PC qualification remain required.
+Do not enable an ordinary listener, broaden a bind or reuse Node credentials as
+a shortcut. No Connection API is added to the public SDK in this increment.
+
 ### Optional Execution Backends
 
 Keep model requests, process/CLI execution, Agent sessions and privileged Agent

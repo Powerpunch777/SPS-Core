@@ -159,6 +159,7 @@ import {
   createSpsModelConnectionSchema,
   updateSpsModelConnectionStatusSchema,
   grantSpsModelConnectionSchema,
+  createSpsMemberDeviceRequestSchema,
 } from "@paperclipai/shared";
 
 type JsonSchema = Record<string, unknown>;
@@ -617,6 +618,8 @@ type OpenApiAuthLevel =
   | "authenticated"
   | "board"
   | "sps_host"
+  | "native_host"
+  | "user_session"
   | "instance_admin";
 
 const BOARD_SESSION_AUTH_SCHEME = "BoardSessionAuth";
@@ -624,6 +627,21 @@ const BOARD_API_KEY_AUTH_SCHEME = "BoardApiKeyAuth";
 const AGENT_BEARER_AUTH_SCHEME = "AgentBearerAuth";
 const SPS_DESKTOP_ACCESS_AUTH_SCHEME = "SpsDesktopAccessAuth";
 const SPS_DESKTOP_HOST_PROOF_AUTH_SCHEME = "SpsDesktopOwnerBootstrapAuth";
+const SPS_IDENTITY_SESSION_AUTH_SCHEME = "SpsIdentitySessionAuth";
+const USER_SESSION_SECURITY = [
+  { [SPS_IDENTITY_SESSION_AUTH_SCHEME]: [] },
+  { [BOARD_SESSION_AUTH_SCHEME]: [] },
+];
+const NATIVE_HOST_OPERATIONS = new Set([
+  "GET /api/sps/member-devices",
+  "GET /api/sps/member-devices/{deviceId}/events",
+  "POST /api/sps/member-devices/{deviceId}/approve",
+  "POST /api/sps/member-devices/{deviceId}/revoke",
+]);
+const NATIVE_USER_OPERATIONS = new Set([
+  "GET /api/companies/{companyId}/sps-member-device-requests",
+  "POST /api/companies/{companyId}/sps-member-device-requests",
+]);
 
 function securityRequirement(name: string): Record<string, string[]> {
   return { [name]: [] };
@@ -828,6 +846,8 @@ function isBoardOnlyOperation(method: string, path: string) {
 function resolveOperationAuthLevel(method: string, path: string): OpenApiAuthLevel {
   const key = operationKey(method, path);
   if (PUBLIC_OPERATIONS.has(key)) return "public";
+  if (NATIVE_HOST_OPERATIONS.has(key)) return "native_host";
+  if (NATIVE_USER_OPERATIONS.has(key)) return "user_session";
   if (SPS_HOST_OPERATIONS.has(key)) return "sps_host";
   if (INSTANCE_ADMIN_OPERATIONS.has(key)) return "instance_admin";
   if (isBoardOnlyOperation(method, path)) return "board";
@@ -848,6 +868,10 @@ function applyOperationStatusOverride(
 function applyDocumentFixups(document: any): any {
   document.components ??= {};
   document.components.securitySchemes = {
+    [SPS_IDENTITY_SESSION_AUTH_SCHEME]: {
+      type: "apiKey", in: "cookie", name: "sps_identity_session",
+      description: "Authenticated SPS Identity user session; not an API key, Agent credential or device approval.",
+    },
     [BOARD_SESSION_AUTH_SCHEME]: {
       type: "apiKey",
       in: "cookie",
@@ -893,12 +917,24 @@ function applyDocumentFixups(document: any): any {
       } else if (authLevel === "sps_host") {
         operation.security = SPS_HOST_SECURITY;
         operation.description = [operation.description, SPS_HOST_AUTH_DESCRIPTION].filter(Boolean).join("\n\n");
+      } else if (authLevel === "native_host") {
+        operation.security = USER_SESSION_SECURITY.map(auth => ({
+          ...auth, [SPS_DESKTOP_ACCESS_AUTH_SCHEME]: [], [SPS_DESKTOP_HOST_PROOF_AUTH_SCHEME]: [],
+        }));
+        operation["x-sps-authorization"] = { actor: "user_session", localDesktopHost: true, hostScoped: true };
+      } else if (authLevel === "user_session") {
+        operation.security = USER_SESSION_SECURITY;
+        operation["x-sps-authorization"] = { actor: "user_session", currentWorkspaceMembership: true, pendingOnly: true };
       } else {
         operation.security = BOARD_SECURITY;
       }
 
       operation["x-paperclip-authorization"] =
-        authLevel === "sps_host"
+        authLevel === "native_host"
+          ? { actor: "board", spsCoreHost: true, workspaceAccess: false, sessionOnly: true }
+          : authLevel === "user_session"
+          ? { actor: "board", workspaceAccess: true, sessionOnly: true }
+          : authLevel === "sps_host"
           ? { actor: "board", spsCoreHost: true, workspaceAccess: true }
           : authLevel === "instance_admin"
           ? { actor: "board", instanceAdmin: true }
@@ -6028,6 +6064,52 @@ registry.registerPath({
     body: { ...jsonBody(z.object({}).strict()), required: false },
   },
   responses: { 204: noStoreResponse(r.noContent), 400: r.badRequest, 403: r.forbidden, 404: r.notFound },
+});
+
+const memberDeviceSchema = z.object({
+  id: z.string().uuid(), hostId: z.string().uuid(), ownerUserId: z.string(), displayName: z.string(),
+  certificateSha256: z.string(), spkiSha256: z.string(), status: z.enum(["pending", "approved", "revoked"]),
+  revision: z.number().int().positive(), certificateNotBefore: z.string(), certificateNotAfter: z.string(),
+  approvedAt: z.string().nullable(), approvedByUserId: z.string().nullable(), revokedAt: z.string().nullable(),
+  createdAt: z.string(), updatedAt: z.string(),
+}).strict();
+const memberDeviceEventSchema = z.object({
+  id: z.string().uuid(), hostId: z.string().uuid(), deviceId: z.string().uuid().nullable(),
+  deviceSnapshotId: z.string().uuid(), ownerUserId: z.string(), actorUserId: z.string(),
+  action: z.enum(["request", "approved", "revoked"]), revision: z.number().int().positive(), createdAt: z.string(),
+}).strict();
+const nativeDeviceDescription = "Optional Native Core management contract, mounted only with a trusted configured nativeConnectivityHostId. No LAN listener, device TLS handshake, Node grant or Plugin SDK method is created by this endpoint. Unknown query/body fields are rejected; raw certificates and private keys are absent from responses.";
+registerCurrentRoute({
+  method: "get", path: "/api/sps/member-devices", tags: ["sps-member-devices"],
+  summary: "List Host Member devices", description: `${nativeDeviceDescription} Requires a real user session and both direct-loopback Desktop Host proofs. Returns at most 200 records.`,
+  responses: { 200: noStoreResponse(r.ok(z.array(memberDeviceSchema))), 400: r.badRequest, 403: r.forbidden },
+});
+registerCurrentRoute({
+  method: "get", path: "/api/sps/member-devices/{deviceId}/events", tags: ["sps-member-devices"],
+  summary: "List Member device security history", params: z.object({ deviceId: z.string().uuid() }),
+  description: `${nativeDeviceDescription} Host-only read of at most 200 non-authorizing history records.`,
+  responses: { 200: noStoreResponse(r.ok(z.array(memberDeviceEventSchema))), 400: r.badRequest, 403: r.forbidden },
+});
+for (const action of ["approve", "revoke"] as const) {
+  registry.registerPath({
+    method: "post", path: `/api/sps/member-devices/{deviceId}/${action}`, tags: ["sps-member-devices"],
+    summary: action === "approve" ? "Approve a pending Member device" : "Revoke a Member device",
+    description: `${nativeDeviceDescription} Host-only; API keys and legacy implicit/admin authority are insufficient. Revocation is terminal for this key. Body may be omitted or an empty object; no fields are accepted.`,
+    request: { params: z.object({ deviceId: z.string().uuid() }), body: { ...jsonBody(z.object({}).strict()), required: false } },
+    responses: { 200: noStoreResponse(r.ok(memberDeviceSchema)), 400: r.badRequest, 403: r.forbidden, 404: r.notFound, 409: r.conflict },
+  });
+}
+registerCurrentRoute({
+  method: "get", path: "/api/companies/{companyId}/sps-member-device-requests", tags: ["sps-member-devices"],
+  summary: "List the signed-in user's devices", params: spsWorkspaceParamsSchema,
+  description: `${nativeDeviceDescription} Requires current active Workspace membership, returns only this user's Host-scoped devices, at most 200 records.`,
+  responses: { 200: noStoreResponse(r.ok(z.array(memberDeviceSchema))), 400: r.badRequest, 403: r.forbidden },
+});
+registerCurrentRoute({
+  method: "post", path: "/api/companies/{companyId}/sps-member-device-requests", tags: ["sps-member-devices"],
+  summary: "Request registration of a Member device", params: spsWorkspaceParamsSchema, body: createSpsMemberDeviceRequestSchema,
+  description: `${nativeDeviceDescription} Authenticated member self-registration creates pending only, not TLS proof or approval. Immutable certificate/key, no owner/Host/status override; a revoked key is not revived. First-time invitation/pairing is a separate unimplemented protocol.`,
+  responses: { 201: noStoreResponse(r.ok(memberDeviceSchema)), 400: r.badRequest, 403: r.forbidden, 409: r.conflict },
 });
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
