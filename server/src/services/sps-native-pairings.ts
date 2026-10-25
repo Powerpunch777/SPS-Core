@@ -153,8 +153,12 @@ export function spsNativePairingService(
 
   return {
     withEnrollmentInvitation,
-    async issue(input: { actorUserId: string; target: Target; ttlMs: number }) {
+    async issue(
+      input: { actorUserId: string; target: Target; ttlMs: number },
+      authorizeInTransaction: SpsNativePairingAuthorizer = async () => {},
+    ) {
       object(input, ["actorUserId", "target", "ttlMs"]);
+      if (typeof authorizeInTransaction !== "function") fail("invalid_input");
       const actorUserId = user(input.actorUserId), ttlMs = integer(input.ttlMs, 1_000, policy.maxTtlMs);
       const target = input.target;
       let targetEmailSha256: string | null = null;
@@ -165,6 +169,7 @@ export function spsNativePairingService(
       } else fail("invalid_input");
       const pairingId = randomUUID(), pairingSecret = createSpsNativePairingSecret();
       return store(() => db.transaction(async tx => {
+        await authorizeInTransaction(tx, actorUserId);
         // Serialize only issuance for this Host; concurrent callers cannot exceed its quota.
         await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${"sps-native-pairings:" + hostId}, 0))`);
         await verifiedUser(tx, actorUserId);
@@ -184,26 +189,53 @@ export function spsNativePairingService(
         }).returning();
         await event(tx, row, actorUserId, "created");
         if (!current(row, now())) fail("pairing_unavailable");
-        return { pairingId, pairingSecret, issuedAt: at.getTime(), expiresAt: expiresAt.getTime() };
+        const result = { pairingId, pairingSecret, issuedAt: at.getTime(), expiresAt: expiresAt.getTime() };
+        await authorizeInTransaction(tx, actorUserId);
+        return result;
       }));
     },
-    async listHost(): Promise<SpsNativePairingMetadata[]> {
-      return store(async () => (await db.select().from(spsNativePairings).where(eq(spsNativePairings.hostId, hostId))
-        .orderBy(desc(spsNativePairings.createdAt), desc(spsNativePairings.id)).limit(200)).map(project));
-    },
-    async revoke(pairingIdInput: string, actorUserIdInput: string): Promise<SpsNativePairingMetadata> {
-      const pairingId = id(pairingIdInput), actorUserId = user(actorUserIdInput);
+    async listHost(access?: { userId: string; authorizeInTransaction: SpsNativePairingAuthorizer }): Promise<SpsNativePairingMetadata[]> {
+      if (access === undefined) {
+        return store(async () => (await db.select().from(spsNativePairings).where(eq(spsNativePairings.hostId, hostId))
+          .orderBy(desc(spsNativePairings.createdAt), desc(spsNativePairings.id)).limit(200)).map(project));
+      }
+      const raw = object(access, ["userId", "authorizeInTransaction"]);
+      const userId = user(raw.userId), authorizeInTransaction = raw.authorizeInTransaction;
+      if (typeof authorizeInTransaction !== "function") fail("invalid_input");
       return store(() => db.transaction(async tx => {
+        await authorizeInTransaction(tx, userId);
+        await verifiedUser(tx, userId);
+        const result = (await tx.select().from(spsNativePairings).where(eq(spsNativePairings.hostId, hostId))
+          .orderBy(desc(spsNativePairings.createdAt), desc(spsNativePairings.id)).limit(200)).map(project);
+        await authorizeInTransaction(tx, userId);
+        return result;
+      }));
+    },
+    async revoke(
+      pairingIdInput: string,
+      actorUserIdInput: string,
+      authorizeInTransaction: SpsNativePairingAuthorizer = async () => {},
+    ): Promise<SpsNativePairingMetadata> {
+      const pairingId = id(pairingIdInput), actorUserId = user(actorUserIdInput);
+      if (typeof authorizeInTransaction !== "function") fail("invalid_input");
+      return store(() => db.transaction(async tx => {
+        await authorizeInTransaction(tx, actorUserId);
         await verifiedUser(tx, actorUserId);
         const [row] = await tx.select().from(spsNativePairings).where(and(
           eq(spsNativePairings.hostId, hostId), eq(spsNativePairings.id, pairingId),
         )).for("update");
         if (!row) fail("pairing_unavailable");
-        if (row.status !== "pending") return project(row);
+        if (row.status !== "pending") {
+          const result = project(row);
+          await authorizeInTransaction(tx, actorUserId);
+          return result;
+        }
         const [revoked] = await tx.update(spsNativePairings).set({ status: "revoked", revokedAt: now(), revokedByUserId: actorUserId })
           .where(and(eq(spsNativePairings.hostId, hostId), eq(spsNativePairings.id, pairingId))).returning();
         await event(tx, revoked, actorUserId, "revoked");
-        return project(revoked);
+        const result = project(revoked);
+        await authorizeInTransaction(tx, actorUserId);
+        return result;
       }));
     },
     async consume(input: { pairingId: string; pairingSecret: string; userId: string; displayName: string; certificate: string }): Promise<SpsMemberDeviceDto> {

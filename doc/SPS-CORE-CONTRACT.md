@@ -96,6 +96,22 @@ still require membership; the new primitive has no HTTP/RPC/SDK/UI call site.
 Certificate approval and membership/grants remain separate. Product target/TTL
 defaults are any verified recipient and one hour, supplied by Desktop under D6;
 Core callers must still provide explicit policy and a server pin.
+An inactive local `createSpsNativeHostPairings` composition now derives the
+issuer solely from the prepared Host management object's current Owner session.
+It fixes the approved first invitation to one hour and any verified recipient;
+attempt and active-invitation caps remain mandatory explicit constructor inputs,
+not product defaults or request selectors. Existing storage issue/revoke and a
+new guarded list form reauthorize before and after their transaction work,
+including terminal revoke responses. In-transaction authority failure rolls back
+writes and audit together. Authority loss after a successful commit instead
+withholds the result with `native_pairing_result_unavailable`; it does not undo
+the committed state, promise rollback or automatically retry. An undelivered
+one-time secret is unrecoverable; that pending invitation occupies quota until
+expiry or a later authorized revoke. Old trusted internal callers retain their optional-guard
+behavior; the storage primitive alone still authenticates no session. Parent
+channel loss also fences final projections, but these checks are not atomic with
+COMMIT or proof of distributed logout. No product startup route, invitation UI,
+listener, SDK method or membership/execution grant is enabled by this composition.
 The pin is captured per service instance, not checked against a persistent global
 identity registry. Rotation must retire old instances/listeners; the storage test
 does not prove global rotation or physical device authentication.

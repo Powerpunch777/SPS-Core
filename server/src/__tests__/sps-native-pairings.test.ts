@@ -344,6 +344,119 @@ describeEmbeddedPostgres("SPS native pairing service", () => {
     expect(await service().value.listHost()).toEqual([]);
   });
 
+  it("rolls back issue when its transaction guard rejects before or after the write and event", async () => {
+    const actorUserId = "pairing-issuer-guard-issue";
+    await seedUser(actorUserId, "issuer-guard-issue@example.test");
+    const { value } = service();
+    const input = { actorUserId, target: { kind: "any_verified_user" as const }, ttlMs: 30_000 };
+    const opaqueError = new Error("opaque session details");
+    let earlyChecks = 0;
+    await expect(value.issue(input, async (_tx, userId) => {
+      earlyChecks += 1;
+      expect(userId).toBe(actorUserId);
+      throw opaqueError;
+    })).rejects.toMatchObject({ code: "state_unavailable", message: "SPS pairing state is unavailable." });
+    expect(earlyChecks).toBe(1);
+    expect(await db.select().from(spsNativePairings)).toEqual([]);
+    expect(await db.select().from(spsNativePairingEvents)).toEqual([]);
+
+    const transactions: unknown[] = [];
+    let lateChecks = 0;
+    await expect(value.issue(input, async (tx, userId) => {
+      transactions.push(tx);
+      lateChecks += 1;
+      expect(userId).toBe(actorUserId);
+      if (lateChecks === 2) throw opaqueError;
+    })).rejects.toMatchObject({ code: "state_unavailable", message: "SPS pairing state is unavailable." });
+    expect(lateChecks).toBe(2);
+    expect(transactions[1]).toBe(transactions[0]);
+    expect(await db.select().from(spsNativePairings)).toEqual([]);
+    expect(await db.select().from(spsNativePairingEvents)).toEqual([]);
+  });
+
+  it("rolls back revoke when its transaction guard rejects before or after the write and event", async () => {
+    const actorUserId = "pairing-issuer-guard-revoke";
+    await seedUser(actorUserId, "issuer-guard-revoke@example.test");
+    const { value } = service();
+    const issued = await value.issue({ actorUserId, target: { kind: "any_verified_user" }, ttlMs: 30_000 });
+    const opaqueError = new Error("opaque session details");
+    let earlyChecks = 0;
+    await expect(value.revoke(issued.pairingId, actorUserId, async (_tx, userId) => {
+      earlyChecks += 1;
+      expect(userId).toBe(actorUserId);
+      throw opaqueError;
+    })).rejects.toMatchObject({ code: "state_unavailable", message: "SPS pairing state is unavailable." });
+    expect(earlyChecks).toBe(1);
+    expect((await value.listHost())[0]).toMatchObject({ status: "pending" });
+    expect((await db.select().from(spsNativePairingEvents)
+      .where(eq(spsNativePairingEvents.pairingSnapshotId, issued.pairingId))).map((row) => row.action)).toEqual(["created"]);
+
+    const transactions: unknown[] = [];
+    let lateChecks = 0;
+    await expect(value.revoke(issued.pairingId, actorUserId, async (tx, userId) => {
+      transactions.push(tx);
+      lateChecks += 1;
+      expect(userId).toBe(actorUserId);
+      if (lateChecks === 2) throw opaqueError;
+    })).rejects.toMatchObject({ code: "state_unavailable", message: "SPS pairing state is unavailable." });
+    expect(lateChecks).toBe(2);
+    expect(transactions[1]).toBe(transactions[0]);
+    expect((await value.listHost())[0]).toMatchObject({ status: "pending" });
+    expect((await db.select().from(spsNativePairingEvents)
+      .where(eq(spsNativePairingEvents.pairingSnapshotId, issued.pairingId))).map((row) => row.action)).toEqual(["created"]);
+  });
+
+  it("runs the final transaction guard before returning an already terminal revoke", async () => {
+    const actorUserId = "pairing-issuer-terminal-revoke-guard";
+    await seedUser(actorUserId, "issuer-terminal-revoke-guard@example.test");
+    const { value } = service();
+    const issued = await value.issue({ actorUserId, target: { kind: "any_verified_user" }, ttlMs: 30_000 });
+    await value.revoke(issued.pairingId, actorUserId);
+    let checks = 0;
+
+    await expect(value.revoke(issued.pairingId, actorUserId, async () => {
+      checks += 1;
+      if (checks === 2) throw new Error("opaque terminal guard details");
+    })).rejects.toMatchObject({ code: "state_unavailable", message: "SPS pairing state is unavailable." });
+    expect(checks).toBe(2);
+    expect((await value.listHost())[0]).toMatchObject({ status: "revoked" });
+    expect((await db.select().from(spsNativePairingEvents)
+      .where(eq(spsNativePairingEvents.pairingSnapshotId, issued.pairingId))).map((row) => row.action)).toEqual(["created", "revoked"]);
+  });
+
+  it("guards a Host listing before and after its query and projection in one transaction", async () => {
+    const actorUserId = "pairing-issuer-guard-list";
+    await seedUser(actorUserId, "issuer-guard-list@example.test");
+    const { value } = service();
+    await value.issue({ actorUserId, target: { kind: "any_verified_user" }, ttlMs: 30_000 });
+    const transactions: unknown[] = [];
+    let checks = 0;
+
+    await expect(value.listHost({ userId: actorUserId, authorizeInTransaction: async (tx, userId) => {
+      transactions.push(tx);
+      checks += 1;
+      expect(userId).toBe(actorUserId);
+      if (checks === 2) throw new Error("opaque list guard details");
+    } })).rejects.toMatchObject({ code: "state_unavailable", message: "SPS pairing state is unavailable." });
+    expect(checks).toBe(2);
+    expect(transactions[1]).toBe(transactions[0]);
+  });
+
+  it("rejects malformed transaction guards and guarded-list access objects", async () => {
+    const { value } = service();
+    const input = { actorUserId: "pairing-issuer-malformed-guard", target: { kind: "any_verified_user" as const }, ttlMs: 30_000 };
+    await expect(value.issue(input, null as never)).rejects.toMatchObject({ code: "invalid_input", status: 400 });
+    await expect(value.revoke(randomUUID(), input.actorUserId, null as never))
+      .rejects.toMatchObject({ code: "invalid_input", status: 400 });
+    await expect(value.listHost(null as never)).rejects.toMatchObject({ code: "invalid_input", status: 400 });
+    await expect(value.listHost({ userId: input.actorUserId, authorizeInTransaction: null } as never))
+      .rejects.toMatchObject({ code: "invalid_input", status: 400 });
+    await expect(value.listHost({ userId: input.actorUserId, authorizeInTransaction: async () => {}, extra: true } as never))
+      .rejects.toMatchObject({ code: "invalid_input", status: 400 });
+    await expect(value.listHost({ userId: " ", authorizeInTransaction: async () => {} }))
+      .rejects.toMatchObject({ code: "invalid_input", status: 400 });
+  });
+
   it("serializes concurrent accepts so exactly one transaction creates the device and consumes the invite", async () => {
     const actorUserId = "pairing-issuer-race";
     const userId = "pairing-race-user";
