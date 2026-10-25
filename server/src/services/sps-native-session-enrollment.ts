@@ -2,6 +2,7 @@ import { IncomingMessage } from "node:http";
 import { TLSSocket } from "node:tls";
 import type { createSpsIdentityAuth } from "../auth/sps-identity.js";
 import { SpsNativeEnrollmentError, type spsNativeEnrollmentService } from "./sps-native-enrollments.js";
+import type { SpsNativePairingAuthorizer } from "./sps-native-pairings.js";
 
 type Identity = Pick<ReturnType<typeof createSpsIdentityAuth>, "resolveNativeEnrollmentSessionFromHeaders">;
 type Enrollment = Pick<ReturnType<typeof spsNativeEnrollmentService>, "issue" | "completeFromTlsPeer">;
@@ -35,8 +36,8 @@ function tlsRequest(request: IncomingMessage): { socket: TLSSocket; headers: Hea
   if (!(request instanceof IncomingMessage) || request.method !== "POST"
     || !(request.socket instanceof TLSSocket) || request.socket.destroyed || !request.socket.encrypted
     || request.socket.getProtocol() !== "TLSv1.3" || request.socket.isSessionReused()) deny();
-  // Only the Native Main client calls this private adapter. Browser mutations
-  // must not borrow a session cookie; no Origin/Referer-derived trust is used.
+  // Reject browser mutations; these checks alone do not authenticate Desktop
+  // Main. Actual user/session authority is resolved separately below.
   if (request.headers.origin !== undefined || request.headers.referer !== undefined
     || request.headers.authorization !== undefined
     || request.headers["sec-fetch-site"] !== undefined
@@ -50,42 +51,62 @@ function tlsRequest(request: IncomingMessage): { socket: TLSSocket; headers: Hea
   return { socket: request.socket, headers: new Headers({ cookie: cookieHeaders[0]! }) };
 }
 
+/** Private ingress preflight, not proof of a Main client or a current session. */
+export function assertSpsNativeEnrollmentTlsRequest(request: IncomingMessage): void { tlsRequest(request); }
+
 /** Explicit trusted composition only: no listener, route or session is created.
  * Identity must be the configured SPS Identity instance, not an actor/body shim.
- * The future ingress still owns body-size/time/concurrency limits and Host pins.
+ * The optional dedicated handler supplies body/time/concurrency limits. The
+ * future listener still owns TLS/socket admission, session exchange and pins.
  */
 export function createSpsNativeSessionEnrollment(identity: Identity, enrollment: Enrollment) {
   if (!identity || typeof identity.resolveNativeEnrollmentSessionFromHeaders !== "function"
     || !enrollment || typeof enrollment.issue !== "function" || typeof enrollment.completeFromTlsPeer !== "function") {
     throw new TypeError("Invalid SPS Native session enrollment configuration.");
   }
-  async function session(request: IncomingMessage) {
+  async function session(request: IncomingMessage, assertRequestActive: () => void) {
+    if (typeof assertRequestActive !== "function") deny();
+    assertRequestActive();
     const captured = tlsRequest(request);
     const current = await identity.resolveNativeEnrollmentSessionFromHeaders(captured.headers);
     if (!current || typeof current.userId !== "string" || !current.userId || current.userId.length > 200
       || /[\u0000-\u001f\u007f]/.test(current.userId) || typeof current.authorizeInTransaction !== "function"
       || tlsRequest(request).socket !== captured.socket) deny();
-    return { ...captured, current };
+    const recheck = () => {
+      assertRequestActive();
+      if (tlsRequest(request).socket !== captured.socket) deny();
+    };
+    recheck();
+    const authorize: SpsNativePairingAuthorizer = async (tx, userId) => {
+      recheck();
+      await current.authorizeInTransaction(tx, userId);
+      recheck();
+    };
+    return { ...captured, current, authorize, recheck };
   }
   async function safe<T>(operation: () => Promise<T>): Promise<T> {
     try { return await operation(); }
     catch (error) { if (error instanceof SpsNativeEnrollmentError) throw error; deny(); }
   }
   return Object.freeze({
-    issue(request: IncomingMessage, input: IssueBody) {
+    issue(request: IncomingMessage, input: IssueBody, assertRequestActive: () => void = () => {}) {
       return safe(async () => {
         const value = body(input, ["pairingId", "pairingSecret", "deviceKeyId", "requestPem"]);
-        const { current } = await session(request);
-        return await enrollment.issue({ pairingId: value.pairingId!, pairingSecret: value.pairingSecret!,
-          deviceKeyId: value.deviceKeyId!, requestPem: value.requestPem!, userId: current.userId }, current.authorizeInTransaction);
+        const { current, authorize, recheck } = await session(request, assertRequestActive);
+        const result = await enrollment.issue({ pairingId: value.pairingId!, pairingSecret: value.pairingSecret!,
+          deviceKeyId: value.deviceKeyId!, requestPem: value.requestPem!, userId: current.userId }, authorize);
+        recheck();
+        return result;
       });
     },
-    completeFromTlsRequest(request: IncomingMessage, input: CompleteBody) {
+    completeFromTlsRequest(request: IncomingMessage, input: CompleteBody, assertRequestActive: () => void = () => {}) {
       return safe(async () => {
         const value = body(input, ["pairingId", "pairingSecret", "enrollmentId", "displayName"]);
-        const { socket, current } = await session(request);
-        return await enrollment.completeFromTlsPeer(socket, { pairingId: value.pairingId!, pairingSecret: value.pairingSecret!,
-          enrollmentId: value.enrollmentId!, displayName: value.displayName!, userId: current.userId }, current.authorizeInTransaction);
+        const { socket, current, authorize, recheck } = await session(request, assertRequestActive);
+        const result = await enrollment.completeFromTlsPeer(socket, { pairingId: value.pairingId!, pairingSecret: value.pairingSecret!,
+          enrollmentId: value.enrollmentId!, displayName: value.displayName!, userId: current.userId }, authorize);
+        recheck();
+        return result;
       });
     },
   });

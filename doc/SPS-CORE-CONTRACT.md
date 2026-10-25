@@ -153,8 +153,28 @@ The adapter requires a real fresh TLS 1.3 IncomingMessage, POST/JSON and no
 browser-origin metadata or Authorization header. This is not proof that an
 arbitrary TLS caller is Desktop Main. It exposes neither a login route nor a
 general API proxy and is not instantiated by product startup. A future dedicated
-ingress must own routing, CSRF, read/time/concurrency limits, client-side server
-pins, session exchange and complete HTTP/file/WebSocket authority coverage.
+listener must own TLS/socket admission, client-side server pins, session exchange
+and complete HTTP/file/WebSocket authority coverage.
+
+An inactive dedicated HTTP request handler now composes this adapter, with only
+two exact internal v1 enrollment paths. It accepts fresh TLS 1.3 POST requests,
+one bounded Content-Length and strict compact JSON.stringify UTF-8 bodies;
+transfer/content encoding, duplicate JSON keys, browser mutation metadata,
+invalid UTF-8, extra fields and other routes are rejected. Request read, operation
+deadline and concurrency limits are explicit constructor inputs, not silently
+enabled product defaults. Capacity is per handler, not distributed or a TLS
+connection/rate limit. Work that ignores cancellation retains its slot until it
+settles. A request guard fences session authorizers before and after transaction
+work and final delivery; timeout, disposal and socket loss suppress late results.
+Reservations or already committed effects are not magically rolled back, nor is
+the network deadline atomic with the instant of COMMIT. There is no automatic
+retry or fresh invitation. Completion projects only device ID and pending state;
+it grants no membership or execution rights. Responses are no-store and close
+the connection, with fixed error codes and no raw failures or account metadata.
+The handler opens no socket, mounts no product route and creates no login or
+trust. Loopback HTTPS/temporary DB acceptance is not app enrollment, Native LAN
+or physical two-PC qualification. The compact wire encoding is a new private v1
+contract; existing Core APIs and Plugin SDK messages are unchanged.
 
 Product session-to-request activation, issued-credential persistence, enrollment
 UI and Native TLS ingress remain unwired. Current network listeners, Tailscale,

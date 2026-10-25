@@ -6,11 +6,12 @@ import express from "express";
 import request from "supertest";
 import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { authSessions, authUsers, companyMemberships, createDb, spsMemberDeviceEvents,
+import { agents, plugins, authSessions, authUsers, companyMemberships, createDb, spsMemberDeviceEvents,
   spsMemberDevices, spsNativeEnrollments, spsNativePairingEvents, spsNativePairings } from "@paperclipai/db";
 import type { Config } from "../config.js";
 import { createSpsIdentityAuth } from "../auth/sps-identity.js";
 import { createSpsNativeSessionEnrollment } from "../services/sps-native-session-enrollment.js";
+import { createSpsNativeEnrollmentRequestHandler } from "../services/sps-native-enrollment-http.js";
 import { spsNativeEnrollmentService } from "../services/sps-native-enrollments.js";
 import { spsNativePairingService } from "../services/sps-native-pairings.js";
 import { createNativeEnrollmentTlsFixture, type NativeEnrollmentTlsFixture } from "./helpers/native-enrollment-tls.js";
@@ -40,6 +41,7 @@ describeDatabase("Native enrollment with actual SPS sessions and loopback HTTPS"
   let member!: NativeEnrollmentTlsFixture, serverIdentity!: MemberTlsFixture;
   const originalFetch = globalThis.fetch;
   const servers: Server[] = [];
+  const handlers: ReturnType<typeof createSpsNativeEnrollmentRequestHandler>[] = [];
   const sockets = new Set<Socket>();
   beforeAll(async () => {
     database = await startEmbeddedPostgresTestDatabase("sps-native-session-enrollment-");
@@ -49,6 +51,7 @@ describeDatabase("Native enrollment with actual SPS sessions and loopback HTTPS"
   }, 60_000);
   afterEach(async () => {
     globalThis.fetch = originalFetch;
+    for (const handler of handlers.splice(0)) handler.dispose();
     for (const socket of sockets) socket.destroy();
     sockets.clear();
     for (const server of servers.splice(0)) await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
@@ -68,7 +71,8 @@ describeDatabase("Native enrollment with actual SPS sessions and loopback HTTPS"
     await database?.cleanup();
   });
 
-  async function setup(signing?: (input: { notBefore: number; notAfter: number }) => Promise<string>) {
+  async function setup(signing?: (input: { notBefore: number; notAfter: number }) => Promise<string>,
+    limits: { operationTimeoutMs?: number; maxConcurrentRequests?: number } = {}) {
     globalThis.fetch = vi.fn(async () => new Response(JSON.stringify({ keys: [{ ...publicJwk, kid, alg: "RS256", use: "sig" }] }))) as typeof fetch;
     const identity = createSpsIdentityAuth(db, { authIdentityEnabled: true, authIdentityIssuer: issuer,
       authIdentityAudience: audience, authIdentityJwksUrl: `${issuer}/.well-known/jwks.json`,
@@ -94,25 +98,13 @@ describeDatabase("Native enrollment with actual SPS sessions and loopback HTTPS"
       return { certificate: await (signing ? signing(input) : member.sign(input)), requestSha256: hash(input.requestPem) };
     });
     const facade = createSpsNativeSessionEnrollment(identity, service);
+    const handler = createSpsNativeEnrollmentRequestHandler(facade, {
+      maxBodyBytes: 8192, readTimeoutMs: 1000, operationTimeoutMs: 10000, maxConcurrentRequests: 4, ...limits,
+    });
+    handlers.push(handler);
     const server = createServer({ key: serverIdentity.keyPem, cert: serverIdentity.certPem,
       ca: new X509Certificate(Buffer.from(member.issuerCertificate, "base64url")).toString(), requestCert: true,
-      rejectUnauthorized: false, minVersion: "TLSv1.3", maxVersion: "TLSv1.3", secureOptions: constants.SSL_OP_NO_TICKET }, async (req, res) => {
-      try {
-        const chunks: Buffer[] = [];
-        let length = 0;
-        for await (const bytes of req) {
-          length += bytes.length;
-          if (length > 8192) throw new Error("Fixture request too large");
-          chunks.push(bytes);
-        }
-        const input = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-        const result = req.url === "/issue" ? await facade.issue(req, input) : await facade.completeFromTlsRequest(req, input);
-        res.writeHead(200, { "Content-Type": "application/json", Connection: "close" }).end(JSON.stringify(result));
-      } catch (error) {
-        const failure = error as { status?: number; code?: string };
-        res.writeHead(failure.status ?? 500, { "Content-Type": "application/json", Connection: "close" }).end(JSON.stringify({ code: failure.code ?? "fixture_failure" }));
-      }
-    });
+      rejectUnauthorized: false, minVersion: "TLSv1.3", maxVersion: "TLSv1.3", secureOptions: constants.SSL_OP_NO_TICKET }, handler.handle);
     servers.push(server);
     server.on("connection", socket => { sockets.add(socket); socket.on("error", () => {}); socket.once("close", () => sockets.delete(socket)); });
     server.on("tlsClientError", () => {});
@@ -122,7 +114,8 @@ describeDatabase("Native enrollment with actual SPS sessions and loopback HTTPS"
     function call(path: string, input: unknown, options: { cookie?: string; certificate?: string; headers?: Record<string, string> } = {}) {
       return new Promise<{ status: number; body: Record<string, string> }>((resolve, reject) => {
         const bytes = Buffer.from(JSON.stringify(input));
-        const req = httpsRequest({ hostname: "127.0.0.1", port: (address as { port: number }).port, path,
+        const route = path === "/issue" ? "/sps-native/v1/enrollment/issue" : path === "/complete" ? "/sps-native/v1/enrollment/complete" : path;
+        const req = httpsRequest({ hostname: "127.0.0.1", port: (address as { port: number }).port, path: route,
           method: "POST", agent: false, ca: serverIdentity.certPem, minVersion: "TLSv1.3", maxVersion: "TLSv1.3",
           ...(options.certificate ? { cert: new X509Certificate(Buffer.from(options.certificate, "base64url")).toString(), key: member.keyPem } : {}),
           headers: { "Content-Type": "application/json", "Content-Length": String(bytes.length),
@@ -141,15 +134,19 @@ describeDatabase("Native enrollment with actual SPS sessions and loopback HTTPS"
 
   it("binds a membership-free session to issuance and fresh mTLS completion without granting access", async () => {
     const value = await setup();
+    expect(await db.select().from(agents)).toEqual([]);
+    expect(await db.select().from(plugins)).toEqual([]);
     const issued = await value.call("/issue", value.input, { cookie: value.account.cookie });
     expect(issued.status).toBe(200);
     expect(issued.body.certificate).toEqual(expect.any(String));
     const completed = await value.call("/complete", { pairingId: value.input.pairingId, pairingSecret: value.input.pairingSecret,
       enrollmentId: issued.body.enrollmentId, displayName: "Fixture device" }, { cookie: value.account.cookie, certificate: issued.body.certificate });
     expect(completed.status).toBe(200);
-    expect(completed.body).toMatchObject({ ownerUserId: value.account.userId, status: "pending" });
+    expect(completed.body).toEqual({ deviceId: expect.any(String), status: "pending" });
     expect((await db.select().from(spsMemberDevices))[0]).toMatchObject({ ownerUserId: value.account.userId, status: "pending" });
     expect(await db.select().from(companyMemberships)).toEqual([]);
+    expect(await db.select().from(agents)).toEqual([]);
+    expect(await db.select().from(plugins)).toEqual([]);
     expect(value.signs()).toBe(1);
     const [row] = await db.select().from(spsNativePairings);
     expect(row).toMatchObject({ status: "consumed", consumedByUserId: value.account.userId });
@@ -165,7 +162,7 @@ describeDatabase("Native enrollment with actual SPS sessions and loopback HTTPS"
       { cookie: value.account.cookie, headers: { "Sec-Fetch-Site": "same-origin" } }]) {
       expect((await value.call("/issue", value.input, options)).status).toBe(403);
     }
-    expect((await value.call("/issue", { ...value.input, userId: value.account.userId }, { cookie: value.account.cookie })).status).toBe(403);
+    expect((await value.call("/issue", { ...value.input, userId: value.account.userId }, { cookie: value.account.cookie })).status).toBe(400);
     const plain = new IncomingMessage(new Socket()); plain.method = "POST";
     await expect(value.facade.issue(plain, value.input)).rejects.toMatchObject({ code: "native_enrollment_request_unavailable" });
     let invoked = false;
@@ -206,5 +203,28 @@ describeDatabase("Native enrollment with actual SPS sessions and loopback HTTPS"
     expect((await db.select().from(spsNativeEnrollments))[0]).toMatchObject({ status: "failed", certificate: null });
     expect((await db.select().from(spsNativePairings))[0]).toMatchObject({ status: "pending", consumedAt: null });
     expect(await db.select().from(spsMemberDevices)).toEqual([]);
+  });
+
+  it("fences late issuance after an HTTP deadline and holds capacity until signing actually settles", async () => {
+    let release!: () => void, started!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const begun = new Promise<void>(resolve => { started = resolve; });
+    const value = await setup(async input => { started(); await held; return await member.sign(input); }, {
+      operationTimeoutMs: 500, maxConcurrentRequests: 1,
+    });
+    const issuing = value.call("/issue", value.input, { cookie: value.account.cookie });
+    try {
+      await begun;
+      expect((await issuing).status).toBe(408);
+      expect((await value.call("/issue", value.input, { cookie: value.account.cookie })).status).toBe(429);
+      release();
+      await vi.waitFor(async () => {
+        expect((await db.select().from(spsNativeEnrollments))[0]).toMatchObject({ status: "failed", certificate: null });
+      }, { timeout: 4000, interval: 25 });
+      expect((await value.call("/issue", value.input, { cookie: value.account.cookie })).status).toBe(409);
+      expect(value.signs()).toBe(1);
+      expect((await db.select().from(spsNativePairings))[0]).toMatchObject({ status: "pending", consumedAt: null });
+      expect(await db.select().from(spsMemberDevices)).toEqual([]);
+    } finally { release(); await issuing; }
   });
 });
