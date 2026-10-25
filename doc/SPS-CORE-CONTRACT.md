@@ -13,7 +13,7 @@ non-AI programs. Core remains private and the Plugin SDK public. AI, OpenClaw,
 OCE and Agent registration are not mandatory. Current Windows/Tailscale access,
 identity and recovery contracts remain unchanged by this direction.
 
-### Inactive Native Member connectivity foundation
+### Native Member foundation and local Host management
 
 Windows Native LAN is not supported by the current product startup. The new
 Host-scoped device registry, transport helper and optional event-WebSocket
@@ -23,9 +23,22 @@ Existing device-request routes require an authenticated user with current active
 membership and create `pending` state only. The Host UUID is trusted constructor
 configuration, never a request selector. Local management additionally requires
 both per-launch Desktop proofs and a real session; API keys, implicit Board
-access and legacy admin roles do not substitute for these proofs. These routes
-are mounted only when `createApp` receives `nativeConnectivityHostId`, which the
-checked-in startup does not currently supply.
+access and legacy admin roles do not substitute for these proofs. The earlier
+request routes remain only for explicit legacy composition with
+`nativeConnectivityHostId`; product management does not expose them as enrollment.
+
+Desktop can opt its directly owned Core child into local device management after
+preparing its protected Host identity. The public Host ID/server pin come from
+the owned Main IPC channel, not an HTTP selector. The current real SPS Identity
+session must match the startup-bound Host owner (the private subject-to-user
+Base64URL SHA-256 mapping), the board actor and both local Desktop proofs.
+Status, bounded device/event reads and approve/revoke are available without a
+Workspace, Agent or Plugin. Reads and writes recheck the exact session inside
+their DB transaction; parent-channel loss/disposal also fences final projections.
+No Authorization token, legacy role or matching non-Owner session substitutes
+for this authority. Preparing keys requires an explicit Host restart to mount
+management; a lost channel is not silently rebound. This opens no Native listener,
+initial enrollment, invitation UI or Workspace/Node/Source grant.
 
 Approval/revocation and redacted audit events commit together. Certificate and
 SPKI are immutable; a revoked key is terminal. Approval grants no Workspace
@@ -46,9 +59,10 @@ The optional WebSocket guard is for a dedicated authenticated Native ingress,
 not the existing local/Agent/Tailscale listener. It checks admission and resolves
 the same user session plus current device authority before event delivery;
 revocation/invalid sessions stop delivery. There is no product call site yet.
-Host identity persistence, certificate issuance/key storage, the complete one-time pairing protocol,
-complete HTTP/subresource/other-upgrade coverage, bounded ingress lifecycle,
-zero-Plugin management UI and physical two-PC qualification remain required.
+Host identity persistence, certificate issuance/key storage and a zero-Plugin
+local management UI have separate source implementations in SPS-Source. Complete
+one-time pairing activation, HTTP/subresource/other-upgrade coverage, bounded
+ingress lifecycle and physical two-PC qualification remain required.
 Do not enable an ordinary listener, broaden a bind or reuse Node credentials as
 a shortcut. No Connection API is added to the public SDK in this increment.
 

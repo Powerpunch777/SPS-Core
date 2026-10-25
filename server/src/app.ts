@@ -56,6 +56,7 @@ import { spsNodeRoutes } from "./routes/sps-nodes.js";
 import { spsExecutionRoutes } from "./routes/sps-executions.js";
 import { spsModelConnectionRoutes } from "./routes/sps-model-connections.js";
 import { spsMemberDeviceRoutes } from "./routes/sps-member-devices.js";
+import type { SpsNativeHostManagement } from "./services/sps-native-host-management.js";
 import { getSpsModelBroker } from "./services/sps-model-broker.js";
 import { spsWorkspaceSourceRoutes } from "./routes/sps-workspace-sources.js";
 import { spsMarketplaceRoutes } from "./routes/sps-marketplace.js";
@@ -175,6 +176,7 @@ export async function createApp(
     companyDeletionEnabled: boolean;
     instanceId?: string;
     nativeConnectivityHostId?: string;
+    nativeConnectivityManagement?: SpsNativeHostManagement;
     hostVersion?: string;
     localPluginDir?: string;
     registryStagingDir?: string;
@@ -185,6 +187,10 @@ export async function createApp(
     spsIdentityHandler?: express.RequestHandler;
   },
 ) {
+  if (opts.nativeConnectivityManagement && opts.nativeConnectivityHostId
+    && opts.nativeConnectivityManagement.hostId !== opts.nativeConnectivityHostId) {
+    throw new TypeError("Native Host management binding mismatch.");
+  }
   const pluginRecoveryState = resolvePluginRecoveryState();
   const app = express();
   app.locals.paperclipDb = db;
@@ -399,8 +405,11 @@ export async function createApp(
   api.use(spsNodeRoutes(db));
   api.use(spsExecutionRoutes(db));
   api.use(spsModelConnectionRoutes(db));
-  if (opts.nativeConnectivityHostId) {
-    api.use(spsMemberDeviceRoutes(db, { hostId: opts.nativeConnectivityHostId }));
+  if (opts.nativeConnectivityManagement || opts.nativeConnectivityHostId) {
+    api.use(spsMemberDeviceRoutes(db, {
+      hostId: opts.nativeConnectivityManagement?.hostId ?? opts.nativeConnectivityHostId!,
+      management: opts.nativeConnectivityManagement,
+    }));
   }
   getSpsModelBroker(db); // Recovery never replays inputs or starts a provider request.
   api.use(spsWorkspaceSourceRoutes(db));

@@ -52,11 +52,11 @@ group("SPS Native Member device management routes", () => {
     for (const principalId of [USER, HOST_USER]) await db.insert(companyMemberships).values({ companyId, principalType: "user", principalId, status: "active" });
     return companyId;
   }
-  function app(actor: Request["actor"], hostId = HOST, onRevoked = vi.fn()) {
+  function app(actor: Request["actor"], hostId = HOST, onRevoked = vi.fn(), management?: Parameters<typeof spsMemberDeviceRoutes>[1]["management"]) {
     const current = express();
     current.use(express.json());
     current.use((req, _res, next) => { req.actor = actor; next(); });
-    current.use("/api", spsMemberDeviceRoutes(db, { hostId, onRevoked }));
+    current.use("/api", spsMemberDeviceRoutes(db, { hostId, onRevoked, management }));
     current.use(errorHandler);
     return current;
   }
@@ -67,6 +67,44 @@ group("SPS Native Member device management routes", () => {
     return (await request(app(session(USER, companyId))).post(`/api/companies/${companyId}/sps-member-device-requests`)
       .send({ displayName: "Member PC", certificate: certificate.certificate }).expect(201)).body;
   }
+  it("uses configured parent identity and final in-transaction Host authority for product management", async () => {
+    await workspace();
+    const row = await register();
+    const authorizeInTransaction = vi.fn(async (_tx: unknown, userId: string) => { expect(userId).toBe(HOST_USER); });
+    const management = { hostId: HOST, serverSpkiSha256: "a".repeat(64), assertActive: vi.fn(), dispose: vi.fn(),
+      resolveHostSession: vi.fn(async () => ({ userId: HOST_USER, authorizeInTransaction })) };
+    const revoked = vi.fn();
+    const current = app(session(HOST_USER, companyId), HOST, revoked, management);
+    await host(request(current).post(`/api/companies/${companyId}/sps-member-device-requests`))
+      .send({ displayName: "Must not bypass enrollment", certificate: certificate.certificate }).expect(404);
+    const status = await host(request(current).get("/api/sps/member-devices/status")).expect(200);
+    expect(status.body).toEqual({ hostId: HOST, serverSpkiSha256: "a".repeat(64) });
+    await host(request(current).get("/api/sps/member-devices")).expect(200);
+    expect(authorizeInTransaction).toHaveBeenCalledTimes(2);
+    authorizeInTransaction.mockClear();
+    authorizeInTransaction.mockImplementation(async () => { throw new Error("Fixture current session ended."); });
+    await host(request(current).post(`/api/sps/member-devices/${row.id}/approve`)).send({}).expect(503);
+    expect((await spsMemberDeviceService(db, HOST).listHost())[0].status).toBe("pending");
+    expect(revoked).not.toHaveBeenCalled();
+    management.resolveHostSession.mockRejectedValue(new Error("Fixture channel unavailable."));
+    await host(request(current).get("/api/sps/member-devices")).expect(503);
+    expect(() => app(session(HOST_USER, companyId), OTHER_HOST, vi.fn(), management)).toThrow("binding mismatch");
+  });
+  it("does not return event history if the Host session expires during the final read check", async () => {
+    await workspace();
+    const row = await register();
+    let checks = 0;
+    const management = { hostId: HOST, serverSpkiSha256: "a".repeat(64), assertActive: vi.fn(), dispose: vi.fn(),
+      resolveHostSession: vi.fn(async () => ({ userId: HOST_USER, authorizeInTransaction: async () => {
+        if (++checks === 2) throw new Error("Fixture session ended after event query.");
+      } })) };
+    const response = await host(request(app(session(HOST_USER, companyId), HOST, vi.fn(), management))
+      .get(`/api/sps/member-devices/${row.id}/events`)).expect(503);
+
+    expect(response.body).toEqual({ error: "SPS Member device state is unavailable" });
+    expect(JSON.stringify(response.body)).not.toContain("request");
+    expect(checks).toBe(2);
+  });
   it("registers pending for the actual user and keeps the public response certificate-free", async () => {
     await workspace();
     const row = await register();

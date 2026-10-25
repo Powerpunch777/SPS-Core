@@ -68,6 +68,11 @@ export class SpsMemberDeviceError extends Error {
 
 type DeviceRow = typeof spsMemberDevices.$inferSelect;
 type DeviceProjectionRow = Pick<DeviceRow, keyof SpsMemberDeviceDto>;
+type DeviceTransaction = Parameters<Parameters<Db["transaction"]>[0]>[0];
+export type SpsMemberDeviceHostAuthority = Readonly<{
+  userId: string;
+  authorizeInTransaction(tx: DeviceTransaction, expectedUserId: string): Promise<void>;
+}>;
 
 const DEVICE_PUBLIC_COLUMNS = {
   id: spsMemberDevices.id,
@@ -323,20 +328,31 @@ export function spsMemberDeviceService(db: Db, hostIdInput: string) {
       return rows.map(projectDevice);
     },
 
-    async listHost(): Promise<SpsMemberDeviceDto[]> {
-      const rows = await db
-        .select(DEVICE_PUBLIC_COLUMNS)
-        .from(spsMemberDevices)
-        .where(eq(spsMemberDevices.hostId, hostId))
-        .orderBy(desc(spsMemberDevices.createdAt), desc(spsMemberDevices.id))
-        .limit(MAX_LIST_SIZE);
-      return rows.map(projectDevice);
+    async listHost(authority?: SpsMemberDeviceHostAuthority): Promise<SpsMemberDeviceDto[]> {
+      const list = async (connection: Db | DeviceTransaction) => {
+        const rows = await connection
+          .select(DEVICE_PUBLIC_COLUMNS)
+          .from(spsMemberDevices)
+          .where(eq(spsMemberDevices.hostId, hostId))
+          .orderBy(desc(spsMemberDevices.createdAt), desc(spsMemberDevices.id))
+          .limit(MAX_LIST_SIZE);
+        return rows.map(projectDevice);
+      };
+      if (!authority) return await list(db);
+      return await db.transaction(async tx => {
+        await authority.authorizeInTransaction(tx, authority.userId);
+        const result = await list(tx);
+        await authority.authorizeInTransaction(tx, authority.userId);
+        return result;
+      });
     },
 
-    async approve(deviceIdInput: string, actorUserIdInput: string): Promise<SpsMemberDeviceDto> {
+    async approve(deviceIdInput: string, actorUserIdInput: string, authority?: SpsMemberDeviceHostAuthority): Promise<SpsMemberDeviceDto> {
       const deviceId = requireUuid(deviceIdInput, "device ID");
       const actorUserId = requireUserId(actorUserIdInput, "actor user ID");
+      if (authority && authority.userId !== actorUserId) throw new SpsMemberDeviceError("not_authorized", "The current Host session is required.");
       return db.transaction(async (tx) => {
+        if (authority) await authority.authorizeInTransaction(tx, actorUserId);
         const [device] = await tx
           .select(DEVICE_PUBLIC_COLUMNS)
           .from(spsMemberDevices)
@@ -350,7 +366,11 @@ export function spsMemberDeviceService(db: Db, hostIdInput: string) {
         if (device.certificateNotBefore > now || device.certificateNotAfter <= now) {
           throw new SpsMemberDeviceError("certificate_not_valid", "The device certificate is not currently valid.");
         }
-        if (device.status === "approved") return projectDevice(device);
+        if (device.status === "approved") {
+          if (authority) await authority.authorizeInTransaction(tx, actorUserId);
+          if (device.certificateNotAfter <= new Date()) throw new SpsMemberDeviceError("certificate_not_valid", "The device certificate is not currently valid.");
+          return projectDevice(device);
+        }
         if (device.revision >= 2_147_483_647) {
           throw new SpsMemberDeviceError("revision_exhausted", "The device revision cannot be increased.");
         }
@@ -378,21 +398,28 @@ export function spsMemberDeviceService(db: Db, hostIdInput: string) {
           action: "approved",
           revision: approved.revision,
         });
+        if (authority) await authority.authorizeInTransaction(tx, actorUserId);
+        if (approved.certificateNotAfter <= new Date()) throw new SpsMemberDeviceError("certificate_not_valid", "The device certificate is not currently valid.");
         return projectDevice(approved);
       });
     },
 
-    async revoke(deviceIdInput: string, actorUserIdInput: string): Promise<SpsMemberDeviceDto> {
+    async revoke(deviceIdInput: string, actorUserIdInput: string, authority?: SpsMemberDeviceHostAuthority): Promise<SpsMemberDeviceDto> {
       const deviceId = requireUuid(deviceIdInput, "device ID");
       const actorUserId = requireUserId(actorUserIdInput, "actor user ID");
+      if (authority && authority.userId !== actorUserId) throw new SpsMemberDeviceError("not_authorized", "The current Host session is required.");
       return db.transaction(async (tx) => {
+        if (authority) await authority.authorizeInTransaction(tx, actorUserId);
         const [device] = await tx
           .select(DEVICE_PUBLIC_COLUMNS)
           .from(spsMemberDevices)
           .where(and(eq(spsMemberDevices.hostId, hostId), eq(spsMemberDevices.id, deviceId)))
           .for("update");
         if (!device) throw new SpsMemberDeviceError("device_not_found", "The device is unavailable.");
-        if (device.status === "revoked") return projectDevice(device);
+        if (device.status === "revoked") {
+          if (authority) await authority.authorizeInTransaction(tx, actorUserId);
+          return projectDevice(device);
+        }
         if (device.revision >= 2_147_483_647) {
           throw new SpsMemberDeviceError("revision_exhausted", "The device revision cannot be increased.");
         }
@@ -420,6 +447,7 @@ export function spsMemberDeviceService(db: Db, hostIdInput: string) {
           action: "revoked",
           revision: revoked.revision,
         });
+        if (authority) await authority.authorizeInTransaction(tx, actorUserId);
         return projectDevice(revoked);
       });
     },
@@ -471,22 +499,31 @@ export function spsMemberDeviceService(db: Db, hostIdInput: string) {
       return authorized;
     },
 
-    async listEvents(deviceIdInput: string): Promise<SpsMemberDeviceEventDto[]> {
+    async listEvents(deviceIdInput: string, authority?: SpsMemberDeviceHostAuthority): Promise<SpsMemberDeviceEventDto[]> {
       const deviceId = requireUuid(deviceIdInput, "device ID");
-      const rows = await db
-        .select(EVENT_PUBLIC_COLUMNS)
-        .from(spsMemberDeviceEvents)
-        .where(and(
-          eq(spsMemberDeviceEvents.hostId, hostId),
-          eq(spsMemberDeviceEvents.deviceSnapshotId, deviceId),
-        ))
-        .orderBy(desc(spsMemberDeviceEvents.createdAt), desc(spsMemberDeviceEvents.id))
-        .limit(MAX_LIST_SIZE);
-      return rows.map((row) => ({
-        ...row,
-        action: row.action as SharedSpsMemberDeviceEvent["action"],
-        createdAt: row.createdAt.toISOString(),
-      }));
+      const list = async (connection: Db | DeviceTransaction) => {
+        const rows = await connection
+          .select(EVENT_PUBLIC_COLUMNS)
+          .from(spsMemberDeviceEvents)
+          .where(and(
+            eq(spsMemberDeviceEvents.hostId, hostId),
+            eq(spsMemberDeviceEvents.deviceSnapshotId, deviceId),
+          ))
+          .orderBy(desc(spsMemberDeviceEvents.createdAt), desc(spsMemberDeviceEvents.id))
+          .limit(MAX_LIST_SIZE);
+        return rows.map((row) => ({
+          ...row,
+          action: row.action as SharedSpsMemberDeviceEvent["action"],
+          createdAt: row.createdAt.toISOString(),
+        }));
+      };
+      if (!authority) return await list(db);
+      return await db.transaction(async (tx) => {
+        await authority.authorizeInTransaction(tx, authority.userId);
+        const events = await list(tx);
+        await authority.authorizeInTransaction(tx, authority.userId);
+        return events;
+      });
     },
   };
 }

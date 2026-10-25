@@ -32,6 +32,7 @@ import {
 import detectPort from "detect-port";
 import { createApp } from "./app.js";
 import { shutdownSpsModelBroker } from "./services/sps-model-broker.js";
+import { createSpsNativeHostManagement, type SpsNativeHostManagement } from "./services/sps-native-host-management.js";
 import { loadConfig } from "./config.js";
 import { logger } from "./middleware/logger.js";
 import { setupEnvironmentCustomImageTerminalWebSocketServer } from "./realtime/environment-custom-image-terminal-ws.js";
@@ -537,6 +538,7 @@ export async function startServer(): Promise<StartedServer> {
   let authReady = config.deploymentMode === "local_trusted";
   let betterAuthHandler: RequestHandler | undefined;
   let spsIdentityHandler: RequestHandler | undefined;
+  let nativeConnectivityManagement: SpsNativeHostManagement | undefined;
   let resolveSession:
     | ((req: ExpressRequest) => Promise<BetterAuthSessionResult | null>)
     | undefined;
@@ -557,6 +559,14 @@ export async function startServer(): Promise<StartedServer> {
       spsIdentityHandler = identityAuth.routes;
       resolveSession = (req) => identityAuth.resolveSession(req);
       resolveSessionFromHeaders = (headers) => identityAuth.resolveSessionFromHeaders(headers);
+      // Desktop explicitly opts into local device management only after its
+      // protected Host identity is prepared. No Native network listener opens.
+      if (process.env.SPS_NATIVE_HOST_MANAGEMENT === "1") {
+        try { nativeConnectivityManagement = await createSpsNativeHostManagement(identityAuth, {
+          ownerUserId: process.env.SPS_NATIVE_HOST_OWNER_USER_ID ?? "",
+        }); }
+        catch { logger.warn("Native Host device management is unavailable; existing Host access is unchanged."); }
+      }
       logger.info(
         {
           issuer: config.authIdentityIssuer,
@@ -720,6 +730,7 @@ export async function startServer(): Promise<StartedServer> {
     hostVersion,
     betterAuthHandler,
     spsIdentityHandler,
+    nativeConnectivityManagement,
     resolveSession,
     pluginWorkerManager,
   });
@@ -1181,6 +1192,7 @@ export async function startServer(): Promise<StartedServer> {
   
   {
     const shutdown = async (signal: "SIGINT" | "SIGTERM") => {
+      nativeConnectivityManagement?.dispose();
       heartbeatSchedulerStopped = true;
       if (heartbeatSchedulerInterval) {
         clearInterval(heartbeatSchedulerInterval);

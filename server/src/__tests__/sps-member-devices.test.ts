@@ -77,6 +77,60 @@ describeEmbeddedPostgres("SPS Member device service", () => {
     return { hostId, value: spsMemberDeviceService(db, hostId) };
   }
 
+  it("rolls back device approval and revocation when final Host session authority fails", async () => {
+    const userId = "guarded-device-user", actorUserId = "guarded-host-user";
+    const companyId = await workspace(userId);
+    const { value } = service();
+    const fixture = await tls();
+    const device = await value.request({ companyId, userId, displayName: "Guarded device", certificate: fixture.certificate });
+    let checks = 0;
+    const denied = { userId: actorUserId, authorizeInTransaction: async () => {
+      if (++checks === 2) throw new Error("Fixture session was revoked.");
+    } };
+    await expect(value.approve(device.id, actorUserId, denied)).rejects.toThrow("Fixture session was revoked.");
+    expect((await value.listHost())[0]).toMatchObject({ status: "pending", revision: 1 });
+    expect((await value.listEvents(device.id)).map(event => event.action)).toEqual(["request"]);
+    await value.approve(device.id, actorUserId);
+    checks = 0;
+    await expect(value.revoke(device.id, actorUserId, denied)).rejects.toThrow("Fixture session was revoked.");
+    expect((await value.listHost())[0]).toMatchObject({ status: "approved", revision: 2 });
+    expect((await value.listEvents(device.id)).map(event => event.action).sort()).toEqual(["approved", "request"]);
+    await expect(value.approve(device.id, actorUserId, { ...denied, userId: "different-user" })).rejects.toMatchObject({ code: "not_authorized" });
+    await expect(value.revoke(device.id, actorUserId, { ...denied, userId: "different-user" })).rejects.toMatchObject({ code: "not_authorized" });
+    expect(checks).toBe(2);
+  });
+
+  it("revalidates Host list authority after reading rows without creating a Workspace or granting access", async () => {
+    const { value } = service();
+    const calls: string[] = [];
+    const authority = { userId: "host-without-workspace", authorizeInTransaction: async (_tx: unknown, userId: string) => {
+      calls.push(userId);
+      if (calls.length === 2) throw new Error("Fixture channel disconnected.");
+    } };
+    await expect(value.listHost(authority)).rejects.toThrow("Fixture channel disconnected.");
+    expect(calls).toEqual([authority.userId, authority.userId]);
+    expect(await db.select().from(companies)).toEqual([]);
+    expect(await db.select().from(companyMemberships)).toEqual([]);
+  });
+
+  it("withholds event history when final Host session authority fails", async () => {
+    const ownerUserId = "event-history-owner", hostUserId = "event-history-host";
+    const companyId = await workspace(ownerUserId);
+    const { value } = service();
+    const fixture = await tls();
+    const device = await value.request({ companyId, userId: ownerUserId, displayName: "Event history device", certificate: fixture.certificate });
+    let checks = 0;
+    const authority = { userId: hostUserId, authorizeInTransaction: async () => {
+      if (++checks === 2) throw new Error("Fixture Host session ended during event history read.");
+    } };
+
+    await expect(value.listEvents(device.id, authority)).rejects.toThrow("Fixture Host session ended during event history read.");
+    expect(checks).toBe(2);
+    expect((await value.listEvents(device.id)).map((event) => event.action)).toEqual(["request"]);
+    expect(await db.select().from(companies)).toHaveLength(1);
+    expect(await db.select().from(companyMemberships)).toHaveLength(1);
+  });
+
   it("registers a real clientAuth DER certificate, returns the shared safe DTO, and deduplicates requests", async () => {
     const userId = "user-member-device-1";
     const companyId = await workspace(userId);

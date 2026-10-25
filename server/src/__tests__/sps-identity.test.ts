@@ -115,9 +115,10 @@ describeEmbeddedPostgres("SPS Identity Core bridge", () => {
 
   it("creates a Core-only HTTP-only session from a valid SPS Identity access token", async () => {
     const { app, identity } = createApp();
+    const subject = `native-host-owner-${randomUUID()}`;
     const response = await request(app)
       .post("/api/sps-identity/session")
-      .set("Authorization", `Bearer ${createAccessToken()}`)
+      .set("Authorization", `Bearer ${createAccessToken({ sub: subject })}`)
       .send({});
 
     expect(response.status, JSON.stringify(response.body)).toBe(201);
@@ -129,7 +130,11 @@ describeEmbeddedPostgres("SPS Identity Core bridge", () => {
     expect(response.headers["set-cookie"][0]).toContain("HttpOnly");
 
     const session = await identity.resolveSessionFromHeaders(new Headers({ cookie: firstCookie(response) }));
-    expect(session?.user).toMatchObject({ email: "owner@example.test", name: "SPS Owner" });
+    expect(session?.user).toMatchObject({
+      // Desktop binds Native local management to this private Core identity mapping.
+      id: `sps_identity_${createHash("sha256").update(subject).digest("base64url")}`,
+      email: "owner@example.test", name: "SPS Owner",
+    });
   });
 
   it("rejects a token that lacks the Core session scope", async () => {
