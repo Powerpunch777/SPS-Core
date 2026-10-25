@@ -17,9 +17,9 @@ identity and recovery contracts remain unchanged by this direction.
 
 Windows Native LAN is not supported by the current product startup. The new
 Host-scoped device registry, transport helper and optional event-WebSocket
-guard are source foundations, not an enabled listener or enrollment protocol.
+guard are source foundations, not an enabled listener or complete enrollment protocol.
 
-Device requests require an authenticated user with current active Workspace
+Existing device-request routes require an authenticated user with current active Workspace
 membership and create `pending` state only. The Host UUID is trusted constructor
 configuration, never a request selector. Local management additionally requires
 both per-launch Desktop proofs and a real session; API keys, implicit Board
@@ -46,11 +46,32 @@ The optional WebSocket guard is for a dedicated authenticated Native ingress,
 not the existing local/Agent/Tailscale listener. It checks admission and resolves
 the same user session plus current device authority before event delivery;
 revocation/invalid sessions stop delivery. There is no product call site yet.
-Host identity persistence, certificate issuance/key storage, one-time pairing,
+Host identity persistence, certificate issuance/key storage, the complete one-time pairing protocol,
 complete HTTP/subresource/other-upgrade coverage, bounded ingress lifecycle,
 zero-Plugin management UI and physical two-PC qualification remain required.
 Do not enable an ordinary listener, broaden a bind or reuse Node credentials as
 a shortcut. No Connection API is added to the public SDK in this increment.
+
+The internal Native pairing store now provides one-use pending enrollment for a
+verified first-time account with no Workspace membership. It stores only a scoped
+256-bit secret digest and an optional verified-email digest, binds each invitation
+to the configured Host/server SPKI, and serializes consumption plus pending-device
+registration/events in one transaction. Wrong-secret budgets commit on failure;
+wrong email targets do not spend the invited user's attempt budget. Replay,
+expiry, wrong Host/pin, exhausted/revoked invitations and revoked devices fail
+closed. Host issuance quotas serialize per Host; restore scrubs pairing state and
+keeps non-authorizing event snapshots.
+
+This store is not an authentication boundary: a live transport must authenticate
+the session, validate key possession and supply the trusted Host identity before
+calling it. A verified database user alone is not a session. Existing HTTP routes
+still require membership; the new primitive has no HTTP/RPC/SDK/UI call site.
+Certificate approval and membership/grants remain separate. Product target/TTL
+defaults are any verified recipient and one hour, supplied by Desktop under D6;
+Core callers must still provide explicit policy and a server pin.
+The pin is captured per service instance, not checked against a persistent global
+identity registry. Rotation must retire old instances/listeners; the storage test
+does not prove global rotation or physical device authentication.
 
 ### Optional Execution Backends
 

@@ -193,6 +193,44 @@ function projectDevice(row: DeviceProjectionRow): SpsMemberDeviceDto {
   };
 }
 
+type MemberDeviceTransaction = Parameters<Parameters<Db["transaction"]>[0]>[0];
+
+/** Internal enrollment primitive; its caller must authenticate and authorize pairing first. */
+export async function registerPendingSpsMemberDeviceInTransaction(
+  tx: MemberDeviceTransaction,
+  hostIdInput: string,
+  input: { userId: string; displayName: string; certificate: string },
+): Promise<SpsMemberDeviceDto> {
+  if (typeof tx?.rollback !== "function") throw new TypeError("A Member enrollment transaction is required");
+  const hostId = requireUuid(hostIdInput, "Host ID");
+  const userId = requireUserId(input?.userId, "user ID");
+  const displayName = normalizeDisplayName(input?.displayName);
+  const certificate = parseCertificate(input?.certificate);
+  const [created] = await tx.insert(spsMemberDevices).values({
+    hostId, ownerUserId: userId, displayName, ...certificate,
+  }).onConflictDoNothing().returning(DEVICE_PUBLIC_COLUMNS);
+  if (created) {
+    await tx.insert(spsMemberDeviceEvents).values({
+      hostId, deviceId: created.id, deviceSnapshotId: created.id,
+      ownerUserId: userId, actorUserId: userId, action: "request", revision: created.revision,
+    });
+    return projectDevice(created);
+  }
+  const [sameCertificate] = await tx.select(DEVICE_PUBLIC_COLUMNS).from(spsMemberDevices).where(and(
+    eq(spsMemberDevices.hostId, hostId), eq(spsMemberDevices.ownerUserId, userId),
+    eq(spsMemberDevices.certificateSha256, certificate.certificateSha256),
+  )).limit(1).for("update");
+  if (sameCertificate) return projectDevice(sameCertificate);
+  const [sameKey] = await tx.select({ id: spsMemberDevices.id }).from(spsMemberDevices).where(and(
+    eq(spsMemberDevices.hostId, hostId), eq(spsMemberDevices.ownerUserId, userId),
+    eq(spsMemberDevices.spkiSha256, certificate.spkiSha256),
+  )).limit(1);
+  if (sameKey) {
+    throw new SpsMemberDeviceError("device_conflict", "A device using this key is already registered. Use a fresh key.");
+  }
+  throw new SpsMemberDeviceError("device_conflict", "The device registration conflicts with an existing device.");
+}
+
 export function spsMemberDeviceService(db: Db, hostIdInput: string) {
   const hostId = requireUuid(hostIdInput, "Host ID");
 
@@ -226,8 +264,6 @@ export function spsMemberDeviceService(db: Db, hostIdInput: string) {
     }): Promise<SpsMemberDeviceDto> {
       const companyId = requireUuid(input?.companyId, "Workspace ID");
       const userId = requireUserId(input?.userId, "user ID");
-      const displayName = normalizeDisplayName(input.displayName);
-      const certificate = parseCertificate(input.certificate);
 
       return db.transaction(async (tx) => {
         const [membership] = await tx
@@ -248,54 +284,9 @@ export function spsMemberDeviceService(db: Db, hostIdInput: string) {
           );
         }
 
-        const [created] = await tx
-          .insert(spsMemberDevices)
-          .values({
-            hostId,
-            ownerUserId: userId,
-            displayName,
-            ...certificate,
-          })
-          .onConflictDoNothing()
-          .returning(DEVICE_PUBLIC_COLUMNS);
-        if (created) {
-          await appendEvent(tx, {
-            deviceId: created.id,
-            ownerUserId: userId,
-            actorUserId: userId,
-            action: "request",
-            revision: created.revision,
-          });
-          return projectDevice(created);
-        }
-
-        const [sameCertificate] = await tx
-          .select(DEVICE_PUBLIC_COLUMNS)
-          .from(spsMemberDevices)
-          .where(and(
-            eq(spsMemberDevices.hostId, hostId),
-            eq(spsMemberDevices.ownerUserId, userId),
-            eq(spsMemberDevices.certificateSha256, certificate.certificateSha256),
-          ))
-          .limit(1);
-        if (sameCertificate) return projectDevice(sameCertificate);
-
-        const [sameKey] = await tx
-          .select({ id: spsMemberDevices.id })
-          .from(spsMemberDevices)
-          .where(and(
-            eq(spsMemberDevices.hostId, hostId),
-            eq(spsMemberDevices.ownerUserId, userId),
-            eq(spsMemberDevices.spkiSha256, certificate.spkiSha256),
-          ))
-          .limit(1);
-        if (sameKey) {
-          throw new SpsMemberDeviceError(
-            "device_conflict",
-            "A device using this key is already registered. Use a fresh key.",
-          );
-        }
-        throw new SpsMemberDeviceError("device_conflict", "The device registration conflicts with an existing device.");
+        return registerPendingSpsMemberDeviceInTransaction(tx, hostId, {
+          userId, displayName: input.displayName, certificate: input.certificate,
+        });
       });
     },
 

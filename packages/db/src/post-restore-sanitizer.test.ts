@@ -53,6 +53,8 @@ describe("sanitizePostRestoreDatabaseWithExecutor", () => {
         "sps_node_commands",
         "sps_node_runner_profiles",
         "sps_nodes",
+        "sps_native_pairings",
+        "sps_member_devices",
       ],
     });
 
@@ -70,19 +72,29 @@ describe("sanitizePostRestoreDatabaseWithExecutor", () => {
     expect(executor.calls.indexOf('DELETE FROM "sps_node_runner_profiles"')).toBeLessThan(
       executor.calls.indexOf('DELETE FROM "sps_nodes"'),
     );
+    expect(executor.calls.indexOf('DELETE FROM "sps_native_pairings"')).toBeLessThan(
+      executor.calls.indexOf('DELETE FROM "sps_member_devices"'),
+    );
   });
 
-  it("removes restored Member device trust while retaining non-authorizing events", async () => {
+  it("removes restored Member device and pairing trust while retaining non-authorizing events", async () => {
     const executor = fakeExecutor({
-      tables: ["sps_member_devices", "sps_member_device_events"],
+      tables: [
+        "sps_native_pairings",
+        "sps_native_pairing_events",
+        "sps_member_devices",
+        "sps_member_device_events",
+      ],
     });
 
     const result = await run(executor);
 
     expect(executor.calls).toContain('DELETE FROM "sps_member_devices"');
+    expect(executor.calls).toContain('DELETE FROM "sps_native_pairings"');
     expect(executor.calls).not.toContain('DELETE FROM "sps_member_device_events"');
+    expect(executor.calls).not.toContain('DELETE FROM "sps_native_pairing_events"');
     expect(executor.calls.some((query) => query.includes('"sps_member_device_events"'))).toBe(false);
-    expect(result.scrubbedTables).toEqual({ sps_member_devices: 1 });
+    expect(result.scrubbedTables).toEqual({ sps_native_pairings: 1, sps_member_devices: 1 });
   });
 
   it("preserves history tables and closes their active rows", async () => {

@@ -28,6 +28,8 @@ export {
   spsNodes,
   spsMemberDevices,
   spsMemberDeviceEvents,
+  spsNativePairings,
+  spsNativePairingEvents,
   spsModelConnections,
   spsModelGrants,
   spsModelRuns,
