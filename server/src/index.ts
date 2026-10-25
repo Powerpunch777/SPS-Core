@@ -4,7 +4,7 @@
 // instrumentationReady before opening DB connections or constructing the
 // HTTP server, so trace coverage does not depend on incidental timing.
 import { instrumentationReady, shutdownInstrumentation } from "./instrumentation.js";
-import { existsSync, readFileSync, rmSync } from "node:fs";
+import { createReadStream, existsSync, readFileSync, rmSync } from "node:fs";
 import { createServer } from "node:http";
 import { resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
@@ -32,6 +32,7 @@ import {
 import detectPort from "detect-port";
 import { createApp } from "./app.js";
 import { shutdownSpsModelBroker } from "./services/sps-model-broker.js";
+import { attachSpsOwnedShutdown } from "./services/sps-owned-shutdown.js";
 import { createSpsNativeHostManagement, type SpsNativeHostManagement } from "./services/sps-native-host-management.js";
 import { loadConfig } from "./config.js";
 import { logger } from "./middleware/logger.js";
@@ -1235,12 +1236,26 @@ export async function startServer(): Promise<StartedServer> {
       process.exit(0);
     };
 
-    process.once("SIGINT", () => {
-      void shutdown("SIGINT");
-    });
-    process.once("SIGTERM", () => {
-      void shutdown("SIGTERM");
-    });
+    let stopping: Promise<void> | undefined;
+    const requestShutdown = (signal: "SIGINT" | "SIGTERM") => stopping ??= shutdown(signal);
+    // Windows child.kill(SIGINT) is abrupt termination, not a JS signal event.
+    // Only an originally connected direct owner gets the independent stop pipe;
+    // Native signer invalidation still disconnects the IPC channel immediately.
+    const canAttachOwnedStopPipe = process.connected === true
+      && typeof process.send === "function"
+      && process.env.SPS_DESKTOP_OWNED_SHUTDOWN_PIPE === "1";
+    let ownedStopPipe: ReturnType<typeof createReadStream> | undefined;
+    if (canAttachOwnedStopPipe) {
+      try {
+        // The fd is authoritative; Node permits a null path here although its types do not.
+        ownedStopPipe = createReadStream(null as unknown as string, { fd: 4, autoClose: true });
+      } catch {
+        logger.warn("Could not attach owned Core stop pipe");
+      }
+    }
+    attachSpsOwnedShutdown(process, () => requestShutdown("SIGTERM"), ownedStopPipe);
+    process.once("SIGINT", () => { void requestShutdown("SIGINT"); });
+    process.once("SIGTERM", () => { void requestShutdown("SIGTERM"); });
   }
 
   return {

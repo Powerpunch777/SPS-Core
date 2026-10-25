@@ -40,6 +40,19 @@ for this authority. Preparing keys requires an explicit Host restart to mount
 management; a lost channel is not silently rebound. This opens no Native listener,
 initial enrollment, invitation UI or Workspace/Node/Source grant.
 
+The directly owned Core process also has a bounded stop-only control path,
+independently of Native signing. An explicitly marked inherited pipe is mounted
+only with an existing direct parent IPC connection; its exact fixed command is
+accepted once, at EOF. Desktop revokes signing authority and disconnects Native
+IPC before requesting the existing Core drain and embedded-database shutdown.
+The separate pipe remains usable after that revocation, but never reconnects
+Native authority. Ordinary invalidation does not stop the Host. No HTTP, Plugin
+or SDK shutdown endpoint is added. A sent request is not process-exit or
+database-cleanup evidence; Desktop retains its bounded owned-process termination
+fallback, and acceptance tests separately require process and temporary-data
+cleanup. A parent connection already lost before mounting the pipe still uses
+the existing bounded fallback; startup interruption is not graceful-stop proof.
+
 Approval/revocation and redacted audit events commit together. Certificate and
 SPKI are immutable; a revoked key is terminal. Approval grants no Workspace
 membership, Plugin permission, Agent/Node execution or Source access. Authority
