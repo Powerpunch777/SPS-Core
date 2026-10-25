@@ -8,6 +8,33 @@ SPS Core is the durable, workflow-neutral runtime embedded by SPS Desktop. A
 user can enable different workflow plugins without replacing the identity,
 storage, execution, safety, recovery, or update foundations of the product.
 
+The product is a customizable workstation foundation, including customer-specific
+non-AI programs. Core remains private and the Plugin SDK public. AI, OpenClaw,
+OCE and Agent registration are not mandatory. Current Windows/Tailscale access,
+identity and recovery contracts remain unchanged by this direction.
+
+### Optional Execution Backends
+
+Keep model requests, process/CLI execution, Agent sessions and privileged Agent
+deployment/control as distinct contracts. Reuse existing Node runs, grants,
+public SDK platform sessions and safe execution projections before adding APIs.
+Do not introduce another universal workflow scheduler or require every backend
+to implement every operation. Unsupported features fail explicitly; cancellation
+acceptance is not process-termination evidence and a backend change is never an
+automatic retry of unknown external effects.
+
+The existing OpenClaw Gateway adapter is reusable source, not current Gateway
+qualification. OCE is a planned optional external control plane; it does not own
+SPS Workspace data, local Plugin lifecycle or local Vault/renderer protection.
+SPS authorization and an external backend's resource authorization are separate
+checks. Workspace IDs, local Source paths and external Namespace IDs must not
+be treated as interchangeable authority.
+
+A new handle-only model/management credential broker is a target, not an existing
+guarantee. The retained internal `secrets.resolve` interface returns a string in
+its type contract, but its current handler fails closed until scoped bindings
+are implemented. Do not enable it as a shortcut for Direct API or OCE work.
+
 ## Core-Owned Contracts
 
 Core owns these cross-workflow contracts:

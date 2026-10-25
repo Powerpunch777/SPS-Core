@@ -4,6 +4,13 @@ SPS Core is the private local-first runtime embedded by SPS Desktop. It provides
 the stable platform services that every SPS workflow can share while leaving
 workflow meaning to plugins.
 
+AI is optional. Plugins may implement ordinary UI, storage and automation
+without Agent registration. Model APIs, process/CLI execution and external Agent
+sessions are separate optional execution paths; OCE management is a separate
+planned control-plane connector, not a required model provider. Existing
+OpenClaw adapter code is not evidence of an OCE integration or production
+runtime isolation. This Core remains private; the Plugin SDK remains public.
+
 This repository is not the public Plugin SDK and is not the SPS release channel.
 The public `SPS-Core-Compat` repository is an upstream-compatibility mirror only.
 
