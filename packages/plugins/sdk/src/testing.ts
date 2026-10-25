@@ -2158,6 +2158,11 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
       },
     },
     agents: {
+      async describeExecution(_agentId, companyId) {
+        requireCapability(manifest, capabilitySet, "agents.read");
+        requireCompanyId(companyId);
+        throw new Error("Agent execution inspection is not modeled by this test harness");
+      },
       async list(input) {
         requireCapability(manifest, capabilitySet, "agents.read");
         const companyId = requireCompanyId(input?.companyId);

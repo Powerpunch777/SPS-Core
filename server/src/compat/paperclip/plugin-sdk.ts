@@ -2,4 +2,5 @@
 export type { AgentSessionRunState } from "@paperclipai/plugin-sdk";
 export type { InitializeParams, WorkerToHostMethodName } from "@paperclipai/plugin-sdk";
 export type { PluginSpsRuntimeConnection } from "@paperclipai/plugin-sdk";
+export type { PluginAgentExecutionDescriptor } from "@paperclipai/plugin-sdk";
 export type { PluginSpsExecution, PluginSpsExecutionLane, PluginSpsExecutionCursor, PluginSpsExecutionPage, PluginSpsUsageEvidence, PluginSpsUsageMetric, PluginSpsUsageAggregateMetric, PluginSpsExecutionSummaryOptions, PluginSpsExecutionSummary } from "@paperclipai/plugin-sdk";

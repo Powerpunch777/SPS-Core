@@ -1882,8 +1882,21 @@ export interface PluginIssuesClient {
  * Requires `agents.read` for reads; `agents.pause` / `agents.resume` /
  * `agents.invoke` for write operations.
  */
+export interface PluginAgentExecutionDescriptor {
+  agentId: string;
+  adapterType: string;
+  state: "configured" | "disabled" | "unknown";
+  adapterRegistration: "registered" | "unavailable";
+  executionOwner: "adapter" | "node";
+  authorization: "recheck_on_dispatch";
+  readiness: "unknown";
+  node: { id: string | null; state: PluginSpsRuntimeConnection["state"]; observedAt: string | null } | null;
+}
+
 export interface PluginAgentsClient {
   list(input: { companyId: string; status?: Agent["status"]; limit?: number; offset?: number }): Promise<Agent[]>;
+  /** Bounded cached execution metadata; not login, readiness or authorization evidence. */
+  describeExecution(agentId: string, companyId: string): Promise<PluginAgentExecutionDescriptor>;
   get(agentId: string, companyId: string): Promise<Agent | null>;
   /** Pause an agent. Throws if agent is terminated or not found. Requires `agents.pause`. */
   pause(agentId: string, companyId: string): Promise<Agent>;

@@ -114,6 +114,15 @@ describeEmbeddedPostgres("SPS Node execution target", () => {
     return { company, agent, node };
   }
 
+  it("rejects future heartbeat evidence before queuing an Agent command", async () => {
+    const fixture = await createFixture();
+    await db.update(spsNodes).set({ lastSeenAt: new Date(Date.now() + 60_000) }).where(eq(spsNodes.id, fixture.node.id));
+    await expect(resolveSpsNodeExecutionTarget({ db, companyId: fixture.company.id, agentId: fixture.agent.id,
+      adapterType: "codex_local", heartbeatRunId: null, projectId: null,
+    })).rejects.toThrow("offline");
+    expect(await db.select().from(spsNodeCommands)).toEqual([]);
+  });
+
   it("queues an Agent command for its approved Node and returns ordered Node output", async () => {
     const fixture = await createFixture();
     const target = await resolveSpsNodeExecutionTarget({

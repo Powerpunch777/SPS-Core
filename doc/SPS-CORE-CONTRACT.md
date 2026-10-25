@@ -64,6 +64,20 @@ not infer support from the SDK, Host version or JSON-RPC protocol version.
 Model requests, OCE control and secret resolution are not advertised by this
 first snapshot. This is not complete backend capability negotiation.
 
+`agents.describeExecution` is a separate bounded read under `agents.read`, not
+a replacement for the retained compatibility `agents.list`/`get` shapes. It
+selects only Agent ID/status/adapter identifier and the same-tenant Node binding
+and cached observation. It does not load adapter/runtime config, paths, keys,
+provider identity, prompts or command output. It reports registration separately
+from configured/disabled state and always leaves execution readiness unknown.
+`executionOwner: "adapter"` means routing is delegated to the existing adapter
+and environment selection, not proof of a Host-local process. A bound Node is
+reported only with same-tenant metadata; an inconsistent foreign Node becomes
+an unknown observation without disclosing its ID. Every actual dispatch must
+recheck Agent/Node/Runner/Source/resource authority. Inspection does not create
+sessions, grants or runs or fall back to another backend. The internal fake
+test harness explicitly does not model this new inspection operation.
+
 ## Core-Owned Contracts
 
 Core owns these cross-workflow contracts:

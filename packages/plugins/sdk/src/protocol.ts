@@ -1626,6 +1626,10 @@ export interface WorkerToHostMethods {
   ];
 
   // Agents (read)
+  "agents.describeExecution": [
+    params: { companyId: string; agentId: string },
+    result: import("./types.js").PluginAgentExecutionDescriptor,
+  ];
   "agents.list": [
     params: { companyId: string; status?: string; limit?: number; offset?: number },
     result: Agent[],

@@ -188,6 +188,16 @@ describePostgres("plugin agent session context", () => {
     return { ...fixture, agentId, session, run, params: { companyId: fixture.companyId, sessionId: session.sessionId, runId: run.id } };
   }
 
+  it("exposes bounded Agent configuration without executing or widening the Workspace", async () => {
+    const { services, companyId } = await seedCompanyAndPlugin();
+    const agentId = await seedAgent(companyId);
+    await db.update(agents).set({ adapterConfig: { cwd: "C:/private", token: "private" } }).where(eq(agents.id, agentId));
+    expect(await services.agents.describeExecution({ agentId, companyId })).toEqual({ agentId, adapterType: "process", state: "configured",
+      adapterRegistration: "registered", executionOwner: "adapter", authorization: "recheck_on_dispatch", readiness: "unknown", node: null });
+    await expect(services.agents.describeExecution({ agentId, companyId: randomUUID() })).rejects.toThrow("Agent not found");
+    expect(mockWakeup).not.toHaveBeenCalled();
+  });
+
   it("reads only the exact owned session run, without output, paths or adapter secrets", async () => {
     const { services, params, run, pluginManifest } = await seedSessionRun();
     await db.update(heartbeatRuns).set({ stdoutExcerpt: "private output", resultJson: { apiKey: "secret" } }).where(eq(heartbeatRuns.id, run.id));

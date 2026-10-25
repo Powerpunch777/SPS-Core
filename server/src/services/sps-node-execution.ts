@@ -15,8 +15,8 @@ import {
 import { spsNodeCapabilityForAdapter, spsNodeSupportsAdapter } from "../compat/paperclip/shared.js";
 import type { AdapterSpsNodeExecutionTarget } from "../compat/paperclip/adapter-runtime.js";
 import { hasSpsSessionCancellation } from "./sps-agent-session-runs.js";
+import { isSpsNodeHeartbeatRecent } from "./sps-runtime-connection.js";
 
-const NODE_ONLINE_WINDOW_MS = 2 * 60 * 1000;
 const COMMAND_RESULT_GRACE_MS = 90 * 1000;
 const COMMAND_POLL_MS = 300;
 const MAX_CAPTURED_OUTPUT_BYTES = 2 * 1024 * 1024;
@@ -27,9 +27,6 @@ export class SpsNodeExecutionUnavailableError extends Error {
   }
 }
 
-function isNodeOnline(lastSeenAt: Date | null, now = Date.now()) {
-  return lastSeenAt != null && now - lastSeenAt.getTime() <= NODE_ONLINE_WINDOW_MS;
-}
 
 export function isSpsNodeExecutionAdapterType(adapterType: string) {
   return spsNodeCapabilityForAdapter(adapterType) !== null;
@@ -186,7 +183,7 @@ export async function resolveSpsNodeExecutionTarget(input: {
   if (!node || !grant || node.status !== "active" || !node.keyVerifiedAt) {
     throw new SpsNodeExecutionUnavailableError("The SPS Desktop Node binding is no longer approved for this Agent.");
   }
-  if (!isNodeOnline(node.lastSeenAt)) {
+  if (!isSpsNodeHeartbeatRecent(node.lastSeenAt)) {
     throw new SpsNodeExecutionUnavailableError(`SPS Desktop Node "${node.displayName}" is offline. Keep SPS Desktop open and connected before waking this Agent.`);
   }
   if (!supportedByNode(input.adapterType, node.capabilities)) {

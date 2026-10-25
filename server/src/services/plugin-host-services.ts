@@ -83,6 +83,8 @@ import { spsPluginExecutionService } from "./sps-plugin-execution.js";
 import { spsWorkspaceSurfaceService } from "./sps-workspace-surfaces.js";
 import { spsAgentSessionRunService } from "./sps-agent-session-runs.js";
 import { spsExecutionHistoryService } from "./sps-execution-history.js";
+import { describeSpsAgentExecution } from "./sps-agent-execution-descriptor.js";
+import { findActiveServerAdapter } from "../adapters/registry.js";
 
 // ---------------------------------------------------------------------------
 // SSRF protection for plugin HTTP fetch
@@ -2417,6 +2419,11 @@ export function buildHostServices(
     },
 
     agents: {
+      async describeExecution(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        return describeSpsAgentExecution(db, { companyId, agentId: params.agentId }, type => Boolean(findActiveServerAdapter(type)));
+      },
       async list(params) {
         const companyId = ensureCompanyId(params.companyId);
         await ensurePluginAvailableForCompany(companyId);

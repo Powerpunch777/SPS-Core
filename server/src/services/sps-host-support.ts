@@ -6,7 +6,7 @@ const PUBLIC_HOST_OPERATIONS = [
   "sps.workspaceSources.list", "sps.runtimes.list", "sps.executionGrants.list",
   "sps.executionGrants.upsert", "sps.executionGrants.revoke", "sps.runs.dispatch",
   "sps.runs.get", "sps.runs.list", "sps.runs.listEvents", "sps.runs.cancel",
-  "sps.artifacts.publish", "sps.artifacts.list", "agents.list",
+  "sps.artifacts.publish", "sps.artifacts.list", "agents.list", "agents.describeExecution",
   "agents.sessions.create", "agents.sessions.list", "agents.sessions.sendMessage",
   "agents.sessions.getRun", "agents.sessions.cancel",
 ] as const satisfies readonly WorkerToHostMethodName[];

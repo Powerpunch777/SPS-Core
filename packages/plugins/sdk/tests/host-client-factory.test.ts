@@ -435,6 +435,20 @@ describe("createHostClientHandlers invocation company scope", () => {
     expect(summarizeExecutions).toHaveBeenCalledWith("company-a", { from: params.from, to: params.to });
   });
 
+  it("gates safe Agent descriptors with agents.read and the current invocation Workspace", async () => {
+    const describeExecution = vi.fn(async () => ({ readiness: "unknown" }));
+    const services = { agents: { describeExecution } } as unknown as HostServices;
+    const params = { companyId: "company-a", agentId: "agent-a" };
+    const denied = createHostClientHandlers({ pluginId: "sps.example", capabilities: [], services });
+    await expect(denied["agents.describeExecution"](params)).rejects.toBeInstanceOf(CapabilityDeniedError);
+    const allowed = createHostClientHandlers({ pluginId: "sps.example", capabilities: ["agents.read"], services });
+    await expect(allowed["agents.describeExecution"](params, { invocationScope: { companyId: "company-b" } })).rejects.toBeInstanceOf(InvocationScopeDeniedError);
+    await expect(allowed["agents.describeExecution"](params, { invalidInvocationScope: true })).rejects.toBeInstanceOf(InvocationScopeDeniedError);
+    expect(describeExecution).not.toHaveBeenCalled();
+    await expect(allowed["agents.describeExecution"](params, { invocationScope: { companyId: "company-a" } })).resolves.toEqual({ readiness: "unknown" });
+    expect(describeExecution).toHaveBeenCalledExactlyOnceWith(params);
+  });
+
   it("gates exact Agent-session run reads and cancellation independently", async () => {
     const getRun = vi.fn(async () => ({ runId: "run-a", status: "running" }));
     const cancel = vi.fn(async () => ({ runId: "run-a", status: "running", termination: "pending" }));

@@ -297,6 +297,7 @@ export interface HostServices {
 
   /** Provides `agents.list`, `agents.get`, `agents.pause`, `agents.resume`, `agents.invoke`. */
   agents: {
+    describeExecution(params: WorkerToHostMethods["agents.describeExecution"][0]): Promise<WorkerToHostMethods["agents.describeExecution"][1]>;
     list(params: WorkerToHostMethods["agents.list"][0]): Promise<WorkerToHostMethods["agents.list"][1]>;
     get(params: WorkerToHostMethods["agents.get"][0]): Promise<WorkerToHostMethods["agents.get"][1]>;
     pause(params: WorkerToHostMethods["agents.pause"][0]): Promise<WorkerToHostMethods["agents.pause"][1]>;
@@ -528,6 +529,7 @@ const METHOD_CAPABILITY_MAP: Record<WorkerToHostMethodName, PluginCapability | n
 
   // Agents
   "agents.list": "agents.read",
+  "agents.describeExecution": "agents.read",
   "agents.get": "agents.read",
   "agents.pause": "agents.pause",
   "agents.resume": "agents.resume",
@@ -1049,6 +1051,7 @@ export function createHostClientHandlers(
     }),
 
     // Agents
+    "agents.describeExecution": gated("agents.describeExecution", async params => services.agents.describeExecution(params)),
     "agents.list": gated("agents.list", async (params) => {
       return services.agents.list(params);
     }),

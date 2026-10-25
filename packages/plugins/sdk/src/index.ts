@@ -261,6 +261,7 @@ export type {
   PluginSpsWorkspaceSource,
   PluginSpsRuntime,
   PluginSpsRuntimeConnection,
+  PluginAgentExecutionDescriptor,
   PluginSpsExecutionGrant,
   PluginSpsArtifact,
   PluginSpsRun,
