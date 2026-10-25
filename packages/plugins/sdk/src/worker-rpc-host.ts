@@ -432,6 +432,10 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
           case "sps.executions.summarize":
           case "sps.workspaceSources.list":
           case "sps.runtimes.list":
+          case "sps.models.list":
+          case "sps.models.submit":
+          case "sps.models.get":
+          case "sps.models.cancel":
           case "sps.executionGrants.list":
           case "sps.executionGrants.upsert":
           case "sps.executionGrants.revoke":
@@ -450,6 +454,12 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
     });
 
     const sps: PluginSpsClient = {
+      models: {
+        async list(companyId) { return callHost("sps.models.list", { companyId }); },
+        async submit(input) { return callHost("sps.models.submit", input); },
+        async get(companyId, runId) { return callHost("sps.models.get", { companyId, runId }); },
+        async cancel(companyId, runId) { return callHost("sps.models.cancel", { companyId, runId }); },
+      },
       executions: {
         async summarize(companyId, options) {
           return spsTransport.request("sps.executions.summarize", { ...options, companyId }) as Promise<Awaited<ReturnType<PluginSpsClient["executions"]["summarize"]>>>;

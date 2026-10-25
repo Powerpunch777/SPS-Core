@@ -54,6 +54,8 @@ import { assetRoutes } from "./routes/assets.js";
 import { accessRoutes } from "./routes/access.js";
 import { spsNodeRoutes } from "./routes/sps-nodes.js";
 import { spsExecutionRoutes } from "./routes/sps-executions.js";
+import { spsModelConnectionRoutes } from "./routes/sps-model-connections.js";
+import { getSpsModelBroker } from "./services/sps-model-broker.js";
 import { spsWorkspaceSourceRoutes } from "./routes/sps-workspace-sources.js";
 import { spsMarketplaceRoutes } from "./routes/sps-marketplace.js";
 import { pluginRoutes } from "./routes/plugins.js";
@@ -394,6 +396,8 @@ export async function createApp(
   api.use(adapterRoutes());
   api.use(spsNodeRoutes(db));
   api.use(spsExecutionRoutes(db));
+  api.use(spsModelConnectionRoutes(db));
+  getSpsModelBroker(db); // Recovery never replays inputs or starts a provider request.
   api.use(spsWorkspaceSourceRoutes(db));
   api.use(spsMarketplaceRoutes(db, workerManager));
   api.use(

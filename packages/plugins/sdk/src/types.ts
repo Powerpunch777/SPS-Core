@@ -9,6 +9,8 @@
  * @see PLUGIN_SPEC.md §29.2 — SDK Versioning
  */
 
+import type { PluginSpsModelConnection, PluginSpsModelRun, PluginSpsModelSubmitInput } from "./sps-model-types.js";
+export type { PluginSpsModelConnection, PluginSpsModelTextResult, PluginSpsModelRun, PluginSpsModelSubmitInput } from "./sps-model-types.js";
 import type {
   PaperclipPluginManifestV1,
   PluginStateScopeKind,
@@ -652,7 +654,7 @@ export interface PluginSpsArtifact {
   updatedAt: string;
 }
 
-export type PluginSpsExecutionLane = "node" | "agent_session";
+export type PluginSpsExecutionLane = "node" | "agent_session" | "model_request";
 export interface PluginSpsUsageMetric {
   value: number | null;
   provenance: "reported" | "estimated" | "unavailable";
@@ -680,7 +682,7 @@ export interface PluginSpsExecution {
   agentId: string | null;
   sessionId: string | null;
   subjectKey: string | null;
-  runtime: { kind: string | null; model: string | null; modelSource: "reported" | "unavailable" };
+  runtime: { kind: string | null; model: string | null; modelSource: "reported" | "configured" | "unavailable" };
   status: string;
   phase: "queued" | "active" | "stopping" | "succeeded" | "failed" | "cancelled" | "interrupted" | "unknown";
   cancellationRequested: boolean;
@@ -733,6 +735,10 @@ export type PluginSpsRuntimeOperation =
   | "sps.executions.summarize"
   | "sps.workspaceSources.list"
   | "sps.runtimes.list"
+  | "sps.models.list"
+  | "sps.models.submit"
+  | "sps.models.get"
+  | "sps.models.cancel"
   | "sps.executionGrants.list"
   | "sps.executionGrants.upsert"
   | "sps.executionGrants.revoke"
@@ -760,6 +766,12 @@ export interface PluginSpsRuntimeTransport {
  * the calling plugin; Core does not interpret it as an Agent, Task, or role.
  */
 export interface PluginSpsClient {
+  models: {
+    list(companyId: string): Promise<PluginSpsModelConnection[]>;
+    submit(input: PluginSpsModelSubmitInput): Promise<PluginSpsModelRun>;
+    get(companyId: string, runId: string): Promise<PluginSpsModelRun | null>;
+    cancel(companyId: string, runId: string): Promise<PluginSpsModelRun | null>;
+  };
   executions: {
     list(companyId: string, options?: { lane?: PluginSpsExecutionLane; limit?: number; before?: PluginSpsExecutionCursor }): Promise<PluginSpsExecutionPage>;
     get(companyId: string, lane: PluginSpsExecutionLane, runId: string): Promise<PluginSpsExecution | null>;

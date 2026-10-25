@@ -77,6 +77,9 @@ import type {
   PluginAuthorizationPolicySummary,
   PluginMemoryLifecyclePublishInput,
   PluginSpsArtifact,
+  PluginSpsModelConnection,
+  PluginSpsModelRun,
+  PluginSpsModelSubmitInput,
   PluginSpsExecution,
   PluginSpsExecutionCursor,
   PluginSpsExecutionLane,
@@ -1014,6 +1017,10 @@ export interface WorkerToHostMethods {
   ];
 
   // Workflow-neutral SPS infrastructure
+  "sps.models.list": [params: { companyId: string }, result: PluginSpsModelConnection[]];
+  "sps.models.submit": [params: PluginSpsModelSubmitInput, result: PluginSpsModelRun];
+  "sps.models.get": [params: { companyId: string; runId: string }, result: PluginSpsModelRun | null];
+  "sps.models.cancel": [params: { companyId: string; runId: string }, result: PluginSpsModelRun | null];
   "sps.executions.list": [
     params: { companyId: string; lane?: PluginSpsExecutionLane; limit?: number; before?: PluginSpsExecutionCursor },
     result: PluginSpsExecutionPage,

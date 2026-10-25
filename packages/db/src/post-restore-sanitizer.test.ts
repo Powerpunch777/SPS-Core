@@ -148,6 +148,23 @@ describe("sanitizePostRestoreDatabaseWithExecutor", () => {
     expect(executor.calls.at(-1)).toBe("COMMIT");
   });
 
+  it("preserves model history but revokes restored authority and clears local leases without replay", async () => {
+    const executor = fakeExecutor({ tables: ["sps_model_connections", "sps_model_grants", "sps_model_runs"], columnsByTable: {
+      sps_model_connections: ["status", "secret_id", "updated_at"],
+      sps_model_grants: ["status", "revoked_at", "binding_id", "updated_at"],
+      sps_model_runs: ["status", "resource_pending", "lease_owner_id", "lease_expires_at", "error_code", "finished_at", "updated_at"],
+    } });
+    await run(executor);
+    for (const table of ["sps_model_connections", "sps_model_grants", "sps_model_runs"]) expect(executor.calls).not.toContain(`DELETE FROM "${table}"`);
+    expect(executor.calls.find(query => query.startsWith('UPDATE "sps_model_connections"'))).toContain('"secret_id" = NULL');
+    expect(executor.calls.find(query => query.startsWith('UPDATE "sps_model_grants"'))).toContain('"status" = \'revoked\'');
+    expect(executor.calls.find(query => query.startsWith('UPDATE "sps_model_runs"'))).toContain('"resource_pending" = false');
+    const interrupted = executor.calls.find(query => query.startsWith('UPDATE "sps_model_runs"') && query.includes(" WHERE "));
+    expect(interrupted).toContain('"error_code" = \'host_restored\'');
+    expect(interrupted).toContain(`WHERE "status" IN ('queued', 'running')`);
+    expect(executor.calls.filter(query => query.startsWith('UPDATE "sps_model_runs"')).join(" ")).not.toMatch(/result_json|usage_json/);
+  });
+
   it("rolls back atomically when a scrub operation fails", async () => {
     const executor = fakeExecutor({ tables: ["session"], failOn: 'DELETE FROM "session"' });
 

@@ -11,6 +11,12 @@ planned control-plane connector, not a required model provider. Existing
 OpenClaw adapter code is not evidence of an OCE integration or production
 runtime isolation. This Core remains private; the Plugin SDK remains public.
 
+The current source includes a mock-first model-request broker: Host-only
+connection/grant management, capability-bound `models.list/submit/get/cancel`,
+durable idempotent runs, revocation checks and a separate `model_request` history
+lane. Configuration UI and real-provider qualification are not included. See the
+Core contract for credential, recovery and cancellation limits.
+
 This repository is not the public Plugin SDK and is not the SPS release channel.
 The public `SPS-Core-Compat` repository is an upstream-compatibility mirror only.
 

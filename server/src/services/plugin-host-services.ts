@@ -85,6 +85,7 @@ import { spsAgentSessionRunService } from "./sps-agent-session-runs.js";
 import { spsExecutionHistoryService } from "./sps-execution-history.js";
 import { describeSpsAgentExecution } from "./sps-agent-execution-descriptor.js";
 import { findActiveServerAdapter } from "../adapters/registry.js";
+import { getSpsModelBroker } from "./sps-model-broker.js";
 
 // ---------------------------------------------------------------------------
 // SSRF protection for plugin HTTP fetch
@@ -565,6 +566,7 @@ export function buildHostServices(
     manifest: options.manifest,
   });
   const spsExecution = spsPluginExecutionService(db, pluginKey);
+  const modelBroker = getSpsModelBroker(db);
   const executionHistory = spsExecutionHistoryService(db, pluginKey);
   const workspaceSurfaces = spsWorkspaceSurfaceService(db);
   const heartbeat = heartbeatService(db, {
@@ -1213,6 +1215,12 @@ export function buildHostServices(
     },
 
     sps: {
+      models: {
+        list: params => modelBroker.list(params.companyId, pluginId),
+        submit: params => modelBroker.submit(pluginId, params),
+        get: params => modelBroker.get(params.companyId, pluginId, params.runId),
+        cancel: params => modelBroker.cancel(params.companyId, pluginId, params.runId),
+      },
       async summarizeExecutions(companyIdInput, options) {
         const companyId = ensureCompanyId(companyIdInput);
         await ensurePluginAvailableForCompany(companyId);

@@ -30,12 +30,13 @@ SPS authorization and an external backend's resource authorization are separate
 checks. Workspace IDs, local Source paths and external Namespace IDs must not
 be treated as interchangeable authority.
 
-A new handle-only model/management credential broker is a target, not an existing
-guarantee. The retained internal `secrets.resolve` interface returns a string in
+A model-request broker now has an additive mock-first source implementation;
+the OCE management credential broker remains a target. The retained internal
+`secrets.resolve` interface returns a string in
 its type contract, but its current handler fails closed until scoped bindings
 are implemented. Do not enable it as a shortcut for Direct API or OCE work.
 
-Stage 3a adds a **Host-internal foundation**, not that public broker:
+Stage 3a introduced the **Host-internal foundation** used by Stage 3b:
 `sps-model-transport` performs one bounded, non-streaming Responses-compatible
 text request at an exact Host-selected endpoint/model, with storage/background/
 tools disabled. HTTPS is required except for an explicit Host opt-in to numeric
@@ -61,16 +62,32 @@ Missing usage is unknown, not zero. Exact credential echoes in projected text
 are rejected; this is not protection against an approved malicious provider
 transforming or disclosing credentials, nor JS memory-zeroization evidence.
 
-No route, RPC, SDK method, capability grant, durable model connection/run,
-management UI or Host-support operation is enabled by these primitives.
-A binding alone is **not execution authority**. A future public broker must bind
-the authenticated invocation to current Workspace activation/capabilities and a
-Host-approved durable endpoint/model/credential grant, add run/idempotency/
-recovery/usage integration and recheck revocation on dispatch/result delivery.
-The final read-to-dispatch interval and already-dispatched provider work are not
-made atomic by the current post-resolution check. Only fake credentials and
-local mock endpoints qualify this foundation; no real provider support or
-production isolation certification is implied.
+Stage 3b adds `sps.models.list/submit/get/cancel`, with separate read, submit and
+cancel capabilities. All require an authenticated Workspace invocation, current
+Plugin activation/capabilities/dependencies, and an approved immutable Host
+connection. Host-only management routes create endpoint/model/limit/Secret
+references and approve or revoke per-Plugin grants. Endpoint/model/key-reference
+changes require a new connection; disabling one revokes its grants. Reapproval
+increments a revision and cannot restore output belonging to an older revision.
+A binding alone is **not execution authority**. No raw-key RPC is enabled.
+
+Model submissions persist a unique Workspace/Plugin request key and input hash
+before HTTP effects. Plaintext input remains ephemeral; a restart never replays
+it. The broker records technical state, the dispatched credential version,
+reported tokens and a bounded projected result. Result content is owned stored
+data, not a claim of encrypted result storage. Current grants, binding, Secret
+and the used version are rechecked before delivery; revocation withholds text
+without erasing known token usage. A repeated identical request key returns its
+original run, not a new provider request. Different input conflicts.
+
+Local cancellation, lease/restart recovery and cleanup accounting do not prove
+upstream termination or billing cancellation. There is no automatic HTTP retry,
+fallback or input replay. The read-to-dispatch interval is not atomic with the
+network. Common history uses the separate `model_request` lane and labels the
+model `configured`, not provider-reported; it never loads prompt/result content.
+Prices remain unknown. The Host configuration UI is not yet implemented. Source
+acceptance uses fake credentials and a loopback HTTP mock, not a real provider,
+installed-app qualification, two-PC proof or production isolation certification.
 
 The existing `sps.runtimes.list` projection may include an optional `connection`
 for approved CLI Runner profiles. Its `executionOwner: "node"` and
@@ -90,7 +107,7 @@ credential read, or remote probe and checks both Node and Runner tenant IDs.
 
 Worker initialization may include `spsHost: { contractVersion: "1.0", operations }`.
 This is a snapshot of registered own Host handlers from a finite public Runtime
-and Agent-session API list. It is generated again on Worker restart and contains
+and Agent-session/model API list. It is generated again on Worker restart and contains
 no tenant data, paths, provider configuration or secrets. It is deliberately
 separate from the Worker callback `supportedMethods` returned to the Host.
 Registration is not capability approval, Workspace activation, resource access,
@@ -98,8 +115,8 @@ credential availability, backend support or live health. Invocation checks remai
 authoritative, including after permission or Node state changes. Older Hosts may
 omit the snapshot; consumers must treat missing/unknown contracts as unknown,
 not infer support from the SDK, Host version or JSON-RPC protocol version.
-Model requests, OCE control and secret resolution are not advertised by this
-first snapshot. This is not complete backend capability negotiation.
+The current snapshot includes the four model methods. OCE control and secret
+resolution remain absent. This is not complete backend capability negotiation.
 
 `agents.describeExecution` is a separate bounded read under `agents.read`, not
 a replacement for the retained compatibility `agents.list`/`get` shapes. It

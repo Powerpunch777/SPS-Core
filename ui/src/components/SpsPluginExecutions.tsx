@@ -26,6 +26,7 @@ const SAFE_MODEL_PATTERN = /^[a-z0-9][a-z0-9._:/@+-]{0,119}$/i;
 const SENSITIVE_MODEL_PATTERN = /^[a-z]:[\\/]|^https?:|\.\.|[^@]+@[^@]+\.[^@]+|^(?:sk-|ghp_|github_pat_|xox[baprs]-|AIza|eyJ)/i;
 
 const RUNTIME_LABELS: Record<string, string> = {
+  model_api: "Model API",
   process: "Local process",
   codex_local: "Codex CLI",
   claude_local: "Claude CLI",
@@ -91,7 +92,7 @@ const BILLING_TYPE_LABELS: Record<PluginSpsExecution["usage"]["billingType"], st
 };
 
 function isExecutionLane(value: unknown): value is PluginSpsExecutionLane {
-  return value === "node" || value === "agent_session";
+  return value === "node" || value === "agent_session" || value === "model_request";
 }
 
 function isRunId(value: string): boolean {
@@ -99,7 +100,7 @@ function isRunId(value: string): boolean {
 }
 
 function laneLabel(lane: PluginSpsExecutionLane): string {
-  return lane === "node" ? "Node" : "Agent session";
+  return lane === "node" ? "Node" : lane === "model_request" ? "Model request" : "Agent session";
 }
 
 function runtimeLabel(kind: string | null): string {
@@ -221,6 +222,7 @@ export function SpsPluginExecutions({ companyId, pluginId }: { companyId: string
               <option value="all">All lanes</option>
               <option value="agent_session">Agent session</option>
               <option value="node">Node</option>
+              <option value="model_request">Model request</option>
             </select>
             <Button
               type="button"
@@ -362,6 +364,7 @@ function ExecutionFacts({ execution }: { execution: PluginSpsExecution }) {
     ["Phase", PHASE_LABELS[execution.phase] ?? "Unknown"],
     ["Runtime", runtimeLabel(execution.runtime.kind)],
     ["Model", modelLabel(execution.runtime.model) ?? "Unknown"],
+    ["Model source", execution.runtime.modelSource === "configured" ? "Host configured" : execution.runtime.modelSource === "reported" ? "Provider or adapter report" : "Unknown"],
     ["Created", formatDate(execution.createdAt)],
     ["Started", formatDate(execution.startedAt)],
     ["Finished", formatDate(execution.finishedAt)],

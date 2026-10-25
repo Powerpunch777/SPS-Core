@@ -1,0 +1,1 @@
+ALTER TABLE "sps_model_runs" ADD COLUMN "credential_version" integer;

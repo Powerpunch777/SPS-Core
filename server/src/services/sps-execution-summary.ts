@@ -18,9 +18,9 @@ export function validateSpsExecutionSummaryOptions(value: unknown): PluginSpsExe
   }
   const duration = Date.parse(input.to as string) - Date.parse(input.from as string);
   if (duration <= 0 || duration > 31 * 24 * 60 * 60 * 1000) throw new Error("Execution summary window must be greater than zero and at most 31 days");
-  if (input.lane !== undefined && input.lane !== "node" && input.lane !== "agent_session") throw new Error("Invalid execution summary lane");
+  if (input.lane !== undefined && input.lane !== "node" && input.lane !== "agent_session" && input.lane !== "model_request") throw new Error("Invalid execution summary lane");
   if (input.agentId !== undefined && (typeof input.agentId !== "string" || !uuid.test(input.agentId))) throw new Error("Execution summary agentId must be a UUID");
-  if (input.agentId !== undefined && input.lane === "node") throw new Error("Node executions do not have an Agent identity");
+  if (input.agentId !== undefined && (input.lane === "node" || input.lane === "model_request")) throw new Error("This execution lane does not have an Agent identity");
   return { from: input.from as string, to: input.to as string,
     ...(input.lane === undefined ? {} : { lane: input.lane }), ...(input.agentId === undefined ? {} : { agentId: (input.agentId as string).toLowerCase() }) };
 }

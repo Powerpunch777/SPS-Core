@@ -135,7 +135,7 @@ describe("SpsPluginExecutions", () => {
     expect(container.querySelector('[data-testid="sps-plugin-executions"]')).toBeTruthy();
     expect(container.textContent).toContain("Loading execution history...");
     const lane = container.querySelector('select[aria-label="Execution lane"]') as HTMLSelectElement;
-    expect(Array.from(lane.options).map((option) => option.value)).toEqual(["all", "agent_session", "node"]);
+    expect(Array.from(lane.options).map((option) => option.value)).toEqual(["all", "agent_session", "node", "model_request"]);
     const refresh = container.querySelector('button[aria-label="Refresh execution history"]') as HTMLButtonElement;
     expect(refresh.disabled).toBe(true);
     expect(mockSpsExecutionsApi.list).toHaveBeenCalledWith(
@@ -198,6 +198,23 @@ describe("SpsPluginExecutions", () => {
     const close = container.querySelector(`button[aria-label="Close execution ${RUN_ONE}"]`) as HTMLButtonElement;
     await act(async () => close.click());
     expect(container.querySelector('[data-testid="sps-execution-detail"]')).toBeNull();
+  });
+
+  it("labels the model lane and its configured model without claiming provider identity", async () => {
+    const execution = makeExecution(RUN_ONE, { lane: "model_request", runtime: { kind: "model_api", model: "mock-model", modelSource: "configured" },
+      status: "succeeded", phase: "succeeded", cancellationRequested: false, termination: "not_applicable", failure: null });
+    mockSpsExecutionsApi.list.mockResolvedValue(makePage([execution]));
+    mockSpsExecutionsApi.get.mockResolvedValue(execution);
+    await render();
+    expect(container.textContent).toContain("Model request");
+    expect(container.textContent).toContain("Model API");
+    await act(async () => (container.querySelector(`button[aria-label="View execution ${RUN_ONE}"]`) as HTMLButtonElement).click());
+    await flushReact();
+    const detail = container.querySelector('[data-testid="sps-execution-detail"]');
+    expect(detail?.textContent).toContain("mock-model");
+    expect(detail?.textContent).toContain("Host configured");
+    expect(detail?.textContent).not.toContain("Provider or adapter report");
+    expect(mockSpsExecutionsApi.get).toHaveBeenCalledWith("company-1", "plugin-1", "model_request", RUN_ONE, { signal: expect.any(AbortSignal) });
   });
 
   it("shows empty state with usable paging controls and applies lane, older, newer, and refresh resets", async () => {

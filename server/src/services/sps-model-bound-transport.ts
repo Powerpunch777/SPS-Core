@@ -14,23 +14,23 @@ export function spsModelCredentialBindingPath(connectionId: string) {
  * A future caller must supply authenticated invocation scope and recheck Plugin capability,
  * Workspace activation and a Host-approved durable connection/egress grant before calling it.
  */
-export function createSpsBoundModelTextTransport(
+export function createSpsModelCredentialResolver(
   db: Db,
   configuration: {
     companyId: string;
     pluginId: string;
     connectionId: string;
     bindingId: string;
-    transport: SpsModelTextTransportConfiguration;
+    expectedSecretId?: string;
+    expectedVersionSelector?: string;
+    onResolvedVersion?: (version: number) => void;
   },
-  dependencies: { fetch?: typeof globalThis.fetch } = {},
 ) {
-  const { companyId, pluginId, connectionId, bindingId } = configuration;
+  const { companyId, pluginId, connectionId, bindingId, expectedSecretId, expectedVersionSelector, onResolvedVersion } = configuration;
   if (![companyId, pluginId, bindingId].every(value => typeof value === "string" && uuid.test(value))) {
     throw new SpsModelTransportError("invalid_configuration", "not_dispatched");
   }
   const configPath = spsModelCredentialBindingPath(connectionId);
-  const transport = createSpsModelTextTransport(configuration.transport, dependencies);
   const secrets = secretService(db);
 
   async function readBinding() {
@@ -46,15 +46,15 @@ export function createSpsBoundModelTextTransport(
       .where(and(eq(companySecretBindings.id, bindingId), eq(companySecretBindings.companyId, companyId),
         eq(companySecretBindings.targetType, "plugin"), eq(companySecretBindings.targetId, pluginId), eq(companySecretBindings.configPath, configPath),
         eq(companySecrets.companyId, companyId), eq(companySecrets.scope, "company"), eq(companySecrets.status, "active")));
-    if (!binding || !Number.isSafeInteger(binding.version) || binding.version < 1) {
+    if (!binding || !Number.isSafeInteger(binding.version) || binding.version < 1
+      || expectedSecretId !== undefined && binding.secretId !== expectedSecretId
+      || expectedVersionSelector !== undefined && binding.selector !== expectedVersionSelector) {
       throw new SpsModelTransportError("credential_unavailable", "not_dispatched");
     }
     return binding;
   }
 
-  return Object.freeze({
-    async request(input: { input: string; signal?: AbortSignal }) {
-      return transport.request({ input: input.input, signal: input.signal, credential: async signal => {
+  return async (signal: AbortSignal) => {
         const before = await readBinding();
         if (signal.aborted) throw new Error("Model credential resolution cancelled");
         const credential = await secrets.resolveSecretValue(companyId, before.secretId, before.version, {
@@ -67,8 +67,17 @@ export function createSpsBoundModelTextTransport(
         if (before.secretId !== after.secretId || before.selector !== after.selector || before.version !== after.version) {
           throw new SpsModelTransportError("credential_unavailable", "not_dispatched");
         }
+        onResolvedVersion?.(before.version);
         return credential;
-      } });
-    },
-  });
+  };
+}
+
+export function createSpsBoundModelTextTransport(
+  db: Db,
+  configuration: { companyId: string; pluginId: string; connectionId: string; bindingId: string; transport: SpsModelTextTransportConfiguration },
+  dependencies: { fetch?: typeof globalThis.fetch } = {},
+) {
+  const transport = createSpsModelTextTransport(configuration.transport, dependencies);
+  const credential = createSpsModelCredentialResolver(db, configuration);
+  return Object.freeze({ request: (input: { input: string; signal?: AbortSignal }) => transport.request({ ...input, credential }) });
 }

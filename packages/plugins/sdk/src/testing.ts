@@ -852,6 +852,12 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
       },
     },
     sps: {
+      models: {
+        async list() { throw new Error("The in-memory plugin test harness does not provide model requests"); },
+        async submit() { throw new Error("The in-memory plugin test harness does not provide model requests"); },
+        async get() { throw new Error("The in-memory plugin test harness does not provide model requests"); },
+        async cancel() { throw new Error("The in-memory plugin test harness does not provide model requests"); },
+      },
       executions: {
         async summarize() {
           throw new Error("The in-memory plugin test harness does not provide SPS execution summaries");

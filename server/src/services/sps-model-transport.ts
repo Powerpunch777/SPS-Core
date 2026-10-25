@@ -15,7 +15,7 @@ export interface SpsModelTextTransportConfiguration {
 
 export type SpsModelTransportErrorCode =
   | "invalid_configuration" | "invalid_request" | "busy" | "cancelled" | "timed_out"
-  | "network_error" | "http_error" | "invalid_response" | "response_too_large" | "credential_echo" | "credential_unavailable";
+  | "network_error" | "http_error" | "invalid_response" | "response_too_large" | "credential_echo" | "credential_unavailable" | "dispatch_denied";
 
 const errorMessages: Record<SpsModelTransportErrorCode, string> = {
   invalid_configuration: "Invalid Host model transport configuration",
@@ -29,6 +29,7 @@ const errorMessages: Record<SpsModelTransportErrorCode, string> = {
   response_too_large: "Model response exceeds the configured limit",
   credential_echo: "Model response contains credential material",
   credential_unavailable: "Bound model credential is unavailable",
+  dispatch_denied: "Model request was denied before dispatch",
 };
 
 export class SpsModelTransportError extends Error {
@@ -50,7 +51,7 @@ function boundedInteger(value: number | undefined, fallback: number, min: number
   return result;
 }
 
-function readConfiguration(input: SpsModelTextTransportConfiguration) {
+export function normalizeSpsModelTextTransportConfiguration(input: SpsModelTextTransportConfiguration) {
   let endpoint: URL;
   try { endpoint = new URL(input.endpoint); } catch {
     throw new SpsModelTransportError("invalid_configuration", "not_dispatched");
@@ -134,11 +135,11 @@ export function createSpsModelTextTransport(
   configuration: SpsModelTextTransportConfiguration,
   dependencies: { fetch?: typeof globalThis.fetch } = {},
 ) {
-  const config = readConfiguration(configuration);
+  const config = normalizeSpsModelTextTransportConfiguration(configuration);
   const fetchResponse = dependencies.fetch ?? globalThis.fetch;
   let active = 0;
-  return Object.freeze({
-    async request(input: { input: string; credential: string | ((signal: AbortSignal) => Promise<string>); signal?: AbortSignal }): Promise<SpsModelTextResponse> {
+  type Request = { input: string; credential: string | ((signal: AbortSignal) => Promise<string>); signal?: AbortSignal; beforeDispatch?: (signal: AbortSignal) => Promise<void> };
+  async function executeRequest(input: Request, acquired: () => void, settled: () => void): Promise<SpsModelTextResponse> {
       if (typeof input.input !== "string" || input.input.length > config.maxRequestBytes || !input.input.trim()
         || (typeof input.credential !== "function" && (typeof input.credential !== "string" || !/^[!-~]{1,8192}$/.test(input.credential)))
         || (input.signal !== undefined && !(input.signal instanceof AbortSignal))) {
@@ -154,6 +155,7 @@ export function createSpsModelTextTransport(
       if (input.signal?.aborted) throw new SpsModelTransportError("cancelled", "not_dispatched");
       if (active >= config.maxConcurrentRequests) throw new SpsModelTransportError("busy", "not_dispatched");
       active += 1;
+      acquired();
       const controller = new AbortController();
       let abortCode: "cancelled" | "timed_out" | null = null;
       let dispatched = false;
@@ -183,6 +185,11 @@ export function createSpsModelTextTransport(
           throw new SpsModelTransportError("credential_unavailable", "not_dispatched");
         }
         if (controller.signal.aborted) throw new Error("Model transport aborted");
+        if (input.beforeDispatch) {
+          try { await awaitAbortable(track(input.beforeDispatch(controller.signal)), controller.signal); }
+          catch { throw new SpsModelTransportError("dispatch_denied", "not_dispatched"); }
+          if (controller.signal.aborted) throw new Error("Model transport aborted");
+        }
         dispatched = true;
         const pending = track(fetchResponse(config.endpoint, {
           method: "POST", headers: { "content-type": "application/json", accept: "application/json", authorization: `Bearer ${credential}` },
@@ -216,9 +223,20 @@ export function createSpsModelTextTransport(
         input.signal?.removeEventListener("abort", cancel);
         // Cancellation bounds the caller's wait, not a resolver/transport that ignores AbortSignal.
         // Such work keeps its slot until it and its cleanup actually settle (fail closed if it never does).
-        if (pendingOperations.size > 0) void Promise.allSettled([...pendingOperations]).then(() => { active -= 1; });
-        else active -= 1;
+        const release = () => { active -= 1; settled(); };
+        if (pendingOperations.size > 0) void Promise.allSettled([...pendingOperations]).then(release);
+        else release();
       }
-    },
-  });
+  }
+  function start(input: Request) {
+    let finish!: () => void;
+    const settled = new Promise<void>(resolve => { finish = resolve; });
+    let acquired = false;
+    const result = executeRequest(input, () => { acquired = true; }, finish).catch(error => {
+      if (!acquired) finish();
+      throw error;
+    });
+    return Object.freeze({ result, settled });
+  }
+  return Object.freeze({ start, request: (input: Request) => start(input).result });
 }

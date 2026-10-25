@@ -1,4 +1,7 @@
 export {
+  createSpsModelConnectionSchema,
+  updateSpsModelConnectionStatusSchema,
+  grantSpsModelConnectionSchema,
   bindSpsAgentNodeSchema,
   createSpsNodeSchema,
   createSpsWorkspaceSourceSchema,

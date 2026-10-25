@@ -1,3 +1,4 @@
+export { createSpsModelConnectionSchema, updateSpsModelConnectionStatusSchema, grantSpsModelConnectionSchema, type CreateSpsModelConnection } from "./sps-model-connections.js";
 export {
   instanceSettingsSchema,
   instanceGeneralSettingsSchema,

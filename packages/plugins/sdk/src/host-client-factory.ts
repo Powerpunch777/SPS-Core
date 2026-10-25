@@ -123,6 +123,12 @@ export interface HostServices {
 
   /** Provides workflow-neutral Host Sources, Node runtimes, and plugin runs. */
   sps?: {
+    models?: {
+      list(params: WorkerToHostMethods["sps.models.list"][0]): Promise<WorkerToHostMethods["sps.models.list"][1]>;
+      submit(params: WorkerToHostMethods["sps.models.submit"][0]): Promise<WorkerToHostMethods["sps.models.submit"][1]>;
+      get(params: WorkerToHostMethods["sps.models.get"][0]): Promise<WorkerToHostMethods["sps.models.get"][1]>;
+      cancel(params: WorkerToHostMethods["sps.models.cancel"][0]): Promise<WorkerToHostMethods["sps.models.cancel"][1]>;
+    };
     summarizeExecutions(
       companyId: string,
       options: Omit<WorkerToHostMethods["sps.executions.summarize"][0], "companyId">,
@@ -426,6 +432,10 @@ const METHOD_CAPABILITY_MAP: Record<WorkerToHostMethodName, PluginCapability | n
   "sps.executions.summarize": "sps.executions.read",
   "sps.workspaceSources.list": "sps.workspaceSources.read",
   "sps.runtimes.list": "sps.runtimes.read",
+  "sps.models.list": "sps.models.read",
+  "sps.models.submit": "sps.models.submit",
+  "sps.models.get": "sps.models.read",
+  "sps.models.cancel": "sps.models.cancel",
   "sps.executionGrants.list": "sps.executionGrants.read",
   "sps.executionGrants.upsert": "sps.executionGrants.write",
   "sps.executionGrants.revoke": "sps.executionGrants.write",
@@ -709,7 +719,50 @@ export function createHostClientHandlers(
   // Build the complete handler map
   // -------------------------------------------------------------------------
 
+  function requireModelScope(params: unknown, context: WorkerHostCallContext | undefined, method: WorkerToHostMethodName, fields: string[]) {
+    const companyId = context?.invocationScope?.companyId;
+    if (context?.invalidInvocationScope || typeof companyId !== "string" || !companyId.trim()) {
+      throw new InvocationScopeDeniedError(pluginId, method, "model requests require an authenticated Workspace invocation");
+    }
+    if (!isRecord(params) || Object.keys(params).some(key => !fields.includes(key)) || Object.getOwnPropertySymbols(params).length > 0) {
+      throw new TypeError("Invalid model request fields");
+    }
+    const descriptors = Object.getOwnPropertyDescriptors(params);
+    if (fields.some(key => !descriptors[key] || !("value" in descriptors[key]!))) throw new TypeError("Invalid model request fields");
+    const uuid = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
+    if (typeof params.companyId !== "string" || !uuid.test(params.companyId) || !uuid.test(companyId) || params.companyId.toLowerCase() !== companyId.toLowerCase()) {
+      throw new InvocationScopeDeniedError(pluginId, method, "model request Workspace does not match its authenticated invocation");
+    }
+    for (const key of ["connectionId", "runId"].filter(key => fields.includes(key))) {
+      if (typeof params[key] !== "string" || !uuid.test(params[key] as string)) throw new TypeError("Invalid model resource ID");
+    }
+    if (fields.includes("requestKey") && (typeof params.requestKey !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(params.requestKey)
+      || typeof params.input !== "string" || !params.input.trim() || params.input.length > 65_536 || new TextEncoder().encode(params.input).byteLength > 65_536)) {
+      throw new TypeError("Invalid model submission");
+    }
+  }
+
   return {
+    "sps.models.list": gated("sps.models.list", async (params, context) => {
+      requireModelScope(params, context, "sps.models.list", ["companyId"]);
+      if (!services.sps?.models) throw new Error("This SPS host does not expose model requests");
+      return services.sps.models.list(params);
+    }),
+    "sps.models.submit": gated("sps.models.submit", async (params, context) => {
+      requireModelScope(params, context, "sps.models.submit", ["companyId", "connectionId", "requestKey", "input"]);
+      if (!services.sps?.models) throw new Error("This SPS host does not expose model requests");
+      return services.sps.models.submit(params);
+    }),
+    "sps.models.get": gated("sps.models.get", async (params, context) => {
+      requireModelScope(params, context, "sps.models.get", ["companyId", "runId"]);
+      if (!services.sps?.models) throw new Error("This SPS host does not expose model requests");
+      return services.sps.models.get(params);
+    }),
+    "sps.models.cancel": gated("sps.models.cancel", async (params, context) => {
+      requireModelScope(params, context, "sps.models.cancel", ["companyId", "runId"]);
+      if (!services.sps?.models) throw new Error("This SPS host does not expose model requests");
+      return services.sps.models.cancel(params);
+    }),
     // Config
     "config.get": gated("config.get", async () => {
       return services.config.get();

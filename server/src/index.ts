@@ -31,6 +31,7 @@ import {
 } from "@paperclipai/db";
 import detectPort from "detect-port";
 import { createApp } from "./app.js";
+import { shutdownSpsModelBroker } from "./services/sps-model-broker.js";
 import { loadConfig } from "./config.js";
 import { logger } from "./middleware/logger.js";
 import { setupEnvironmentCustomImageTerminalWebSocketServer } from "./realtime/environment-custom-image-terminal-ws.js";
@@ -1203,6 +1204,7 @@ export async function startServer(): Promise<StartedServer> {
       }
 
       const appShutdown = (app as { locals?: { paperclipShutdown?: () => void } }).locals?.paperclipShutdown;
+      await shutdownSpsModelBroker(db);
       appShutdown?.();
 
       if (embeddedPostgres && embeddedPostgresStartedByThisProcess) {

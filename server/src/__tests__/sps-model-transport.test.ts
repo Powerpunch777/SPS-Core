@@ -232,6 +232,36 @@ describe("Host-only bounded model text transport", () => {
     }
     expect(fetch).not.toHaveBeenCalled();
   });
+  it("requires the Host dispatch proof before sending and sanitizes a denied proof", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>(async () => jsonResponse());
+    const transport = mockTransport(fetch);
+    const beforeDispatch = vi.fn(async (signal: AbortSignal) => {
+      expect(signal.aborted).toBe(false);
+      expect(fetch).not.toHaveBeenCalled();
+      throw new Error(`private-proof-${credential}`);
+    });
+    await expectSafeError(transport.request({ ...request, beforeDispatch }), "dispatch_denied", "not_dispatched");
+    expect(beforeDispatch).toHaveBeenCalledOnce(); expect(fetch).not.toHaveBeenCalled();
+  });
+  it("exposes settlement separately from cancellation of an unsettled dispatch proof", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>(async () => jsonResponse());
+    const controller = new AbortController();
+    let resolveProof!: () => void;
+    let enterProof!: () => void;
+    const entered = new Promise<void>(resolve => { enterProof = resolve; });
+    const transport = mockTransport(fetch);
+    const started = transport.start({ ...request, signal: controller.signal, beforeDispatch: async () => {
+      enterProof(); await new Promise<void>(resolve => { resolveProof = resolve; });
+    } });
+    await entered;
+    let settled = false; void started.settled.then(() => { settled = true; });
+    controller.abort(); await expectSafeError(started.result, "cancelled", "not_dispatched");
+    expect(settled).toBe(false);
+    await expectSafeError(transport.request(request), "busy", "not_dispatched");
+    resolveProof(); await started.settled;
+    expect(settled).toBe(true); expect(fetch).not.toHaveBeenCalled();
+    await expect(transport.request(request)).resolves.toMatchObject({ text: "Mock result" });
+  });
   it("bounds a stalled body and records only local cancellation, not upstream termination", async () => {
     const controller = new AbortController(); const cancel = vi.fn();
     const fetch = vi.fn(async () => new Response(new ReadableStream({ cancel }), { headers: { "content-type": "application/json" } }));

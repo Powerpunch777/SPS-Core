@@ -8,7 +8,7 @@ import { SpsExecutionSummaryLimitError, validateSpsExecutionSummaryOptions } fro
 import type { PluginSpsExecutionCursor, PluginSpsExecutionLane } from "../compat/paperclip/plugin-sdk.js";
 
 const uuid = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
-const isLane = (value: unknown): value is PluginSpsExecutionLane => value === "node" || value === "agent_session";
+const isLane = (value: unknown): value is PluginSpsExecutionLane => value === "node" || value === "agent_session" || value === "model_request";
 
 function readHostScope(req: Request) {
   assertSpsCoreHostAuthority(req);

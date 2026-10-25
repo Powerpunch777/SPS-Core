@@ -25,9 +25,12 @@ function phase(status: string, pending: boolean): PluginSpsExecution["phase"] {
   return status === "timed_out" ? "failed" : "unknown";
 }
 const failures = {
-  auth_required: "authorization", permission_denied: "authorization", responsible_user_access_denied: "authorization",
+  auth_required: "authorization", permission_denied: "authorization", responsible_user_access_denied: "authorization", host_restored: "execution",
   configuration_incomplete: "configuration", workspace_validation_failed: "configuration", agent_not_invokable: "configuration",
   provider_quota: "provider_limit", timeout: "timeout", cancelled: "cancelled", adapter_failed: "execution", setup_failed: "execution", process_lost: "execution",
+  permission_revoked: "authorization", dispatch_denied: "authorization", credential_unavailable: "authorization", timed_out: "timeout", lease_lost: "execution",
+  network_error: "execution", http_error: "execution", invalid_response: "execution", response_too_large: "execution", credential_echo: "execution", busy: "configuration",
+  provider_limit: "provider_limit", provider_error: "execution", invalid_request: "configuration", invalid_configuration: "configuration",
 } as const;
 function failure(status: string, code: string | null, timedOut = false): PluginSpsExecution["failure"] {
   if (!["failed", "timed_out", "cancelled", "interrupted"].includes(status)) return null;
@@ -40,6 +43,20 @@ type Common = { id: string; companyId: string; status: string; createdAt: Date; 
 export type ObservedAgentRun = Common & { agentId: string; contextSnapshot: Record<string, unknown> | null; usageJson: Record<string, unknown> | null; errorCode: string | null };
 export type ObservedNodeRun = Common & { pluginKey: string; subjectKey: string; command: string; timedOut: number;
   nodeId?: string; runnerProfileId?: string; executionGrantId?: string; usageJson?: unknown };
+export type ObservedModelRun = Common & { pluginKey: string; model: string; cancellationRequestedAt: Date | null;
+  externalEffects: string; errorCode: string | null; usageJson: Record<string, unknown> | null; resourcePending: boolean; leaseExpiresAt: Date | null };
+
+/** Model identity is Host-configured, not a provider-reported resolved model. No prompt/output is loaded. */
+export function observeSpsModelRun(run: ObservedModelRun, now = Date.now()): PluginSpsExecution {
+  const stale = run.resourcePending && (!run.leaseExpiresAt || run.leaseExpiresAt.getTime() <= now) && ["queued", "running"].includes(run.status);
+  const status = stale ? "interrupted" : run.status, model = safeLabel(run.model), requested = run.cancellationRequestedAt !== null;
+  const pending = requested && ["queued", "running"].includes(status);
+  return { lane: "model_request", runId: run.id, companyId: run.companyId, pluginKey: run.pluginKey, agentId: null, sessionId: null, subjectKey: null,
+    runtime: { kind: "model_api", model, modelSource: model ? "configured" : "unavailable" }, status, phase: phase(status, pending),
+    cancellationRequested: requested, termination: requested && run.externalEffects === "unknown" ? "pending" : "not_applicable",
+    failure: failure(status, stale ? "process_lost" : run.errorCode), createdAt: run.createdAt.toISOString(), startedAt: run.startedAt?.toISOString() ?? null,
+    finishedAt: run.finishedAt?.toISOString() ?? null, elapsedMs: elapsed(run.startedAt, run.finishedAt, now, status), usage: readSpsUsageEvidence(run.usageJson) };
+}
 
 export function observeSpsAgentRun(run: ObservedAgentRun, pluginKey: string, now = Date.now()): PluginSpsExecution {
   const context = record(run.contextSnapshot), conversation = record(context.spsPluginConversation), runtime = record(context.spsExecutionRuntime);

@@ -4,6 +4,7 @@ import type { InitializeParams, WorkerToHostMethodName } from "../compat/papercl
 const PUBLIC_HOST_OPERATIONS = [
   "sps.executions.list", "sps.executions.get", "sps.executions.summarize",
   "sps.workspaceSources.list", "sps.runtimes.list", "sps.executionGrants.list",
+  "sps.models.list", "sps.models.submit", "sps.models.get", "sps.models.cancel",
   "sps.executionGrants.upsert", "sps.executionGrants.revoke", "sps.runs.dispatch",
   "sps.runs.get", "sps.runs.list", "sps.runs.listEvents", "sps.runs.cancel",
   "sps.artifacts.publish", "sps.artifacts.list", "agents.list", "agents.describeExecution",

@@ -1,11 +1,11 @@
 import { and, desc, eq, gte, lt, sql, type SQL } from "drizzle-orm";
-import { heartbeatRuns, spsPluginNodeRuns, type Db } from "../compat/paperclip/db.js";
+import { heartbeatRuns, spsModelConnections, spsModelRuns, spsPluginNodeRuns, type Db } from "../compat/paperclip/db.js";
 import type { PluginSpsExecution, PluginSpsExecutionCursor, PluginSpsExecutionLane, PluginSpsExecutionPage, PluginSpsExecutionSummaryOptions } from "../compat/paperclip/plugin-sdk.js";
-import { observeSpsAgentRun, observeSpsNodeRun } from "./sps-execution-observation.js";
+import { observeSpsAgentRun, observeSpsModelRun, observeSpsNodeRun } from "./sps-execution-observation.js";
 import { SPS_EXECUTION_SUMMARY_MAX_RUNS, summarizeSpsExecutions, validateSpsExecutionSummaryOptions } from "./sps-execution-summary.js";
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const laneValid = (value: unknown): value is PluginSpsExecutionLane => value === "node" || value === "agent_session";
+const laneValid = (value: unknown): value is PluginSpsExecutionLane => value === "node" || value === "agent_session" || value === "model_request";
 function requireUuid(value: unknown) {
   if (typeof value !== "string" || !uuid.test(value)) throw new Error("Execution identifiers must be UUIDs");
   return value.toLowerCase();
@@ -45,11 +45,19 @@ const nodeColumns = {
   usageJson: spsPluginNodeRuns.usageJson,
   timedOut: spsPluginNodeRuns.timedOut, createdAt: spsPluginNodeRuns.createdAt, startedAt: spsPluginNodeRuns.startedAt, finishedAt: spsPluginNodeRuns.finishedAt,
 };
+const modelColumns = {
+  id: spsModelRuns.id, companyId: spsModelRuns.companyId, pluginKey: spsModelRuns.pluginKey, status: spsModelRuns.status,
+  model: spsModelConnections.model, cancellationRequestedAt: spsModelRuns.cancellationRequestedAt, externalEffects: spsModelRuns.externalEffects,
+  errorCode: spsModelRuns.errorCode, usageJson: spsModelRuns.usageJson, resourcePending: spsModelRuns.resourcePending, leaseExpiresAt: spsModelRuns.leaseExpiresAt,
+  createdAt: spsModelRuns.createdAt, startedAt: spsModelRuns.startedAt, finishedAt: spsModelRuns.finishedAt,
+};
 
 /** Own-plugin technical history. No mutable session join, raw output or billing writes. */
 export function spsExecutionHistoryService(db: Db, pluginKey: string) {
   const agentTime = sql`date_trunc('milliseconds', ${heartbeatRuns.createdAt})`;
   const nodeTime = sql`date_trunc('milliseconds', ${spsPluginNodeRuns.createdAt})`;
+  const modelTime = sql`date_trunc('milliseconds', ${spsModelRuns.createdAt})`;
+  const modelJoin = and(eq(spsModelConnections.id, spsModelRuns.connectionId), eq(spsModelConnections.companyId, spsModelRuns.companyId));
   function agentScope(companyId: string) {
     return and(eq(heartbeatRuns.companyId, companyId),
       sql`${heartbeatRuns.contextSnapshot}->'spsPluginConversation'->>'pluginKey' = ${pluginKey}`,
@@ -74,6 +82,12 @@ export function spsExecutionHistoryService(db: Db, pluginKey: string) {
         .orderBy(desc(nodeTime), desc(spsPluginNodeRuns.id)).limit(limit + 1);
       items.push(...rows.map(run => observeSpsNodeRun(run, now)));
     }
+    if (!options.lane || options.lane === "model_request") {
+      const rows = await db.select(modelColumns).from(spsModelRuns).innerJoin(spsModelConnections, modelJoin)
+        .where(and(eq(spsModelRuns.companyId, companyId), eq(spsModelRuns.pluginKey, pluginKey), before(modelTime, sql`${spsModelRuns.id}`, "model_request", cursor)))
+        .orderBy(desc(modelTime), desc(spsModelRuns.id)).limit(limit + 1);
+      items.push(...rows.map(run => observeSpsModelRun(run, now)));
+    }
     items.sort((a, b) => {
       for (const key of ["createdAt", "runId", "lane"] as const) { if (a[key] !== b[key]) return a[key] > b[key] ? -1 : 1; }
       return 0;
@@ -88,6 +102,11 @@ export function spsExecutionHistoryService(db: Db, pluginKey: string) {
       const [run] = await db.select(agentColumns).from(heartbeatRuns).where(and(agentScope(companyId), eq(heartbeatRuns.id, runId))).limit(1);
       return run ? observeSpsAgentRun(run, pluginKey) : null;
     }
+    if (lane === "model_request") {
+      const [run] = await db.select(modelColumns).from(spsModelRuns).innerJoin(spsModelConnections, modelJoin)
+        .where(and(eq(spsModelRuns.companyId, companyId), eq(spsModelRuns.pluginKey, pluginKey), eq(spsModelRuns.id, runId))).limit(1);
+      return run ? observeSpsModelRun(run) : null;
+    }
     const [run] = await db.select(nodeColumns).from(spsPluginNodeRuns).where(and(eq(spsPluginNodeRuns.companyId, companyId), eq(spsPluginNodeRuns.pluginKey, pluginKey), eq(spsPluginNodeRuns.id, runId))).limit(1);
     return run ? observeSpsNodeRun(run) : null;
   }
@@ -95,7 +114,7 @@ export function spsExecutionHistoryService(db: Db, pluginKey: string) {
     companyId = requireUuid(companyId);
     const options = validateSpsExecutionSummaryOptions(input);
     const from = new Date(options.from), to = new Date(options.to), now = Date.now();
-    // Both lanes must come from one DB snapshot; never silently aggregate a
+    // All lanes must come from one DB snapshot; never silently aggregate a
     // truncated page or mutate the legacy cost ledger on a read.
     return db.transaction(async tx => {
       const items: PluginSpsExecution[] = [];
@@ -108,6 +127,12 @@ export function spsExecutionHistoryService(db: Db, pluginKey: string) {
         const rows = await tx.select(nodeColumns).from(spsPluginNodeRuns).where(and(eq(spsPluginNodeRuns.companyId, companyId), eq(spsPluginNodeRuns.pluginKey, pluginKey),
           gte(spsPluginNodeRuns.createdAt, from), lt(spsPluginNodeRuns.createdAt, to))).limit(SPS_EXECUTION_SUMMARY_MAX_RUNS + 1);
         items.push(...rows.map(run => observeSpsNodeRun(run, now)));
+      }
+      if ((!options.lane || options.lane === "model_request") && !options.agentId) {
+        const rows = await tx.select(modelColumns).from(spsModelRuns).innerJoin(spsModelConnections, modelJoin)
+          .where(and(eq(spsModelRuns.companyId, companyId), eq(spsModelRuns.pluginKey, pluginKey), gte(spsModelRuns.createdAt, from), lt(spsModelRuns.createdAt, to)))
+          .limit(SPS_EXECUTION_SUMMARY_MAX_RUNS + 1);
+        items.push(...rows.map(run => observeSpsModelRun(run, now)));
       }
       return summarizeSpsExecutions(companyId, pluginKey, options, items, now);
     }, { isolationLevel: "repeatable read", accessMode: "read only" });
