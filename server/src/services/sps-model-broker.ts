@@ -11,7 +11,7 @@ import { buildSpsUsageEvidence } from "./sps-execution-usage.js";
 
 type Run = typeof spsModelRuns.$inferSelect;
 type Connection = typeof spsModelConnections.$inferSelect;
-type Task = { run: Run; ownerId: string; controller: AbortController; done: boolean; settled: boolean; checking: boolean; permissionLost: boolean; leaseLost: boolean; work?: Promise<void> };
+type Task = { run: Run; ownerId: string; controller: AbortController; done: boolean; settled: boolean; checking: boolean; checkRequested: boolean; permissionLost: boolean; leaseLost: boolean; work?: Promise<void> };
 // This protects brokers in this process sharing the same Db object; it is not a cross-process liveness signal.
 const locallyTrackedTasks = new WeakMap<Db, Map<string, Task>>();
 const terminal = new Set(["succeeded", "failed", "cancelled", "interrupted"]);
@@ -124,9 +124,7 @@ export function createSpsModelBroker(db: Db, dependencies: { fetch?: typeof glob
     }
     return entry.transport;
   }
-  async function tick(task: Task) {
-    if (task.checking) return;
-    task.checking = true;
+  async function sweepTask(task: Task) {
     try {
       if (task.done && task.settled) {
         await db.update(spsModelRuns).set({ resourcePending: false, leaseOwnerId: null, leaseExpiresAt: null, updatedAt: new Date(),
@@ -162,7 +160,21 @@ export function createSpsModelBroker(db: Db, dependencies: { fetch?: typeof glob
       task.controller.abort();
       try { await preserveLeaseLostTask(task); } catch { /* A later tick or recovery retries the cleanup reservation. */ }
     }
-    finally { task.checking = false; }
+  }
+  async function tick(task: Task) {
+    if (task.checking) {
+      task.checkRequested = true;
+      return;
+    }
+    task.checking = true;
+    try {
+      do {
+        task.checkRequested = false;
+        await sweepTask(task);
+      } while (task.checkRequested);
+    } finally {
+      task.checking = false;
+    }
   }
   const timer = setInterval(() => {
     for (const task of tasks.values()) void tick(task);
@@ -269,7 +281,7 @@ export function createSpsModelBroker(db: Db, dependencies: { fetch?: typeof glob
         return { run: duplicate, inserted: false };
       });
       if (saved.inserted) {
-        const task: Task = { run: saved.run, ownerId, controller: new AbortController(), done: false, settled: false, checking: false, permissionLost: false, leaseLost: false };
+        const task: Task = { run: saved.run, ownerId, controller: new AbortController(), done: false, settled: false, checking: false, checkRequested: false, permissionLost: false, leaseLost: false };
         tasks.set(task.run.id, task);
         tracked.set(task.run.id, task);
         task.work = execute(task, input.input).catch(() => { task.leaseLost = true; task.controller.abort(); });

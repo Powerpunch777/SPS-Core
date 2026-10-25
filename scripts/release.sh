@@ -83,6 +83,32 @@ set_cleanup_trap() {
   trap cleanup_release_state EXIT
 }
 
+assert_cli_release_version_if_enrolled() {
+  local release_plan="$1"
+  local target_version="$2"
+  local cli_is_enrolled=false
+  local pkg_dir _pkg_name _pkg_version
+
+  while IFS=$'\t' read -r pkg_dir _pkg_name _pkg_version; do
+    [ -n "$pkg_dir" ] || continue
+    if [ "$pkg_dir" = "cli" ]; then
+      cli_is_enrolled=true
+      break
+    fi
+  done <<< "$release_plan"
+
+  if [ "$cli_is_enrolled" != true ]; then
+    release_info "  CLI is not CI-release enrolled; version assertion is not applicable (not part of this publish plan)"
+    return 0
+  fi
+
+  local version_in_cli_package
+  version_in_cli_package="$(cd "$CLI_DIR" && node -p "require('./package.json').version")"
+  if [ "$version_in_cli_package" != "$target_version" ]; then
+    release_fail "versioning drift detected. Expected $target_version but found $version_in_cli_package."
+  fi
+}
+
 while [ $# -gt 0 ]; do
   case "$1" in
     canary|stable)
@@ -245,10 +271,7 @@ release_info "==> Step 4/7: Building publishable CLI bundle..."
 release_info "  ✓ CLI bundle ready"
 
 VERSIONED_PACKAGE_INFO="$(list_public_package_info)"
-VERSION_IN_CLI_PACKAGE="$(cd "$CLI_DIR" && node -p "require('./package.json').version")"
-if [ "$VERSION_IN_CLI_PACKAGE" != "$TARGET_PUBLISH_VERSION" ]; then
-  release_fail "versioning drift detected. Expected $TARGET_PUBLISH_VERSION but found $VERSION_IN_CLI_PACKAGE."
-fi
+assert_cli_release_version_if_enrolled "$VERSIONED_PACKAGE_INFO" "$TARGET_PUBLISH_VERSION"
 
 release_info ""
 if [ "$dry_run" = true ]; then

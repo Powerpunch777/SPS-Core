@@ -14,6 +14,11 @@ const support = await getEmbeddedPostgresTestSupport();
 const describeDb = support.supported ? describe : describe.skip;
 const credential = "fake-model-broker-key-for-isolated-tests-only";
 const payload = { status: "completed", output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "Local mock answer" }] }], usage: { input_tokens: 7, output_tokens: 3, total_tokens: 10 } };
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>(done => { resolve = done; });
+  return { promise, resolve };
+}
 describeDb("durable model request broker", () => {
   let db: ReturnType<typeof createDb>, temporary: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>;
   const previousKey = process.env.PAPERCLIP_SECRETS_MASTER_KEY;
@@ -115,14 +120,57 @@ describeDb("durable model request broker", () => {
   });
   it("cancels a hanging request without claiming upstream termination or freeing unresolved resources", async () => {
     let finish!: (response: Response) => void;
-    const fetch = vi.fn<typeof globalThis.fetch>(() => new Promise(resolve => { finish = resolve; })), fixture = await seed(fetch);
-    const first = await fixture.broker.submit(fixture.pluginId, fixture.input);
-    await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
-    await fixture.broker.cancel(fixture.companyId, fixture.pluginId, first.id);
-    expect(await finished(fixture, first.id)).toMatchObject({ status: "cancelled", externalEffects: "unknown", cleanupPending: true, result: null });
-    await expect(fixture.broker.submit(fixture.pluginId, { ...fixture.input, requestKey: randomUUID() })).rejects.toThrow("busy");
-    finish(Response.json(payload));
-    await vi.waitFor(async () => expect(await fixture.broker.get(fixture.companyId, fixture.pluginId, first.id)).toMatchObject({ cleanupPending: false }));
+    let tickCallback: (() => void) | undefined;
+    const nativeSetInterval = globalThis.setInterval.bind(globalThis);
+    const nativeClearInterval = globalThis.clearInterval.bind(globalThis);
+    const intervalSpy = vi.spyOn(globalThis, "setInterval").mockImplementation((handler, timeout, ...args) => {
+      if (timeout === 5_000) {
+        tickCallback = handler as () => void;
+        const interval = nativeSetInterval(handler, timeout, ...args);
+        nativeClearInterval(interval);
+        return interval;
+      }
+      return nativeSetInterval(handler, timeout, ...args);
+    });
+    const fetch = vi.fn<typeof globalThis.fetch>(() => new Promise(resolve => { finish = resolve; }));
+    const lockReady = deferred();
+    const releaseLock = deferred();
+    let lockTask: Promise<void> | undefined;
+    try {
+      const fixture = await seed(fetch);
+      intervalSpy.mockRestore();
+      const first = await fixture.broker.submit(fixture.pluginId, fixture.input);
+      await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+      await fixture.broker.cancel(fixture.companyId, fixture.pluginId, first.id);
+      expect(await finished(fixture, first.id)).toMatchObject({ status: "cancelled", externalEffects: "unknown", cleanupPending: true, result: null });
+      await expect(fixture.broker.submit(fixture.pluginId, { ...fixture.input, requestKey: randomUUID() })).rejects.toThrow("busy");
+
+      lockTask = db.transaction(async tx => {
+        await tx.execute(sql`LOCK TABLE "sps_model_grants" IN ACCESS EXCLUSIVE MODE`);
+        lockReady.resolve();
+        await releaseLock.promise;
+      });
+      await lockReady.promise;
+      expect(tickCallback).toBeTypeOf("function");
+      tickCallback!();
+      await vi.waitFor(async () => {
+        const result = await db.execute(sql`SELECT EXISTS (
+          SELECT 1 FROM pg_locks WHERE NOT granted AND relation = 'sps_model_grants'::regclass
+        ) AS waiting`);
+        expect(result[0]?.waiting).toBe(true);
+      });
+
+      finish(Response.json(payload));
+      await new Promise<void>(resolve => setImmediate(resolve));
+      releaseLock.resolve();
+      await lockTask;
+      await vi.waitFor(async () => expect(await fixture.broker.get(fixture.companyId, fixture.pluginId, first.id)).toMatchObject({ cleanupPending: false }));
+      expect(fetch).toHaveBeenCalledOnce();
+    } finally {
+      intervalSpy.mockRestore();
+      releaseLock.resolve();
+      await lockTask?.catch(() => undefined);
+    }
   });
   it("keeps locally unresolved work reserved after lease expiry and blocks another broker until cleanup settles", async () => {
     let finish!: (response: Response) => void;
