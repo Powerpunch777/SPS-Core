@@ -35,6 +35,19 @@ guarantee. The retained internal `secrets.resolve` interface returns a string in
 its type contract, but its current handler fails closed until scoped bindings
 are implemented. Do not enable it as a shortcut for Direct API or OCE work.
 
+The existing `sps.runtimes.list` projection may include an optional `connection`
+for approved CLI Runner profiles. Its `executionOwner: "node"` and
+`authorization: "execution_grant_required"` describe technical ownership, not
+permission to start work. `state` is a cached Host observation: `recently_seen`
+requires an active, key-verified Node and a valid, non-future heartbeat no older
+than two minutes. Other states are `inactive`, `unverified`, `offline`, and
+`unknown`. `observedAt` is the valid heartbeat timestamp, not a live probe.
+Missing metadata from older Hosts is unknown. This does not certify a CLI login,
+Runner availability, execution grant, model API, Agent session, or OCE backend.
+Existing credential/availability fields remain separate; dispatch still checks
+its grant and current Node/Runner/Source state. Discovery performs no execution,
+credential read, or remote probe and checks both Node and Runner tenant IDs.
+
 ## Core-Owned Contracts
 
 Core owns these cross-workflow contracts:

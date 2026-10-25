@@ -11,8 +11,8 @@ import {
 } from "../compat/paperclip/db.js";
 import { spsNodeExecutableRuntimeKindSchema } from "../compat/paperclip/shared.js";
 import { normalizeSpsPluginExecutionTimeout } from "./sps-execution-timeout.js";
+import { describeSpsRuntimeConnection, isSpsNodeHeartbeatRecent } from "./sps-runtime-connection.js";
 
-const ONLINE_WINDOW_MS = 2 * 60 * 1000;
 const RUNNER_COMMAND_BY_KIND = {
   claude_cli: "claude",
   codex_cli: "codex",
@@ -25,10 +25,6 @@ const RUNNER_COMMAND_BY_KIND = {
 } as const;
 
 type ExecutableRuntimeKind = keyof typeof RUNNER_COMMAND_BY_KIND;
-
-function isNodeOnline(lastSeenAt: Date | null, now = Date.now()) {
-  return lastSeenAt != null && now - lastSeenAt.getTime() <= ONLINE_WINDOW_MS;
-}
 
 function requiredString(value: string, field: string, maxLength: number) {
   const normalized = value.trim();
@@ -71,7 +67,8 @@ function publicSource(source: typeof spsWorkspaceSources.$inferSelect) {
 function publicRunner(input: {
   node: typeof spsNodes.$inferSelect;
   runner: typeof spsNodeRunnerProfiles.$inferSelect;
-}) {
+}, now = Date.now()) {
+  const connection = describeSpsRuntimeConnection(input.node, now);
   return {
     id: input.runner.id,
     nodeId: input.node.id,
@@ -85,7 +82,8 @@ function publicRunner(input: {
     availabilityDetail: input.runner.availabilityDetail,
     availabilityObservedAt: input.runner.availabilityObservedAt?.toISOString() ?? null,
     retryAfter: input.runner.retryAfter?.toISOString() ?? null,
-    online: isNodeOnline(input.node.lastSeenAt),
+    online: connection.state === "recently_seen",
+    connection,
   };
 }
 
@@ -234,7 +232,7 @@ export function spsPluginExecutionService(db: Db, pluginKey: string) {
       throw new Error("The selected SPS Workspace Source is not active in this company");
     }
     if (input.requireRunnable) {
-      if (!isNodeOnline(node.lastSeenAt)) throw new Error(`SPS Node \"${node.displayName}\" is offline`);
+      if (!isSpsNodeHeartbeatRecent(node.lastSeenAt)) throw new Error(`SPS Node \"${node.displayName}\" is offline or its heartbeat freshness is unknown`);
       if (!runnerCanAcceptRun(runner)) {
         throw new Error(`SPS Node Runner Profile \"${runner.label}\" is not ready to execute`);
       }
@@ -259,12 +257,14 @@ export function spsPluginExecutionService(db: Db, pluginKey: string) {
         .innerJoin(spsNodes, eq(spsNodes.id, spsNodeRunnerProfiles.nodeId))
         .where(and(
           eq(spsNodeRunnerProfiles.companyId, input.companyId),
+          eq(spsNodes.companyId, input.companyId),
           input.nodeId ? eq(spsNodeRunnerProfiles.nodeId, input.nodeId) : undefined,
         ))
         .orderBy(spsNodes.displayName, spsNodeRunnerProfiles.label);
+      const now = Date.now();
       return rows
         .filter(({ runner }) => spsNodeExecutableRuntimeKindSchema.safeParse(runner.kind).success)
-        .map(publicRunner);
+        .map(row => publicRunner(row, now));
     },
 
     async listExecutionGrants(input: { companyId: string; subjectKey?: string | null; includeRevoked?: boolean }) {

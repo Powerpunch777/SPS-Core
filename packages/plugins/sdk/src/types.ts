@@ -567,6 +567,13 @@ export interface PluginSpsWorkspaceSource {
 }
 
 /** Safe Node-local runtime metadata. Provider credentials never leave the Node. */
+export interface PluginSpsRuntimeConnection {
+  executionOwner: "node";
+  authorization: "execution_grant_required";
+  state: "inactive" | "unverified" | "recently_seen" | "offline" | "unknown";
+  observedAt: string | null;
+}
+
 export interface PluginSpsRuntime {
   id: string;
   nodeId: string;
@@ -581,6 +588,8 @@ export interface PluginSpsRuntime {
   availabilityObservedAt: string | null;
   retryAfter: string | null;
   online: boolean;
+  /** Cached Node heartbeat/approval only, not execution authorization or readiness. */
+  connection?: PluginSpsRuntimeConnection;
 }
 
 /** A technical allowance for one plugin-defined subject to use one runtime. */

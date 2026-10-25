@@ -260,6 +260,7 @@ export type {
   PluginLocalFoldersClient,
   PluginSpsWorkspaceSource,
   PluginSpsRuntime,
+  PluginSpsRuntimeConnection,
   PluginSpsExecutionGrant,
   PluginSpsArtifact,
   PluginSpsRun,
