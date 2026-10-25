@@ -53,7 +53,7 @@ overrides:
 
 patchedDependencies:
   '@embedded-postgres/windows-x64@18.1.0-beta.16': 243b29700ff2e4ad70674643bca4ac0a1f109c9b68924aea162dde2754b93d46
-  embedded-postgres@18.1.0-beta.16: 6eef591e9f212af71863a47784cbfe276643164fad7ed93b8f6f81eb291fadc6
+  embedded-postgres@18.1.0-beta.16: c0e3c29f95071a5acc66594982bcb6df3f424f696fa5d101ef6e4669c1062ff9
 
 importers:
 
@@ -133,7 +133,7 @@ importers:
         version: 0.45.2(@electric-sql/pglite@0.3.15)(kysely@0.29.2)(pg@8.18.0)(postgres@3.4.9)(sqlite3@5.1.7)
       embedded-postgres:
         specifier: ^18.1.0-beta.16
-        version: 18.1.0-beta.16(patch_hash=6eef591e9f212af71863a47784cbfe276643164fad7ed93b8f6f81eb291fadc6)
+        version: 18.1.0-beta.16(patch_hash=c0e3c29f95071a5acc66594982bcb6df3f424f696fa5d101ef6e4669c1062ff9)
       picocolors:
         specifier: ^1.1.1
         version: 1.1.1
@@ -374,7 +374,7 @@ importers:
         version: 0.45.2(@electric-sql/pglite@0.3.15)(kysely@0.29.2)(pg@8.18.0)(postgres@3.4.9)(sqlite3@5.1.7)
       embedded-postgres:
         specifier: ^18.1.0-beta.16
-        version: 18.1.0-beta.16(patch_hash=6eef591e9f212af71863a47784cbfe276643164fad7ed93b8f6f81eb291fadc6)
+        version: 18.1.0-beta.16(patch_hash=c0e3c29f95071a5acc66594982bcb6df3f424f696fa5d101ef6e4669c1062ff9)
       postgres:
         specifier: ^3.4.9
         version: 3.4.9
@@ -814,7 +814,7 @@ importers:
         version: 0.45.2(@electric-sql/pglite@0.3.15)(kysely@0.29.2)(pg@8.18.0)(postgres@3.4.9)(sqlite3@5.1.7)
       embedded-postgres:
         specifier: ^18.1.0-beta.16
-        version: 18.1.0-beta.16(patch_hash=6eef591e9f212af71863a47784cbfe276643164fad7ed93b8f6f81eb291fadc6)
+        version: 18.1.0-beta.16(patch_hash=c0e3c29f95071a5acc66594982bcb6df3f424f696fa5d101ef6e4669c1062ff9)
       express:
         specifier: ^5.1.0
         version: 5.2.1
@@ -12265,7 +12265,7 @@ snapshots:
 
   electron-to-chromium@1.5.443: {}
 
-  embedded-postgres@18.1.0-beta.16(patch_hash=6eef591e9f212af71863a47784cbfe276643164fad7ed93b8f6f81eb291fadc6):
+  embedded-postgres@18.1.0-beta.16(patch_hash=c0e3c29f95071a5acc66594982bcb6df3f424f696fa5d101ef6e4669c1062ff9):
     dependencies:
       async-exit-hook: 2.0.1
       pg: 8.18.0

@@ -20,6 +20,11 @@ diff --git a/dist/index.js b/dist/index.js
  // The default configuration options for the class
  const defaults = {
      databaseDir: path.join(process.cwd(), 'data', 'db'),
+@@ -43,3 +43,4 @@ const BIN_PERMISSIONS = 0b101101101;
+ const BIN_PERMISSIONS = 0b101101101;
+ const ensureBinIsExecutable = (filePath) => __awaiter(void 0, void 0, void 0, function* () {
++    if (platform() === 'win32') return;
+     // Only fix the file's mode if it's missing a permission. This is useful
 @@ -84,7 +88,9 @@ class EmbeddedPostgres {
       */
      initialise() {
@@ -31,7 +36,12 @@ diff --git a/dist/index.js b/dist/index.js
              // GUARD: Check that a postgres user is available 
              yield this.checkForRootUser();
              // Optionally retrieve the uid and gid
-@@ -133,7 +139,7 @@ class EmbeddedPostgres {
+@@ -124,2 +131,2 @@ class EmbeddedPostgres {
+-            ensureBinIsExecutable(postgres);
+-            ensureBinIsExecutable(initdb);
++            yield ensureBinIsExecutable(postgres);
++            yield ensureBinIsExecutable(initdb);
+@@ -133,7 +140,7 @@ class EmbeddedPostgres {
                      `--pwfile=${passwordFile}`,
                      `--lc-messages=${LC_MESSAGES_LOCALE}`,
                      ...this.options.initdbFlags,
@@ -40,7 +50,7 @@ diff --git a/dist/index.js b/dist/index.js
                  // Connect to stderr, as that is where the messages get sent
                  (_a = process.stdout) === null || _a === void 0 ? void 0 : _a.on('data', (chunk) => {
                      // Parse the data as a string and log it
-@@ -160,7 +166,8 @@ class EmbeddedPostgres {
+@@ -160,7 +167,8 @@ class EmbeddedPostgres {
       */
      start() {
          return __awaiter(this, void 0, void 0, function* () {
@@ -50,7 +60,10 @@ diff --git a/dist/index.js b/dist/index.js
              // Optionally retrieve the uid and gid
              const permissionIds = yield this.getUidAndGid()
                  .catch(() => {
-@@ -177,7 +184,7 @@ class EmbeddedPostgres {
+@@ -170,1 +178,1 @@ class EmbeddedPostgres {
+-            ensureBinIsExecutable(postgres);
++            yield ensureBinIsExecutable(postgres);
+@@ -177,7 +185,7 @@ class EmbeddedPostgres {
                      '-p',
                      this.options.port.toString(),
                      ...this.options.postgresFlags,
