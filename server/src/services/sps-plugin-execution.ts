@@ -82,7 +82,7 @@ function publicRunner(input: {
     availabilityDetail: input.runner.availabilityDetail,
     availabilityObservedAt: input.runner.availabilityObservedAt?.toISOString() ?? null,
     retryAfter: input.runner.retryAfter?.toISOString() ?? null,
-    online: connection.state === "recently_seen",
+    online: isSpsNodeHeartbeatRecent(input.node.lastSeenAt, now),
     connection,
   };
 }

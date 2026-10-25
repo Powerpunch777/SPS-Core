@@ -44,7 +44,10 @@ than two minutes. Other states are `inactive`, `unverified`, `offline`, and
 `unknown`. `observedAt` is the valid heartbeat timestamp, not a live probe.
 Missing metadata from older Hosts is unknown. This does not certify a CLI login,
 Runner availability, execution grant, model API, Agent session, or OCE backend.
-Existing credential/availability fields remain separate; dispatch still checks
+The existing `online` field retains heartbeat-only liveness, independently of
+approval; it may be true on a recently seen inactive Node. Missing, invalid or
+future heartbeats never count as online. Existing credential/availability fields
+remain separate; dispatch still checks
 its grant and current Node/Runner/Source state. Discovery performs no execution,
 credential read, or remote probe and checks both Node and Runner tenant IDs.
 

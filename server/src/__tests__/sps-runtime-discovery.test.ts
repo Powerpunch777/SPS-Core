@@ -66,22 +66,22 @@ describeDb("SPS safe runtime discovery", () => {
     expect(await service.listRuns({ companyId: workspace.id })).toEqual([]);
   });
 
-  it("projects revoked, unverified, stale and future observations without a false online claim", async () => {
+  it("separates approval from legacy heartbeat liveness for revoked, unverified and stale Nodes", async () => {
     const workspace = await company();
     const cases = [
-      { options: { status: "revoked" }, state: "inactive" },
-      { options: { verified: false }, state: "unverified" },
-      { options: { lastSeenAt: new Date(Date.now() - 180_000) }, state: "offline" },
-      { options: { lastSeenAt: new Date(Date.now() + 60_000) }, state: "unknown" },
-      { options: { lastSeenAt: null }, state: "unknown" },
+      { options: { status: "revoked" }, state: "inactive", online: true },
+      { options: { verified: false }, state: "unverified", online: true },
+      { options: { lastSeenAt: new Date(Date.now() - 180_000) }, state: "offline", online: false },
+      { options: { lastSeenAt: new Date(Date.now() + 60_000) }, state: "unknown", online: false },
+      { options: { lastSeenAt: null }, state: "unknown", online: false },
     ];
-    const expected = new Map<string, string>();
-    for (const item of cases) expected.set((await runtime(workspace.id, item.options)).runner.id, item.state);
+    const expected = new Map<string, { state: string; online: boolean }>();
+    for (const item of cases) expected.set((await runtime(workspace.id, item.options)).runner.id, item);
     const result = await spsPluginExecutionService(db, "sps.discovery-fixture").listRuntimes({ companyId: workspace.id });
     expect(result).toHaveLength(cases.length);
     for (const item of result) {
-      expect(item.online).toBe(false);
-      expect(item.connection.state).toBe(expected.get(item.id));
+      expect(item.online).toBe(expected.get(item.id)!.online);
+      expect(item.connection.state).toBe(expected.get(item.id)!.state);
     }
   });
 

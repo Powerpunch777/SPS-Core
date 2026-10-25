@@ -587,6 +587,7 @@ export interface PluginSpsRuntime {
   availabilityDetail: string | null;
   availabilityObservedAt: string | null;
   retryAfter: string | null;
+  /** Legacy cached heartbeat liveness only, never approval or execution readiness. */
   online: boolean;
   /** Cached Node heartbeat/approval only, not execution authorization or readiness. */
   connection?: PluginSpsRuntimeConnection;
