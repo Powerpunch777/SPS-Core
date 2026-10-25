@@ -73,6 +73,40 @@ The pin is captured per service instance, not checked against a persistent globa
 identity registry. Rotation must retire old instances/listeners; the storage test
 does not prove global rotation or physical device authentication.
 
+Migration `0167_absurd_loki` adds Host-private public enrollment issuance records,
+with one unique cascading row per invitation. The inactive
+`spsNativeEnrollmentService` reuses the pairing transaction and wrong-secret
+budget for two operations, without adding a route, RPC, SDK method or listener:
+
+- `issue` reserves the exact Host/server/issuer pins, verified user, device-key ID
+  and canonical CSR digest, but does not consume the invitation. It calls an
+  injected trusted signer outside the transaction and publishes only the exact
+  reserved row after rechecking the invitation. Main must validate the PKCS#10
+  signature/profile/key binding; no CA private key belongs in this interface.
+  The stored public leaf must match the configured issuer, identity, purpose and
+  requested validity. A committed identical retry returns the same certificate;
+  a different request conflicts. The record stores neither full CSR nor secret.
+- `completeFromTlsPeer` requires a real authorized, non-resumed TLS 1.3 socket,
+  the same verified account and the exact committed certificate fingerprint.
+  It consumes the invitation and creates only `pending` device state plus audit
+  in one transaction, rechecking peer and certificate expiry after async writes.
+  Headers, body certificate fields or a plain socket cannot provide this proof.
+
+Signing concurrency/timeout are explicit constructor limits (per service
+instance); the timeout bounds signing, not an end-to-end database deadline.
+A signer that ignores abort keeps its slot until it settles. Failed
+or interrupted `signing` records do not automatically re-sign on restart; a fresh
+invitation is required. Altered reserved bindings are not overwritten. Issuance
+records are removed before pairings on restore; non-authorizing audit remains.
+There is no automatic retention cleanup yet.
+
+These are internal persistence/transport operations, not authenticated endpoints.
+The current user ID must still come from a real, revalidated SPS session in a
+future dedicated ingress; the DB verified flag alone is insufficient. Desktop
+Main signer IPC, session-to-request binding, issued-credential persistence,
+enrollment UI and Native TLS ingress remain unwired. Current product startup,
+Tailscale, Workspace/Plugin/Node/CLI/Source permissions and public SDK are unchanged.
+
 ### Optional Execution Backends
 
 Keep model requests, process/CLI execution, Agent sessions and privileged Agent

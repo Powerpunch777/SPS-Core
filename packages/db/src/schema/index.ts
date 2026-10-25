@@ -103,6 +103,7 @@ export {
 } from "./sps_nodes.js";
 export { spsMemberDevices, spsMemberDeviceEvents } from "./sps_member_devices.js";
 export { spsNativePairings, spsNativePairingEvents } from "./sps_native_pairings.js";
+export { spsNativeEnrollments } from "./sps_native_enrollments.js";
 export {
   spsWorkspaceSources,
   spsWorkspaceSourceNodeGrants,

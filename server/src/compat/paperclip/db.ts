@@ -30,6 +30,7 @@ export {
   spsMemberDeviceEvents,
   spsNativePairings,
   spsNativePairingEvents,
+  spsNativeEnrollments,
   spsModelConnections,
   spsModelGrants,
   spsModelRuns,

@@ -53,6 +53,7 @@ describe("sanitizePostRestoreDatabaseWithExecutor", () => {
         "sps_node_commands",
         "sps_node_runner_profiles",
         "sps_nodes",
+        "sps_native_enrollments",
         "sps_native_pairings",
         "sps_member_devices",
       ],
@@ -72,14 +73,19 @@ describe("sanitizePostRestoreDatabaseWithExecutor", () => {
     expect(executor.calls.indexOf('DELETE FROM "sps_node_runner_profiles"')).toBeLessThan(
       executor.calls.indexOf('DELETE FROM "sps_nodes"'),
     );
+    expect(executor.calls.indexOf('DELETE FROM "sps_native_enrollments"')).toBeGreaterThanOrEqual(0);
+    expect(executor.calls.indexOf('DELETE FROM "sps_native_enrollments"')).toBeLessThan(
+      executor.calls.indexOf('DELETE FROM "sps_native_pairings"'),
+    );
     expect(executor.calls.indexOf('DELETE FROM "sps_native_pairings"')).toBeLessThan(
       executor.calls.indexOf('DELETE FROM "sps_member_devices"'),
     );
   });
 
-  it("removes restored Member device and pairing trust while retaining non-authorizing events", async () => {
+  it("removes restored enrollment, pairing, and Member device trust while retaining non-authorizing events", async () => {
     const executor = fakeExecutor({
       tables: [
+        "sps_native_enrollments",
         "sps_native_pairings",
         "sps_native_pairing_events",
         "sps_member_devices",
@@ -91,10 +97,16 @@ describe("sanitizePostRestoreDatabaseWithExecutor", () => {
 
     expect(executor.calls).toContain('DELETE FROM "sps_member_devices"');
     expect(executor.calls).toContain('DELETE FROM "sps_native_pairings"');
+    expect(executor.calls).toContain('DELETE FROM "sps_native_enrollments"');
     expect(executor.calls).not.toContain('DELETE FROM "sps_member_device_events"');
     expect(executor.calls).not.toContain('DELETE FROM "sps_native_pairing_events"');
     expect(executor.calls.some((query) => query.includes('"sps_member_device_events"'))).toBe(false);
-    expect(result.scrubbedTables).toEqual({ sps_native_pairings: 1, sps_member_devices: 1 });
+    expect(executor.calls.some((query) => query.includes('"sps_native_pairing_events"'))).toBe(false);
+    expect(result.scrubbedTables).toEqual({
+      sps_native_enrollments: 1,
+      sps_native_pairings: 1,
+      sps_member_devices: 1,
+    });
   });
 
   it("preserves history tables and closes their active rows", async () => {
@@ -198,13 +210,29 @@ describe("sanitizePostRestoreDatabaseWithExecutor", () => {
     expect(executor.calls).not.toContain("COMMIT");
   });
 
+  it("rolls back an enrollment scrub failure before deleting pairing trust or touching audit history", async () => {
+    const executor = fakeExecutor({
+      tables: ["sps_native_enrollments", "sps_native_pairings", "sps_native_pairing_events"],
+      failOn: 'DELETE FROM "sps_native_enrollments"',
+    });
+
+    await expect(run(executor)).rejects.toThrow("sanitizer failure");
+
+    expect(executor.calls.at(-1)).toBe("ROLLBACK");
+    expect(executor.calls).not.toContain("COMMIT");
+    expect(executor.calls).not.toContain('DELETE FROM "sps_native_pairings"');
+    expect(executor.calls.some((query) => query.includes('"sps_native_pairing_events"'))).toBe(false);
+  });
+
   it("is safe to run repeatedly", async () => {
-    const executor = fakeExecutor({ tables: ["session", "heartbeat_runs"] });
+    const executor = fakeExecutor({ tables: ["session", "heartbeat_runs", "sps_native_enrollments", "sps_native_pairings"] });
 
     await run(executor);
     await run(executor);
 
     expect(executor.calls.filter((query) => query === "BEGIN")).toHaveLength(2);
     expect(executor.calls.filter((query) => query === "COMMIT")).toHaveLength(2);
+    expect(executor.calls.filter((query) => query === 'DELETE FROM "sps_native_enrollments"')).toHaveLength(2);
+    expect(executor.calls.filter((query) => query === 'DELETE FROM "sps_native_pairings"')).toHaveLength(2);
   });
 });

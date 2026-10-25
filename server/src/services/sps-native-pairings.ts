@@ -108,7 +108,46 @@ export function spsNativePairingService(
     });
   }
 
+  // Private DB orchestration only; this does not authenticate a network session
+  // or prove TLS possession. No route, Worker RPC or public SDK exposes it.
+  async function withEnrollmentInvitation<T>(
+    input: { pairingId: string; pairingSecret: string; userId: string },
+    operation: (tx: Transaction, row: PairingRow) => Promise<T>,
+  ): Promise<T> {
+    object(input, ["pairingId", "pairingSecret", "userId"]);
+    const pairingId = id(input.pairingId), userId = user(input.userId);
+    if (typeof operation !== "function") fail("invalid_input");
+    try { hashSpsNativePairingSecret(hostId, pairingId, input.pairingSecret); } catch { fail("invalid_input"); }
+    const outcome = await store(() => db.transaction(async tx => {
+      const account = await verifiedUser(tx, userId);
+      const [row] = await tx.select().from(spsNativePairings).where(and(
+        eq(spsNativePairings.hostId, hostId), eq(spsNativePairings.id, pairingId),
+      )).for("update");
+      if (!row || !current(row, now())) fail("pairing_unavailable");
+      if (row.targetEmailSha256 !== null) {
+        let emailHash: string;
+        try { emailHash = hashSpsNativePairingEmail(account.email); } catch { fail("pairing_unavailable"); }
+        if (emailHash !== row.targetEmailSha256) fail("pairing_unavailable");
+      }
+      if (!verifySpsNativePairingSecret(hostId, pairingId, input.pairingSecret, row.secretSha256)) {
+        const failedAttempts = row.failedAttempts + 1, exhausted = failedAttempts >= row.maxAttempts;
+        await tx.update(spsNativePairings).set({ failedAttempts, status: exhausted ? "exhausted" : "pending" })
+          .where(and(eq(spsNativePairings.hostId, hostId), eq(spsNativePairings.id, pairingId)));
+        await event(tx, row, userId, exhausted ? "exhausted" : "secret_rejected");
+        return { ok: false } as const;
+      }
+      const value = await operation(tx, row);
+      // Operations may intentionally consume the row; this snapshot checks only
+      // the captured identity/expiry/attempt window, not the newly stored status.
+      if (!current(row, now())) fail("pairing_unavailable");
+      return { ok: true, value } as const;
+    }));
+    if (!outcome.ok) fail("pairing_unavailable");
+    return outcome.value;
+  }
+
   return {
+    withEnrollmentInvitation,
     async issue(input: { actorUserId: string; target: Target; ttlMs: number }) {
       object(input, ["actorUserId", "target", "ttlMs"]);
       const actorUserId = user(input.actorUserId), ttlMs = integer(input.ttlMs, 1_000, policy.maxTtlMs);
@@ -164,43 +203,23 @@ export function spsNativePairingService(
     },
     async consume(input: { pairingId: string; pairingSecret: string; userId: string; displayName: string; certificate: string }): Promise<SpsMemberDeviceDto> {
       object(input, ["pairingId", "pairingSecret", "userId", "displayName", "certificate"]);
-      const pairingId = id(input.pairingId), userId = user(input.userId);
-      try { hashSpsNativePairingSecret(hostId, pairingId, input.pairingSecret); } catch { fail("invalid_input"); }
-      const outcome = await store(() => db.transaction(async tx => {
-        const account = await verifiedUser(tx, userId);
-        const [row] = await tx.select().from(spsNativePairings).where(and(
-          eq(spsNativePairings.hostId, hostId), eq(spsNativePairings.id, pairingId),
-        )).for("update");
-        if (!row || !current(row, now())) fail("pairing_unavailable");
-        if (row.targetEmailSha256 !== null) {
-          let emailHash: string;
-          try { emailHash = hashSpsNativePairingEmail(account.email); } catch { fail("pairing_unavailable"); }
-          if (emailHash !== row.targetEmailSha256) fail("pairing_unavailable");
-        }
-        if (!verifySpsNativePairingSecret(hostId, pairingId, input.pairingSecret, row.secretSha256)) {
-          const failedAttempts = row.failedAttempts + 1, exhausted = failedAttempts >= row.maxAttempts;
-          await tx.update(spsNativePairings).set({ failedAttempts, status: exhausted ? "exhausted" : "pending" })
-            .where(and(eq(spsNativePairings.hostId, hostId), eq(spsNativePairings.id, pairingId)));
-          await event(tx, row, userId, exhausted ? "exhausted" : "secret_rejected");
-          return { ok: false } as const;
-        }
+      const scope = { pairingId: input.pairingId, pairingSecret: input.pairingSecret, userId: input.userId };
+      return withEnrollmentInvitation(scope, async (tx, row) => {
         const device = await registerPendingSpsMemberDeviceInTransaction(tx, hostId, {
-          userId, displayName: input.displayName, certificate: input.certificate,
+          userId: scope.userId, displayName: input.displayName, certificate: input.certificate,
         });
         const afterRegistration = now();
         if (device.status !== "pending" || !current(row, afterRegistration)
           || Date.parse(device.certificateNotBefore) > afterRegistration.getTime()
           || Date.parse(device.certificateNotAfter) <= afterRegistration.getTime()) fail("pairing_unavailable");
         await tx.update(spsNativePairings).set({
-          status: "consumed", consumedAt: now(), consumedByUserId: userId,
+          status: "consumed", consumedAt: now(), consumedByUserId: scope.userId,
           consumedDeviceId: device.id, consumedDeviceSnapshotId: device.id,
-        }).where(and(eq(spsNativePairings.hostId, hostId), eq(spsNativePairings.id, pairingId)));
-        await event(tx, row, userId, "consumed", device.id);
+        }).where(and(eq(spsNativePairings.hostId, hostId), eq(spsNativePairings.id, row.id)));
+        await event(tx, row, scope.userId, "consumed", device.id);
         if (!current(row, now())) fail("pairing_unavailable");
-        return { ok: true, device } as const;
-      }));
-      if (!outcome.ok) fail("pairing_unavailable");
-      return outcome.device;
+        return device;
+      });
     },
   };
 }
