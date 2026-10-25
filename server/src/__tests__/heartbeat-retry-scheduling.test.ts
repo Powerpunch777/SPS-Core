@@ -56,6 +56,32 @@ async function waitForRunToFinish(
   return await heartbeat.getRun(runId);
 }
 
+async function waitForRunScratchCleanupEvent(
+  db: ReturnType<typeof createDb>,
+  heartbeat: ReturnType<typeof heartbeatService>,
+  runId: string,
+) {
+  const run = await heartbeat.getRun(runId);
+  const contextSnapshot = (run?.contextSnapshot as Record<string, unknown> | null) ?? null;
+  if (!contextSnapshot?.paperclipScratch) return;
+
+  // Terminal status and agent idle can precede the detached execution's final scratch-cleanup event.
+  await expect
+    .poll(
+      async () => {
+        const events = await db
+          .select({ message: heartbeatRunEvents.message })
+          .from(heartbeatRunEvents)
+          .where(eq(heartbeatRunEvents.runId, runId));
+        return events.some(
+          ({ message }) => message === "run scratch cleaned" || message.startsWith("run scratch cleanup "),
+        );
+      },
+      { timeout: 5_000, interval: 50 },
+    )
+    .toBe(true);
+}
+
 describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
   let db!: ReturnType<typeof createDb>;
   let heartbeat!: ReturnType<typeof heartbeatService>;
@@ -98,8 +124,6 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
     await db.delete(issues);
     await db.delete(executionWorkspaces);
     await db.delete(projects);
-    await db.delete(activityLog);
-    await db.delete(heartbeatRunEvents);
     await db.delete(heartbeatRuns);
     await db.delete(agentWakeupRequests);
     await db.delete(agentRuntimeState);
@@ -263,6 +287,8 @@ describeEmbeddedPostgres("heartbeat bounded retry scheduling", () => {
         { timeout: 5_000, interval: 50 },
       )
       .toEqual({ status: "idle", errorReason: null });
+
+    await waitForRunScratchCleanupEvent(db, heartbeat, run!.id);
   });
 
   async function seedMaxTurnFixture(input?: {
