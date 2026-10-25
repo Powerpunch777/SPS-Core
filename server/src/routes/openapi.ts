@@ -634,6 +634,7 @@ const USER_SESSION_SECURITY = [
 ];
 const NATIVE_HOST_OPERATIONS = new Set([
   "GET /api/sps/member-devices",
+  "GET /api/sps/member-devices/status",
   "GET /api/sps/member-devices/{deviceId}/events",
   "POST /api/sps/member-devices/{deviceId}/approve",
   "POST /api/sps/member-devices/{deviceId}/revoke",
@@ -918,7 +919,9 @@ function applyDocumentFixups(document: any): any {
         operation.security = SPS_HOST_SECURITY;
         operation.description = [operation.description, SPS_HOST_AUTH_DESCRIPTION].filter(Boolean).join("\n\n");
       } else if (authLevel === "native_host") {
-        operation.security = USER_SESSION_SECURITY.map(auth => ({
+        const sessions = path === "/api/sps/member-devices/status"
+          ? [{ [SPS_IDENTITY_SESSION_AUTH_SCHEME]: [] }] : USER_SESSION_SECURITY;
+        operation.security = sessions.map(auth => ({
           ...auth, [SPS_DESKTOP_ACCESS_AUTH_SCHEME]: [], [SPS_DESKTOP_HOST_PROOF_AUTH_SCHEME]: [],
         }));
         operation["x-sps-authorization"] = { actor: "user_session", localDesktopHost: true, hostScoped: true };
@@ -6078,7 +6081,17 @@ const memberDeviceEventSchema = z.object({
   deviceSnapshotId: z.string().uuid(), ownerUserId: z.string(), actorUserId: z.string(),
   action: z.enum(["request", "approved", "revoked"]), revision: z.number().int().positive(), createdAt: z.string(),
 }).strict();
-const nativeDeviceDescription = "Optional Native Core management contract, mounted only with a trusted configured nativeConnectivityHostId. No LAN listener, device TLS handshake, Node grant or Plugin SDK method is created by this endpoint. Unknown query/body fields are rejected; raw certificates and private keys are absent from responses.";
+const nativeDeviceDescription = "Optional Native Core management contract. Product startup mounts nativeConnectivityManagement only for the prepared Host identity, owned Main IPC binding and exact current SPS Identity Owner session; nativeConnectivityHostId alone is retained for explicit legacy composition. No LAN listener, device TLS handshake, Node grant or Plugin SDK method is created by this endpoint. Unknown query/body fields are rejected; raw certificates and private keys are absent from responses.";
+registerCurrentRoute({
+  method: "get", path: "/api/sps/member-devices/status", tags: ["sps-member-devices"],
+  summary: "Read the prepared local Native Host binding",
+  description: `${nativeDeviceDescription} Requires both direct-loopback Desktop Host proofs and the startup-bound Owner's real SPS Identity cookie session, with no Authorization header. A Board session is not a substitute. Returns only the public Host ID and server SPKI pin; no Workspace membership is needed. Legacy composition without nativeConnectivityManagement returns 503.`,
+  responses: {
+    200: noStoreResponse(r.ok(z.object({ hostId: z.string().uuid(), serverSpkiSha256: z.string().regex(/^[0-9a-f]{64}$/) }).strict())),
+    400: r.badRequest, 403: r.forbidden,
+    503: { description: "Native Host management is unavailable." },
+  },
+});
 registerCurrentRoute({
   method: "get", path: "/api/sps/member-devices", tags: ["sps-member-devices"],
   summary: "List Host Member devices", description: `${nativeDeviceDescription} Requires a real user session and both direct-loopback Desktop Host proofs. Returns at most 200 records.`,

@@ -274,6 +274,19 @@ describe("openapi routes", () => {
     expect(create.requestBody.content["application/json"].schema.required).toEqual(["displayName", "certificate"]);
     expect(create.responses["201"].content["application/json"].schema.properties).not.toHaveProperty("certificate");
     expect(create.responses["201"].content["application/json"].schema.additionalProperties).toBe(false);
+    const status = spec.paths["/api/sps/member-devices/status"].get;
+    expect(status.security).toEqual([{
+      SpsIdentitySessionAuth: [], SpsDesktopAccessAuth: [], SpsDesktopOwnerBootstrapAuth: [],
+    }]);
+    expect(status["x-sps-authorization"]).toEqual({ actor: "user_session", localDesktopHost: true, hostScoped: true });
+    expect(status.description).toContain("startup-bound Owner's real SPS Identity cookie");
+    expect(status.description).toContain("no Authorization header");
+    const binding = status.responses["200"].content["application/json"].schema;
+    expect(binding.additionalProperties).toBe(false);
+    expect(Object.keys(binding.properties).sort()).toEqual(["hostId", "serverSpkiSha256"]);
+    expect(binding.properties.serverSpkiSha256.pattern).toBe("^[0-9a-f]{64}$");
+    expect(status.responses).toHaveProperty("503");
+    expect(status.responses["200"].headers["Cache-Control"]).toBeDefined();
   });
 
   it("documents execution metadata, model-request lane, and bounded history/summary filters", () => {
