@@ -156,6 +156,9 @@ import {
   remoteSecretImportSchema,
   workspaceFileListQuerySchema,
   workspaceFileResourceQuerySchema,
+  createSpsModelConnectionSchema,
+  updateSpsModelConnectionStatusSchema,
+  grantSpsModelConnectionSchema,
 } from "@paperclipai/shared";
 
 type JsonSchema = Record<string, unknown>;
@@ -313,6 +316,7 @@ function zodToOpenApiSchema(schema: z.ZodTypeAny): JsonSchema {
     }
     const jsonSchema: JsonSchema = { type: "object", properties };
     if (required.length > 0) jsonSchema.required = required;
+    if (unwrapped._def.unknownKeys === "strict") jsonSchema.additionalProperties = false;
     return jsonSchema;
   }
 
@@ -583,11 +587,13 @@ function registerCurrentRoute(input: {
   path: string;
   tags: string[];
   summary: string;
+  description?: string;
+  params?: z.ZodTypeAny;
   query?: z.ZodTypeAny;
   body?: z.ZodTypeAny;
   responses?: Record<string, OpenApiResponse>;
 }) {
-  const params = paramsSchemaFromPath(input.path);
+  const params = input.params ?? paramsSchemaFromPath(input.path);
   const request = params || input.query || input.body
     ? {
         ...(params ? { params } : {}),
@@ -600,6 +606,7 @@ function registerCurrentRoute(input: {
     path: input.path,
     tags: input.tags,
     summary: input.summary,
+    ...(input.description ? { description: input.description } : {}),
     ...(request ? { request } : {}),
     responses: input.responses ?? { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 404: r.notFound },
   });
@@ -609,11 +616,14 @@ type OpenApiAuthLevel =
   | "public"
   | "authenticated"
   | "board"
+  | "sps_host"
   | "instance_admin";
 
 const BOARD_SESSION_AUTH_SCHEME = "BoardSessionAuth";
 const BOARD_API_KEY_AUTH_SCHEME = "BoardApiKeyAuth";
 const AGENT_BEARER_AUTH_SCHEME = "AgentBearerAuth";
+const SPS_DESKTOP_ACCESS_AUTH_SCHEME = "SpsDesktopAccessAuth";
+const SPS_DESKTOP_HOST_PROOF_AUTH_SCHEME = "SpsDesktopOwnerBootstrapAuth";
 
 function securityRequirement(name: string): Record<string, string[]> {
   return { [name]: [] };
@@ -628,6 +638,24 @@ const AUTHENTICATED_SECURITY: Array<Record<string, string[]>> = [
   ...BOARD_SECURITY,
   securityRequirement(AGENT_BEARER_AUTH_SCHEME),
 ];
+
+const SPS_HOST_SECURITY = BOARD_SECURITY.map((authentication) => ({
+  ...authentication,
+  [SPS_DESKTOP_ACCESS_AUTH_SCHEME]: [],
+  [SPS_DESKTOP_HOST_PROOF_AUTH_SCHEME]: [],
+}));
+const SPS_HOST_AUTH_DESCRIPTION = "Host-only Core infrastructure endpoint. In the SPS Core baseline, a Board actor must use direct loopback transport with both per-launch Desktop access and separate owner-bootstrap Host proofs. A Board session or API key alone is not Host authority. Workspace access is checked separately. Existing local_implicit development authority and non-baseline instance-admin compatibility remain unchanged; this is not the Plugin capability API.";
+const SPS_HOST_OPERATIONS = new Set([
+  "GET /api/companies/{companyId}/sps-executions",
+  "GET /api/companies/{companyId}/sps-executions/summary",
+  "GET /api/companies/{companyId}/sps-executions/{lane}/{runId}",
+  "GET /api/companies/{companyId}/sps-model-connections",
+  "POST /api/companies/{companyId}/sps-model-connections",
+  "PATCH /api/companies/{companyId}/sps-model-connections/{connectionId}",
+  "GET /api/companies/{companyId}/sps-model-connections/{connectionId}/grants",
+  "POST /api/companies/{companyId}/sps-model-connections/{connectionId}/grants",
+  "POST /api/companies/{companyId}/sps-model-grants/{grantId}/revoke",
+]);
 
 const PUBLIC_OPERATIONS = new Set([
   "GET /api/health",
@@ -800,6 +828,7 @@ function isBoardOnlyOperation(method: string, path: string) {
 function resolveOperationAuthLevel(method: string, path: string): OpenApiAuthLevel {
   const key = operationKey(method, path);
   if (PUBLIC_OPERATIONS.has(key)) return "public";
+  if (SPS_HOST_OPERATIONS.has(key)) return "sps_host";
   if (INSTANCE_ADMIN_OPERATIONS.has(key)) return "instance_admin";
   if (isBoardOnlyOperation(method, path)) return "board";
   return "authenticated";
@@ -839,6 +868,18 @@ function applyDocumentFixups(document: any): any {
       description:
         "Agent API key or Paperclip-issued local agent JWT presented in the Authorization bearer header.",
     },
+    [SPS_DESKTOP_ACCESS_AUTH_SCHEME]: {
+      type: "apiKey",
+      in: "header",
+      name: "x-sps-desktop-access",
+      description: "Per-launch SPS Desktop local transport proof. This header alone does not grant Core Host authority.",
+    },
+    [SPS_DESKTOP_HOST_PROOF_AUTH_SCHEME]: {
+      type: "apiKey",
+      in: "header",
+      name: "x-sps-desktop-owner-bootstrap",
+      description: "Separate per-launch Core Host proof, checked together with Desktop access on direct loopback transport and an authenticated Board actor. Workspace access remains required.",
+    },
   };
   document.security = AUTHENTICATED_SECURITY;
 
@@ -849,12 +890,17 @@ function applyDocumentFixups(document: any): any {
         operation.security = [];
       } else if (authLevel === "authenticated") {
         operation.security = AUTHENTICATED_SECURITY;
+      } else if (authLevel === "sps_host") {
+        operation.security = SPS_HOST_SECURITY;
+        operation.description = [operation.description, SPS_HOST_AUTH_DESCRIPTION].filter(Boolean).join("\n\n");
       } else {
         operation.security = BOARD_SECURITY;
       }
 
       operation["x-paperclip-authorization"] =
-        authLevel === "instance_admin"
+        authLevel === "sps_host"
+          ? { actor: "board", spsCoreHost: true, workspaceAccess: true }
+          : authLevel === "instance_admin"
           ? { actor: "board", instanceAdmin: true }
           : authLevel === "board"
             ? { actor: "board" }
@@ -5832,6 +5878,157 @@ for (const route of [
     summary: route[2],
   });
 }
+
+const spsWorkspaceParamsSchema = z.object({ companyId: z.string().uuid() });
+const spsExecutionLaneSchema = z.enum(["node", "agent_session", "model_request"]);
+const spsCanonicalTimestampSchema = z.string().datetime().regex(/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/);
+const spsExecutionPluginQuerySchema = z.object({ pluginId: z.string().uuid() }).strict();
+const spsExecutionHistoryQuerySchema = spsExecutionPluginQuerySchema.extend({
+  limit: z.string().regex(/^(?:[1-9]\d?|100)$/).optional(),
+  lane: spsExecutionLaneSchema.optional(),
+  beforeCreatedAt: spsCanonicalTimestampSchema.optional(),
+  beforeRunId: z.string().uuid().optional(),
+  beforeLane: spsExecutionLaneSchema.optional(),
+}).strict();
+const spsExecutionSummaryQuerySchema = spsExecutionPluginQuerySchema.extend({
+  from: spsCanonicalTimestampSchema,
+  to: spsCanonicalTimestampSchema,
+  lane: spsExecutionLaneSchema.optional(),
+  agentId: z.string().uuid().optional(),
+}).strict();
+const spsExecutionCursorSchema = z.object({
+  createdAt: spsCanonicalTimestampSchema,
+  runId: z.string().uuid(),
+  lane: spsExecutionLaneSchema,
+}).strict();
+const spsUsageMetricSchema = z.object({
+  value: z.number().nonnegative().nullable(),
+  provenance: z.enum(["reported", "estimated", "unavailable"]),
+}).strict();
+const spsExecutionMetadataSchema = z.object({
+  lane: spsExecutionLaneSchema,
+  runId: z.string().uuid(),
+  companyId: z.string().uuid(),
+  pluginKey: z.string(),
+  agentId: z.string().uuid().nullable(),
+  sessionId: z.string().uuid().nullable(),
+  subjectKey: z.string().nullable(),
+  runtime: z.object({ kind: z.string().nullable(), model: z.string().nullable(), modelSource: z.enum(["reported", "configured", "unavailable"]) }).strict(),
+  status: z.string(),
+  phase: z.enum(["queued", "active", "stopping", "succeeded", "failed", "cancelled", "interrupted", "unknown"]),
+  cancellationRequested: z.boolean(),
+  termination: z.enum(["not_applicable", "pending", "confirmed"]),
+  failure: z.object({
+    category: z.enum(["authorization", "configuration", "provider_limit", "timeout", "cancelled", "execution", "unknown"]),
+    code: z.string().nullable(),
+    retrySafety: z.literal("requires_review"),
+  }).strict().nullable(),
+  createdAt: z.string().datetime(),
+  startedAt: z.string().datetime().nullable(),
+  finishedAt: z.string().datetime().nullable(),
+  elapsedMs: z.number().int().nonnegative().nullable(),
+  usage: z.object({
+    inputTokens: spsUsageMetricSchema,
+    cachedInputTokens: spsUsageMetricSchema,
+    outputTokens: spsUsageMetricSchema,
+    costUsd: spsUsageMetricSchema,
+    currency: z.literal("USD").nullable(),
+    billingType: z.enum(["metered_api", "subscription_included", "subscription_overage", "credits", "fixed", "unknown"]),
+    costBasis: z.enum(["incremental_api", "subscription_reference", "unknown"]),
+  }).strict(),
+}).strict();
+const spsUsageAggregateSchema = z.object({
+  reported: z.number().nonnegative().nullable(), estimated: z.number().nonnegative().nullable(),
+  reportedExecutions: z.number().int().nonnegative(), estimatedExecutions: z.number().int().nonnegative(),
+  unavailableExecutions: z.number().int().nonnegative(), overflowed: z.boolean(),
+}).strict();
+const spsExecutionSummarySchema = z.object({
+  companyId: z.string().uuid(), pluginKey: z.string(),
+  window: z.object({ from: spsCanonicalTimestampSchema, to: spsCanonicalTimestampSchema }).strict(),
+  generatedAt: z.string().datetime(), executionCount: z.number().int().nonnegative(), terminalCount: z.number().int().nonnegative(),
+  inFlightCount: z.number().int().nonnegative(), unknownPhaseCount: z.number().int().nonnegative(),
+  tokens: z.object({ inputTokens: spsUsageAggregateSchema, cachedInputTokens: spsUsageAggregateSchema, outputTokens: spsUsageAggregateSchema }).strict(),
+  costs: z.object({ currency: z.literal("USD"), incrementalApi: spsUsageAggregateSchema, subscriptionReference: spsUsageAggregateSchema, other: spsUsageAggregateSchema }).strict(),
+  duration: z.object({ totalMs: z.number().int().nonnegative().nullable(), knownExecutions: z.number().int().nonnegative(), unavailableExecutions: z.number().int().nonnegative(), overflowed: z.boolean() }).strict(),
+}).strict();
+const spsModelConnectionRecordSchema = z.object({
+  id: z.string().uuid(), companyId: z.string().uuid(), displayName: z.string(), protocol: z.literal("responses_text_v1"),
+  endpoint: z.string(), model: z.string(), secretId: z.string().uuid().nullable(), versionSelector: z.string(),
+  status: z.enum(["active", "disabled"]), allowLoopbackHttp: z.boolean(),
+  timeoutMs: z.number().int(), maxOutputTokens: z.number().int(), maxRequestBytes: z.number().int(),
+  maxResponseBytes: z.number().int(), maxConcurrentRequests: z.number().int(),
+  createdByUserId: z.string(), createdAt: z.string().datetime(), updatedAt: z.string().datetime(),
+}).strict();
+const spsModelGrantRecordSchema = z.object({
+  id: z.string().uuid(), companyId: z.string().uuid(), pluginId: z.string().uuid(), connectionId: z.string().uuid(),
+  bindingId: z.string().uuid().nullable(), revision: z.number().int().positive(), status: z.enum(["active", "revoked"]),
+  revokedAt: z.string().datetime().nullable(), createdByUserId: z.string(), createdAt: z.string().datetime(), updatedAt: z.string().datetime(),
+}).strict();
+const noStoreResponse = (response: OpenApiResponse): OpenApiResponse => ({
+  ...response,
+  headers: { "Cache-Control": { description: "This response is not cached.", schema: { type: "string", enum: ["no-store"] } } },
+});
+
+registerCurrentRoute({
+  method: "get", path: "/api/companies/{companyId}/sps-executions", tags: ["sps-executions"],
+  summary: "List Plugin execution metadata", params: spsWorkspaceParamsSchema, query: spsExecutionHistoryQuerySchema,
+  description: "The required pluginId is the installed registry UUID, not a Plugin key. Returns safe metadata across node, agent_session and model_request lanes, including disabled Plugin history; no raw input, output, paths or credentials. Newest-first pages default to 20 items (1..100). Supply all three beforeCreatedAt/beforeRunId/beforeLane cursor fields together or omit all three. Unknown query parameters are rejected.",
+  responses: { 200: noStoreResponse(r.ok(z.object({ items: z.array(spsExecutionMetadataSchema), nextCursor: spsExecutionCursorSchema.nullable() }).strict())), 400: r.badRequest, 403: r.forbidden, 404: r.notFound },
+});
+registerCurrentRoute({
+  method: "get", path: "/api/companies/{companyId}/sps-executions/summary", tags: ["sps-executions"],
+  summary: "Summarize Plugin execution usage", params: spsWorkspaceParamsSchema, query: spsExecutionSummaryQuerySchema,
+  description: "The required pluginId is the installed registry UUID. Uses a canonical UTC millisecond createdAt window [from, to), greater than zero and at most 31 days. agentId is invalid with node or model_request lanes. More than 10000 executions returns 422, never partial totals. Usage provenance and billing bases stay separate; this is not a provider invoice. Unknown query parameters are rejected.",
+  responses: { 200: noStoreResponse(r.ok(spsExecutionSummarySchema)), 400: r.badRequest, 403: r.forbidden, 404: r.notFound, 422: r.unprocessable },
+});
+registerCurrentRoute({
+  method: "get", path: "/api/companies/{companyId}/sps-executions/{lane}/{runId}", tags: ["sps-executions"],
+  summary: "Get Plugin execution metadata",
+  params: spsWorkspaceParamsSchema.extend({ lane: spsExecutionLaneSchema, runId: z.string().uuid() }),
+  query: spsExecutionPluginQuerySchema,
+  description: "Reads one Workspace- and registry-Plugin-scoped execution, including the model_request lane. Returns safe technical metadata, not raw model input/output, endpoint configuration or credentials. Only the pluginId query parameter is accepted.",
+  responses: { 200: noStoreResponse(r.ok(spsExecutionMetadataSchema)), 400: r.badRequest, 403: r.forbidden, 404: r.notFound },
+});
+registerCurrentRoute({
+  method: "get", path: "/api/companies/{companyId}/sps-model-connections", tags: ["sps-model-connections"],
+  summary: "List Host model connections", params: spsWorkspaceParamsSchema,
+  description: "Lists at most 100 Host configuration records for this Workspace, including endpoint and Secret references but never credential values. No query parameters are accepted.",
+  responses: { 200: noStoreResponse(r.ok(z.array(spsModelConnectionRecordSchema))), 400: r.badRequest, 403: r.forbidden, 404: r.notFound },
+});
+registerCurrentRoute({
+  method: "post", path: "/api/companies/{companyId}/sps-model-connections", tags: ["sps-model-connections"],
+  summary: "Create an immutable Host model connection", params: spsWorkspaceParamsSchema, body: createSpsModelConnectionSchema,
+  description: "Persists an immutable Host-selected endpoint/model and company-scoped active Secret reference. HTTPS is required except for explicit loopback HTTP opt-in; localhost is pinned to 127.0.0.1. The selected Secret version and combined buffer/concurrency budget are also validated. Does not dispatch a model request. No query parameters are accepted.",
+  responses: { 201: noStoreResponse(r.ok(spsModelConnectionRecordSchema)), 400: r.badRequest, 403: r.forbidden, 422: r.unprocessable },
+});
+registerCurrentRoute({
+  method: "patch", path: "/api/companies/{companyId}/sps-model-connections/{connectionId}", tags: ["sps-model-connections"],
+  summary: "Set model connection status", params: spsWorkspaceParamsSchema.extend({ connectionId: z.string().uuid() }), body: updateSpsModelConnectionStatusSchema,
+  description: "Changes only active/disabled status, not immutable configuration. Disabling revokes grants; re-enabling does not silently reactivate them. No query parameters are accepted.",
+  responses: { 200: noStoreResponse(r.ok(spsModelConnectionRecordSchema)), 400: r.badRequest, 403: r.forbidden, 404: r.notFound },
+});
+registerCurrentRoute({
+  method: "get", path: "/api/companies/{companyId}/sps-model-connections/{connectionId}/grants", tags: ["sps-model-connections"],
+  summary: "List model connection grants", params: spsWorkspaceParamsSchema.extend({ connectionId: z.string().uuid() }),
+  description: "Lists at most 100 Workspace-scoped grant records, including revoked grants. No query parameters are accepted.",
+  responses: { 200: noStoreResponse(r.ok(z.array(spsModelGrantRecordSchema))), 400: r.badRequest, 403: r.forbidden, 404: r.notFound },
+});
+registerCurrentRoute({
+  method: "post", path: "/api/companies/{companyId}/sps-model-connections/{connectionId}/grants", tags: ["sps-model-connections"],
+  summary: "Approve a Plugin instance for a model connection", params: spsWorkspaceParamsSchema.extend({ connectionId: z.string().uuid() }), body: grantSpsModelConnectionSchema,
+  description: "pluginId is the installed registry UUID. Reuses an unchanged active grant; reapproval after revocation increments its revision. Checks current Workspace, Plugin capability/activation/dependencies and Secret availability, and creates the exact Plugin credential binding. No query parameters are accepted.",
+  responses: { 201: noStoreResponse(r.ok(spsModelGrantRecordSchema)), 400: r.badRequest, 403: r.forbidden, 422: r.unprocessable },
+});
+registry.registerPath({
+  method: "post", path: "/api/companies/{companyId}/sps-model-grants/{grantId}/revoke", tags: ["sps-model-connections"],
+  summary: "Revoke a model connection grant",
+  description: "Revokes the Workspace-scoped grant and deletes only its own binding. The body may be omitted or an empty object; fields and query parameters are rejected. This does not prove upstream work terminated.",
+  request: {
+    params: spsWorkspaceParamsSchema.extend({ grantId: z.string().uuid() }),
+    body: { ...jsonBody(z.object({}).strict()), required: false },
+  },
+  responses: { 204: noStoreResponse(r.noContent), 400: r.badRequest, 403: r.forbidden, 404: r.notFound },
+});
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function buildOpenApiDocument(): any {

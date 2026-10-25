@@ -121,12 +121,14 @@ const envKeys = [
   "SPS_BUNDLED_PLUGIN_REFRESH_PATHS",
 ] as const;
 const originalEnv = new Map(envKeys.map((key) => [key, process.env[key]]));
+const bundledPaths = ["workflow", "optional"].map(name => path.resolve("fixture-bundle", name));
+const bundledRefreshPath = path.resolve("fixture-bundle", "refresh");
 
 function setRecoveryEnvironment(mode: string | undefined) {
   if (mode === undefined) delete process.env.SPS_PLUGIN_RECOVERY_MODE;
   else process.env.SPS_PLUGIN_RECOVERY_MODE = mode;
-  process.env.SPS_BUNDLED_PLUGIN_PATHS = ["C:/bundle/workflow", "C:/bundle/optional"].join(path.delimiter);
-  process.env.SPS_BUNDLED_PLUGIN_REFRESH_PATHS = "C:/bundle/refresh";
+  process.env.SPS_BUNDLED_PLUGIN_PATHS = bundledPaths.join(path.delimiter);
+  process.env.SPS_BUNDLED_PLUGIN_REFRESH_PATHS = bundledRefreshPath;
 }
 
 async function createTestApp() {
@@ -219,8 +221,8 @@ describe("createApp plugin recovery startup contract", () => {
     ]));
     expect(mocks.registry.getByKey).toHaveBeenCalledWith("paperclip.kubernetes-sandbox-provider");
     expect(mocks.bundleCalls.map(({ paths, options }) => ({ paths, options }))).toEqual([
-      { paths: ["C:/bundle/workflow", "C:/bundle/optional"], options: undefined },
-      { paths: ["C:/bundle/refresh"], options: { installMissing: false } },
+      { paths: bundledPaths, options: undefined },
+      { paths: [bundledRefreshPath], options: { installMissing: false } },
     ]);
     expect(mocks.bundleCalls.map(({ dependencies }) => dependencies)).toEqual([
       expect.objectContaining({ loader: mocks.loader, lifecycle: mocks.lifecycle, pluginRegistry: mocks.registry }),
