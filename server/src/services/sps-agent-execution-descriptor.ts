@@ -14,12 +14,16 @@ export async function describeSpsAgentExecution(
   if (!agent) throw new Error("Agent not found in this Workspace");
   const [binding] = await db.select({ nodeId: spsAgentNodeBindings.nodeId }).from(spsAgentNodeBindings)
     .where(and(eq(spsAgentNodeBindings.agentId, agent.id), eq(spsAgentNodeBindings.companyId, input.companyId)));
-  const adapterType = /^[a-z][a-z0-9_-]{0,79}$/.test(agent.adapterType) ? agent.adapterType : "unknown";
+  const registered = isAdapterRegistered(agent.adapterType);
+  const safeIdentifier = agent.adapterType.length <= 160 && agent.adapterType.trim().length > 0
+    && !/[\u0000-\u001f\u007f]/.test(agent.adapterType)
+    && !/^(?:[a-z]:[\\/]|[\\/]|[a-z][a-z0-9+.-]*:\/\/)/i.test(agent.adapterType);
+  const adapterType = registered && safeIdentifier ? agent.adapterType : "unknown";
   const state = ["paused", "terminated", "pending_approval"].includes(agent.status) ? "disabled"
     : ["active", "idle", "running", "error"].includes(agent.status) ? "configured" : "unknown";
   const result: PluginAgentExecutionDescriptor = {
     agentId: agent.id, adapterType, state,
-    adapterRegistration: adapterType !== "unknown" && isAdapterRegistered(adapterType) ? "registered" : "unavailable",
+    adapterRegistration: registered ? "registered" : "unavailable",
     executionOwner: binding ? "node" : "adapter", authorization: "recheck_on_dispatch", readiness: "unknown", node: null,
   };
   if (binding) {

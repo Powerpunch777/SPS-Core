@@ -70,6 +70,9 @@ selects only Agent ID/status/adapter identifier and the same-tenant Node binding
 and cached observation. It does not load adapter/runtime config, paths, keys,
 provider identity, prompts or command output. It reports registration separately
 from configured/disabled state and always leaves execution readiness unknown.
+Registration uses the existing adapter registry without imposing a new slug
+grammar on external identifiers. Unknown, excessive, control-character, path or
+URL-like display identifiers are masked; masking never changes registration.
 `executionOwner: "adapter"` means routing is delegated to the existing adapter
 and environment selection, not proof of a Host-local process. A bound Node is
 reported only with same-tenant metadata; an inconsistent foreign Node becomes

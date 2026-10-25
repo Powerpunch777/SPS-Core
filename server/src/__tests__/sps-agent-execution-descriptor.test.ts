@@ -43,9 +43,21 @@ describeDb("safe Agent execution descriptors", () => {
     const workspace = await company(); const entry = await agent(workspace.id, "not_registered", "paused");
     expect(await describeSpsAgentExecution(db, { agentId: entry.id, companyId: workspace.id }, () => false)).toMatchObject({ state: "disabled", adapterRegistration: "unavailable", readiness: "unknown" });
     await db.update(agents).set({ adapterType: "C:/private-token", status: "unexpected" }).where(eq(agents.id, entry.id));
-    const registered = vi.fn(() => true);
+    const registered = vi.fn(() => false);
     expect(await describeSpsAgentExecution(db, { agentId: entry.id, companyId: workspace.id }, registered)).toMatchObject({ adapterType: "unknown", state: "unknown", adapterRegistration: "unavailable" });
-    expect(registered).not.toHaveBeenCalled();
+    expect(registered).toHaveBeenCalledExactlyOnceWith("C:/private-token");
+  });
+  it("keeps external adapter registration authoritative for namespaced and non-slug identifiers", async () => {
+    const workspace = await company();
+    for (const adapterType of ["vendor.adapter", "Vendor Adapter v2", "@vendor/adapter", "C:/private-adapter"]) {
+      const entry = await agent(workspace.id, adapterType);
+      const registered = vi.fn(type => type === adapterType);
+      expect(await describeSpsAgentExecution(db, { agentId: entry.id, companyId: workspace.id }, registered)).toMatchObject({
+        adapterType: adapterType.startsWith("C:") ? "unknown" : adapterType,
+        adapterRegistration: "registered", readiness: "unknown",
+      });
+      expect(registered).toHaveBeenCalledExactlyOnceWith(adapterType);
+    }
   });
   it("uses cached Node approval and heartbeat but never claims an Agent grant or credential is ready", async () => {
     const workspace = await company(); const entry = await agent(workspace.id); const node = await bind(entry.id, workspace.id);
