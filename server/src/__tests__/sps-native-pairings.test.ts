@@ -16,7 +16,7 @@ import {
 } from "./helpers/embedded-postgres.js";
 import { createMemberTlsFixture, type MemberTlsFixture } from "./helpers/member-tls.js";
 import { spsNativePairingService } from "../services/sps-native-pairings.js";
-import { hashSpsNativePairingSecret } from "../services/sps-native-pairing-crypto.js";
+import { createSpsNativePairingSecret, hashSpsNativePairingSecret } from "../services/sps-native-pairing-crypto.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -572,6 +572,36 @@ describeEmbeddedPostgres("SPS native pairing service", () => {
     })).rejects.toMatchObject({ code: "invalid_input", status: 400 });
     expect(() => service(randomUUID(), { maxTtlMs: 0, maxAttempts: 2, maxActiveInvites: 1 }))
       .toThrowError(expect.objectContaining({ code: "invalid_input", status: 400 }));
+  });
+
+  it("checks the current session before a wrong secret can spend an invitation attempt", async () => {
+    await seedUser("session-issuer", "session-issuer@example.test");
+    await seedUser("session-member", "session-member@example.test");
+    const { value } = service();
+    const invitation = await value.issue({ actorUserId: "session-issuer", target: { kind: "any_verified_user" }, ttlMs: 30_000 });
+    let called = false;
+    await expect(value.withEnrollmentInvitation({ pairingId: invitation.pairingId,
+      pairingSecret: createSpsNativePairingSecret(), userId: "session-member" }, async () => { called = true; },
+    async () => { throw new Error("fixture session revoked"); })).rejects.toMatchObject({ code: "state_unavailable" });
+    expect(called).toBe(false);
+    expect((await value.listHost())[0]).toMatchObject({ status: "pending", failedAttempts: 0 });
+    expect(await db.select().from(spsNativePairingEvents)
+      .where(eq(spsNativePairingEvents.action, "secret_rejected"))).toEqual([]);
+  });
+
+  it("rolls back wrong-secret accounting when the final session check expires", async () => {
+    await seedUser("session-final-issuer", "session-final-issuer@example.test");
+    await seedUser("session-final-member", "session-final-member@example.test");
+    const { value } = service();
+    const invitation = await value.issue({ actorUserId: "session-final-issuer", target: { kind: "any_verified_user" }, ttlMs: 30_000 });
+    let checks = 0;
+    await expect(value.withEnrollmentInvitation({ pairingId: invitation.pairingId,
+      pairingSecret: createSpsNativePairingSecret(), userId: "session-final-member" }, async () => {},
+    async () => { if (++checks > 1) throw new Error("fixture session expired"); })).rejects.toMatchObject({ code: "state_unavailable" });
+    expect(checks).toBe(2);
+    expect((await value.listHost())[0]).toMatchObject({ status: "pending", failedAttempts: 0 });
+    expect(await db.select().from(spsNativePairingEvents)
+      .where(eq(spsNativePairingEvents.action, "secret_rejected"))).toEqual([]);
   });
 
   it("rejects pairing and Host UUIDs with trailing LF or CRLF as invalid input", async () => {

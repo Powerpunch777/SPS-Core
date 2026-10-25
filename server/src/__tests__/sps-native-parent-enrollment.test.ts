@@ -117,6 +117,12 @@ describe("SPS Native parent enrollment composition", () => {
       result: { certificate: CERTIFICATE, requestSha256 },
     });
     await expect(signPromise).resolves.toEqual({ certificate: CERTIFICATE, requestSha256 });
+    const authorizeInTransaction = async () => {};
+    await composition.service.issue({} as never, authorizeInTransaction);
+    expect(serviceStub.issue).toHaveBeenCalledWith({}, authorizeInTransaction);
+    const socket = {} as never;
+    await composition.service.completeFromTlsPeer(socket, {} as never, authorizeInTransaction);
+    expect(serviceStub.completeFromTlsPeer).toHaveBeenCalledWith(socket, {}, authorizeInTransaction);
   });
 
   it("disposes the client and fails closed when initial inspection fails", async () => {

@@ -13,7 +13,9 @@ import {
 } from "./sps-member-devices.js";
 
 type PairingRow = typeof spsNativePairings.$inferSelect;
-type Transaction = Parameters<Parameters<Db["transaction"]>[0]>[0];
+export type SpsNativePairingTransaction = Parameters<Parameters<Db["transaction"]>[0]>[0];
+export type SpsNativePairingAuthorizer = (tx: SpsNativePairingTransaction, userId: string) => Promise<void>;
+type Transaction = SpsNativePairingTransaction;
 type Target = { kind: "any_verified_user" } | { kind: "verified_email"; email: string };
 export type SpsNativePairingPolicy = { maxTtlMs: number; maxAttempts: number; maxActiveInvites: number };
 export type SpsNativePairingMetadata = {
@@ -113,12 +115,14 @@ export function spsNativePairingService(
   async function withEnrollmentInvitation<T>(
     input: { pairingId: string; pairingSecret: string; userId: string },
     operation: (tx: Transaction, row: PairingRow) => Promise<T>,
+    authorizeInTransaction: SpsNativePairingAuthorizer = async () => {},
   ): Promise<T> {
     object(input, ["pairingId", "pairingSecret", "userId"]);
     const pairingId = id(input.pairingId), userId = user(input.userId);
-    if (typeof operation !== "function") fail("invalid_input");
+    if (typeof operation !== "function" || typeof authorizeInTransaction !== "function") fail("invalid_input");
     try { hashSpsNativePairingSecret(hostId, pairingId, input.pairingSecret); } catch { fail("invalid_input"); }
     const outcome = await store(() => db.transaction(async tx => {
+      await authorizeInTransaction(tx, userId);
       const account = await verifiedUser(tx, userId);
       const [row] = await tx.select().from(spsNativePairings).where(and(
         eq(spsNativePairings.hostId, hostId), eq(spsNativePairings.id, pairingId),
@@ -134,6 +138,7 @@ export function spsNativePairingService(
         await tx.update(spsNativePairings).set({ failedAttempts, status: exhausted ? "exhausted" : "pending" })
           .where(and(eq(spsNativePairings.hostId, hostId), eq(spsNativePairings.id, pairingId)));
         await event(tx, row, userId, exhausted ? "exhausted" : "secret_rejected");
+        await authorizeInTransaction(tx, userId);
         return { ok: false } as const;
       }
       const value = await operation(tx, row);

@@ -115,6 +115,12 @@ describeDatabase("Native invitation-bound issuance and live mTLS completion", ()
     expect(await value.service.issue(value.input)).toEqual(issued);
     const restarted = spsNativeEnrollmentService(db, value.options, async () => { throw new Error("Must not sign twice"); });
     expect(await restarted.issue(value.input)).toEqual(issued);
+    let authorizationChecks = 0;
+    await expect(restarted.issue(value.input, async () => {
+      authorizationChecks++;
+      if (authorizationChecks === 2) throw new Error("Session expired before replay projection");
+    })).rejects.toMatchObject({ code: "native_enrollment_unavailable" });
+    expect(authorizationChecks).toBe(2);
     expect((await value.pairing.listHost())[0]?.status).toBe("pending");
     expect(await db.select().from(spsMemberDevices)).toEqual([]);
     expect(await db.select().from(companyMemberships)).toEqual([]);
@@ -164,6 +170,50 @@ describeDatabase("Native invitation-bound issuance and live mTLS completion", ()
     await expect(value.service.issue(input)).rejects.toMatchObject({ code: "native_enrollment_unavailable" });
     expect((await value.pairing.listHost())[0]).toMatchObject({ status: "exhausted", failedAttempts: 2 });
     expect(await db.select().from(spsNativeEnrollments)).toEqual([]); expect(value.signCalls()).toBe(0);
+  });
+
+  it("authorizes before wrong-secret budgeting and rejects a malformed transaction guard before database work", async () => {
+    const value = await setup();
+    const wrongSecret = { ...value.input, pairingSecret: randomBytes(32).toString("base64url") };
+    await expect(value.service.issue(wrongSecret, async () => { throw new Error("Session expired"); }))
+      .rejects.toMatchObject({ code: "native_enrollment_unavailable" });
+    await expect(value.service.issue(value.input, {} as never))
+      .rejects.toMatchObject({ code: "native_enrollment_unavailable" });
+
+    expect((await value.pairing.listHost())[0]).toMatchObject({ status: "pending", failedAttempts: 0 });
+    expect(await db.select().from(spsNativeEnrollments)).toEqual([]);
+    expect(value.signCalls()).toBe(0);
+  });
+
+  it("withholds issuance when transaction authorization expires during asynchronous signing", async () => {
+    let release!: () => void;
+    const waiting = new Promise<void>(resolve => { release = resolve; });
+    let started!: () => void;
+    const begun = new Promise<void>(resolve => { started = resolve; });
+    const value = await setup(async input => {
+      started();
+      await waiting;
+      return { certificate: await value.fixture.sign(input), requestSha256: digest(input.requestPem) };
+    });
+    let sessionActive = true;
+    const authorize = async () => { if (!sessionActive) throw new Error("Session expired"); };
+    const issuing = value.service.issue(value.input, authorize);
+    try {
+      await begun;
+      sessionActive = false;
+      release();
+      await expect(issuing).rejects.toMatchObject({ code: "native_enrollment_unavailable" });
+    } finally {
+      release();
+      await issuing.catch(() => {});
+    }
+
+    const [row] = await db.select().from(spsNativeEnrollments);
+    expect(row).toMatchObject({ status: "failed", certificate: null, certificateSha256: null });
+    expect((await value.pairing.listHost())[0]?.status).toBe("pending");
+    expect(await db.select().from(spsMemberDevices)).toEqual([]);
+    expect(await db.select().from(spsNativePairingEvents).where(eq(spsNativePairingEvents.action, "consumed"))).toEqual([]);
+    expect(value.signCalls()).toBe(1);
   });
 
   it("does not re-sign after failure, and a signer failure never consumes the invitation", async () => {
@@ -409,6 +459,80 @@ describeDatabase("Native invitation-bound issuance and live mTLS completion", ()
       release();
       await outcome;
     }
+    const [invitation] = await db.select().from(spsNativePairings).where(eq(spsNativePairings.id, value.invitation.pairingId));
+    expect(invitation).toMatchObject({ status: "pending", consumedAt: null, consumedByUserId: null, consumedDeviceId: null, consumedDeviceSnapshotId: null });
+    expect(await db.select().from(spsMemberDevices)).toEqual([]);
+    expect(await db.select().from(spsMemberDeviceEvents)).toEqual([]);
+    expect(await db.select().from(spsNativePairingEvents).where(eq(spsNativePairingEvents.action, "consumed"))).toEqual([]);
+    expect(await db.select().from(companyMemberships)).toEqual([]);
+  });
+
+  it("rolls back consumed state when transaction authorization expires after the consumed event insert", async () => {
+    const value = await setup();
+    type Transaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let inserted!: () => void;
+    const consumedInserted = new Promise<void>(resolve => { inserted = resolve; });
+    const gatedDb = new Proxy(db, {
+      get(target, property) {
+        if (property !== "transaction") {
+          const member = Reflect.get(target, property, target);
+          return typeof member === "function" ? member.bind(target) : member;
+        }
+        return (operation: (tx: Transaction) => Promise<unknown>) => target.transaction(tx => operation(new Proxy(tx, {
+          get(transaction, key) {
+            if (key !== "insert") {
+              const member = Reflect.get(transaction, key, transaction);
+              return typeof member === "function" ? member.bind(transaction) : member;
+            }
+            return (table: Parameters<Transaction["insert"]>[0]) => {
+              const builder = transaction.insert(table);
+              if (table !== spsNativePairingEvents) return builder;
+              return new Proxy(builder, {
+                get(insert, method) {
+                  if (method !== "values") {
+                    const member = Reflect.get(insert, method, insert);
+                    return typeof member === "function" ? member.bind(insert) : member;
+                  }
+                  return async (event: typeof spsNativePairingEvents.$inferInsert) => {
+                    const result = await insert.values(event);
+                    if (event.action === "consumed") {
+                      inserted();
+                      await gate;
+                    }
+                    return result;
+                  };
+                },
+              });
+            };
+          },
+        })));
+      },
+    });
+    const service = spsNativeEnrollmentService(gatedDb, value.options, async input => ({
+      certificate: await value.fixture.sign(input), requestSha256: digest(input.requestPem),
+    }));
+    const issued = await value.service.issue(value.input);
+    const socket = await peer(value.fixture, new X509Certificate(Buffer.from(issued.certificate, "base64url")).toString());
+    let sessionActive = true;
+    const outcome = service.completeFromTlsPeer(socket, completion(value, issued.enrollmentId), async () => {
+      if (!sessionActive) throw new Error("Session expired");
+    }).then(
+      () => ({ fulfilled: true as const }),
+      (error: unknown) => ({ fulfilled: false as const, error }),
+    );
+    try {
+      await Promise.race([consumedInserted, outcome.then(() => { throw new Error("Completion did not reach the consumed-event gate"); })]);
+      sessionActive = false;
+      release();
+      expect(await outcome).toMatchObject({ fulfilled: false, error: { code: "native_enrollment_unavailable" } });
+      expect(socket.authorized).toBe(true);
+    } finally {
+      release();
+      await outcome;
+    }
+
     const [invitation] = await db.select().from(spsNativePairings).where(eq(spsNativePairings.id, value.invitation.pairingId));
     expect(invitation).toMatchObject({ status: "pending", consumedAt: null, consumedByUserId: null, consumedDeviceId: null, consumedDeviceSnapshotId: null });
     expect(await db.select().from(spsMemberDevices)).toEqual([]);

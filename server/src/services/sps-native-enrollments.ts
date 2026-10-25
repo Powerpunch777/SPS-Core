@@ -2,7 +2,7 @@ import { createHash, X509Certificate } from "node:crypto";
 import { TLSSocket } from "node:tls";
 import { and, eq } from "drizzle-orm";
 import { spsNativeEnrollments, spsNativePairings, spsNativePairingEvents, type Db } from "../compat/paperclip/db.js";
-import { spsNativePairingService, type SpsNativePairingPolicy } from "./sps-native-pairings.js";
+import { spsNativePairingService, type SpsNativePairingAuthorizer, type SpsNativePairingPolicy } from "./sps-native-pairings.js";
 import { registerPendingSpsMemberDeviceInTransaction } from "./sps-member-devices.js";
 
 type EnrollmentRow = typeof spsNativeEnrollments.$inferSelect;
@@ -13,6 +13,8 @@ type SigningRequest = { hostId: string; deviceKeyId: string; requestPem: string;
 // A trusted Main-owned implementation must validate PKCS#10 signature/profile and
 // bind the resulting leaf to this exact request. No CA key crosses this port.
 export type SpsNativeEnrollmentSigner = (input: SigningRequest) => Promise<{ certificate: string; requestSha256: string }>;
+// Private trusted port: bind a revalidated SPS session in the transaction; body userId is not authentication.
+export type SpsNativeEnrollmentAuthorizer = SpsNativePairingAuthorizer;
 type Options = {
   hostId: string; serverSpkiSha256: string; issuerCertificate: string;
   pairingPolicy: SpsNativePairingPolicy; certificateLifetimeMs: number;
@@ -30,6 +32,11 @@ export class SpsNativeEnrollmentError extends Error {
   constructor() { super("This SPS device enrollment is unavailable. Existing credentials were not replaced."); }
 }
 function deny(): never { throw new SpsNativeEnrollmentError(); }
+const NOOP_AUTHORIZER: SpsNativeEnrollmentAuthorizer = async () => {};
+function authorizer(value?: SpsNativeEnrollmentAuthorizer): SpsNativeEnrollmentAuthorizer {
+  if (value !== undefined && typeof value !== "function") deny();
+  return value ?? NOOP_AUTHORIZER;
+}
 function record(value: unknown, keys: readonly string[]): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)
     || ![Object.prototype, null].includes(Object.getPrototypeOf(value))) deny();
@@ -137,8 +144,9 @@ export function spsNativeEnrollmentService(db: Db, options: Options, sign: SpsNa
   }
 
   return {
-    issue(input: IssueInput) {
+    issue(input: IssueInput, authorizeInTransaction?: SpsNativeEnrollmentAuthorizer) {
       return safe(async () => {
+        const authorize = authorizer(authorizeInTransaction);
         assertActive();
         const raw = record(input, ["pairingId", "pairingSecret", "userId", "deviceKeyId", "requestPem"]);
         const scope = admission(raw), deviceKeyId = uuid(raw.deviceKeyId), requestPem = request(raw.requestPem);
@@ -156,18 +164,21 @@ export function spsNativeEnrollmentService(db: Db, options: Options, sign: SpsNa
                 || existing.userId !== scope.userId || existing.deviceKeyId !== deviceKeyId || existing.requestSha256 !== requestSha256
                 || existing.expiresAt.getTime() !== invitation.expiresAt.getTime()
                 || existing.createdAt < invitation.createdAt || existing.createdAt.getTime() > Date.now()) deny();
-              return { row: existing, created: false };
+              await authorize(tx, scope.userId);
+              assertActive();
+              return { row: existing, created: false, result: projection(existing) };
             }
             const [row] = await tx.insert(spsNativeEnrollments).values({
               pairingId: invitation.id, hostId, serverSpkiSha256: serverPin, issuerSpkiSha256: issuerPin,
               userId: scope.userId, deviceKeyId, requestSha256, status: "signing", createdAt: new Date(), expiresAt: invitation.expiresAt,
             }).returning();
             if (!row) deny();
+            await authorize(tx, scope.userId);
             assertActive();
             return { row, created: true };
-          });
+          }, authorize);
           assertActive();
-          if (!reserved.created) return projection(reserved.row);
+          if (!reserved.created) return reserved.result;
           const controller = new AbortController();
           let settled = false, timer: ReturnType<typeof setTimeout> | undefined;
           const notBefore = Math.floor(Date.now() / 1000) * 1000;
@@ -188,8 +199,10 @@ export function spsNativeEnrollmentService(db: Db, options: Options, sign: SpsNa
                 status: "issued", certificate: checked.parsed.raw.toString("base64url"), certificateSha256: checked.sha256, issuedAt: new Date(),
               }).where(reservedBinding(reserved.row)).returning();
               if (!row) deny();
+              await authorize(tx, scope.userId);
+              assertActive();
               return projection(row);
-            });
+            }, authorize);
           } catch {
             // No automatic re-sign after an ambiguous failure/restart. A fresh
             // invitation is required; an uncommitted certificate cannot enroll.
@@ -206,8 +219,9 @@ export function spsNativeEnrollmentService(db: Db, options: Options, sign: SpsNa
         } finally { if (!deferredRelease) active--; }
       });
     },
-    completeFromTlsPeer(socket: TLSSocket, input: CompleteInput) {
+    completeFromTlsPeer(socket: TLSSocket, input: CompleteInput, authorizeInTransaction?: SpsNativeEnrollmentAuthorizer) {
       return safe(async () => {
+        const authorize = authorizer(authorizeInTransaction);
         assertActive();
         const raw = record(input, ["pairingId", "pairingSecret", "userId", "enrollmentId", "displayName"]);
         const scope = admission(raw), enrollmentId = uuid(raw.enrollmentId);
@@ -239,10 +253,12 @@ export function spsNativeEnrollmentService(db: Db, options: Options, sign: SpsNa
             hostId, pairingId: invitation.id, pairingSnapshotId: invitation.id, actorUserId: scope.userId,
             action: "consumed", deviceSnapshotId: device.id, createdAt: new Date(),
           });
+          await authorize(tx, scope.userId);
+          assertActive();
           projection(row);
           if (peer(socket) !== fingerprint) deny();
           return device;
-        });
+        }, authorize);
       });
     },
   };

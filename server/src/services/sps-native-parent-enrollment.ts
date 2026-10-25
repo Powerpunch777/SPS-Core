@@ -114,13 +114,13 @@ export async function createSpsNativeParentEnrollmentService(
       signal: input.signal,
     }), assertActive);
     const service: ReturnType<typeof spsNativeEnrollmentService> = Object.freeze({
-      async issue(input) {
+      async issue(input, authorizeInTransaction) {
         assertActive();
-        return await delegate.issue(input);
+        return await delegate.issue(input, authorizeInTransaction);
       },
-      async completeFromTlsPeer(socket, input) {
+      async completeFromTlsPeer(socket, input, authorizeInTransaction) {
         assertActive();
-        return await delegate.completeFromTlsPeer(socket, input);
+        return await delegate.completeFromTlsPeer(socket, input, authorizeInTransaction);
       },
     });
     return Object.freeze({

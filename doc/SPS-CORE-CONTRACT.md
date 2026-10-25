@@ -114,8 +114,23 @@ session. Startup does not instantiate the enrollment factory automatically.
 These are internal persistence/transport operations, not authenticated endpoints.
 The current user ID must still come from a real, revalidated SPS session in a
 future dedicated ingress; the DB verified flag alone is insufficient.
-Session-to-request binding, issued-credential persistence, enrollment UI and
-Native TLS ingress remain unwired. Current network listeners, Tailscale,
+An inactive session-enrollment adapter now derives the user from the configured
+SPS Identity cookie, never a body or actor substitute. Its private transaction
+authorizer binds exact session ID/digest/user/expiry and verified account, with
+shared row locks and a matching expected user. It runs before invitation attempt
+accounting and before final issuance/replay/completion projections. Local logout
+and the transaction are ordered by those locks; central Google logout propagation
+and validity through the wall-clock instant of COMMIT are not implied.
+
+The adapter requires a real fresh TLS 1.3 IncomingMessage, POST/JSON and no
+browser-origin metadata or Authorization header. This is not proof that an
+arbitrary TLS caller is Desktop Main. It exposes neither a login route nor a
+general API proxy and is not instantiated by product startup. A future dedicated
+ingress must own routing, CSRF, read/time/concurrency limits, client-side server
+pins, session exchange and complete HTTP/file/WebSocket authority coverage.
+
+Product session-to-request activation, issued-credential persistence, enrollment
+UI and Native TLS ingress remain unwired. Current network listeners, Tailscale,
 Workspace/Plugin/Node/CLI/Source permissions and public SDK are unchanged.
 
 ### Optional Execution Backends
