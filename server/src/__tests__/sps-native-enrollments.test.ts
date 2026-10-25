@@ -344,4 +344,76 @@ describeDatabase("Native invitation-bound issuance and live mTLS completion", ()
     expect(await db.select().from(spsNativePairingEvents).where(eq(spsNativePairingEvents.action, "consumed"))).toEqual([]);
     expect(await db.select().from(companyMemberships)).toEqual([]);
   });
+
+  it("rolls back completion when the service becomes inactive after the consumed event insert", async () => {
+    const value = await setup();
+    type Transaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let inserted!: () => void;
+    const consumedInserted = new Promise<void>(resolve => { inserted = resolve; });
+    const gatedDb = new Proxy(db, {
+      get(target, property) {
+        if (property !== "transaction") {
+          const member = Reflect.get(target, property, target);
+          return typeof member === "function" ? member.bind(target) : member;
+        }
+        return (operation: (tx: Transaction) => Promise<unknown>) => target.transaction(tx => operation(new Proxy(tx, {
+          get(transaction, key) {
+            if (key !== "insert") {
+              const member = Reflect.get(transaction, key, transaction);
+              return typeof member === "function" ? member.bind(transaction) : member;
+            }
+            return (table: Parameters<Transaction["insert"]>[0]) => {
+              const builder = transaction.insert(table);
+              if (table !== spsNativePairingEvents) return builder;
+              return new Proxy(builder, {
+                get(insert, method) {
+                  if (method !== "values") {
+                    const member = Reflect.get(insert, method, insert);
+                    return typeof member === "function" ? member.bind(insert) : member;
+                  }
+                  return async (event: typeof spsNativePairingEvents.$inferInsert) => {
+                    const result = await insert.values(event);
+                    if (event.action === "consumed") {
+                      inserted();
+                      await gate;
+                    }
+                    return result;
+                  };
+                },
+              });
+            };
+          },
+        })));
+      },
+    });
+    let active = true;
+    const service = spsNativeEnrollmentService(gatedDb, value.options, async input => ({
+      certificate: await value.fixture.sign(input), requestSha256: digest(input.requestPem),
+    }), () => { if (!active) throw new Error("Service disposed"); });
+    const issued = await service.issue(value.input);
+    const certificate = new X509Certificate(Buffer.from(issued.certificate, "base64url"));
+    const socket = await peer(value.fixture, certificate.toString());
+    const outcome = service.completeFromTlsPeer(socket, completion(value, issued.enrollmentId)).then(
+      () => ({ fulfilled: true as const }),
+      (error: unknown) => ({ fulfilled: false as const, error }),
+    );
+    try {
+      await Promise.race([consumedInserted, outcome.then(() => { throw new Error("Completion did not reach the consumed-event gate"); })]);
+      active = false;
+      release();
+      expect(await outcome).toMatchObject({ fulfilled: false, error: { code: "native_enrollment_unavailable" } });
+      expect(socket.authorized).toBe(true);
+    } finally {
+      release();
+      await outcome;
+    }
+    const [invitation] = await db.select().from(spsNativePairings).where(eq(spsNativePairings.id, value.invitation.pairingId));
+    expect(invitation).toMatchObject({ status: "pending", consumedAt: null, consumedByUserId: null, consumedDeviceId: null, consumedDeviceSnapshotId: null });
+    expect(await db.select().from(spsMemberDevices)).toEqual([]);
+    expect(await db.select().from(spsMemberDeviceEvents)).toEqual([]);
+    expect(await db.select().from(spsNativePairingEvents).where(eq(spsNativePairingEvents.action, "consumed"))).toEqual([]);
+    expect(await db.select().from(companyMemberships)).toEqual([]);
+  });
 });

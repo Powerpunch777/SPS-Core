@@ -73,10 +73,11 @@ function request(value: unknown) {
 
 /** Inactive Host-private orchestration. A verified DB user is NOT a session.
  * The future ingress must authenticate the real SPS session before either call.
- * There is no HTTP/IPC/SDK call site or listener in this increment. */
-export function spsNativeEnrollmentService(db: Db, options: Options, sign: SpsNativeEnrollmentSigner) {
+ * Only explicit internal composition is provided; no authenticated ingress or
+ * SDK route is registered here. The lifecycle guard also fences final writes. */
+export function spsNativeEnrollmentService(db: Db, options: Options, sign: SpsNativeEnrollmentSigner, assertActive: () => void = () => {}) {
   const hostId = uuid(options.hostId);
-  if (!SHA.test(options.serverSpkiSha256) || typeof sign !== "function"
+  if (!SHA.test(options.serverSpkiSha256) || typeof sign !== "function" || typeof assertActive !== "function"
     || !Number.isSafeInteger(options.certificateLifetimeMs) || options.certificateLifetimeMs < 1000
     || options.certificateLifetimeMs > MAX_LIFETIME || options.certificateLifetimeMs % 1000 !== 0
     || !Number.isSafeInteger(options.signingTimeoutMs) || options.signingTimeoutMs < 1000 || options.signingTimeoutMs > 30000
@@ -109,6 +110,7 @@ export function spsNativeEnrollmentService(db: Db, options: Options, sign: SpsNa
     return { parsed, before, after, sha256: digest(parsed.raw) };
   }
   function projection(row: EnrollmentRow) {
+    assertActive();
     if (row.status !== "issued" || !row.certificate || !row.certificateSha256 || row.expiresAt.getTime() <= Date.now()) deny();
     if (leaf(row.certificate, row.deviceKeyId).sha256 !== row.certificateSha256) deny();
     return Object.freeze({ enrollmentId: row.id, certificate: row.certificate, issuerCertificate, expiresAt: row.expiresAt.toISOString() });
@@ -137,6 +139,7 @@ export function spsNativeEnrollmentService(db: Db, options: Options, sign: SpsNa
   return {
     issue(input: IssueInput) {
       return safe(async () => {
+        assertActive();
         const raw = record(input, ["pairingId", "pairingSecret", "userId", "deviceKeyId", "requestPem"]);
         const scope = admission(raw), deviceKeyId = uuid(raw.deviceKeyId), requestPem = request(raw.requestPem);
         const requestSha256 = digest(requestPem);
@@ -146,6 +149,7 @@ export function spsNativeEnrollmentService(db: Db, options: Options, sign: SpsNa
         let deferredRelease = false;
         try {
           const reserved = await pairing.withEnrollmentInvitation(scope, async (tx, invitation) => {
+            assertActive();
             const [existing] = await tx.select().from(spsNativeEnrollments).where(eq(spsNativeEnrollments.pairingId, invitation.id));
             if (existing) {
               if (existing.hostId !== hostId || existing.serverSpkiSha256 !== serverPin || existing.issuerSpkiSha256 !== issuerPin
@@ -159,8 +163,10 @@ export function spsNativeEnrollmentService(db: Db, options: Options, sign: SpsNa
               userId: scope.userId, deviceKeyId, requestSha256, status: "signing", createdAt: new Date(), expiresAt: invitation.expiresAt,
             }).returning();
             if (!row) deny();
+            assertActive();
             return { row, created: true };
           });
+          assertActive();
           if (!reserved.created) return projection(reserved.row);
           const controller = new AbortController();
           let settled = false, timer: ReturnType<typeof setTimeout> | undefined;
@@ -177,6 +183,7 @@ export function spsNativeEnrollmentService(db: Db, options: Options, sign: SpsNa
             const checked = leaf(signed.certificate, deviceKeyId);
             if (checked.before !== notBefore || checked.after !== notAfter) deny();
             return await pairing.withEnrollmentInvitation(scope, async (tx) => {
+              assertActive();
               const [row] = await tx.update(spsNativeEnrollments).set({
                 status: "issued", certificate: checked.parsed.raw.toString("base64url"), certificateSha256: checked.sha256, issuedAt: new Date(),
               }).where(reservedBinding(reserved.row)).returning();
@@ -201,6 +208,7 @@ export function spsNativeEnrollmentService(db: Db, options: Options, sign: SpsNa
     },
     completeFromTlsPeer(socket: TLSSocket, input: CompleteInput) {
       return safe(async () => {
+        assertActive();
         const raw = record(input, ["pairingId", "pairingSecret", "userId", "enrollmentId", "displayName"]);
         const scope = admission(raw), enrollmentId = uuid(raw.enrollmentId);
         if (typeof raw.displayName !== "string") deny();
@@ -208,6 +216,7 @@ export function spsNativeEnrollmentService(db: Db, options: Options, sign: SpsNa
         const fingerprint = peer(socket);
         currentIssuer();
         return pairing.withEnrollmentInvitation(scope, async (tx, invitation) => {
+          assertActive();
           const [row] = await tx.select().from(spsNativeEnrollments).where(and(
             eq(spsNativeEnrollments.id, enrollmentId), eq(spsNativeEnrollments.pairingId, invitation.id),
           ));

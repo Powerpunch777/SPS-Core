@@ -100,12 +100,23 @@ invitation is required. Altered reserved bindings are not overwritten. Issuance
 records are removed before pairings on restore; non-authorizing audit remains.
 There is no automatic retention cleanup yet.
 
+An explicit `createSpsNativeParentEnrollmentService` composition can obtain the
+public Host/issuer identity and request purpose-bound issuance over the direct
+owned Desktop Main-to-Core child IPC channel. No private key, account token,
+filesystem path or general-purpose signature is part of that protocol. The
+client has bounded pending requests, timeout, abort and disconnect handling;
+dispose and channel loss fence new operations and final transactional writes.
+Main independently checks the current local Host session, identity store and
+account/Vault lifecycle generation before and after asynchronous signing. This
+does not make the Core child untrusted-code isolation or establish a Member
+session. Startup does not instantiate the enrollment factory automatically.
+
 These are internal persistence/transport operations, not authenticated endpoints.
 The current user ID must still come from a real, revalidated SPS session in a
-future dedicated ingress; the DB verified flag alone is insufficient. Desktop
-Main signer IPC, session-to-request binding, issued-credential persistence,
-enrollment UI and Native TLS ingress remain unwired. Current product startup,
-Tailscale, Workspace/Plugin/Node/CLI/Source permissions and public SDK are unchanged.
+future dedicated ingress; the DB verified flag alone is insufficient.
+Session-to-request binding, issued-credential persistence, enrollment UI and
+Native TLS ingress remain unwired. Current network listeners, Tailscale,
+Workspace/Plugin/Node/CLI/Source permissions and public SDK are unchanged.
 
 ### Optional Execution Backends
 
