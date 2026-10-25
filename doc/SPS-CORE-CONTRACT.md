@@ -35,6 +35,43 @@ guarantee. The retained internal `secrets.resolve` interface returns a string in
 its type contract, but its current handler fails closed until scoped bindings
 are implemented. Do not enable it as a shortcut for Direct API or OCE work.
 
+Stage 3a adds a **Host-internal foundation**, not that public broker:
+`sps-model-transport` performs one bounded, non-streaming Responses-compatible
+text request at an exact Host-selected endpoint/model, with storage/background/
+tools disabled. HTTPS is required except for an explicit Host opt-in to numeric
+loopback HTTP (HTTP localhost is pinned to 127.0.0.1). It never follows redirects,
+retries a request, infers a price, returns provider metadata/errors, or claims
+that aborting the local request terminated upstream work or billing. The total
+timeout and per-transport-instance concurrency bound include credential resolution. Work
+that ignores abort keeps its slot until it and its cleanup settle, even after
+the caller receives a timeout/cancellation; a permanently pending operation
+keeps the transport busy. Configuration also limits the request/response buffer
+budget multiplied by concurrency to 8 MiB. This is not a strict JavaScript heap
+limit, a distributed limit or proof that cancelled upstream work stopped.
+
+`sps-model-bound-transport` reuses encrypted company Secrets and the existing
+Plugin-instance binding at `sps.models.<connection-uuid>.apiKey`. It checks the
+Workspace, Plugin instance, purpose, exact binding and selected usable version,
+and rechecks deletion/rebinding/latest rotation/version revocation after async
+resolution, using one SQL statement snapshot for each selector/material check.
+The key is passed only inside the Host and in the selected provider's Bearer
+header, never returned to a Plugin or renderer. The result
+projects only text/refusal, technical completion and validated reported tokens.
+Missing usage is unknown, not zero. Exact credential echoes in projected text
+are rejected; this is not protection against an approved malicious provider
+transforming or disclosing credentials, nor JS memory-zeroization evidence.
+
+No route, RPC, SDK method, capability grant, durable model connection/run,
+management UI or Host-support operation is enabled by these primitives.
+A binding alone is **not execution authority**. A future public broker must bind
+the authenticated invocation to current Workspace activation/capabilities and a
+Host-approved durable endpoint/model/credential grant, add run/idempotency/
+recovery/usage integration and recheck revocation on dispatch/result delivery.
+The final read-to-dispatch interval and already-dispatched provider work are not
+made atomic by the current post-resolution check. Only fake credentials and
+local mock endpoints qualify this foundation; no real provider support or
+production isolation certification is implied.
+
 The existing `sps.runtimes.list` projection may include an optional `connection`
 for approved CLI Runner profiles. Its `executionOwner: "node"` and
 `authorization: "execution_grant_required"` describe technical ownership, not

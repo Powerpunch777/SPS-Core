@@ -1,6 +1,9 @@
 export type { Db } from "@paperclipai/db";
 export {
   companies,
+  companySecretBindings,
+  companySecrets,
+  companySecretVersions,
   plugins,
   agents,
   agentTaskSessions,
