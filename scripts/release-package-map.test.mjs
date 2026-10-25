@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
@@ -6,6 +7,7 @@ import {
   checkConfiguration,
   findUnpublishableWorkspaceEdges,
   getReleasePackages,
+  loadReleaseManifest,
   normalizePackageDir,
   replaceWorkspaceDeps,
 } from "./release-package-map.mjs";
@@ -35,6 +37,35 @@ test("release package list only contains CI-enrolled packages", () => {
   const enabledPackages = getReleasePackages();
   assert.ok(enabledPackages.length > 0);
   assert.ok(enabledPackages.every((pkg) => pkg.publishFromCi === true));
+});
+
+test("private SPS MCP runtime stays buildable but outside the public release graph", () => {
+  const mcpServer = JSON.parse(
+    readFileSync(new URL("../packages/mcp-server/package.json", import.meta.url), "utf8"),
+  );
+  const plan = buildReleasePackagePlan();
+  const manifest = loadReleaseManifest();
+  const expectedBins = {
+    "sps-mcp-server": "./dist/stdio.js",
+    "sps-marketplace-assistant-mcp": "./dist/marketplace-assistant-stdio.js",
+  };
+
+  assert.equal(mcpServer.private, true);
+  assert.equal(mcpServer.publishConfig.access, undefined);
+  assert.equal(manifest.some((entry) => entry.name === "@sps/mcp-server"), false);
+  assert.equal(plan.some((pkg) => pkg.name === "@sps/mcp-server"), false);
+  assert.equal(plan.find((pkg) => pkg.dir === "server")?.publishFromCi, false);
+  assert.equal(plan.find((pkg) => pkg.dir === "cli")?.publishFromCi, false);
+  assert.equal(mcpServer.scripts.build, "tsc");
+  assert.deepEqual(mcpServer.bin, expectedBins);
+  assert.deepEqual(mcpServer.publishConfig.bin, expectedBins);
+  assert.equal(mcpServer.publishConfig.main, "./dist/index.js");
+  assert.equal(mcpServer.publishConfig.types, "./dist/index.d.ts");
+  assert.deepEqual(mcpServer.publishConfig.exports["."], {
+    types: "./dist/index.d.ts",
+    import: "./dist/index.js",
+  });
+  assert.ok(mcpServer.files.includes("dist"));
 });
 
 test("Hermes release surface publishes the unified built-in package and keeps gateway as a shim", () => {

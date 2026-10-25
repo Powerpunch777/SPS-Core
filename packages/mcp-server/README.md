@@ -20,11 +20,8 @@ The matching `PAPERCLIP_*` variables remain accepted as a temporary compatibilit
 
 ## Usage
 
-```sh
-npx -y @sps/mcp-server
-```
-
-Or locally in this repo:
+This package is an internal SPS Core component and is not published to npm.
+To build and run it from this repository:
 
 ```sh
 pnpm --filter @sps/mcp-server build

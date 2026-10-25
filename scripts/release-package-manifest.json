@@ -92,17 +92,12 @@
   {
     "dir": "server",
     "name": "@paperclipai/server",
-    "publishFromCi": true
+    "publishFromCi": false
   },
   {
     "dir": "cli",
     "name": "paperclipai",
-    "publishFromCi": true
-  },
-  {
-    "dir": "packages/mcp-server",
-    "name": "@sps/mcp-server",
-    "publishFromCi": true
+    "publishFromCi": false
   },
   {
     "dir": "packages/plugins/plugin-mcp-connector",
