@@ -54,6 +54,7 @@ overrides:
 patchedDependencies:
   '@embedded-postgres/windows-x64@18.1.0-beta.16': 243b29700ff2e4ad70674643bca4ac0a1f109c9b68924aea162dde2754b93d46
   embedded-postgres@18.1.0-beta.16: c0e3c29f95071a5acc66594982bcb6df3f424f696fa5d101ef6e4669c1062ff9
+  zod@3.25.76: 98ab5563b76cf600adedfa38d3d1eb4619c837b7eec2f16d1f3f16c0560afa9f
 
 importers:
 
@@ -145,7 +146,7 @@ importers:
         version: 4.22.4
       zod:
         specifier: ^3.24.2
-        version: 3.25.76
+        version: 3.25.76(patch_hash=98ab5563b76cf600adedfa38d3d1eb4619c837b7eec2f16d1f3f16c0560afa9f)
     devDependencies:
       '@types/node':
         specifier: ^22.19.21
@@ -399,13 +400,13 @@ importers:
     dependencies:
       '@modelcontextprotocol/sdk':
         specifier: 1.32.0
-        version: 1.32.0(zod@3.25.76)
+        version: 1.32.0(zod@3.25.76(patch_hash=98ab5563b76cf600adedfa38d3d1eb4619c837b7eec2f16d1f3f16c0560afa9f))
       '@paperclipai/shared':
         specifier: workspace:*
         version: link:../shared
       zod:
         specifier: ^3.24.2
-        version: 3.25.76
+        version: 3.25.76(patch_hash=98ab5563b76cf600adedfa38d3d1eb4619c837b7eec2f16d1f3f16c0560afa9f)
     devDependencies:
       '@types/node':
         specifier: ^22.19.21
@@ -632,13 +633,13 @@ importers:
     dependencies:
       '@modelcontextprotocol/sdk':
         specifier: 1.32.0
-        version: 1.32.0(zod@3.25.76)
+        version: 1.32.0(zod@3.25.76(patch_hash=98ab5563b76cf600adedfa38d3d1eb4619c837b7eec2f16d1f3f16c0560afa9f))
       '@paperclipai/plugin-sdk':
         specifier: workspace:*
         version: link:../sdk
       zod:
         specifier: ^3.24.2
-        version: 3.25.76
+        version: 3.25.76(patch_hash=98ab5563b76cf600adedfa38d3d1eb4619c837b7eec2f16d1f3f16c0560afa9f)
     devDependencies:
       '@types/node':
         specifier: ^22.19.21
@@ -694,7 +695,7 @@ importers:
         version: 19.2.7
       zod:
         specifier: ^3.24.2
-        version: 3.25.76
+        version: 3.25.76(patch_hash=98ab5563b76cf600adedfa38d3d1eb4619c837b7eec2f16d1f3f16c0560afa9f)
     devDependencies:
       '@types/node':
         specifier: ^22.19.21
@@ -710,7 +711,7 @@ importers:
     dependencies:
       zod:
         specifier: ^3.24.2
-        version: 3.25.76
+        version: 3.25.76(patch_hash=98ab5563b76cf600adedfa38d3d1eb4619c837b7eec2f16d1f3f16c0560afa9f)
     devDependencies:
       '@types/node':
         specifier: ^22.19.21
@@ -847,7 +848,7 @@ importers:
         version: 8.21.0
       zod:
         specifier: ^3.24.2
-        version: 3.25.76
+        version: 3.25.76(patch_hash=98ab5563b76cf600adedfa38d3d1eb4619c837b7eec2f16d1f3f16c0560afa9f)
     devDependencies:
       '@types/express':
         specifier: ^5.0.0
@@ -8703,7 +8704,7 @@ snapshots:
       '@connectrpc/connect': 1.7.0(@bufbuild/protobuf@1.10.0)
       '@connectrpc/connect-web': 1.7.0(@bufbuild/protobuf@1.10.0)(@connectrpc/connect@1.7.0(@bufbuild/protobuf@1.10.0))
       '@statsig/js-client': 3.31.0
-      zod: 3.25.76
+      zod: 3.25.76(patch_hash=98ab5563b76cf600adedfa38d3d1eb4619c837b7eec2f16d1f3f16c0560afa9f)
     optionalDependencies:
       '@cursor/sdk-darwin-arm64': 1.0.19
       '@cursor/sdk-darwin-x64': 1.0.19
@@ -9478,7 +9479,7 @@ snapshots:
     dependencies:
       '@chevrotain/types': 11.1.2
 
-  '@modelcontextprotocol/sdk@1.32.0(zod@3.25.76)':
+  '@modelcontextprotocol/sdk@1.32.0(zod@3.25.76(patch_hash=98ab5563b76cf600adedfa38d3d1eb4619c837b7eec2f16d1f3f16c0560afa9f))':
     dependencies:
       '@hono/node-server': 1.19.15(hono@4.13.11)
       ajv: 8.20.0
@@ -9495,8 +9496,8 @@ snapshots:
       json-schema-typed: 8.0.2
       pkce-challenge: 5.0.1
       raw-body: 3.0.2
-      zod: 3.25.76
-      zod-to-json-schema: 3.25.2(zod@3.25.76)
+      zod: 3.25.76(patch_hash=98ab5563b76cf600adedfa38d3d1eb4619c837b7eec2f16d1f3f16c0560afa9f)
+      zod-to-json-schema: 3.25.2(zod@3.25.76(patch_hash=98ab5563b76cf600adedfa38d3d1eb4619c837b7eec2f16d1f3f16c0560afa9f))
     transitivePeerDependencies:
       - supports-color
 
@@ -15233,15 +15234,15 @@ snapshots:
     dependencies:
       lib0: 0.2.117
 
-  zod-to-json-schema@3.25.2(zod@3.25.76):
+  zod-to-json-schema@3.25.2(zod@3.25.76(patch_hash=98ab5563b76cf600adedfa38d3d1eb4619c837b7eec2f16d1f3f16c0560afa9f)):
     dependencies:
-      zod: 3.25.76
+      zod: 3.25.76(patch_hash=98ab5563b76cf600adedfa38d3d1eb4619c837b7eec2f16d1f3f16c0560afa9f)
 
   zod-to-json-schema@3.25.2(zod@4.6.6):
     dependencies:
       zod: 4.6.6
 
-  zod@3.25.76: {}
+  zod@3.25.76(patch_hash=98ab5563b76cf600adedfa38d3d1eb4619c837b7eec2f16d1f3f16c0560afa9f): {}
 
   zod@4.6.6: {}
 

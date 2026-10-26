@@ -1,0 +1,242 @@
+diff --git a/v3/helpers/parseUtil.cjs b/v3/helpers/parseUtil.cjs
+index 36cf2d83395453921f034956b9e2b8c66aba92c4..cb5443570a59bf47191a2e467cf946dc972e1497 100644
+--- a/v3/helpers/parseUtil.cjs
++++ b/v3/helpers/parseUtil.cjs
+@@ -37,7 +37,20 @@ const makeIssue = (params) => {
+ };
+ exports.makeIssue = makeIssue;
+ exports.EMPTY_PATH = [];
++const MAX_RETAINED_ISSUES = 100;
+ function addIssueToContext(ctx, issueData) {
++    const budget = ctx.common.issueBudget;
++    if (!budget) throw new Error("Missing Zod v3 issue budget.");
++    const issueLimit = budget.limit ?? MAX_RETAINED_ISSUES;
++    if (budget.count >= issueLimit - 1) {
++        if (!budget.truncated) {
++            budget.truncated = true;
++            budget.count++;
++            budget.rootIssues.push({ code: "custom", path: [], message: "Too many validation issues; additional issues omitted." });
++        }
++        return;
++    }
++    budget.count++;
+     const overrideMap = (0, errors_js_1.getErrorMap)();
+     const issue = (0, exports.makeIssue)({
+         issueData: issueData,
+diff --git a/v3/helpers/parseUtil.js b/v3/helpers/parseUtil.js
+index 91b2afb81b4358fb84d637bc963a868517c6a516..106b6b57d9ccb97b717ad6eb9ff2f36b77063260 100644
+--- a/v3/helpers/parseUtil.js
++++ b/v3/helpers/parseUtil.js
+@@ -29,7 +29,20 @@ export const makeIssue = (params) => {
+     };
+ };
+ export const EMPTY_PATH = [];
++const MAX_RETAINED_ISSUES = 100;
+ export function addIssueToContext(ctx, issueData) {
++  const budget = ctx.common.issueBudget;
++  if (!budget) throw new Error("Missing Zod v3 issue budget.");
++  const issueLimit = budget.limit ?? MAX_RETAINED_ISSUES;
++    if (budget.count >= issueLimit - 1) {
++    if (!budget.truncated) {
++      budget.truncated = true;
++      budget.count++;
++      budget.rootIssues.push({ code: "custom", path: [], message: "Too many validation issues; additional issues omitted." });
++    }
++    return;
++  }
++  budget.count++;
+     const overrideMap = getErrorMap();
+     const issue = makeIssue({
+         issueData: issueData,
+diff --git a/v3/types.cjs b/v3/types.cjs
+index 11ed4dfc4745f9af1f1501874576b78b77d294ef..e3b83af832be64bdd4ea7315802ccc8a4ddad853 100644
+--- a/v3/types.cjs
++++ b/v3/types.cjs
+@@ -9,6 +9,7 @@ const errors_js_1 = require("./errors.cjs");
+ const errorUtil_js_1 = require("./helpers/errorUtil.cjs");
+ const parseUtil_js_1 = require("./helpers/parseUtil.cjs");
+ const util_js_1 = require("./helpers/util.cjs");
++const issueBudgetParam = Symbol("zod.issueBudget");
+ class ParseInputLazyPath {
+     constructor(parent, value, path, key) {
+         this._cachedPath = [];
+@@ -123,6 +124,7 @@ class ZodType {
+         const ctx = {
+             common: {
+                 issues: [],
++                issueBudget: params?.[issueBudgetParam] ?? { count: 0, truncated: false, rootIssues: null },
+                 async: params?.async ?? false,
+                 contextualErrorMap: params?.errorMap,
+             },
+@@ -132,6 +134,7 @@ class ZodType {
+             data,
+             parsedType: (0, util_js_1.getParsedType)(data),
+         };
++        ctx.common.issueBudget.rootIssues = ctx.common.issues;
+         const result = this._parseSync({ data, path: ctx.path, parent: ctx });
+         return handleResult(ctx, result);
+     }
+@@ -139,6 +142,7 @@ class ZodType {
+         const ctx = {
+             common: {
+                 issues: [],
++                issueBudget: { count: 0, truncated: false, rootIssues: null },
+                 async: !!this["~standard"].async,
+             },
+             path: [],
+@@ -147,6 +151,7 @@ class ZodType {
+             data,
+             parsedType: (0, util_js_1.getParsedType)(data),
+         };
++        ctx.common.issueBudget.rootIssues = ctx.common.issues;
+         if (!this["~standard"].async) {
+             try {
+                 const result = this._parseSync({ data, path: [], parent: ctx });
+@@ -164,8 +169,10 @@ class ZodType {
+                 }
+                 ctx.common = {
+                     issues: [],
++                    issueBudget: { count: 0, truncated: false, rootIssues: null },
+                     async: true,
+                 };
++                ctx.common.issueBudget.rootIssues = ctx.common.issues;
+             }
+         }
+         return this._parseAsync({ data, path: [], parent: ctx }).then((result) => (0, parseUtil_js_1.isValid)(result)
+@@ -186,6 +193,7 @@ class ZodType {
+         const ctx = {
+             common: {
+                 issues: [],
++                issueBudget: params?.[issueBudgetParam] ?? { count: 0, truncated: false, rootIssues: null },
+                 contextualErrorMap: params?.errorMap,
+                 async: true,
+             },
+@@ -195,6 +203,7 @@ class ZodType {
+             data,
+             parsedType: (0, util_js_1.getParsedType)(data),
+         };
++        ctx.common.issueBudget.rootIssues = ctx.common.issues;
+         const maybeAsyncResult = this._parse({ data, path: ctx.path, parent: ctx });
+         const result = await ((0, parseUtil_js_1.isAsync)(maybeAsyncResult) ? maybeAsyncResult : Promise.resolve(maybeAsyncResult));
+         return handleResult(ctx, result);
+@@ -2932,7 +2941,7 @@ class ZodFunction extends ZodType {
+                 },
+             });
+         }
+-        const params = { errorMap: ctx.common.contextualErrorMap };
++        const createParams = () => ({ errorMap: ctx.common.contextualErrorMap, [issueBudgetParam]: { count: 0, truncated: false, rootIssues: null, limit: 99 } });
+         const fn = ctx.data;
+         if (this._def.returns instanceof ZodPromise) {
+             // Would love a way to avoid disabling this rule, but we need
+@@ -2940,6 +2949,7 @@ class ZodFunction extends ZodType {
+             // eslint-disable-next-line @typescript-eslint/no-this-alias
+             const me = this;
+             return (0, parseUtil_js_1.OK)(async function (...args) {
++                const params = createParams();
+                 const error = new ZodError_js_1.ZodError([]);
+                 const parsedArgs = await me._def.args.parseAsync(args, params).catch((e) => {
+                     error.addIssue(makeArgsIssue(args, e));
+@@ -2961,6 +2971,7 @@ class ZodFunction extends ZodType {
+             // eslint-disable-next-line @typescript-eslint/no-this-alias
+             const me = this;
+             return (0, parseUtil_js_1.OK)(function (...args) {
++                const params = createParams();
+                 const parsedArgs = me._def.args.safeParse(args, params);
+                 if (!parsedArgs.success) {
+                     throw new ZodError_js_1.ZodError([makeArgsIssue(args, parsedArgs.error)]);
+diff --git a/v3/types.js b/v3/types.js
+index 40b11c0f01b2af54e0ed48e198607bd8836d9a63..f57cad6ec3d272f97c9b7109bc58a525c63983af 100644
+--- a/v3/types.js
++++ b/v3/types.js
+@@ -3,6 +3,7 @@ import { defaultErrorMap, getErrorMap } from "./errors.js";
+ import { errorUtil } from "./helpers/errorUtil.js";
+ import { DIRTY, INVALID, OK, ParseStatus, addIssueToContext, isAborted, isAsync, isDirty, isValid, makeIssue, } from "./helpers/parseUtil.js";
+ import { util, ZodParsedType, getParsedType } from "./helpers/util.js";
++const issueBudgetParam = Symbol("zod.issueBudget");
+ class ParseInputLazyPath {
+     constructor(parent, value, path, key) {
+         this._cachedPath = [];
+@@ -117,6 +118,7 @@ export class ZodType {
+         const ctx = {
+             common: {
+                 issues: [],
++                issueBudget: params?.[issueBudgetParam] ?? { count: 0, truncated: false, rootIssues: null },
+                 async: params?.async ?? false,
+                 contextualErrorMap: params?.errorMap,
+             },
+@@ -126,6 +128,7 @@ export class ZodType {
+             data,
+             parsedType: getParsedType(data),
+         };
++        ctx.common.issueBudget.rootIssues = ctx.common.issues;
+         const result = this._parseSync({ data, path: ctx.path, parent: ctx });
+         return handleResult(ctx, result);
+     }
+@@ -133,6 +136,7 @@ export class ZodType {
+         const ctx = {
+             common: {
+                 issues: [],
++                issueBudget: { count: 0, truncated: false, rootIssues: null },
+                 async: !!this["~standard"].async,
+             },
+             path: [],
+@@ -141,6 +145,7 @@ export class ZodType {
+             data,
+             parsedType: getParsedType(data),
+         };
++        ctx.common.issueBudget.rootIssues = ctx.common.issues;
+         if (!this["~standard"].async) {
+             try {
+                 const result = this._parseSync({ data, path: [], parent: ctx });
+@@ -158,8 +163,10 @@ export class ZodType {
+                 }
+                 ctx.common = {
+                     issues: [],
++                    issueBudget: { count: 0, truncated: false, rootIssues: null },
+                     async: true,
+                 };
++                ctx.common.issueBudget.rootIssues = ctx.common.issues;
+             }
+         }
+         return this._parseAsync({ data, path: [], parent: ctx }).then((result) => isValid(result)
+@@ -180,6 +187,7 @@ export class ZodType {
+         const ctx = {
+             common: {
+                 issues: [],
++                issueBudget: params?.[issueBudgetParam] ?? { count: 0, truncated: false, rootIssues: null },
+                 contextualErrorMap: params?.errorMap,
+                 async: true,
+             },
+@@ -189,6 +197,7 @@ export class ZodType {
+             data,
+             parsedType: getParsedType(data),
+         };
++        ctx.common.issueBudget.rootIssues = ctx.common.issues;
+         const maybeAsyncResult = this._parse({ data, path: ctx.path, parent: ctx });
+         const result = await (isAsync(maybeAsyncResult) ? maybeAsyncResult : Promise.resolve(maybeAsyncResult));
+         return handleResult(ctx, result);
+@@ -2902,7 +2911,7 @@ export class ZodFunction extends ZodType {
+                 },
+             });
+         }
+-        const params = { errorMap: ctx.common.contextualErrorMap };
++        const createParams = () => ({ errorMap: ctx.common.contextualErrorMap, [issueBudgetParam]: { count: 0, truncated: false, rootIssues: null, limit: 99 } });
+         const fn = ctx.data;
+         if (this._def.returns instanceof ZodPromise) {
+             // Would love a way to avoid disabling this rule, but we need
+@@ -2910,6 +2919,7 @@ export class ZodFunction extends ZodType {
+             // eslint-disable-next-line @typescript-eslint/no-this-alias
+             const me = this;
+             return OK(async function (...args) {
++                const params = createParams();
+                 const error = new ZodError([]);
+                 const parsedArgs = await me._def.args.parseAsync(args, params).catch((e) => {
+                     error.addIssue(makeArgsIssue(args, e));
+@@ -2931,6 +2941,7 @@ export class ZodFunction extends ZodType {
+             // eslint-disable-next-line @typescript-eslint/no-this-alias
+             const me = this;
+             return OK(function (...args) {
++                const params = createParams();
+                 const parsedArgs = me._def.args.safeParse(args, params);
+                 if (!parsedArgs.success) {
+                     throw new ZodError([makeArgsIssue(args, parsedArgs.error)]);
