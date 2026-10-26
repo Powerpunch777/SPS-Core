@@ -36,7 +36,7 @@ import { attachSpsOwnedShutdown } from "./services/sps-owned-shutdown.js";
 import { createSpsNativeHostManagement, type SpsNativeHostManagement } from "./services/sps-native-host-management.js";
 import { createSpsNativeParentEnrollmentService, type SpsNativeParentEnrollment } from "./services/sps-native-parent-enrollment.js";
 import { createSpsNativeParentIngress } from "./services/sps-native-parent-ingress.js";
-import { createSpsNativeWorkspaceChannel } from "./services/sps-native-workspace-channel.js";
+import type { createSpsNativeWorkspaceChannel as CreateSpsNativeWorkspaceChannel } from "./services/sps-native-workspace-channel.js";
 import { loadConfig } from "./config.js";
 import { logger } from "./middleware/logger.js";
 import { setupEnvironmentCustomImageTerminalWebSocketServer } from "./realtime/environment-custom-image-terminal-ws.js";
@@ -545,7 +545,7 @@ export async function startServer(): Promise<StartedServer> {
   let nativeConnectivityManagement: SpsNativeHostManagement | undefined;
   let nativeParentEnrollment: SpsNativeParentEnrollment | undefined;
   let nativeParentIngress: ReturnType<typeof createSpsNativeParentIngress> | undefined;
-  let nativeWorkspaceChannel: ReturnType<typeof createSpsNativeWorkspaceChannel> | undefined;
+  let nativeWorkspaceChannel: ReturnType<typeof CreateSpsNativeWorkspaceChannel> | undefined;
   let resolveSession:
     | ((req: ExpressRequest) => Promise<BetterAuthSessionResult | null>)
     | undefined;
@@ -619,6 +619,7 @@ export async function startServer(): Promise<StartedServer> {
           logger.warn("Native Workspace channel is unavailable because prepared Host ingress is not active.");
         } else {
           try {
+            const { createSpsNativeWorkspaceChannel } = await import("./services/sps-native-workspace-channel.js");
             const management = nativeConnectivityManagement;
             const enrollment = nativeParentEnrollment;
             const parentIngress = nativeParentIngress;
