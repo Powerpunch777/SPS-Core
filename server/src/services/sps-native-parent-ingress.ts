@@ -21,7 +21,7 @@ type Channel = {
   removeListener(event: "message" | "disconnect" | "exit", listener: (...args: unknown[]) => void): unknown;
 };
 type Limits = { maxPending?: number; maxRequests?: number; assertCurrent?: () => void };
-type Op = "identity" | "session.exchange" | "enrollment.issue" | "enrollment.complete" | "enrollment.reconcile";
+type Op = "identity" | "session.exchange" | "enrollment.issue" | "enrollment.complete" | "enrollment.reconcile" | "enrollment.renew";
 type Pending = { controller: AbortController; cancelled: boolean };
 
 function fail(): never { throw new Error(FAILURE); }
@@ -57,16 +57,16 @@ function parse(value: unknown): { id: string; operation: Op; body: Record<string
   const top = record(value, ["v", "kind", "id", "operation", "request"]);
   if (top.v !== 1 || top.kind !== REQUEST || typeof top.id !== "string" || !UUID.test(top.id)) fail();
   const operation = top.operation;
-  if (!["identity", "session.exchange", "enrollment.issue", "enrollment.complete", "enrollment.reconcile"].includes(operation as string)) fail();
+  if (!["identity", "session.exchange", "enrollment.issue", "enrollment.complete", "enrollment.reconcile", "enrollment.renew"].includes(operation as string)) fail();
   const op = operation as Op;
   const needsCredential = op !== "identity";
   const request = record(top.request, ["body", "transport", "credential"], ["body", "transport"]);
   if (Object.hasOwn(request, "credential") !== needsCredential) fail();
   const transport = record(request.transport, ["tlsVersion", "sessionReused", "remoteAddress", "peerCertificateDer"],
-    ["tlsVersion", "sessionReused", "remoteAddress", ...(op === "enrollment.complete" || op === "enrollment.reconcile" ? ["peerCertificateDer"] : [])]);
+    ["tlsVersion", "sessionReused", "remoteAddress", ...(op === "enrollment.complete" || op === "enrollment.reconcile" || op === "enrollment.renew" ? ["peerCertificateDer"] : [])]);
   if (transport.tlsVersion !== "TLSv1.3" || transport.sessionReused !== false
     || !(transport.remoteAddress === null || text(transport.remoteAddress, 128))) fail();
-  if (op === "enrollment.complete" || op === "enrollment.reconcile") {
+  if (op === "enrollment.complete" || op === "enrollment.reconcile" || op === "enrollment.renew") {
     if (typeof transport.peerCertificateDer !== "string" || transport.peerCertificateDer.length > 5462
       || !/^[A-Za-z0-9_-]+$/.test(transport.peerCertificateDer)) fail();
     const der = Buffer.from(transport.peerCertificateDer, "base64url");
@@ -81,6 +81,9 @@ function parse(value: unknown): { id: string; operation: Op; body: Record<string
     body = record(request.body, ["pairingId", "pairingSecret", "deviceKeyId", "requestPem"]);
     if (!text(body.pairingId, 200) || !text(body.pairingSecret, 200) || !text(body.deviceKeyId, 200)
       || !csrText(body.requestPem)) fail();
+  } else if (op === "enrollment.renew") {
+    body = record(request.body, ["deviceKeyId", "requestPem"]);
+    if (!text(body.deviceKeyId, 200) || !csrText(body.requestPem)) fail();
   } else if (op === "enrollment.complete") {
     body = record(request.body, ["pairingId", "pairingSecret", "enrollmentId", "displayName"]);
     if (!text(body.pairingId, 200) || !text(body.pairingSecret, 200) || !text(body.enrollmentId, 200)
@@ -179,12 +182,12 @@ export function createSpsNativeParentIngress(
     if (request.operation === "enrollment.issue") {
       result = await enrollment.service.issue({ ...request.body!, userId } as never, authorize);
     } else {
-      const proof = request.operation === "enrollment.complete"
-        ? createSpsNativeMainIngressPeer({ protocol: "TLSv1.3", resumed: false,
-          certificateDer: Buffer.from(request.transport.peerCertificateDer as string, "base64url"), assertActive })
-        : createSpsNativeMainIngressPeer({ protocol: "TLSv1.3", resumed: false,
-          certificateDer: Buffer.from(request.transport.peerCertificateDer as string, "base64url"), assertActive });
-      result = request.operation === "enrollment.complete"
+      const proof = createSpsNativeMainIngressPeer({ protocol: "TLSv1.3", resumed: false,
+        certificateDer: Buffer.from(request.transport.peerCertificateDer as string, "base64url"), assertActive });
+      if (request.operation === "enrollment.renew") {
+        if (!enrollment.renewal) fail();
+        result = await enrollment.renewal.renewFromTlsPeer(proof, { ...request.body!, userId } as never, authorize);
+      } else result = request.operation === "enrollment.complete"
         ? await enrollment.service.completeFromTlsPeer(proof, { ...request.body!, userId } as never, authorize)
         : await enrollment.service.reconcileFromTlsPeer(proof, { ...request.body!, userId } as never, authorize);
       if (request.operation === "enrollment.complete") {

@@ -1,7 +1,9 @@
+import { X509Certificate } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createSpsNativeParentIngress } from "../services/sps-native-parent-ingress.js";
-import { createSpsNativeMainIngressPeer } from "../services/sps-native-enrollments.js";
+import { createSpsNativeMainIngressPeer, getSpsNativeEnrollmentPeerCertificate } from "../services/sps-native-enrollments.js";
+import { createMemberTlsFixture } from "./helpers/member-tls.js";
 
 const HOST_ID = "11111111-1111-4111-8111-111111111111";
 const UUID = "22222222-2222-4222-8222-222222222222";
@@ -64,6 +66,46 @@ describe("SPS Native Main-owned parent ingress", () => {
     expect(identity.resolveNativeEnrollmentSessionFromHeaders).toHaveBeenCalledWith(new Headers({ cookie: COOKIE }));
     expect(issue).toHaveBeenCalledWith(expect.objectContaining({ userId: "user-1", pairingId: HOST_ID }), expect.any(Function));
     expect(channel.messages[0]).toMatchObject({ ok: true, result: { enrollmentId: HOST_ID } });
+  });
+
+  it("dispatches renewal only with its exact DTO, current session and private fresh-TLS peer proof", async () => {
+    const peerFixture = await createMemberTlsFixture({ purpose: "clientAuth" });
+    try {
+      const channel = new Channel();
+      const renewed = { renewalId: UUID_2, deviceId: UUID, predecessorCertificateSha256: "d".repeat(64),
+        certificate: "AQID", issuerCertificate: "BAUG", certificateNotBefore: "2026-10-27T00:00:00.000Z",
+        certificateNotAfter: "2027-01-25T00:00:00.000Z" };
+      const renewFromTlsPeer = vi.fn(async (peer: unknown, input: unknown) => {
+        expect(getSpsNativeEnrollmentPeerCertificate(peer as never).raw.toString("base64url"))
+          .toBe(new X509Certificate(peerFixture.certPem).raw.toString("base64url"));
+        expect(input).toEqual({ deviceKeyId: UUID_2, requestPem: "fixture-csr", userId: "user-1" });
+        return renewed;
+      });
+      const owner = { ...enrollment(), renewal: { renewFromTlsPeer } };
+      active.push(createSpsNativeParentIngress(auth() as never, owner as never, {}, channel as never));
+      const transport = { tlsVersion: "TLSv1.3", sessionReused: false, remoteAddress: "127.0.0.1",
+        peerCertificateDer: new X509Certificate(peerFixture.certPem).raw.toString("base64url") };
+      channel.request("enrollment.renew", { deviceKeyId: UUID_2, requestPem: "fixture-csr" },
+        { credential: { sessionCookie: COOKIE }, transport }, UUID_2);
+      await vi.waitFor(() => expect(channel.messages).toHaveLength(1));
+      expect(channel.messages[0]).toEqual({ v: 1, kind: "sps.native.parent-ingress.response", id: UUID_2, ok: true, result: renewed });
+      expect(renewFromTlsPeer).toHaveBeenCalledTimes(1);
+
+      channel.request("enrollment.renew", { deviceKeyId: UUID_2, requestPem: "fixture-csr", userId: "attacker" },
+        { credential: { sessionCookie: COOKIE }, transport }, "44444444-4444-4444-8444-444444444444");
+      await vi.waitFor(() => expect(channel.messages).toHaveLength(2));
+      expect(channel.messages[1]).toMatchObject({ ok: false, errorCode: "native_ingress_unavailable" });
+      channel.request("enrollment.renew", { deviceKeyId: UUID_2, requestPem: "fixture-csr" },
+        { credential: { sessionCookie: COOKIE } }, "55555555-5555-4555-8555-555555555555");
+      await vi.waitFor(() => expect(channel.messages).toHaveLength(3));
+      expect(channel.messages[2]).toMatchObject({ ok: false, errorCode: "native_ingress_unavailable" });
+      channel.request("enrollment.renew", { deviceKeyId: UUID_2, requestPem: "fixture-csr" },
+        { credential: { sessionCookie: `sps_identity_session=${"z".repeat(64)}` }, transport },
+        "77777777-7777-4777-8777-777777777777");
+      await vi.waitFor(() => expect(channel.messages).toHaveLength(4));
+      expect(channel.messages[3]).toMatchObject({ ok: false, errorCode: "native_ingress_unavailable" });
+      expect(renewFromTlsPeer).toHaveBeenCalledTimes(1);
+    } finally { await peerFixture.cleanup(); }
   });
 
   it("rejects malformed envelopes and duplicate IDs without dispatching a Core operation", async () => {

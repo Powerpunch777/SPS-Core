@@ -2,6 +2,7 @@ import type { Db } from "../compat/paperclip/db.js";
 import { spsNativeEnrollmentService } from "./sps-native-enrollments.js";
 import type { SpsNativePairingPolicy } from "./sps-native-pairings.js";
 import { createSpsNativeParentSignerClient } from "./sps-native-parent-signer.js";
+import { createSpsNativeMemberRenewalService } from "./sps-native-member-renewals.js";
 
 const OPTION_KEYS = ["pairingPolicy", "certificateLifetimeMs", "signingTimeoutMs", "maxConcurrentSignings"] as const;
 const PAIRING_POLICY_KEYS = ["maxTtlMs", "maxAttempts", "maxActiveInvites"] as const;
@@ -15,6 +16,7 @@ export type SpsNativeParentEnrollmentOptions = {
 
 export type SpsNativeParentEnrollment = {
   service: ReturnType<typeof spsNativeEnrollmentService>;
+  renewal?: ReturnType<typeof createSpsNativeMemberRenewalService>;
   /** Public host metadata only. The private signer key never leaves Desktop Main. */
   identity: Readonly<{ hostId: string; serverSpkiSha256: string; issuerSpkiSha256: string; issuerCertificate: string }>;
   assertActive(): void;
@@ -137,8 +139,27 @@ export async function createSpsNativeParentEnrollmentService(
         return await delegate.completeFromTlsPeer(socket, input, authorizeInTransaction);
       },
     });
+    const renewal = createSpsNativeMemberRenewalService(db, {
+      hostId: identity.hostId,
+      serverSpkiSha256: identity.serverSpkiSha256,
+      issuerCertificate: identity.issuerCertificate,
+      certificateLifetimeMs: options.certificateLifetimeMs,
+      signingTimeoutMs: options.signingTimeoutMs,
+      maxConcurrentSignings: options.maxConcurrentSignings,
+    }, async input => await client.sign({
+      hostId: identity.hostId,
+      serverSpkiSha256: identity.serverSpkiSha256,
+      issuerSpkiSha256: identity.issuerSpkiSha256,
+      deviceKeyId: input.deviceKeyId,
+      requestPem: input.requestPem,
+      notBefore: input.notBefore,
+      notAfter: input.notAfter,
+      expectedSpkiSha256: input.expectedSpkiSha256,
+      signal: input.signal,
+    }), assertActive);
     return Object.freeze({
       service,
+      renewal,
       identity: Object.freeze({ ...identity }),
       assertActive,
       dispose() {

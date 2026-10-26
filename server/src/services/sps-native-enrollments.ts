@@ -1,7 +1,7 @@
 import { createHash, X509Certificate } from "node:crypto";
 import { TLSSocket } from "node:tls";
 import { and, eq } from "drizzle-orm";
-import { spsMemberDevices, spsNativeEnrollments, spsNativePairings, spsNativePairingEvents, type Db } from "../compat/paperclip/db.js";
+import { spsMemberDevices, spsMemberDeviceRenewalCertificates, spsNativeEnrollments, spsNativePairings, spsNativePairingEvents, type Db } from "../compat/paperclip/db.js";
 import { spsNativePairingService, type SpsNativePairingAuthorizer, type SpsNativePairingPolicy } from "./sps-native-pairings.js";
 import { registerPendingSpsMemberDeviceInTransaction } from "./sps-member-devices.js";
 
@@ -119,14 +119,16 @@ export function createSpsNativeMainIngressPeer(input: {
   return proof;
 }
 
-function peerFingerprint(peerOrSocket: TLSSocket | SpsNativeMainIngressPeer): string {
+/** Trusted internal inspection only; the private proof is created by the owned
+ * Main adapter after a real fresh TLS socket, never from an HTTP selector. */
+export function getSpsNativeEnrollmentPeerCertificate(peerOrSocket: TLSSocket | SpsNativeMainIngressPeer): X509Certificate {
   if (peerOrSocket instanceof TLSSocket) {
     const socket = peerOrSocket;
     if (socket.destroyed || !socket.encrypted || !socket.authorized
       || socket.getProtocol() !== "TLSv1.3" || socket.isSessionReused()) deny();
     const value = socket.getPeerX509Certificate();
     if (!value) deny();
-    return digest(value.raw);
+    return certificate(value.raw.toString("base64url"));
   }
   if (!peerOrSocket || typeof peerOrSocket !== "object") deny();
   const proof = mainPeerProof.get(peerOrSocket);
@@ -135,7 +137,10 @@ function peerFingerprint(peerOrSocket: TLSSocket | SpsNativeMainIngressPeer): st
   if (peerOrSocket.protocol !== "TLSv1.3" || peerOrSocket.resumed !== false) deny();
   const parsed = certificate(proof.certificateDer.toString("base64url"));
   proof.assertActive();
-  return digest(parsed.raw);
+  return parsed;
+}
+function peerFingerprint(peerOrSocket: TLSSocket | SpsNativeMainIngressPeer): string {
+  return digest(getSpsNativeEnrollmentPeerCertificate(peerOrSocket).raw);
 }
 function request(value: unknown) {
   if (typeof value !== "string" || value.length > 3000) deny();
@@ -175,7 +180,7 @@ export function spsNativeEnrollmentService(db: Db, options: Options, sign: SpsNa
     if (!Number.isFinite(Date.parse(issuer.validFrom)) || !Number.isFinite(Date.parse(issuer.validTo))
       || Date.parse(issuer.validFrom) > Date.now() || Date.parse(issuer.validTo) <= Date.now()) deny();
   }
-  function leaf(value: unknown, deviceKeyId: string) {
+  function leaf(value: unknown, deviceKeyId: string, historical = false) {
     currentIssuer();
     const parsed = certificate(value);
     const before = Date.parse(parsed.validFrom), after = Date.parse(parsed.validTo);
@@ -183,7 +188,7 @@ export function spsNativeEnrollmentService(db: Db, options: Options, sign: SpsNa
       || parsed.subject !== `CN=SPS Member Device ${deviceKeyId}\nOU=SPS Native Host ${hostId}`
       || parsed.publicKey.asymmetricKeyType !== "ec" || parsed.publicKey.asymmetricKeyDetails?.namedCurve !== "prime256v1"
       || parsed.keyUsage?.length !== 1 || parsed.keyUsage[0] !== CLIENT_AUTH
-      || !Number.isFinite(before) || !Number.isFinite(after) || before > Date.now() || after <= Date.now()
+      || !Number.isFinite(before) || !Number.isFinite(after) || after <= before || before > Date.now() || (!historical && after <= Date.now())
       || before < Date.parse(issuer.validFrom) || after > Date.parse(issuer.validTo) || after - before > MAX_LIFETIME) deny();
     return { parsed, before, after, sha256: digest(parsed.raw) };
   }
@@ -230,10 +235,15 @@ export function spsNativeEnrollmentService(db: Db, options: Options, sign: SpsNa
             eq(spsNativeEnrollments.userId, userId),
           )).for("share");
           if (!row || row.status !== "issued" || row.serverSpkiSha256 !== serverPin
-            || row.issuerSpkiSha256 !== issuerPin || row.certificateSha256 !== fingerprint
+            || row.issuerSpkiSha256 !== issuerPin
             || !row.certificate || !row.issuedAt || row.createdAt.getTime() > Date.now()) deny();
-          const checked = leaf(row.certificate, row.deviceKeyId);
-          if (checked.sha256 !== fingerprint) deny();
+          // The enrollment's original certificate is immutable history. Only
+          // the actual, currently valid registered peer proves today's identity.
+          const checked = leaf(row.certificate, row.deviceKeyId, true);
+          if (checked.sha256 !== row.certificateSha256) deny();
+          const peerCertificate = getSpsNativeEnrollmentPeerCertificate(socket).raw.toString("base64url");
+          const current = leaf(peerCertificate, row.deviceKeyId);
+          if (current.sha256 !== fingerprint) deny();
           const [invitation] = await tx.select().from(spsNativePairings).where(and(
             eq(spsNativePairings.id, row.pairingId), eq(spsNativePairings.hostId, hostId),
           )).for("share");
@@ -248,15 +258,25 @@ export function spsNativeEnrollmentService(db: Db, options: Options, sign: SpsNa
             eq(spsMemberDevices.ownerUserId, userId),
           )).for("share");
           if (!device || !["pending", "approved", "revoked"].includes(device.status)
-            || device.certificate !== row.certificate || device.certificateSha256 !== fingerprint
+            || device.certificate !== row.certificate || device.certificateSha256 !== row.certificateSha256
             || device.spkiSha256 !== digest(checked.parsed.publicKey.export({ type: "spki", format: "der" }))
             || device.certificateNotBefore.getTime() !== checked.before
             || device.certificateNotAfter.getTime() !== checked.after) deny();
+          if (fingerprint !== device.certificateSha256) {
+            const [renewed] = await tx.select().from(spsMemberDeviceRenewalCertificates).where(and(
+              eq(spsMemberDeviceRenewalCertificates.deviceId, device.id),
+              eq(spsMemberDeviceRenewalCertificates.certificateSha256, fingerprint),
+            )).for("share");
+            if (!renewed || renewed.certificate !== peerCertificate || renewed.spkiSha256 !== device.spkiSha256
+              || renewed.issuerSpkiSha256 !== issuerPin || renewed.deviceKeyId !== row.deviceKeyId
+              || renewed.certificateNotBefore.getTime() !== current.before
+              || renewed.certificateNotAfter.getTime() !== current.after) deny();
+          }
           await authorize(tx, userId);
           assertActive();
-          if (peerFingerprint(socket) !== fingerprint || leaf(row.certificate, row.deviceKeyId).sha256 !== fingerprint) deny();
+          if (peerFingerprint(socket) !== fingerprint || leaf(peerCertificate, row.deviceKeyId).sha256 !== fingerprint) deny();
           return { deviceId: device.id, status: device.status as "pending" | "approved" | "revoked",
-            certificate: row.certificate, deviceKeyId: row.deviceKeyId };
+            certificate: peerCertificate, deviceKeyId: row.deviceKeyId };
         });
         assertActive();
         currentIssuer();

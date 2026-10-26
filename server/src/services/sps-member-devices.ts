@@ -11,6 +11,7 @@ import {
   companyMemberships,
   spsMemberDeviceEvents,
   spsMemberDevices,
+  spsMemberDeviceRenewalCertificates,
 } from "../compat/paperclip/db.js";
 
 const UUID_PATTERN = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
@@ -471,7 +472,9 @@ export function spsMemberDeviceService(db: Db, hostIdInput: string) {
     },
 
     async authorize(input: SpsMemberDeviceAuthorizationInput): Promise<SpsMemberDeviceAuthorization> {
-      return authorizeCurrent(db, input, false);
+      // Certificate resolution may use a renewal row; keep that identity and
+      // the subsequent membership lookup in one stable authorization snapshot.
+      return db.transaction(tx => authorizeCurrent(tx, input, true));
     },
 
     /** Keeps device, Workspace and membership authority stable while a private
@@ -497,21 +500,7 @@ export function spsMemberDeviceService(db: Db, hostIdInput: string) {
         invalidInput("Invalid certificate fingerprint.");
       }
       const now = new Date();
-      const [device] = await tx.select({
-        deviceId: spsMemberDevices.id,
-        hostId: spsMemberDevices.hostId,
-        userId: spsMemberDevices.ownerUserId,
-        revision: spsMemberDevices.revision,
-        certificateSha256: spsMemberDevices.certificateSha256,
-        certificateNotAfter: spsMemberDevices.certificateNotAfter,
-      }).from(spsMemberDevices).where(and(
-        eq(spsMemberDevices.hostId, hostId),
-        eq(spsMemberDevices.ownerUserId, userId),
-        eq(spsMemberDevices.certificateSha256, input.certificateSha256),
-        eq(spsMemberDevices.status, "approved"),
-        lte(spsMemberDevices.certificateNotBefore, now),
-        gt(spsMemberDevices.certificateNotAfter, now),
-      )).for("share").limit(1);
+      const device = await resolveApprovedDeviceCertificate(tx, hostId, userId, input.certificateSha256, now, true);
       if (!device) throw new SpsMemberDeviceError("not_authorized", "No active approved device matches this request.");
 
       const workspaces = await tx.select({ id: companies.id, name: companies.name })
@@ -574,40 +563,73 @@ export function spsMemberDeviceService(db: Db, hostIdInput: string) {
         invalidInput("Invalid certificate fingerprint.");
       }
       const now = new Date();
-      const query = connection
-        .select({
-          deviceId: spsMemberDevices.id,
-          hostId: spsMemberDevices.hostId,
-          userId: spsMemberDevices.ownerUserId,
-          companyId: companies.id,
-          revision: spsMemberDevices.revision,
-          certificateSha256: spsMemberDevices.certificateSha256,
-          certificateNotAfter: spsMemberDevices.certificateNotAfter,
-        })
-        .from(spsMemberDevices)
-        .innerJoin(companies, and(
-          eq(companies.id, companyId),
-          eq(companies.status, "active"),
-        ))
+      const device = await resolveApprovedDeviceCertificate(connection, hostId, userId, input.certificateSha256, now, lock);
+      if (!device) {
+        throw new SpsMemberDeviceError("not_authorized", "No active approved device matches this request.");
+      }
+      const membershipQuery = connection.select({ companyId: companies.id })
+        .from(companies)
         .innerJoin(companyMemberships, and(
           eq(companyMemberships.companyId, companies.id),
           eq(companyMemberships.principalType, "user"),
           eq(companyMemberships.principalId, userId),
           eq(companyMemberships.status, "active"),
         ))
-        .where(and(
-          eq(spsMemberDevices.hostId, hostId),
-          eq(spsMemberDevices.ownerUserId, userId),
-          eq(spsMemberDevices.certificateSha256, input.certificateSha256),
-          eq(spsMemberDevices.status, "approved"),
-          lte(spsMemberDevices.certificateNotBefore, now),
-          gt(spsMemberDevices.certificateNotAfter, now),
-        ))
+        .where(and(eq(companies.id, companyId), eq(companies.status, "active")))
         .limit(1);
-      const [authorized] = await (lock ? query.for("share") : query);
-      if (!authorized) {
-        throw new SpsMemberDeviceError("not_authorized", "No active approved device matches this request.");
-      }
-      return authorized;
+      const [membership] = await (lock ? membershipQuery.for("share") : membershipQuery);
+      if (!membership) throw new SpsMemberDeviceError("not_authorized", "No active approved device matches this request.");
+      return { ...device, companyId: membership.companyId };
   }
+}
+
+/** Resolves only an exact currently valid leaf bound to an approved logical device.
+ * The immutable base leaf and append-only renewal leaves share the parent status. */
+async function resolveApprovedDeviceCertificate(
+  connection: Db | DeviceTransaction,
+  hostId: string,
+  userId: string,
+  certificateSha256: string,
+  now: Date,
+  lock: boolean,
+): Promise<Pick<SpsMemberDeviceAuthorization, "deviceId" | "hostId" | "userId" | "revision" | "certificateSha256" | "certificateNotAfter"> | null> {
+  const baseQuery = connection.select({
+    deviceId: spsMemberDevices.id,
+    hostId: spsMemberDevices.hostId,
+    userId: spsMemberDevices.ownerUserId,
+    revision: spsMemberDevices.revision,
+    certificateSha256: spsMemberDevices.certificateSha256,
+    certificateNotAfter: spsMemberDevices.certificateNotAfter,
+  }).from(spsMemberDevices).where(and(
+    eq(spsMemberDevices.hostId, hostId),
+    eq(spsMemberDevices.ownerUserId, userId),
+    eq(spsMemberDevices.certificateSha256, certificateSha256),
+    eq(spsMemberDevices.status, "approved"),
+    lte(spsMemberDevices.certificateNotBefore, now),
+    gt(spsMemberDevices.certificateNotAfter, now),
+  )).limit(1);
+  const [base] = await (lock ? baseQuery.for("share") : baseQuery);
+  if (base) return base;
+
+  const renewalQuery = connection.select({
+    deviceId: spsMemberDevices.id,
+    hostId: spsMemberDevices.hostId,
+    userId: spsMemberDevices.ownerUserId,
+    revision: spsMemberDevices.revision,
+    certificateSha256: spsMemberDeviceRenewalCertificates.certificateSha256,
+    certificateNotAfter: spsMemberDeviceRenewalCertificates.certificateNotAfter,
+  }).from(spsMemberDeviceRenewalCertificates).innerJoin(
+    spsMemberDevices,
+    eq(spsMemberDevices.id, spsMemberDeviceRenewalCertificates.deviceId),
+  ).where(and(
+    eq(spsMemberDevices.hostId, hostId),
+    eq(spsMemberDevices.ownerUserId, userId),
+    eq(spsMemberDevices.status, "approved"),
+    eq(spsMemberDeviceRenewalCertificates.certificateSha256, certificateSha256),
+    eq(spsMemberDeviceRenewalCertificates.spkiSha256, spsMemberDevices.spkiSha256),
+    lte(spsMemberDeviceRenewalCertificates.certificateNotBefore, now),
+    gt(spsMemberDeviceRenewalCertificates.certificateNotAfter, now),
+  )).limit(1);
+  const [renewal] = await (lock ? renewalQuery.for("share") : renewalQuery);
+  return renewal ?? null;
 }

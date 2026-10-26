@@ -7,6 +7,7 @@ import {
   createDb,
   spsMemberDeviceEvents,
   spsMemberDevices,
+  spsMemberDeviceRenewalCertificates,
 } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
@@ -39,6 +40,7 @@ describeEmbeddedPostgres("SPS Member device service", () => {
   afterEach(async () => {
     await Promise.all(fixtures.splice(0).map((fixture) => fixture.cleanup()));
     await db.delete(spsMemberDeviceEvents);
+    await db.delete(spsMemberDeviceRenewalCertificates);
     await db.delete(spsMemberDevices);
     await db.delete(companyMemberships);
     await db.delete(companies);
@@ -284,6 +286,44 @@ describeEmbeddedPostgres("SPS Member device service", () => {
     ]);
     expect(events.find((event) => event.action === "approved")?.actorUserId).toBe(actorUserId);
     expect(events.find((event) => event.action === "revoked")?.actorUserId).toBe(actorUserId);
+  });
+
+  it("authorizes an exact currently valid registered renewal leaf through its approved parent", async () => {
+    const userId = "user-member-device-renewal";
+    const companyId = await workspace(userId);
+    const { hostId, value } = service();
+    const fixture = await tls();
+    const requested = await value.request({ companyId, userId, displayName: "Renewed laptop", certificate: fixture.certificate });
+    await value.approve(requested.id, "host-actor-renewal");
+    const certificateSha256 = "b".repeat(64);
+    const now = Date.now();
+    await db.insert(spsMemberDeviceRenewalCertificates).values({
+      deviceId: requested.id,
+      predecessorCertificateSha256: fixture.certificateSha256,
+      certificate: fixture.certificate,
+      certificateSha256,
+      spkiSha256: fixture.spkiSha256,
+      issuerSpkiSha256: "c".repeat(64),
+      requestSha256: "d".repeat(64),
+      deviceKeyId: randomUUID(),
+      certificateNotBefore: new Date(now - 1000),
+      certificateNotAfter: new Date(now + 60_000),
+      actorUserId: userId,
+    });
+
+    await expect(value.authorize({ companyId, userId, certificateSha256 })).resolves.toMatchObject({
+      deviceId: requested.id,
+      hostId,
+      userId,
+      companyId,
+      revision: 2,
+      certificateSha256,
+      certificateNotAfter: expect.any(Date),
+    });
+
+    await value.revoke(requested.id, "host-actor-renewal");
+    await expect(value.authorize({ companyId, userId, certificateSha256 }))
+      .rejects.toMatchObject({ code: "not_authorized" });
   });
 
   it("holds current device and membership authority until a Native Workspace transaction completes", async () => {

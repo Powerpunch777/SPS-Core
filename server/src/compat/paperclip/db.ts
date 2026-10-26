@@ -28,6 +28,7 @@ export {
   spsNodes,
   spsMemberDevices,
   spsMemberDeviceEvents,
+  spsMemberDeviceRenewalCertificates,
   spsNativePairings,
   spsNativePairingEvents,
   spsNativeEnrollments,
