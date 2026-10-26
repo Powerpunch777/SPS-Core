@@ -97,6 +97,11 @@ Host identity persistence, certificate issuance/key storage and a zero-Plugin
 local management UI have separate source implementations in SPS-Source. Complete
 HTTP/subresource/other-upgrade coverage, certificate renewal and physical two-PC
 qualification remain required beyond the bounded registration ingress.
+An explicitly constructed private loopback Workspace adapter and request-proof
+codec now have source-level DB/HTTP tests for selected surface queries. They are
+not mounted by product startup and do not make the ordinary Core listener a
+Native ingress. See [private Workspace channel](SPS-NATIVE-WORKSPACE-CHANNEL.md)
+for request/session/device transaction boundaries and remaining composition.
 Do not enable an ordinary listener, broaden a bind or reuse Node credentials as
 a shortcut. No Connection API is added to the public SDK in this increment.
 

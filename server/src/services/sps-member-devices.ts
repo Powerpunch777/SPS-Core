@@ -33,6 +33,12 @@ export type SpsMemberDeviceAuthorization = {
   certificateNotAfter: Date;
 };
 
+export type SpsMemberDeviceAuthorizationInput = {
+  companyId: string;
+  userId: string;
+  certificateSha256: string;
+};
+
 export type SpsMemberDeviceErrorCode =
   | "invalid_input"
   | "workspace_membership_required"
@@ -452,51 +458,18 @@ export function spsMemberDeviceService(db: Db, hostIdInput: string) {
       });
     },
 
-    async authorize(input: {
-      companyId: string;
-      userId: string;
-      certificateSha256: string;
-    }): Promise<SpsMemberDeviceAuthorization> {
-      const companyId = requireUuid(input?.companyId, "Workspace ID");
-      const userId = requireUserId(input?.userId, "user ID");
-      if (typeof input.certificateSha256 !== "string" || !/^[0-9a-f]{64}$/.test(input.certificateSha256)) {
-        invalidInput("Invalid certificate fingerprint.");
-      }
-      const now = new Date();
-      const [authorized] = await db
-        .select({
-          deviceId: spsMemberDevices.id,
-          hostId: spsMemberDevices.hostId,
-          userId: spsMemberDevices.ownerUserId,
-          companyId: companies.id,
-          revision: spsMemberDevices.revision,
-          certificateSha256: spsMemberDevices.certificateSha256,
-          certificateNotAfter: spsMemberDevices.certificateNotAfter,
-        })
-        .from(spsMemberDevices)
-        .innerJoin(companies, and(
-          eq(companies.id, companyId),
-          eq(companies.status, "active"),
-        ))
-        .innerJoin(companyMemberships, and(
-          eq(companyMemberships.companyId, companies.id),
-          eq(companyMemberships.principalType, "user"),
-          eq(companyMemberships.principalId, userId),
-          eq(companyMemberships.status, "active"),
-        ))
-        .where(and(
-          eq(spsMemberDevices.hostId, hostId),
-          eq(spsMemberDevices.ownerUserId, userId),
-          eq(spsMemberDevices.certificateSha256, input.certificateSha256),
-          eq(spsMemberDevices.status, "approved"),
-          lte(spsMemberDevices.certificateNotBefore, now),
-          gt(spsMemberDevices.certificateNotAfter, now),
-        ))
-        .limit(1);
-      if (!authorized) {
-        throw new SpsMemberDeviceError("not_authorized", "No active approved device matches this request.");
-      }
-      return authorized;
+    async authorize(input: SpsMemberDeviceAuthorizationInput): Promise<SpsMemberDeviceAuthorization> {
+      return authorizeCurrent(db, input, false);
+    },
+
+    /** Keeps device, Workspace and membership authority stable while a private
+     * Native Workspace transaction reads or mutates the existing Core services. */
+    async authorizeInTransaction(
+      tx: DeviceTransaction,
+      input: SpsMemberDeviceAuthorizationInput,
+    ): Promise<SpsMemberDeviceAuthorization> {
+      if (typeof tx?.rollback !== "function") throw new TypeError("A Member authorization transaction is required");
+      return authorizeCurrent(tx, input, true);
     },
 
     async listEvents(deviceIdInput: string, authority?: SpsMemberDeviceHostAuthority): Promise<SpsMemberDeviceEventDto[]> {
@@ -526,4 +499,52 @@ export function spsMemberDeviceService(db: Db, hostIdInput: string) {
       });
     },
   };
+
+  async function authorizeCurrent(
+    connection: Db | DeviceTransaction,
+    input: SpsMemberDeviceAuthorizationInput,
+    lock: boolean,
+  ): Promise<SpsMemberDeviceAuthorization> {
+      const companyId = requireUuid(input?.companyId, "Workspace ID");
+      const userId = requireUserId(input?.userId, "user ID");
+      if (typeof input.certificateSha256 !== "string" || !/^[0-9a-f]{64}$/.test(input.certificateSha256)) {
+        invalidInput("Invalid certificate fingerprint.");
+      }
+      const now = new Date();
+      const query = connection
+        .select({
+          deviceId: spsMemberDevices.id,
+          hostId: spsMemberDevices.hostId,
+          userId: spsMemberDevices.ownerUserId,
+          companyId: companies.id,
+          revision: spsMemberDevices.revision,
+          certificateSha256: spsMemberDevices.certificateSha256,
+          certificateNotAfter: spsMemberDevices.certificateNotAfter,
+        })
+        .from(spsMemberDevices)
+        .innerJoin(companies, and(
+          eq(companies.id, companyId),
+          eq(companies.status, "active"),
+        ))
+        .innerJoin(companyMemberships, and(
+          eq(companyMemberships.companyId, companies.id),
+          eq(companyMemberships.principalType, "user"),
+          eq(companyMemberships.principalId, userId),
+          eq(companyMemberships.status, "active"),
+        ))
+        .where(and(
+          eq(spsMemberDevices.hostId, hostId),
+          eq(spsMemberDevices.ownerUserId, userId),
+          eq(spsMemberDevices.certificateSha256, input.certificateSha256),
+          eq(spsMemberDevices.status, "approved"),
+          lte(spsMemberDevices.certificateNotBefore, now),
+          gt(spsMemberDevices.certificateNotAfter, now),
+        ))
+        .limit(1);
+      const [authorized] = await (lock ? query.for("share") : query);
+      if (!authorized) {
+        throw new SpsMemberDeviceError("not_authorized", "No active approved device matches this request.");
+      }
+      return authorized;
+  }
 }

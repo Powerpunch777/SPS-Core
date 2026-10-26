@@ -34,7 +34,7 @@ describeEmbeddedPostgres("SPS Member device service", () => {
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("sps-member-devices-");
     db = createDb(tempDb.connectionString);
-  }, 20_000);
+  }, process.platform === "win32" ? 120_000 : 20_000);
 
   afterEach(async () => {
     await Promise.all(fixtures.splice(0).map((fixture) => fixture.cleanup()));
@@ -45,8 +45,9 @@ describeEmbeddedPostgres("SPS Member device service", () => {
   });
 
   afterAll(async () => {
+    await db?.$client.end();
     await tempDb?.cleanup();
-  });
+  }, 30_000);
 
   async function tls(options: Parameters<typeof createMemberTlsFixture>[0] = {}) {
     const fixture = await createMemberTlsFixture(options);
@@ -283,6 +284,51 @@ describeEmbeddedPostgres("SPS Member device service", () => {
     ]);
     expect(events.find((event) => event.action === "approved")?.actorUserId).toBe(actorUserId);
     expect(events.find((event) => event.action === "revoked")?.actorUserId).toBe(actorUserId);
+  });
+
+  it("holds current device and membership authority until a Native Workspace transaction completes", async () => {
+    const userId = "user-native-workspace-transaction";
+    const companyId = await workspace(userId);
+    const { value } = service();
+    const fixture = await tls();
+    const device = await value.request({ companyId, userId, displayName: "Transaction laptop", certificate: fixture.certificate });
+    await value.approve(device.id, "host-actor");
+    const input = { companyId, userId, certificateSha256: fixture.certificateSha256 };
+
+    await db.transaction(async tx => {
+      expect(await value.authorizeInTransaction(tx, input)).toMatchObject({ deviceId: device.id, companyId, userId });
+      // The real PostgreSQL lock timeout proves concurrent changes cannot
+      // invalidate authority in the middle of the authorized transaction.
+      for (const mutate of [
+        async (connection: typeof tx) => connection.update(spsMemberDevices)
+          .set({ status: "revoked" }).where(eq(spsMemberDevices.id, device.id)),
+        async (connection: typeof tx) => connection.update(companyMemberships)
+          .set({ status: "inactive" }).where(eq(companyMemberships.companyId, companyId)),
+        async (connection: typeof tx) => connection.update(companies)
+          .set({ status: "paused" }).where(eq(companies.id, companyId)),
+      ]) {
+        let conflict: unknown;
+        try {
+          await db.transaction(async concurrent => {
+            await concurrent.execute(sql`set local lock_timeout = '100ms'`);
+            await mutate(concurrent);
+          });
+        } catch (error) { conflict = error; }
+        expect(conflict).toBeDefined();
+        const cause = conflict as { code?: string; cause?: { code?: string } };
+        expect(cause.code ?? cause.cause?.code).toBe("55P03");
+      }
+    });
+    await value.revoke(device.id, "host-actor");
+    await expect(db.transaction(tx => value.authorizeInTransaction(tx, input)))
+      .rejects.toMatchObject({ code: "not_authorized" });
+  });
+
+  it("requires a real transaction for locked Native authorization", async () => {
+    const { value } = service();
+    await expect(value.authorizeInTransaction(db as never, {
+      companyId: randomUUID(), userId: "member", certificateSha256: "a".repeat(64),
+    })).rejects.toThrow("A Member authorization transaction is required");
   });
 
   it("rejects a different certificate reusing a registered SPKI and keeps revoked identities terminal", async () => {
