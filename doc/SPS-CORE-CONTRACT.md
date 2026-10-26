@@ -15,9 +15,11 @@ identity and recovery contracts remain unchanged by this direction.
 
 ### Native Member foundation and local Host management
 
-Windows Native LAN is not supported by the current product startup. The new
-Host-scoped device registry, transport helper and optional event-WebSocket
-guard are source foundations, not an enabled listener or complete enrollment protocol.
+Full Windows Native LAN is not yet qualified. Prepared, directly owned startup
+can mount the private Main-ingress registration dispatcher, while Desktop Main
+owns the separate per-launch opt-in TLS listener. The Host device registry,
+transport helper and optional event-WebSocket guard do not yet provide complete
+Native Workspace/Source/Node transport. See [Main ingress](SPS-NATIVE-MAIN-INGRESS.md).
 
 Existing device-request routes require an authenticated user with current active Workspace
 membership and create `pending` state only. The Host UUID is trusted constructor
@@ -37,8 +39,9 @@ Workspace, Agent or Plugin. Reads and writes recheck the exact session inside
 their DB transaction; parent-channel loss/disposal also fences final projections.
 No Authorization token, legacy role or matching non-Owner session substitutes
 for this authority. Preparing keys requires an explicit Host restart to mount
-management; a lost channel is not silently rebound. This opens no Native listener,
-initial enrollment, invitation UI or Workspace/Node/Source grant.
+management; a lost channel is not silently rebound. Core opens no Native socket.
+Desktop can separately opt into registration and local Owner invitation actions;
+these grant no Workspace/Node/Source access.
 
 The directly owned Core process also has a bounded stop-only control path,
 independently of Native signing. An explicitly marked inherited pipe is mounted
@@ -92,8 +95,8 @@ the same user session plus current device authority before event delivery;
 revocation/invalid sessions stop delivery. There is no product call site yet.
 Host identity persistence, certificate issuance/key storage and a zero-Plugin
 local management UI have separate source implementations in SPS-Source. Complete
-one-time pairing activation, HTTP/subresource/other-upgrade coverage, bounded
-ingress lifecycle and physical two-PC qualification remain required.
+HTTP/subresource/other-upgrade coverage, certificate renewal and physical two-PC
+qualification remain required beyond the bounded registration ingress.
 Do not enable an ordinary listener, broaden a bind or reuse Node credentials as
 a shortcut. No Connection API is added to the public SDK in this increment.
 
@@ -110,11 +113,12 @@ keeps non-authorizing event snapshots.
 This store is not an authentication boundary: a live transport must authenticate
 the session, validate key possession and supply the trusted Host identity before
 calling it. A verified database user alone is not a session. Existing HTTP routes
-still require membership; the new primitive has no HTTP/RPC/SDK/UI call site.
+still require membership; the storage primitive itself is not a public API.
+Prepared Owner routes and the private Main-ingress adapter now compose it.
 Certificate approval and membership/grants remain separate. Product target/TTL
 defaults are any verified recipient and one hour, supplied by Desktop under D6;
 Core callers must still provide explicit policy and a server pin.
-An inactive local `createSpsNativeHostPairings` composition now derives the
+A local `createSpsNativeHostPairings` composition derives the
 issuer solely from the prepared Host management object's current Owner session.
 It fixes the approved first invitation to one hour and any verified recipient;
 attempt and active-invitation caps remain mandatory explicit constructor inputs,
@@ -128,14 +132,15 @@ one-time secret is unrecoverable; that pending invitation occupies quota until
 expiry or a later authorized revoke. Old trusted internal callers retain their optional-guard
 behavior; the storage primitive alone still authenticates no session. Parent
 channel loss also fences final projections, but these checks are not atomic with
-COMMIT or proof of distributed logout. No product startup route, invitation UI,
-listener, SDK method or membership/execution grant is enabled by this composition.
+COMMIT or proof of distributed logout. Prepared startup mounts Owner-only
+invitation routes; the storage composition itself opens no listener, SDK method
+or membership/execution grant.
 The pin is captured per service instance, not checked against a persistent global
 identity registry. Rotation must retire old instances/listeners; the storage test
 does not prove global rotation or physical device authentication.
 
 Migration `0167_absurd_loki` adds Host-private public enrollment issuance records,
-with one unique cascading row per invitation. The inactive
+with one unique cascading row per invitation. The
 `spsNativeEnrollmentService` reuses the pairing transaction and wrong-secret
 budget for two operations, without adding a route, RPC, SDK method or listener:
 
@@ -147,7 +152,8 @@ budget for two operations, without adding a route, RPC, SDK method or listener:
   The stored public leaf must match the configured issuer, identity, purpose and
   requested validity. A committed identical retry returns the same certificate;
   a different request conflicts. The record stores neither full CSR nor secret.
-- `completeFromTlsPeer` requires a real authorized, non-resumed TLS 1.3 socket,
+- `completeFromTlsPeer` requires a real authorized, non-resumed TLS 1.3 socket
+  or a privately branded, immutable certificate proof from the owned Main IPC,
   the same verified account and the exact committed certificate fingerprint.
   It consumes the invitation and creates only `pending` device state plus audit
   in one transaction, rechecking peer and certificate expiry after async writes.
@@ -170,11 +176,12 @@ dispose and channel loss fence new operations and final transactional writes.
 Main independently checks the current local Host session, identity store and
 account/Vault lifecycle generation before and after asynchronous signing. This
 does not make the Core child untrusted-code isolation or establish a Member
-session. Startup does not instantiate the enrollment factory automatically.
+session. Startup instantiates this composition only with prepared Host
+management and the explicit `SPS_NATIVE_PARENT_INGRESS=1` capability.
 
-These are internal persistence/transport operations, not authenticated endpoints.
-The current user ID must still come from a real, revalidated SPS session in a
-future dedicated ingress; the DB verified flag alone is insufficient.
+These remain internal persistence/transport operations. The current user ID
+comes from a real, revalidated SPS session in the private Main-ingress adapter;
+the DB verified flag alone is insufficient.
 An inactive session-enrollment adapter now derives the user from the configured
 SPS Identity cookie, never a body or actor substitute. Its private transaction
 authorizer binds exact session ID/digest/user/expiry and verified account, with
@@ -235,9 +242,11 @@ an RSA-signed fixture token, not production Google OAuth or an active Main clien
 The handler is unmounted: creating it opens no listener, supplies no browser
 cookie jar and does not share existing hub cookies with a different origin.
 
-Product session-to-request activation, issued-credential persistence, enrollment
-UI and Native TLS ingress remain unwired. Current network listeners, Tailscale,
-Workspace/Plugin/Node/CLI/Source permissions and public SDK are unchanged.
+Desktop's source registration path now connects Main TLS, the private IPC
+dispatcher, issued-credential persistence and explicit enrollment/recovery UI.
+The ordinary HTTP factories described here remain unmounted in Core startup;
+their real-socket requirement is unchanged. Existing network listeners,
+Tailscale, Workspace/Plugin/Node/CLI/Source permissions and public SDK are unchanged.
 
 An inactive public-identity handler now accepts only an empty, fresh TLS 1.3
 POST on `/sps-native/v1/identity`, before account/session enrollment. It obtains

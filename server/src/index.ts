@@ -34,6 +34,8 @@ import { createApp } from "./app.js";
 import { shutdownSpsModelBroker } from "./services/sps-model-broker.js";
 import { attachSpsOwnedShutdown } from "./services/sps-owned-shutdown.js";
 import { createSpsNativeHostManagement, type SpsNativeHostManagement } from "./services/sps-native-host-management.js";
+import { createSpsNativeParentEnrollmentService, type SpsNativeParentEnrollment } from "./services/sps-native-parent-enrollment.js";
+import { createSpsNativeParentIngress } from "./services/sps-native-parent-ingress.js";
 import { loadConfig } from "./config.js";
 import { logger } from "./middleware/logger.js";
 import { setupEnvironmentCustomImageTerminalWebSocketServer } from "./realtime/environment-custom-image-terminal-ws.js";
@@ -540,6 +542,8 @@ export async function startServer(): Promise<StartedServer> {
   let betterAuthHandler: RequestHandler | undefined;
   let spsIdentityHandler: RequestHandler | undefined;
   let nativeConnectivityManagement: SpsNativeHostManagement | undefined;
+  let nativeParentEnrollment: SpsNativeParentEnrollment | undefined;
+  let nativeParentIngress: ReturnType<typeof createSpsNativeParentIngress> | undefined;
   let resolveSession:
     | ((req: ExpressRequest) => Promise<BetterAuthSessionResult | null>)
     | undefined;
@@ -567,6 +571,43 @@ export async function startServer(): Promise<StartedServer> {
           ownerUserId: process.env.SPS_NATIVE_HOST_OWNER_USER_ID ?? "",
         }); }
         catch { logger.warn("Native Host device management is unavailable; existing Host access is unchanged."); }
+      }
+      // This is a private Main-to-Core IPC capability. It never opens an HTTP
+      // route or socket; Desktop Main must explicitly prepare the Host and set
+      // both opt-in flags before Core binds the dispatcher to its owned child.
+      if (process.env.SPS_NATIVE_PARENT_INGRESS === "1") {
+        if (!nativeConnectivityManagement) {
+          logger.warn("Native parent ingress is unavailable because Native Host management was not prepared.");
+        } else {
+          try {
+            nativeConnectivityManagement.assertActive();
+            nativeParentEnrollment = await createSpsNativeParentEnrollmentService(db as any, {
+              pairingPolicy: { maxTtlMs: 60 * 60 * 1000, maxAttempts: 5, maxActiveInvites: 10 },
+              certificateLifetimeMs: 90 * 24 * 60 * 60 * 1000,
+              signingTimeoutMs: 10_000,
+              maxConcurrentSignings: 2,
+            });
+            const binding = nativeParentEnrollment.identity;
+            if (binding.hostId !== nativeConnectivityManagement.hostId
+              || binding.serverSpkiSha256 !== nativeConnectivityManagement.serverSpkiSha256
+              || binding.issuerSpkiSha256 !== nativeConnectivityManagement.issuerSpkiSha256) {
+              throw new Error("Native parent identity does not match the prepared Host binding.");
+            }
+            nativeParentIngress = createSpsNativeParentIngress(identityAuth, nativeParentEnrollment, {
+              maxPending: 2,
+              maxRequests: 4096,
+              assertCurrent: () => nativeConnectivityManagement?.assertActive(),
+            });
+            nativeConnectivityManagement.assertActive();
+            nativeParentIngress.assertAvailable();
+          } catch {
+            nativeParentIngress?.dispose();
+            nativeParentIngress = undefined;
+            nativeParentEnrollment?.dispose();
+            nativeParentEnrollment = undefined;
+            logger.warn("Native parent ingress is unavailable; no Native network listener was opened.");
+          }
+        }
       }
       logger.info(
         {
@@ -1194,6 +1235,8 @@ export async function startServer(): Promise<StartedServer> {
   {
     const shutdown = async (signal: "SIGINT" | "SIGTERM") => {
       nativeConnectivityManagement?.dispose();
+      nativeParentIngress?.dispose();
+      nativeParentEnrollment?.dispose();
       heartbeatSchedulerStopped = true;
       if (heartbeatSchedulerInterval) {
         clearInterval(heartbeatSchedulerInterval);

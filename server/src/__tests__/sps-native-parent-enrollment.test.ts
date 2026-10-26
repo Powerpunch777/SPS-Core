@@ -83,6 +83,7 @@ describe("SPS Native parent enrollment composition", () => {
       signingTimeoutMs: OPTIONS.signingTimeoutMs,
       maxConcurrentSignings: OPTIONS.maxConcurrentSignings,
     });
+    expect(Object.getPrototypeOf(passedOptions.pairingPolicy)).toBe(Object.prototype);
     expect(channel.messages).toHaveLength(1);
     expect(assertActive).toBeTypeOf("function");
 

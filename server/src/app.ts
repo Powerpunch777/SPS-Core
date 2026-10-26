@@ -56,6 +56,7 @@ import { spsNodeRoutes } from "./routes/sps-nodes.js";
 import { spsExecutionRoutes } from "./routes/sps-executions.js";
 import { spsModelConnectionRoutes } from "./routes/sps-model-connections.js";
 import { spsMemberDeviceRoutes } from "./routes/sps-member-devices.js";
+import { spsNativePairingRoutes } from "./routes/sps-native-pairings.js";
 import type { SpsNativeHostManagement } from "./services/sps-native-host-management.js";
 import { getSpsModelBroker } from "./services/sps-model-broker.js";
 import { spsWorkspaceSourceRoutes } from "./routes/sps-workspace-sources.js";
@@ -410,6 +411,7 @@ export async function createApp(
       hostId: opts.nativeConnectivityManagement?.hostId ?? opts.nativeConnectivityHostId!,
       management: opts.nativeConnectivityManagement,
     }));
+    if (opts.nativeConnectivityManagement) api.use(spsNativePairingRoutes(db, opts.nativeConnectivityManagement));
   }
   getSpsModelBroker(db); // Recovery never replays inputs or starts a provider request.
   api.use(spsWorkspaceSourceRoutes(db));

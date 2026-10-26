@@ -15,6 +15,9 @@ export type SpsNativeParentEnrollmentOptions = {
 
 export type SpsNativeParentEnrollment = {
   service: ReturnType<typeof spsNativeEnrollmentService>;
+  /** Public host metadata only. The private signer key never leaves Desktop Main. */
+  identity: Readonly<{ hostId: string; serverSpkiSha256: string; issuerSpkiSha256: string; issuerCertificate: string }>;
+  assertActive(): void;
   dispose(): void;
 };
 
@@ -57,7 +60,14 @@ function validatedOptions(value: SpsNativeParentEnrollmentOptions): SpsNativePar
     throw invalidOptions();
   }
   return {
-    pairingPolicy,
+    // exactRecord deliberately returns a null-prototype bag. Project its
+    // already-validated primitive fields into the plain DTO required by the
+    // existing pairing service's closed configuration validator.
+    pairingPolicy: {
+      maxTtlMs: pairingPolicy.maxTtlMs,
+      maxAttempts: pairingPolicy.maxAttempts,
+      maxActiveInvites: pairingPolicy.maxActiveInvites,
+    },
     certificateLifetimeMs: options.certificateLifetimeMs as number,
     signingTimeoutMs: options.signingTimeoutMs as number,
     maxConcurrentSignings: options.maxConcurrentSignings as number,
@@ -129,6 +139,8 @@ export async function createSpsNativeParentEnrollmentService(
     });
     return Object.freeze({
       service,
+      identity: Object.freeze({ ...identity }),
+      assertActive,
       dispose() {
         if (disposed) return;
         disposed = true;

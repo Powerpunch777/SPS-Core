@@ -6082,6 +6082,31 @@ const memberDeviceEventSchema = z.object({
   action: z.enum(["request", "approved", "revoked"]), revision: z.number().int().positive(), createdAt: z.string(),
 }).strict();
 const nativeDeviceDescription = "Optional Native Core management contract. Product startup mounts nativeConnectivityManagement only for the prepared Host identity, owned Main IPC binding and exact current SPS Identity Owner session; nativeConnectivityHostId alone is retained for explicit legacy composition. No LAN listener, device TLS handshake, Node grant or Plugin SDK method is created by this endpoint. Unknown query/body fields are rejected; raw certificates and private keys are absent from responses.";
+const nativePairingSchema = z.object({
+  id: z.string().uuid(), status: z.enum(["pending", "expired", "identity_changed", "consumed", "revoked", "exhausted"]),
+  createdAt: z.string().datetime(), expiresAt: z.string().datetime(), failedAttempts: z.number().int().nonnegative(),
+  maxAttempts: z.number().int().positive(), issuedByUserId: z.string(), consumedByUserId: z.string().nullable(),
+  consumedDeviceSnapshotId: z.string().uuid().nullable(), target: z.enum(["any_verified_user", "verified_email"]),
+}).strict();
+const nativePairingDescription = `${nativeDeviceDescription} Invitation management is available only from the local Desktop Host with a current Owner SPS Identity session. Invitations expire after one hour, allow five attempts and are capped at ten active invitations. Listing and revocation never return invitation secrets.`;
+registerCurrentRoute({
+  method: "get", path: "/api/sps/native-pairings", tags: ["sps-native-pairings"],
+  summary: "List local Host invitations", description: nativePairingDescription,
+  responses: { 200: noStoreResponse(r.ok(z.array(nativePairingSchema))), 400: r.badRequest, 403: r.forbidden, 503: { description: "Native Host pairing state is unavailable." } },
+});
+registerCurrentRoute({
+  method: "post", path: "/api/sps/native-pairings", tags: ["sps-native-pairings"],
+  summary: "Create a local Host invitation", description: `${nativePairingDescription} The one-time secret appears only in this response and is not stored or returned by later reads.`,
+  body: z.object({}).strict(),
+  responses: { 201: noStoreResponse(r.ok(z.object({ pairingId: z.string().uuid(), pairingSecret: z.string().min(32).max(128), issuedAt: z.number().int(), expiresAt: z.number().int() }).strict())),
+    400: r.badRequest, 403: r.forbidden, 409: r.conflict, 503: { description: "Invitation state or one-time result delivery is unavailable." } },
+});
+registerCurrentRoute({
+  method: "post", path: "/api/sps/native-pairings/{pairingId}/revoke", tags: ["sps-native-pairings"],
+  summary: "Revoke a local Host invitation", params: z.object({ pairingId: z.string().uuid() }), body: z.object({}).strict(),
+  description: `${nativePairingDescription} Revocation is terminal.`,
+  responses: { 200: noStoreResponse(r.ok(nativePairingSchema)), 400: r.badRequest, 403: r.forbidden, 503: { description: "Native Host pairing state is unavailable." } },
+});
 registerCurrentRoute({
   method: "get", path: "/api/sps/member-devices/status", tags: ["sps-member-devices"],
   summary: "Read the prepared local Native Host binding",
@@ -6121,7 +6146,7 @@ registerCurrentRoute({
 registerCurrentRoute({
   method: "post", path: "/api/companies/{companyId}/sps-member-device-requests", tags: ["sps-member-devices"],
   summary: "Request registration of a Member device", params: spsWorkspaceParamsSchema, body: createSpsMemberDeviceRequestSchema,
-  description: `${nativeDeviceDescription} Authenticated member self-registration creates pending only, not TLS proof or approval. Immutable certificate/key, no owner/Host/status override; a revoked key is not revived. First-time invitation/pairing is a separate unimplemented protocol.`,
+  description: `${nativeDeviceDescription} Authenticated member self-registration creates pending only, not TLS proof or approval. Immutable certificate/key, no owner/Host/status override; a revoked key is not revived. Native TLS enrollment must complete through the explicitly configured Desktop Main TLS ingress.`,
   responses: { 201: noStoreResponse(r.ok(memberDeviceSchema)), 400: r.badRequest, 403: r.forbidden, 409: r.conflict },
 });
 
