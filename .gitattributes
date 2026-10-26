@@ -3,3 +3,6 @@ packages/skills-catalog/catalog/** text=auto eol=lf
 packages/skills-catalog/generated/*.json text eol=lf
 packages/teams-catalog/catalog/** text=auto eol=lf
 packages/teams-catalog/generated/*.json text eol=lf
+
+# pnpm lock entries hash patch bytes; keep them identical on Windows and Linux.
+patches/*.patch text eol=lf
