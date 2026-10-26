@@ -663,13 +663,14 @@ export async function createApp(
       pluginRegistry,
     }, { installMissing: false });
   };
+  let pluginRuntimeStopping = false;
   const pluginStartup = runPluginStartupUnlessRecovering(pluginRecoveryState, () =>
     ensureBundledKubernetesPlugin()
       .then(() => ensureConfiguredBundledPlugins())
       .then(() => refreshConfiguredBundledPlugins())
       .then(() => loader.loadAll())
       .then((result) => {
-        if (!result) return;
+        if (!result || pluginRuntimeStopping) return;
         for (const loaded of result.results) {
           if (devWatcher && loaded.success && loaded.plugin.packagePath) {
             devWatcher.watch(loaded.plugin.id, loaded.plugin.packagePath);
@@ -681,17 +682,42 @@ export async function createApp(
     logger.error({ err }, "Failed to load ready plugins on startup");
   });
   let appServicesShutdown = false;
+  let pluginDiscoveryStopped = false;
+  const stopPluginDiscovery = () => {
+    if (pluginDiscoveryStopped) return;
+    pluginDiscoveryStopped = true;
+    scheduler.stop();
+    jobCoordinator.stop();
+    devWatcher?.close();
+  };
   const shutdownAppServices = () => {
     if (appServicesShutdown) return;
     appServicesShutdown = true;
     disableFeedbackExportFlushes();
-    devWatcher?.close();
+    stopPluginDiscovery();
     viteHtmlRenderer?.dispose();
     canonicalPluginDiagnostics.dispose();
     hostServiceCleanup.disposeAll();
     hostServiceCleanup.teardown();
   };
-  app.locals.paperclipShutdown = shutdownAppServices;
+  let pluginRuntimeShutdown: Promise<void> | undefined;
+  const shutdownPluginRuntime = () => {
+    if (pluginRuntimeShutdown) return pluginRuntimeShutdown;
+    pluginRuntimeStopping = true;
+    stopPluginDiscovery();
+    // Close admission synchronously, before a still-running startup can fork
+    // another worker. Keep Host services alive until owned workers have stopped.
+    const stoppingWorkers = workerManager.shutdown();
+    pluginRuntimeShutdown = Promise.allSettled([
+      Promise.resolve(pluginStartup).catch(() => undefined),
+      stoppingWorkers,
+    ]).then(results => {
+      const failures = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
+      if (failures.length) throw new AggregateError(failures.map(result => result.reason), "Plugin runtime shutdown failed.");
+    }).finally(shutdownAppServices);
+    return pluginRuntimeShutdown;
+  };
+  app.locals.paperclipShutdown = shutdownPluginRuntime;
 
   process.once("exit", shutdownAppServices);
   process.once("beforeExit", () => {

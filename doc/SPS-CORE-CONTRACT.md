@@ -53,6 +53,17 @@ fallback, and acceptance tests separately require process and temporary-data
 cleanup. A parent connection already lost before mounting the pipe still uses
 the existing bounded fallback; startup interruption is not graceful-stop proof.
 
+Normal Core shutdown stops plugin scheduling and development discovery before
+closing worker admission. It joins in-flight plugin startup and owned worker
+termination before disposing Host services or stopping the embedded database.
+The terminal worker-manager shutdown is shared by concurrent callers and rejects
+new starts, including starts through previously returned managed handles; the
+existing reusable `stopAll` operation is not redefined as terminal shutdown.
+A shutdown RPC acknowledgement alone is not process-exit evidence. A child still
+alive after the bounded termination sequence makes shutdown fail, and Core exits
+nonzero rather than recording a clean shutdown. This is local lifecycle control,
+not physical two-PC, distributed cancellation, or arbitrary descendant proof.
+
 Approval/revocation and redacted audit events commit together. Certificate and
 SPKI are immutable; a revoked key is terminal. Approval grants no Workspace
 membership, Plugin permission, Agent/Node execution or Source access. Authority
@@ -220,6 +231,27 @@ cookie jar and does not share existing hub cookies with a different origin.
 Product session-to-request activation, issued-credential persistence, enrollment
 UI and Native TLS ingress remain unwired. Current network listeners, Tailscale,
 Workspace/Plugin/Node/CLI/Source permissions and public SDK are unchanged.
+
+An inactive public-identity handler now accepts only an empty, fresh TLS 1.3
+POST on `/sps-native/v1/identity`, before account/session enrollment. It obtains
+Host UUID, server SPKI, Member issuer SPKI and the public issuer certificate from
+an explicitly injected trusted inspector, not a request selector. It rejects
+account/browser/proxy credential metadata, ambiguous framing and resumed TLS.
+The actual local TLS certificate must match the inspected server pin; issuer
+certificate/profile scope and current validity must agree with the inspected
+Host/issuer pin. A future trusted composition can reuse the owned parent signer
+inspector; product startup does not create or mount this handler.
+
+Only those four public fields are returned, with no-store/close headers and no
+cookie. It creates no session/user/device, consumes no invitation and grants no
+Workspace/Plugin/Node/CLI/Source authority. Read/operation/concurrency bounds are
+explicit; timeout, disposal, socket loss and a synchronous current-identity
+guard suppress late results while unresolved inspection retains capacity. This
+is public PKI metadata over an already authenticated Host connection, not a new
+Identity provider, browser access grant or proof of an approved Member. Desktop
+must verify the exact invited server on that connection and validate the issuer
+certificate before creating pending-key context. No listener, OS trust, firewall
+change or public SDK method is added.
 
 ### Optional Execution Backends
 

@@ -1216,9 +1216,14 @@ export async function startServer(): Promise<StartedServer> {
         }
       }
 
-      const appShutdown = (app as { locals?: { paperclipShutdown?: () => void } }).locals?.paperclipShutdown;
+      const appShutdown = (app as { locals?: { paperclipShutdown?: () => Promise<void> | void } }).locals?.paperclipShutdown;
       await shutdownSpsModelBroker(db);
-      appShutdown?.();
+      let pluginShutdownFailed = false;
+      try { await appShutdown?.(); }
+      catch (err) {
+        pluginShutdownFailed = true;
+        logger.error({ err }, "Failed to stop plugin runtime cleanly");
+      }
 
       if (embeddedPostgres && embeddedPostgresStartedByThisProcess) {
         logger.info({ signal }, "Stopping embedded PostgreSQL");
@@ -1233,7 +1238,7 @@ export async function startServer(): Promise<StartedServer> {
       // await the exporter's final batch is dropped on exit.
       await shutdownInstrumentation();
 
-      process.exit(0);
+      process.exit(pluginShutdownFailed ? 1 : 0);
     };
 
     let stopping: Promise<void> | undefined;

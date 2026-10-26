@@ -19,6 +19,13 @@ const mocks = vi.hoisted(() => {
       installPlugin: vi.fn(),
       loadAll: vi.fn(),
     },
+    workerManager: {
+      shutdown: vi.fn(async () => { calls.push("workers-stopped"); }),
+    },
+    hostCleanup: {
+      disposeAll: vi.fn(() => { calls.push("host-services-disposed"); }),
+      teardown: vi.fn(),
+    },
     lifecycle: {
       attachRuntimeLoader: vi.fn(),
       load: vi.fn(),
@@ -28,9 +35,11 @@ const mocks = vi.hoisted(() => {
     },
     scheduler: {
       start: vi.fn(() => calls.push("scheduler-start")),
+      stop: vi.fn(),
     },
     coordinator: {
       start: vi.fn(() => calls.push("coordinator-start")),
+      stop: vi.fn(),
     },
     toolDispatcher: {
       initialize: vi.fn(async () => { calls.push("tools-initialize"); }),
@@ -104,10 +113,7 @@ vi.mock("../services/bundled-plugin-bootstrap.js", async (importOriginal) => {
 });
 
 vi.mock("../services/plugin-host-service-cleanup.js", () => ({
-  createPluginHostServiceCleanup: vi.fn(() => ({
-    disposeAll: vi.fn(),
-    teardown: vi.fn(),
-  })),
+  createPluginHostServiceCleanup: vi.fn(() => mocks.hostCleanup),
 }));
 
 vi.mock("../services/plugin-canonical-diagnostics.js", () => ({
@@ -142,7 +148,7 @@ async function createTestApp() {
     bindHost: "127.0.0.1",
     authReady: true,
     companyDeletionEnabled: false,
-    pluginWorkerManager: {} as never,
+    pluginWorkerManager: mocks.workerManager as never,
   });
 }
 
@@ -193,8 +199,11 @@ describe("createApp plugin recovery startup contract", () => {
     expect(mocks.eventBus.observe).not.toHaveBeenCalled();
     expect(mocks.watcher.watch).not.toHaveBeenCalled();
 
-    app.locals.paperclipShutdown();
+    await app.locals.paperclipShutdown();
     expect(mocks.watcher.close).not.toHaveBeenCalled();
+    expect(mocks.workerManager.shutdown).toHaveBeenCalledOnce();
+    expect(mocks.scheduler.stop).toHaveBeenCalledOnce();
+    expect(mocks.coordinator.stop).toHaveBeenCalledOnce();
   });
 
   it("retains the normal bundled install/refresh/load, scheduler, tools, memory subscription, and watcher path", async () => {
@@ -230,7 +239,51 @@ describe("createApp plugin recovery startup contract", () => {
     ]);
     expect(mocks.watcher.watch).toHaveBeenCalledWith("loaded-plugin-id", "C:/plugins/loaded");
 
-    app.locals.paperclipShutdown();
+    await app.locals.paperclipShutdown();
     expect(mocks.watcher.close).toHaveBeenCalledOnce();
+    expect(mocks.workerManager.shutdown).toHaveBeenCalledOnce();
+    expect(mocks.scheduler.stop).toHaveBeenCalledOnce();
+    expect(mocks.coordinator.stop).toHaveBeenCalledOnce();
+  });
+
+  it("waits for a still-starting plugin and owned workers without watching after shutdown", async () => {
+    setRecoveryEnvironment(undefined);
+    let releaseStartup!: () => void;
+    const startup = new Promise<void>(resolve => { releaseStartup = resolve; });
+    mocks.loader.loadAll.mockImplementationOnce(async () => {
+      await startup;
+      return { results: [{ success: true, plugin: { id: "late-plugin", packagePath: "C:/fixture/late" } }] };
+    });
+    const app = await createTestApp();
+    await vi.waitFor(() => expect(mocks.loader.loadAll).toHaveBeenCalledOnce());
+    const stopping = app.locals.paperclipShutdown();
+    expect(app.locals.paperclipShutdown()).toBe(stopping);
+    expect(mocks.workerManager.shutdown).toHaveBeenCalledOnce();
+    let settled = false;
+    void stopping.then(() => { settled = true; });
+    await new Promise(resolve => setImmediate(resolve));
+    expect(settled).toBe(false);
+    releaseStartup();
+    await stopping;
+    expect(mocks.watcher.watch).not.toHaveBeenCalled();
+    expect(mocks.watcher.close).toHaveBeenCalledOnce();
+  });
+
+  it("keeps Host services until workers settle and propagates failed shutdown", async () => {
+    setRecoveryEnvironment("all-disabled");
+    let rejectWorkers!: (error: Error) => void;
+    const workers = new Promise<void>((_resolve, reject) => { rejectWorkers = reject; });
+    mocks.workerManager.shutdown.mockImplementationOnce(() => workers);
+    const app = await createTestApp();
+    const stopping = app.locals.paperclipShutdown();
+    const failure = expect(stopping).rejects.toThrow("Plugin runtime shutdown failed.");
+    expect(app.locals.paperclipShutdown()).toBe(stopping);
+    await new Promise(resolve => setImmediate(resolve));
+    expect(mocks.hostCleanup.disposeAll).not.toHaveBeenCalled();
+    rejectWorkers(new Error("fixture process remains"));
+    await failure;
+    expect(mocks.hostCleanup.disposeAll).toHaveBeenCalledOnce();
+    expect(mocks.hostCleanup.teardown).toHaveBeenCalledOnce();
+    expect(mocks.workerManager.shutdown).toHaveBeenCalledOnce();
   });
 });
