@@ -1103,6 +1103,7 @@ export function pluginRoutes(
       displayName: plugin.manifestJson.displayName,
       version: plugin.version,
       status: plugin.status,
+      capabilities: plugin.manifestJson.capabilities ?? [],
       activation: await resolveCompanyPluginActivation(plugin, companyId),
     })));
     res.json({ companyId, plugins: rows });

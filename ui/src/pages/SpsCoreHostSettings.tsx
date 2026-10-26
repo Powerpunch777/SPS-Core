@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { Bot, FolderCog, Network, Puzzle, ServerCog, UsersRound } from "lucide-react";
+import { Bot, Cpu, FolderCog, KeyRound, Network, Puzzle, ServerCog, UsersRound } from "lucide-react";
 import { Link } from "@/lib/router";
 import { useCompany } from "@/context/CompanyContext";
 import { useBreadcrumbs } from "@/context/BreadcrumbContext";
@@ -35,6 +35,18 @@ const settings = [
     title: "Nodes",
     description: "Review the computers that have joined this Workspace and their safe runtime metadata.",
     icon: Network,
+  },
+  {
+    to: "/company/settings/instance/model-connections",
+    title: "Model connections",
+    description: "Connect an optional text model and choose which plugins may use it.",
+    icon: Cpu,
+  },
+  {
+    to: "/company/settings/secrets",
+    title: "Credentials",
+    description: "Manage protected connection keys for this Workspace.",
+    icon: KeyRound,
   },
   {
     to: "/company/settings/instance/plugins",

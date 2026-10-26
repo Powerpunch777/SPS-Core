@@ -227,7 +227,7 @@ describe("SpsNativeWorkspaceEntry", () => {
       ...bootstrap,
       capabilities: ["workspace.shell.read", "workspace.dashboard.read", "workspace.inbox.read", "workspace.inbox.state.write"],
     };
-    let currentItem = inboxItem("Writable inbox item");
+    let currentItem: Omit<ReturnType<typeof inboxItem>, "readAt" | "archivedAt"> & { readAt: string | null; archivedAt: string | null } = inboxItem("Writable inbox item");
     bridge.getBootstrap = vi.fn().mockResolvedValue(writableBootstrap);
     bridge.readSurface = vi.fn(async ({ surface, archived }) => {
       if (surface === "shell") return neutralShell();

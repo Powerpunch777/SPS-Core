@@ -376,7 +376,15 @@ upstream termination or billing cancellation. There is no automatic HTTP retry,
 fallback or input replay. The read-to-dispatch interval is not atomic with the
 network. Common history uses the separate `model_request` lane and labels the
 model `configured`, not provider-reported; it never loads prompt/result content.
-Prices remain unknown. The Host configuration UI is not yet implemented. Source
+Prices remain unknown. Host settings now exposes the existing connection and
+per-Plugin approval APIs at `/company/settings/instance/model-connections`.
+The Core baseline also links the existing Secret management page; the model
+page consumes only credential metadata. Ready, enabled Plugins must declare
+`sps.models.submit` to appear as approval choices. Manifest metadata is not a
+grant: the existing server checks remain authoritative. Saved configuration is
+not provider readiness, and creating it does not start a model request or Agent.
+Uncertain mutation responses require a fresh read before another change; writes
+are not automatically repeated. AI remains optional. Source
 acceptance uses fake credentials and a loopback HTTP mock, not a real provider,
 installed-app qualification, two-PC proof or production isolation certification.
 

@@ -31,6 +31,8 @@ describe("SpsCoreHostSettings", () => {
       expect(container.querySelector('a[href="/company/settings/team"]')).not.toBeNull();
       expect(container.querySelector('a[href="/company/settings/project-sources"]')).not.toBeNull();
       expect(container.querySelector('a[href="/company/settings/nodes"]')).not.toBeNull();
+      expect(container.querySelector('a[href="/company/settings/instance/model-connections"]')?.textContent).toContain("Model connections");
+      expect(container.querySelector('a[href="/company/settings/secrets"]')?.textContent).toContain("Credentials");
       expect(container.querySelector('a[href="/company/settings/instance/plugins"]')).not.toBeNull();
     } finally {
       act(() => root.unmount());

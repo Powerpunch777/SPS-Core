@@ -62,6 +62,7 @@ const SpsCoreHostSettings = lazyNamed(
   "SpsCoreHostSettings",
 );
 const SpsCoreAgents = lazyNamed(() => import("./pages/SpsCoreAgents"), "SpsCoreAgents");
+const SpsModelConnections = lazyNamed(() => import("./pages/SpsModelConnections"), "SpsModelConnections");
 const SpsCoreWorkspaceSources = lazyNamed(
   () => import("./pages/SpsCoreWorkspaceSources"),
   "SpsCoreWorkspaceSources",
@@ -197,6 +198,8 @@ function coreBaselineRoutes() {
       <Route path="assistants/:agentId/:tab" element={<SpsCoreAssistantDetail />} />
       <Route path="company/settings" element={<SpsCoreHostSettings />} />
       <Route path="company/settings/agents" element={<SpsCoreAgents />} />
+      <Route path="company/settings/secrets" element={<Secrets />} />
+      <Route path="company/settings/instance/model-connections" element={<SpsModelConnections />} />
       <Route path="company/settings/workspace-appearance" element={<Navigate to="/company/settings/instance/plugins" replace />} />
       <Route path="company/settings/sps-server" element={<SpsCoreServerSettings />} />
       <Route path="company/settings/team" element={<SpsCoreTeamAccess />} />
@@ -238,6 +241,7 @@ function boardRoutes() {
       <Route path="company/export/*" element={<CompanyExport />} />
       <Route path="company/import" element={<CompanyImport />} />
       <Route path="company/settings/secrets" element={<Secrets />} />
+      <Route path="company/settings/instance/model-connections" element={<SpsModelConnections />} />
       <Route path="company/settings/instance" element={<Navigate to="general" replace />} />
       <Route path="company/settings/instance/profile" element={<ProfileSettings />} />
       <Route path="company/settings/instance/general" element={<InstanceGeneralSettings />} />
