@@ -13,7 +13,8 @@ separate.
 
 Main and Core share a fresh 32-byte child-launch secret privately. The encoded
 proof is base64url of a canonical JSON array, a dot, and base64url HMAC-SHA256 of
-the decoded array bytes. Ordered fields are version 1, Host UUID, Workspace UUID,
+the decoded array bytes. Ordered fields are version 1, Host UUID, Workspace UUID
+(or null for the exact discovery request below),
 method, exact origin-form target, fresh 32-byte nonce, timestamp in milliseconds,
 body SHA-256, exact Identity cookie, content type and client certificate DER.
 Headers are capped at 8 KiB, body bytes at 64 KiB, target at 2 KiB and DER at
@@ -37,8 +38,21 @@ close or failure. A matching `bootstrap.close`, parent disconnect, child exit,
 or stale Host/issuer guard disposes the server and verifier. The secret never
 enters argv, environment, renderer, public HTTP or logs.
 
-The surface reader admits four exact GET families: Workspace shell/providers,
-dashboard and inbox (only an optional archived=true/false query). It binds path
+The proof codec permits a null Workspace binding only for the exact private
+`GET /sps-native/v1/workspaces` discovery target. Core resolves the real Identity
+session first, then in one bounded transaction locks the matching approved,
+currently valid Host device and returns at most 200 active Workspace
+`{id,name}` choices joined to that session user's active memberships. A valid
+device with no active memberships receives an empty list; no matching device,
+expired session, revoked membership or revoked device fails closed. More than
+200 choices fails rather than returning a partial list. The listing conveys no
+Workspace authority: each later surface request still binds its selected
+Workspace ID and rechecks session, device and membership in that request's
+transaction. Company-wide listing and Owner/Board fallback are not used.
+
+The surface reader admits the exact workspace-discovery request above and four
+Workspace-bound GET families: shell/providers, dashboard and inbox (only an
+optional archived=true/false query). For Workspace surfaces it binds the path
 and proof Workspace IDs, resolves the real Identity session, and rechecks that
 session and approved device inside the same transaction as existing Core surface
 services. Shared row locks keep device, active Workspace and active membership
@@ -66,9 +80,9 @@ resolution and transaction lifetime before enabling this path.
 
 ## Verification and remaining work
 
-Focused proof tests passed 11/11, HTTP lifecycle/framing tests passed 7/7,
+Focused proof tests passed 12/12, HTTP lifecycle/framing tests passed 7/7,
 channel bootstrap/lifecycle tests passed 9/9, and actual temporary-DB/HTTP
-surface tests passed 4/4. Existing device tests plus transaction lock tests
+surface tests passed 5/5. Existing device tests plus transaction lock tests
 passed 16/16. Source's real signer/verifier interoperability check uses generated
 actual certificates and needs no DB or AI. Server typecheck is separate; full
 current CI/build remain required before readiness claims. Source's actual Main

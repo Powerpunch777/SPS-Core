@@ -11,11 +11,11 @@ const DEFAULT_TARGET = `/api/companies/${WORKSPACE_ID}/workspace-shell`;
 let clientCertificate: MemberTlsFixture;
 let serverCertificate: MemberTlsFixture;
 
-type ProofFields = [1, string, string, string, string, string, number, string, string, string, string];
+type ProofFields = [1, string, string | null, string, string, string, number, string, string, string, string];
 
 function fields(overrides: Partial<ProofFields> = {}, now = Date.now(), certificate = clientCertificate.certificate): ProofFields {
   return [1, HOST_ID, WORKSPACE_ID, "GET", DEFAULT_TARGET, randomBytes(32).toString("base64url"), now,
-    EMPTY_HASH, COOKIE, "", certificate].map((value, index) => overrides[index] ?? value) as ProofFields;
+    EMPTY_HASH, COOKIE, "", certificate].map((value, index) => Object.hasOwn(overrides, index) ? overrides[index as keyof ProofFields] : value) as ProofFields;
 }
 
 function encode(values: unknown, key: Buffer): string {
@@ -99,6 +99,21 @@ describe("SPS Native Workspace request proof codec", () => {
         4: request.target, 7: createHash("sha256").update(body).digest("hex"), 8: request.cookie, 9: request.contentType }), key), mutation))
         .toThrow("Native Workspace request proof is unavailable.");
     }
+    verify.dispose();
+  });
+
+  it("permits a null workspace binding only for the exact empty workspace discovery target", () => {
+    const key = randomBytes(32);
+    const verify = verifier({ key });
+    const target = "/sps-native/v1/workspaces";
+    const request = actual({ target });
+    const discovery = fields({ 2: null, 4: target });
+    expect(verify.verify(encode(discovery, key), request).workspaceId).toBeNull();
+    expect(() => verify.verify(encode(fields({ 2: null }), key), actual())).toThrow();
+    expect(() => verify.verify(encode(fields({ 2: null, 3: "PATCH", 4: target }), key), actual({ method: "PATCH", target }))).toThrow();
+    expect(() => verify.verify(encode(fields({ 2: WORKSPACE_ID, 4: target }), key), request)).toThrow();
+    const queryTarget = `${target}?x=1`;
+    expect(() => verify.verify(encode(fields({ 2: null, 4: queryTarget }), key), actual({ target: queryTarget }))).toThrow();
     verify.dispose();
   });
 

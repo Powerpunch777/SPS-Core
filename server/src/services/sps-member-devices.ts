@@ -39,6 +39,18 @@ export type SpsMemberDeviceAuthorizationInput = {
   certificateSha256: string;
 };
 
+export type SpsMemberAuthorizedWorkspace = Readonly<{ id: string; name: string }>;
+export type SpsMemberDeviceWorkspaceAuthorization = Readonly<{
+  deviceId: string;
+  hostId: string;
+  userId: string;
+  revision: number;
+  certificateSha256: string;
+  certificateNotAfter: Date;
+  workspaces: readonly SpsMemberAuthorizedWorkspace[];
+}>;
+export type SpsMemberDeviceWorkspaceAuthorizationInput = Readonly<{ userId: string; certificateSha256: string }>;
+
 export type SpsMemberDeviceErrorCode =
   | "invalid_input"
   | "workspace_membership_required"
@@ -470,6 +482,57 @@ export function spsMemberDeviceService(db: Db, hostIdInput: string) {
     ): Promise<SpsMemberDeviceAuthorization> {
       if (typeof tx?.rollback !== "function") throw new TypeError("A Member authorization transaction is required");
       return authorizeCurrent(tx, input, true);
+    },
+
+    /** Discovers only active workspaces for the authenticated Member and this
+     * current Host certificate. Device and membership rows stay locked through
+     * the caller's transaction. A valid device with no memberships returns []. */
+    async listAuthorizedWorkspacesInTransaction(
+      tx: DeviceTransaction,
+      input: SpsMemberDeviceWorkspaceAuthorizationInput,
+    ): Promise<SpsMemberDeviceWorkspaceAuthorization> {
+      if (typeof tx?.rollback !== "function") throw new TypeError("A Member authorization transaction is required");
+      const userId = requireUserId(input?.userId, "user ID");
+      if (typeof input.certificateSha256 !== "string" || !/^[0-9a-f]{64}$/.test(input.certificateSha256)) {
+        invalidInput("Invalid certificate fingerprint.");
+      }
+      const now = new Date();
+      const [device] = await tx.select({
+        deviceId: spsMemberDevices.id,
+        hostId: spsMemberDevices.hostId,
+        userId: spsMemberDevices.ownerUserId,
+        revision: spsMemberDevices.revision,
+        certificateSha256: spsMemberDevices.certificateSha256,
+        certificateNotAfter: spsMemberDevices.certificateNotAfter,
+      }).from(spsMemberDevices).where(and(
+        eq(spsMemberDevices.hostId, hostId),
+        eq(spsMemberDevices.ownerUserId, userId),
+        eq(spsMemberDevices.certificateSha256, input.certificateSha256),
+        eq(spsMemberDevices.status, "approved"),
+        lte(spsMemberDevices.certificateNotBefore, now),
+        gt(spsMemberDevices.certificateNotAfter, now),
+      )).for("share").limit(1);
+      if (!device) throw new SpsMemberDeviceError("not_authorized", "No active approved device matches this request.");
+
+      const workspaces = await tx.select({ id: companies.id, name: companies.name })
+        .from(companies)
+        .innerJoin(companyMemberships, and(
+          eq(companyMemberships.companyId, companies.id),
+          eq(companyMemberships.principalType, "user"),
+          eq(companyMemberships.principalId, userId),
+          eq(companyMemberships.status, "active"),
+        ))
+        .where(eq(companies.status, "active"))
+        .orderBy(companies.id)
+        .limit(MAX_LIST_SIZE + 1)
+        .for("share");
+      if (workspaces.length > MAX_LIST_SIZE) {
+        throw new SpsMemberDeviceError("not_authorized", "Too many active workspaces are available.");
+      }
+      return Object.freeze({
+        ...device,
+        workspaces: Object.freeze(workspaces.map(workspace => Object.freeze({ id: workspace.id, name: workspace.name }))),
+      });
     },
 
     async listEvents(deviceIdInput: string, authority?: SpsMemberDeviceHostAuthority): Promise<SpsMemberDeviceEventDto[]> {

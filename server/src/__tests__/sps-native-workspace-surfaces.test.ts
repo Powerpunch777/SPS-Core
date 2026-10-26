@@ -1,7 +1,7 @@
 import { createHash, randomBytes, randomUUID, createHmac } from "node:crypto";
 import { request as httpRequest } from "node:http";
 import { eq } from "drizzle-orm";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   authSessions,
   authUsers,
@@ -36,7 +36,7 @@ const ISSUER = "https://native-workspace.example.test";
 
 function signedHeader(input: {
   key: Buffer;
-  workspaceId: string;
+  workspaceId: string | null;
   target: string;
   certificate: string;
   cookie?: string;
@@ -56,6 +56,7 @@ describeDatabase("Native read-only Workspace surface consumer", () => {
   let database: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | undefined;
   let certificate!: MemberTlsFixture;
   let companyId!: string;
+  let secondCompanyId!: string;
   let currentIdentity!: ReturnType<typeof createSpsIdentityAuth>;
   let service!: ReturnType<typeof createSpsNativeWorkspaceSurfaceReader>;
   let privateHttp!: ReturnType<typeof createSpsNativeWorkspaceHttpServer>;
@@ -63,6 +64,7 @@ describeDatabase("Native read-only Workspace surface consumer", () => {
   let key: Buffer;
   let verifier: ReturnType<typeof createSpsNativeWorkspaceProofVerifier>;
   let registeredDeviceId: string;
+  let deviceService!: ReturnType<typeof spsMemberDeviceService>;
 
   beforeAll(async () => {
     database = await startEmbeddedPostgresTestDatabase("sps-native-workspace-surfaces-");
@@ -101,8 +103,13 @@ describeDatabase("Native read-only Workspace surface consumer", () => {
       issuePrefix: `N${randomUUID().replaceAll("-", "").slice(0, 8).toUpperCase()}` });
     await db.insert(companyMemberships).values({ companyId, principalType: "user", principalId: USER_ID,
       status: "active", membershipRole: "member" });
+    secondCompanyId = randomUUID();
+    await db.insert(companies).values({ id: secondCompanyId, name: "Second Native Workspace Fixture",
+      issuePrefix: `N${randomUUID().replaceAll("-", "").slice(0, 8).toUpperCase()}` });
+    await db.insert(companyMemberships).values({ companyId: secondCompanyId, principalType: "user", principalId: USER_ID,
+      status: "active", membershipRole: "viewer" });
 
-    const deviceService = spsMemberDeviceService(db, HOST_ID);
+    deviceService = spsMemberDeviceService(db, HOST_ID);
     const pending = await deviceService.request({ companyId, userId: USER_ID,
       displayName: "Test Member", certificate: certificate.certificate });
     registeredDeviceId = pending.id;
@@ -135,13 +142,13 @@ describeDatabase("Native read-only Workspace surface consumer", () => {
       .where(eq(spsMemberDevices.id, registeredDeviceId));
   });
 
-  const read = (path: string, workspaceId = companyId, method = "GET", cookie = COOKIE, cert = certificate.certificate) => {
+  const read = (path: string, workspaceId: string | null = companyId, method = "GET", cookie = COOKIE, cert = certificate.certificate) => {
     const request = signedHeader({ key, workspaceId, target: path, certificate: cert, method, cookie });
     return service.read(request.header, request.actual);
   };
 
-  function overPrivateHttp(path: string, options: { cookie?: string; header?: string; cert?: string } = {}) {
-    const signed = signedHeader({ key, workspaceId: companyId, target: path,
+  function overPrivateHttp(path: string, options: { cookie?: string; header?: string; cert?: string; workspaceId?: string | null } = {}) {
+    const signed = signedHeader({ key, workspaceId: options.workspaceId === undefined ? companyId : options.workspaceId, target: path,
       certificate: options.cert ?? certificate.certificate, cookie: options.cookie ?? COOKIE });
     return new Promise<{ status: number; body: unknown }>((resolve, reject) => {
       const request = httpRequest({ hostname: privateAddress.host, port: privateAddress.port, path,
@@ -169,6 +176,59 @@ describeDatabase("Native read-only Workspace surface consumer", () => {
     expect(await read(`/api/companies/${companyId}/workspace-inbox`)).toEqual({ items: [] });
     expect(await read(`/api/companies/${companyId}/workspace-inbox?archived=true`)).toEqual({ items: [] });
     expect(await read(`/api/companies/${companyId}/workspace-inbox?archived=false`)).toEqual({ items: [] });
+  });
+
+  it("discovers only this authenticated user's active workspaces for the approved Host device", async () => {
+    const target = "/sps-native/v1/workspaces";
+    const signed = signedHeader({ key, workspaceId: null, target, certificate: certificate.certificate });
+    expect(await service.read(signed.header, signed.actual)).toEqual([
+      { id: companyId, name: "Native Workspace Fixture" },
+      { id: secondCompanyId, name: "Second Native Workspace Fixture" },
+    ].sort((left, right) => left.id.localeCompare(right.id)));
+    expect(await overPrivateHttp(target, { workspaceId: null })).toMatchObject({
+      status: 200,
+      body: expect.arrayContaining([
+        { id: companyId, name: "Native Workspace Fixture" },
+        { id: secondCompanyId, name: "Second Native Workspace Fixture" },
+      ]),
+    });
+    await expect(read(target, companyId)).rejects.toMatchObject({ code: "native_workspace_unavailable" });
+
+    const transactionSpy = vi.spyOn(db, "transaction");
+    await expect(read(target, null, "GET", `sps_identity_session=${"z".repeat(64)}`))
+      .rejects.toMatchObject({ code: "native_workspace_unavailable" });
+    expect(transactionSpy).not.toHaveBeenCalled();
+    transactionSpy.mockRestore();
+
+    const tx = { execute: vi.fn(async () => undefined), select: vi.fn(() => { throw new Error("authorization must precede device/workspace reads"); }) };
+    const fakeDb = { transaction: vi.fn(async (callback: (transaction: typeof tx) => Promise<unknown>) => callback(tx)) };
+    const deniedSessionReader = createSpsNativeWorkspaceSurfaceReader({
+      db: fakeDb as never,
+      identity: { resolveNativeEnrollmentSessionFromHeaders: async () => ({
+        userId: USER_ID,
+        authorizeInTransaction: async () => { throw new Error("session was revoked"); },
+      }) } as never,
+      hostId: HOST_ID,
+      verifier,
+      assertCurrent: () => {},
+    });
+    const denied = signedHeader({ key, workspaceId: null, target, certificate: certificate.certificate });
+    await expect(deniedSessionReader.read(denied.header, denied.actual))
+      .rejects.toMatchObject({ code: "native_workspace_unavailable" });
+    expect(fakeDb.transaction).toHaveBeenCalledOnce();
+    expect(tx.select).not.toHaveBeenCalled();
+
+    await db.update(companyMemberships).set({ status: "revoked" })
+      .where(eq(companyMemberships.principalId, USER_ID));
+    const noMembership = signedHeader({ key, workspaceId: null, target, certificate: certificate.certificate });
+    expect(await service.read(noMembership.header, noMembership.actual)).toEqual([]);
+    await db.update(companyMemberships).set({ status: "active" })
+      .where(eq(companyMemberships.principalId, USER_ID));
+
+    await db.update(spsMemberDevices).set({ status: "revoked", revokedAt: new Date() })
+      .where(eq(spsMemberDevices.id, registeredDeviceId));
+    const revoked = signedHeader({ key, workspaceId: null, target, certificate: certificate.certificate });
+    await expect(service.read(revoked.header, revoked.actual)).rejects.toMatchObject({ code: "native_workspace_unavailable" });
   });
 
   it("serves the real private loopback HTTP adapter only after Core proof and Member authorization", async () => {

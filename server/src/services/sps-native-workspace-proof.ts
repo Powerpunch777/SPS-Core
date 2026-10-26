@@ -15,6 +15,7 @@ const MAX_FUTURE_MS = 5_000;
 const MAX_REPLAY_ENTRIES = 4096;
 const CLIENT_AUTH_OID = "1.3.6.1.5.5.7.3.2";
 const SERVER_AUTH_OID = "1.3.6.1.5.5.7.3.1";
+const DISCOVERY_TARGET = "/sps-native/v1/workspaces";
 
 export type SpsNativeWorkspaceProofActualRequest = Readonly<{
   method: string;
@@ -27,7 +28,7 @@ export type SpsNativeWorkspaceProofActualRequest = Readonly<{
 export type SpsNativeWorkspaceProof = Readonly<{
   v: 1;
   hostId: string;
-  workspaceId: string;
+  workspaceId: string | null;
   method: "GET" | "PUT" | "PATCH";
   target: string;
   nonce: string;
@@ -38,7 +39,7 @@ export type SpsNativeWorkspaceProof = Readonly<{
   peerCertificateDer: Buffer;
 }>;
 
-type ProofArray = readonly [1, string, string, string, string, string, number, string, string, string, string];
+type ProofArray = readonly [1, string, string | null, string, string, string, number, string, string, string, string];
 type VerifierOptions = {
   hostId: string;
   key: Buffer;
@@ -98,7 +99,9 @@ function proofArray(value: unknown): ProofArray {
     throw unavailable();
   }
   const fields = value as unknown[];
-  if (fields[0] !== 1 || !canonicalUuid(fields[1]) || !canonicalUuid(fields[2])
+  if (fields[0] !== 1 || !canonicalUuid(fields[1])
+    || !(fields[2] === null ? fields[3] === "GET" && fields[4] === DISCOVERY_TARGET : canonicalUuid(fields[2]))
+    || (fields[4] === DISCOVERY_TARGET && fields[2] !== null)
     || typeof fields[3] !== "string" || !METHODS.has(fields[3])
     || !canonicalTarget(fields[4]) || typeof fields[5] !== "string" || !NONCE.test(fields[5])
     || Buffer.from(fields[5], "base64url").length !== 32 || Buffer.from(fields[5], "base64url").toString("base64url") !== fields[5]

@@ -17,6 +17,7 @@ type Verifier = Readonly<{
   verify(header: string, actual: SpsNativeWorkspaceProofActualRequest): SpsNativeWorkspaceProof;
 }>;
 type ReadResult =
+  | ReadonlyArray<Readonly<{ id: string; name: string }>>
   | Awaited<ReturnType<ReturnType<typeof spsWorkspaceSurfaceService>["listShellProviders"]>>
   | Awaited<ReturnType<ReturnType<typeof spsWorkspaceSurfaceService>["getShell"]>>
   | { widgets: Awaited<ReturnType<ReturnType<typeof spsWorkspaceSurfaceService>["listDashboard"]>> }
@@ -31,6 +32,7 @@ type Options = {
 };
 
 type SurfaceOperation =
+  | { workspaceId: null; kind: "workspace-discovery" }
   | { workspaceId: string; kind: "shell-providers" }
   | { workspaceId: string; kind: "shell" }
   | { workspaceId: string; kind: "dashboard" }
@@ -55,6 +57,7 @@ function assertCurrent(assertion: () => void) {
 }
 
 function matchTarget(target: string): SurfaceOperation {
+  if (target === "/sps-native/v1/workspaces") return { workspaceId: null, kind: "workspace-discovery" };
   const shellProviders = /^\/api\/companies\/([0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12})\/workspace-shell\/providers$/.exec(target);
   if (shellProviders) return { workspaceId: shellProviders[1]!, kind: "shell-providers" };
   const shell = /^\/api\/companies\/([0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12})\/workspace-shell$/.exec(target);
@@ -103,6 +106,26 @@ export function createSpsNativeWorkspaceSurfaceReader({ db, identity, hostId, ve
             await session.authorizeInTransaction(tx, userId);
             assertCurrent(assertCurrentInput);
           };
+          await assertSession();
+          if (operation.kind === "workspace-discovery") {
+            const initial = await devices.listAuthorizedWorkspacesInTransaction(tx, { userId, certificateSha256 });
+            if (!UUID.test(initial.deviceId) || !Number.isSafeInteger(initial.revision) || initial.revision < 1
+              || initial.hostId !== hostId || initial.userId !== userId || initial.certificateSha256 !== certificateSha256
+              || !(initial.certificateNotAfter instanceof Date) || !Number.isFinite(initial.certificateNotAfter.getTime())
+              || initial.certificateNotAfter.getTime() <= Date.now() || !Array.isArray(initial.workspaces)
+              || initial.workspaces.length > 200
+              || initial.workspaces.some(workspace => !UUID.test(workspace.id) || typeof workspace.name !== "string")) fail();
+            assertCurrent(assertCurrentInput);
+            await assertSession();
+            const final = await devices.listAuthorizedWorkspacesInTransaction(tx, { userId, certificateSha256 });
+            if (final.deviceId !== initial.deviceId || final.revision !== initial.revision
+              || final.hostId !== initial.hostId || final.userId !== initial.userId
+              || final.certificateSha256 !== initial.certificateSha256
+              || final.certificateNotAfter.getTime() !== initial.certificateNotAfter.getTime()) fail();
+            assertCurrent(assertCurrentInput);
+            return final.workspaces;
+          }
+          if (operation.workspaceId === null) fail();
           const authorizeDevice = async () => {
             const grant = await devices.authorizeInTransaction(tx, {
               companyId: operation.workspaceId,
@@ -117,7 +140,7 @@ export function createSpsNativeWorkspaceSurfaceReader({ db, identity, hostId, ve
             return grant;
           };
 
-          await assertSession();
+          if (!operation.workspaceId) fail();
           const initialGrant = await authorizeDevice();
           const surfaces = spsWorkspaceSurfaceService(tx as unknown as Db);
           let value: ReadResult;
