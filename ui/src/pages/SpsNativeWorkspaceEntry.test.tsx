@@ -4,7 +4,7 @@ import { act, StrictMode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { NativeWorkspaceBootstrap, SpsNativeWorkspaceBridge } from "../native-workspace-bridge";
-import { SpsNativeWorkspaceEntry } from "./SpsNativeWorkspaceEntry";
+import { parseNativeWorkspaceBootstrap, SpsNativeWorkspaceEntry } from "./SpsNativeWorkspaceEntry";
 
 const bootstrap: NativeWorkspaceBootstrap = {
   v: 1,
@@ -39,7 +39,7 @@ function widget(displayName: string, description?: string) {
 
 function inboxItem(title: string) {
   return {
-    id: "inbox-1",
+    id: "a9b8b2a5-115a-45e9-8fbd-5fb2a6daed5d",
     companyId: bootstrap.workspace.id,
     sourcePluginId: "plugin-1",
     sourcePluginKey: "workflow-kit",
@@ -103,6 +103,7 @@ describe("SpsNativeWorkspaceEntry", () => {
         if (surface === "inbox") return { items: [] };
         return [];
       }),
+      updateInboxState: vi.fn().mockResolvedValue({ readAt: null, archivedAt: null }),
     };
   });
 
@@ -152,6 +153,7 @@ describe("SpsNativeWorkspaceEntry", () => {
     expect(container.textContent).not.toContain("/owner-only/plugin-route");
     expect(container.textContent).not.toContain("Approve");
     expect(container.textContent).not.toContain("do not render");
+    expect(container.textContent).not.toContain("Mark read");
     expect(container.querySelector("a")).toBeNull();
     expect(fetchSpy).not.toHaveBeenCalled();
   });
@@ -218,6 +220,111 @@ describe("SpsNativeWorkspaceEntry", () => {
     expect(bridge.readSurface).not.toHaveBeenCalled();
     expect(container.textContent).toContain("Workspace could not be loaded.");
     expect(container.textContent).not.toContain("München Workspace");
+  });
+
+  it("supports the optional inbox write capability with server-confirmed read, archive, and restore state", async () => {
+    const writableBootstrap: NativeWorkspaceBootstrap = {
+      ...bootstrap,
+      capabilities: ["workspace.shell.read", "workspace.dashboard.read", "workspace.inbox.read", "workspace.inbox.state.write"],
+    };
+    let currentItem = inboxItem("Writable inbox item");
+    bridge.getBootstrap = vi.fn().mockResolvedValue(writableBootstrap);
+    bridge.readSurface = vi.fn(async ({ surface, archived }) => {
+      if (surface === "shell") return neutralShell();
+      if (surface === "inbox") return { items: currentItem.archivedAt === null ? (archived ? [] : [currentItem]) : (archived ? [currentItem] : []) };
+      return { widgets: [] };
+    });
+    bridge.updateInboxState = vi.fn(async (input: { itemId: string; read?: boolean; archived?: boolean }) => {
+      currentItem = {
+        ...currentItem,
+        unread: input.read === undefined ? currentItem.unread : !input.read,
+        readAt: input.read === undefined ? currentItem.readAt : input.read ? new Date(0).toISOString() : null,
+        archivedAt: input.archived === undefined ? currentItem.archivedAt : input.archived ? new Date(0).toISOString() : null,
+      };
+      return { readAt: currentItem.readAt, archivedAt: currentItem.archivedAt };
+    });
+    render();
+    await settle();
+    await click(container, "Inbox");
+    expect(container.textContent).toContain("Mark read");
+    expect(container.textContent).toContain("Archive");
+
+    await click(container, "Mark read");
+    expect(bridge.updateInboxState).toHaveBeenLastCalledWith({ itemId: currentItem.id, read: true });
+    expect(container.textContent).toContain("Read");
+    expect(container.textContent).toContain("Mark unread");
+
+    await click(container, "Archive");
+    expect(bridge.updateInboxState).toHaveBeenLastCalledWith({ itemId: currentItem.id, archived: true });
+    expect(container.textContent).toContain("No inbox items.");
+    await click(container, "Show archived");
+    expect(bridge.readSurface).toHaveBeenLastCalledWith({ surface: "inbox", archived: true });
+    expect(container.textContent).toContain("Writable inbox item");
+    await click(container, "Restore");
+    expect(bridge.updateInboxState).toHaveBeenLastCalledWith({ itemId: currentItem.id, archived: false });
+    expect(container.textContent).toContain("No inbox items.");
+  });
+
+  it("rejects unknown inbox write capabilities instead of granting controls", async () => {
+    bridge.getBootstrap = vi.fn().mockResolvedValue({
+      ...bootstrap,
+      capabilities: [...bootstrap.capabilities, "workspace.inbox.state.write", "workspace.admin"],
+    });
+    render();
+    await settle();
+    expect(container.textContent).toContain("Workspace could not be loaded.");
+    expect(bridge.readSurface).not.toHaveBeenCalled();
+    const sparseCapabilities = ["workspace.shell.read", "workspace.dashboard.read", "workspace.inbox.read", "workspace.inbox.state.write"];
+    delete sparseCapabilities[0];
+    expect(() => parseNativeWorkspaceBootstrap({
+      ...bootstrap,
+      capabilities: sparseCapabilities,
+    })).toThrow("Workspace could not be loaded.");
+  });
+
+  it("clears inbox data when a write or its authoritative reread fails", async () => {
+    bridge.readSurface = vi.fn(async ({ surface }) => surface === "shell"
+      ? neutralShell() : surface === "inbox" ? { items: [inboxItem("Stale inbox row")] } : { widgets: [] });
+    bridge.getBootstrap = vi.fn().mockResolvedValue({
+      ...bootstrap,
+      capabilities: ["workspace.shell.read", "workspace.dashboard.read", "workspace.inbox.read", "workspace.inbox.state.write"],
+    });
+    bridge.updateInboxState = vi.fn().mockRejectedValue(new Error("private Host failure"));
+    render();
+    await settle();
+    await click(container, "Inbox");
+    expect(container.textContent).toContain("Stale inbox row");
+    await click(container, "Mark read");
+    expect(container.textContent).toContain("Workspace could not be loaded.");
+    expect(container.textContent).not.toContain("Stale inbox row");
+    expect(container.textContent).not.toContain("private Host failure");
+  });
+
+  it("ignores a late inbox mutation response after the entry unmounts", async () => {
+    let finishUpdate!: (value: { readAt: string | null; archivedAt: string | null }) => void;
+    bridge.readSurface = vi.fn(async ({ surface }) => surface === "shell"
+      ? neutralShell() : surface === "inbox" ? { items: [inboxItem("Late inbox row")] } : { widgets: [] });
+    bridge.getBootstrap = vi.fn().mockResolvedValue({
+      ...bootstrap,
+      capabilities: ["workspace.shell.read", "workspace.dashboard.read", "workspace.inbox.read", "workspace.inbox.state.write"],
+    });
+    bridge.updateInboxState = vi.fn(() => new Promise<{ readAt: string | null; archivedAt: string | null }>(resolve => { finishUpdate = resolve; }));
+    render();
+    await settle();
+    await click(container, "Inbox");
+    const markRead = [...container.querySelectorAll("button")].find(item => item.textContent?.trim() === "Mark read");
+    expect(markRead).toBeTruthy();
+    act(() => markRead!.click());
+    await settle();
+    const readCountBeforeUnmount = vi.mocked(bridge.readSurface).mock.calls.length;
+    act(() => {
+      root.unmount();
+      rootUnmounted = true;
+    });
+    await act(async () => finishUpdate({ readAt: new Date(0).toISOString(), archivedAt: null }));
+    await settle();
+    expect(vi.mocked(bridge.readSurface).mock.calls).toHaveLength(readCountBeforeUnmount);
+    expect(container.textContent).not.toContain("Late inbox row");
   });
 
   it("ignores the stale StrictMode bootstrap completion and reads the shell once", async () => {

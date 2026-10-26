@@ -10,6 +10,8 @@ import {
   createDb,
   spsMemberDeviceEvents,
   spsMemberDevices,
+  spsPluginInboxItems,
+  spsPluginInboxUserStates,
 } from "@paperclipai/db";
 import type { Config } from "../config.js";
 import { createSpsIdentityAuth } from "../auth/sps-identity.js";
@@ -41,14 +43,17 @@ function signedHeader(input: {
   certificate: string;
   cookie?: string;
   method?: string;
+  body?: Buffer;
+  contentType?: string;
 }) {
-  const body = Buffer.alloc(0);
+  const body = input.body ?? Buffer.alloc(0);
+  const contentType = input.contentType ?? "";
   const fields = [1, HOST_ID, input.workspaceId, input.method ?? "GET", input.target,
     randomBytes(32).toString("base64url"), Date.now(), createHash("sha256").update(body).digest("hex"),
-    input.cookie ?? COOKIE, "", input.certificate];
+    input.cookie ?? COOKIE, contentType, input.certificate];
   const bytes = Buffer.from(JSON.stringify(fields), "utf8");
   return { header: `${bytes.toString("base64url")}.${createHmac("sha256", input.key).update(bytes).digest("base64url")}`,
-    actual: { method: input.method ?? "GET", target: input.target, body, cookie: input.cookie ?? COOKIE, contentType: "" } };
+    actual: { method: input.method ?? "GET", target: input.target, body, cookie: input.cookie ?? COOKIE, contentType } };
 }
 
 describeDatabase("Native read-only Workspace surface consumer", () => {
@@ -66,6 +71,7 @@ describeDatabase("Native read-only Workspace surface consumer", () => {
   let key: Buffer;
   let verifier: ReturnType<typeof createSpsNativeWorkspaceProofVerifier>;
   let registeredDeviceId: string;
+  let inboxItemId: string;
   let deviceService!: ReturnType<typeof spsMemberDeviceService>;
 
   beforeAll(async () => {
@@ -132,6 +138,8 @@ describeDatabase("Native read-only Workspace surface consumer", () => {
     verifier?.dispose();
     await db?.delete(spsMemberDeviceEvents);
     await db?.delete(spsMemberDevices);
+    await db?.delete(spsPluginInboxUserStates);
+    await db?.delete(spsPluginInboxItems);
     await db?.delete(companyMemberships);
     await db?.delete(companies);
     await db?.delete(authSessions);
@@ -142,23 +150,32 @@ describeDatabase("Native read-only Workspace surface consumer", () => {
   }, 30_000);
 
   afterEach(async () => {
+    if (inboxItemId) {
+      await db.delete(spsPluginInboxUserStates).where(eq(spsPluginInboxUserStates.itemId, inboxItemId));
+      await db.delete(spsPluginInboxItems).where(eq(spsPluginInboxItems.id, inboxItemId));
+      inboxItemId = "";
+    }
     await db.update(spsMemberDevices).set({ status: "approved", revokedAt: null })
       .where(eq(spsMemberDevices.id, registeredDeviceId));
   });
 
-  const read = (path: string, workspaceId: string | null = companyId, method = "GET", cookie = COOKIE, cert = certificate.certificate) => {
-    const request = signedHeader({ key, workspaceId, target: path, certificate: cert, method, cookie });
+  const read = (path: string, workspaceId: string | null = companyId, method = "GET", cookie = COOKIE, cert = certificate.certificate,
+    body = Buffer.alloc(0), contentType = "") => {
+    const request = signedHeader({ key, workspaceId, target: path, certificate: cert, method, cookie, body, contentType });
     return service.read(request.header, request.actual);
   };
 
-  function overPrivateHttp(path: string, options: { cookie?: string; header?: string; cert?: string; workspaceId?: string | null } = {}) {
+  function overPrivateHttp(path: string, options: { cookie?: string; header?: string; cert?: string; workspaceId?: string | null;
+    method?: string; body?: Buffer; contentType?: string } = {}) {
     const signed = signedHeader({ key, workspaceId: options.workspaceId === undefined ? companyId : options.workspaceId, target: path,
-      certificate: options.cert ?? certificate.certificate, cookie: options.cookie ?? COOKIE });
+      certificate: options.cert ?? certificate.certificate, cookie: options.cookie ?? COOKIE,
+      method: options.method, body: options.body, contentType: options.contentType });
     return new Promise<{ status: number; body: unknown }>((resolve, reject) => {
       const request = httpRequest({ hostname: privateAddress.host, port: privateAddress.port, path,
-        method: "GET", agent: false, headers: {
+        method: options.method ?? "GET", agent: false, headers: {
           ...(options.header === "" ? {} : { "x-sps-native-workspace-proof": options.header ?? signed.header }),
           ...(options.cookie === "" ? {} : { Cookie: options.cookie ?? COOKIE }),
+          ...(options.contentType ? { "Content-Type": options.contentType } : {}),
         } }, response => {
         const parts: Buffer[] = [];
         response.on("data", part => parts.push(Buffer.from(part)));
@@ -169,7 +186,8 @@ describeDatabase("Native read-only Workspace surface consumer", () => {
         });
       });
       request.once("error", reject);
-      request.end();
+        if (options.body) request.end(options.body);
+        else request.end();
     });
   }
 
@@ -182,6 +200,73 @@ describeDatabase("Native read-only Workspace surface consumer", () => {
     expect(await read(`/api/companies/${companyId}/workspace-inbox?archived=false`)).toEqual({ items: [] });
   });
 
+  it("updates only the authenticated Member's inbox state on the exact PATCH contract", async () => {
+    const [inboxItem] = await db.insert(spsPluginInboxItems).values({
+      companyId,
+      sourcePluginId: null,
+      sourcePluginKey: "test-plugin",
+      externalId: `native-${randomUUID()}`,
+      targetUserId: USER_ID,
+      category: "test",
+      severity: "info",
+      title: "Member inbox fixture",
+      summary: "Inbox state fixture",
+      navigationTarget: null,
+      actionIds: [],
+      opaqueReference: {},
+      withdrawnAt: null,
+    }).returning({ id: spsPluginInboxItems.id });
+    inboxItemId = inboxItem!.id;
+    const target = `/api/companies/${companyId}/workspace-inbox/${inboxItemId}`;
+    const body = Buffer.from('{"read":true,"archived":true}', "utf8");
+    const result = await read(target, companyId, "PATCH", COOKIE, certificate.certificate, body, "application/json");
+    expect(Object.keys(result as object).sort()).toEqual(["archivedAt", "readAt"]);
+    expect(result).toMatchObject({ readAt: expect.any(String), archivedAt: expect.any(String) });
+    expect(await overPrivateHttp(target, { method: "PATCH", body, contentType: "application/json" }))
+      .toMatchObject({ status: 200, body: { readAt: expect.any(String), archivedAt: expect.any(String) } });
+
+    await expect(read(target, secondCompanyId, "PATCH", COOKIE, certificate.certificate, body, "application/json"))
+      .rejects.toMatchObject({ code: "native_workspace_unavailable" });
+    const viewerTarget = `/api/companies/${secondCompanyId}/workspace-inbox/${randomUUID()}`;
+    await expect(read(viewerTarget, secondCompanyId, "PATCH", COOKIE, certificate.certificate, body, "application/json"))
+      .rejects.toMatchObject({ code: "native_workspace_unavailable" });
+
+    for (const [badBody, contentType] of [
+      [Buffer.from("{}"), "application/json"],
+      [Buffer.from('{"read":true,"extra":false}'), "application/json"],
+      [Buffer.from('{"read":"true"}'), "application/json"],
+      [Buffer.from('{ "read": true }'), "application/json"],
+      [Buffer.from('{"read":true}'), "text/plain"],
+      [Buffer.from("x".repeat(129)), "application/json"],
+    ] as const) {
+      await expect(read(target, companyId, "PATCH", COOKIE, certificate.certificate, badBody, contentType))
+        .rejects.toMatchObject({ code: "native_workspace_unavailable" });
+    }
+    await expect(read(target, companyId, "GET", COOKIE, certificate.certificate, body, "application/json"))
+      .rejects.toMatchObject({ code: "native_workspace_unavailable" });
+
+    const rollbackReader = createSpsNativeWorkspaceSurfaceReader({
+      db,
+      identity: currentIdentity,
+      hostId: HOST_ID,
+      verifier,
+      assertCurrent: (() => {
+        let checks = 0;
+        return () => { if (++checks === 6) throw new Error("parent authority changed after mutation"); };
+      })(),
+    });
+    const rollback = signedHeader({ key, workspaceId: companyId, target, certificate: certificate.certificate,
+      method: "PATCH", body: Buffer.from('{"read":false,"archived":false}'), contentType: "application/json" });
+    await expect(rollbackReader.read(rollback.header, rollback.actual))
+      .rejects.toMatchObject({ code: "native_workspace_unavailable" });
+    expect(await db.select().from(spsPluginInboxUserStates)
+      .where(eq(spsPluginInboxUserStates.itemId, inboxItemId))).toHaveLength(1);
+    expect(await db.select().from(spsPluginInboxUserStates)
+      .where(eq(spsPluginInboxUserStates.itemId, inboxItemId))).toMatchObject([
+      { readAt: expect.any(Date), archivedAt: expect.any(Date) },
+    ]);
+  });
+
   it("returns only the exact session-bound Workspace bootstrap DTO after current Member authorization", async () => {
     const target = `/api/companies/${companyId}/workspace-bootstrap`;
     const result = await read(target);
@@ -190,7 +275,7 @@ describeDatabase("Native read-only Workspace surface consumer", () => {
       kind: "sps.native.workspace.bootstrap",
       workspace: { id: companyId, name: "Native Workspace Fixture", issuePrefix: companyIssuePrefix },
       member: { userId: USER_ID },
-      capabilities: ["workspace.shell.read", "workspace.dashboard.read", "workspace.inbox.read"],
+      capabilities: ["workspace.shell.read", "workspace.dashboard.read", "workspace.inbox.read", "workspace.inbox.state.write"],
     });
     expect(Object.keys(result as object).sort()).toEqual(["capabilities", "kind", "member", "v", "workspace"]);
     expect("hostId" in (result as object)).toBe(false);

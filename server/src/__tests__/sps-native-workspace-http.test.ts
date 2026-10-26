@@ -5,10 +5,10 @@ import { createSpsNativeWorkspaceHttpServer } from "../services/sps-native-works
 const owned: Array<ReturnType<typeof createSpsNativeWorkspaceHttpServer>> = [];
 afterEach(async () => { await Promise.all(owned.splice(0).map(server => server.dispose())); });
 
-function call(port: number, options: { method?: string; headers?: Record<string, string>; body?: string } = {}) {
+function call(port: number, options: { method?: string; path?: string; headers?: Record<string, string>; body?: string } = {}) {
   return new Promise<{ status: number; body: unknown; headers: Record<string, unknown> }>((resolve, reject) => {
     const req = request({ host: "127.0.0.1", port, method: options.method ?? "GET",
-      path: "/api/companies/22222222-2222-4222-8222-222222222222/workspace-shell", agent: false,
+      path: options.path ?? "/api/companies/22222222-2222-4222-8222-222222222222/workspace-shell", agent: false,
       headers: { "X-SPS-Native-Workspace-Proof": "test-proof", Cookie: "test-cookie", ...options.headers },
     }, res => {
       const chunks: Buffer[] = [];
@@ -64,6 +64,36 @@ describe("private Native Workspace HTTP adapter", () => {
       expect(response.body).toEqual({ error: "Native Workspace access is unavailable." });
     }
     expect(read).not.toHaveBeenCalled();
+  });
+
+  it("frames only bounded inbox-state PATCH bodies and rejects PATCH on every other path", async () => {
+    const read = vi.fn(async (_proof: string, actual: { method: string; target: string; body: Buffer; cookie: string; contentType: string }) => ({
+      method: actual.method, target: actual.target, body: actual.body.toString("utf8"), contentType: actual.contentType,
+    }));
+    const server = createSpsNativeWorkspaceHttpServer({ reader: { read }, assertCurrent() {} });
+    owned.push(server);
+    const { port } = await server.start();
+    const target = "/api/companies/22222222-2222-4222-8222-222222222222/workspace-inbox/33333333-3333-4333-8333-333333333333";
+    const body = '{"read":true}';
+    const response = await call(port, {
+      method: "PATCH",
+      path: target,
+      body,
+      headers: { "Content-Type": "application/json" },
+    });
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({ method: "PATCH", target, body, contentType: "application/json" });
+    expect(read).toHaveBeenCalledOnce();
+    expect(read.mock.calls[0]?.[1].body).toEqual(Buffer.from(body));
+
+    for (const options of [
+      { method: "PATCH", path: "/api/companies/22222222-2222-4222-8222-222222222222/workspace-dashboard", body, headers: { "Content-Type": "application/json" } },
+      { method: "PATCH", path: target, body: "x".repeat(129), headers: { "Content-Type": "application/json" } },
+      { method: "PATCH", path: target, body, headers: { "Content-Type": "text/plain" } },
+    ]) {
+      expect(await call(port, options)).toMatchObject({ status: 403, body: { error: "Native Workspace access is unavailable." } });
+    }
+    expect(read).toHaveBeenCalledOnce();
   });
 
   it("does not publish a completed read after parent authority changes", async () => {

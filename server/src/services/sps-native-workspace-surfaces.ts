@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { eq, sql } from "drizzle-orm";
-import { companies, type Db } from "../compat/paperclip/db.js";
+import { and, eq, sql } from "drizzle-orm";
+import { companies, companyMemberships, type Db } from "../compat/paperclip/db.js";
 import type { createSpsIdentityAuth } from "../auth/sps-identity.js";
 import { spsMemberDeviceService } from "./sps-member-devices.js";
 import { spsWorkspaceSurfaceService } from "./sps-workspace-surfaces.js";
@@ -22,14 +22,16 @@ type ReadResult =
   | Awaited<ReturnType<ReturnType<typeof spsWorkspaceSurfaceService>["listShellProviders"]>>
   | Awaited<ReturnType<ReturnType<typeof spsWorkspaceSurfaceService>["getShell"]>>
   | { widgets: Awaited<ReturnType<ReturnType<typeof spsWorkspaceSurfaceService>["listDashboard"]>> }
-  | { items: Awaited<ReturnType<ReturnType<typeof spsWorkspaceSurfaceService>["listInbox"]>> };
+  | { items: Awaited<ReturnType<ReturnType<typeof spsWorkspaceSurfaceService>["listInbox"]>> }
+  | Readonly<{ readAt: string | null; archivedAt: string | null }>;
 
 type SpsNativeWorkspaceBootstrap = Readonly<{
   v: 1;
   kind: "sps.native.workspace.bootstrap";
   workspace: Readonly<{ id: string; name: string; issuePrefix: string }>;
   member: Readonly<{ userId: string }>;
-  capabilities: readonly ["workspace.shell.read", "workspace.dashboard.read", "workspace.inbox.read"];
+  capabilities: readonly ["workspace.shell.read", "workspace.dashboard.read", "workspace.inbox.read"]
+    | readonly ["workspace.shell.read", "workspace.dashboard.read", "workspace.inbox.read", "workspace.inbox.state.write"];
 }>;
 
 type Options = {
@@ -46,7 +48,8 @@ type SurfaceOperation =
   | { workspaceId: string; kind: "shell-providers" }
   | { workspaceId: string; kind: "shell" }
   | { workspaceId: string; kind: "dashboard" }
-  | { workspaceId: string; kind: "inbox"; archived: boolean };
+  | { workspaceId: string; kind: "inbox"; archived: boolean }
+  | { workspaceId: string; itemId: string; kind: "inbox-state" };
 
 export class SpsNativeWorkspaceSurfaceError extends Error {
   readonly status = 403;
@@ -66,6 +69,27 @@ function assertCurrent(assertion: () => void) {
   } catch { fail(); }
 }
 
+function parseInboxState(body: Buffer): Readonly<{ read?: boolean; archived?: boolean }> {
+  if (!Buffer.isBuffer(body) || body.length < 2 || body.length > 128) fail();
+  const text = body.toString("utf8");
+  let parsed: unknown;
+  try { parsed = JSON.parse(text); } catch { return fail(); }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) fail();
+  const prototype = Object.getPrototypeOf(parsed);
+  if (prototype !== Object.prototype && prototype !== null) fail();
+  const descriptors = Object.getOwnPropertyDescriptors(parsed);
+  const keys = Reflect.ownKeys(descriptors);
+  if (keys.length < 1 || keys.length > 2 || keys.some(key => key !== "read" && key !== "archived")) fail();
+  const state: { read?: boolean; archived?: boolean } = {};
+  for (const key of keys as Array<"read" | "archived">) {
+    const descriptor = descriptors[key];
+    if (!descriptor?.enumerable || !("value" in descriptor) || typeof descriptor.value !== "boolean") fail();
+    state[key] = descriptor.value;
+  }
+  if (JSON.stringify(state) !== text) fail();
+  return Object.freeze(state);
+}
+
 function matchTarget(target: string): SurfaceOperation {
   if (target === "/sps-native/v1/workspaces") return { workspaceId: null, kind: "workspace-discovery" };
   const bootstrap = /^\/api\/companies\/([0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12})\/workspace-bootstrap$/.exec(target);
@@ -78,11 +102,13 @@ function matchTarget(target: string): SurfaceOperation {
   if (dashboard) return { workspaceId: dashboard[1]!, kind: "dashboard" };
   const inbox = /^\/api\/companies\/([0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12})\/workspace-inbox(?:\?archived=(true|false))?$/.exec(target);
   if (inbox) return { workspaceId: inbox[1]!, kind: "inbox", archived: inbox[2] === "true" };
+  const inboxState = /^\/api\/companies\/([0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12})\/workspace-inbox\/([0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12})$/.exec(target);
+  if (inboxState) return { workspaceId: inboxState[1]!, itemId: inboxState[2]!, kind: "inbox-state" };
   return fail();
 }
 
 /**
- * Core-side read-only Native Workspace surface consumer. It has no listener or
+ * Core-side allowlisted Native Workspace surface reader. It has no listener or
  * Express integration; the private HTTP composition owns request framing.
  */
 export function createSpsNativeWorkspaceSurfaceReader({ db, identity, hostId, verifier, assertCurrent: assertCurrentInput }: Options) {
@@ -97,9 +123,13 @@ export function createSpsNativeWorkspaceSurfaceReader({ db, identity, hostId, ve
         assertCurrent(assertCurrentInput);
         const proof = verifier.verify(header, actual);
         const operation = matchTarget(proof.target);
-        if (proof.hostId !== hostId || proof.method !== "GET" || actual.method !== "GET"
-          || actual.body.length !== 0 || actual.contentType !== ""
+        const isInboxState = operation.kind === "inbox-state";
+        if (proof.hostId !== hostId || proof.method !== actual.method
+          || (isInboxState
+            ? actual.method !== "PATCH" || actual.contentType !== "application/json"
+            : actual.method !== "GET" || actual.body.length !== 0 || actual.contentType !== "")
           || operation.workspaceId !== proof.workspaceId) fail();
+        const inboxState = isInboxState ? parseInboxState(actual.body) : undefined;
         assertCurrent(assertCurrentInput);
 
         const session = await identity.resolveNativeEnrollmentSessionFromHeaders(new Headers({ cookie: proof.cookie }));
@@ -153,7 +183,22 @@ export function createSpsNativeWorkspaceSurfaceReader({ db, identity, hostId, ve
           };
 
           if (!operation.workspaceId) fail();
+          const workspaceId = operation.workspaceId;
           const initialGrant = await authorizeDevice();
+          const membershipRole = async () => {
+            const rows = await tx.select({ membershipRole: companyMemberships.membershipRole })
+              .from(companyMemberships)
+              .where(and(
+                eq(companyMemberships.companyId, workspaceId),
+                eq(companyMemberships.principalType, "user"),
+                eq(companyMemberships.principalId, userId),
+                eq(companyMemberships.status, "active"),
+              ))
+              .for("share")
+              .limit(2);
+            if (!Array.isArray(rows) || rows.length !== 1) fail();
+            return rows[0]!.membershipRole;
+          };
           if (operation.kind === "workspace-bootstrap") {
             const rows = await tx.select({
               id: companies.id,
@@ -164,15 +209,20 @@ export function createSpsNativeWorkspaceSurfaceReader({ db, identity, hostId, ve
             const row = rows[0];
             if (!row || row.id !== operation.workspaceId || typeof row.name !== "string" || row.name.length === 0
               || typeof row.issuePrefix !== "string" || row.issuePrefix.length === 0) fail();
+            const role = await membershipRole();
+            if (role !== "member" && role !== "admin" && role !== "viewer") fail();
             assertCurrent(assertCurrentInput);
             await assertSession();
             const finalGrant = await authorizeDevice();
             if (finalGrant.deviceId !== initialGrant.deviceId || finalGrant.revision !== initialGrant.revision) fail();
-            const capabilities = Object.freeze([
+            const readCapabilities = [
               "workspace.shell.read",
               "workspace.dashboard.read",
               "workspace.inbox.read",
-            ] as const);
+            ] as const;
+            const capabilities = role === "viewer"
+              ? Object.freeze(readCapabilities)
+              : Object.freeze([...readCapabilities, "workspace.inbox.state.write"] as const);
             return Object.freeze({
               v: 1 as const,
               kind: "sps.native.workspace.bootstrap" as const,
@@ -183,7 +233,26 @@ export function createSpsNativeWorkspaceSurfaceReader({ db, identity, hostId, ve
           }
           const surfaces = spsWorkspaceSurfaceService(tx as unknown as Db);
           let value: ReadResult;
-          if (operation.kind === "shell-providers") value = await surfaces.listShellProviders(operation.workspaceId);
+          if (operation.kind === "inbox-state") {
+            const role = await membershipRole();
+            if (role !== "member" && role !== "admin") fail();
+            const state = await surfaces.setInboxUserState({
+              companyId: operation.workspaceId,
+              userId,
+              itemId: operation.itemId,
+              read: inboxState!.read,
+              archived: inboxState!.archived,
+            });
+            const isoOrNull = (date: Date | null) => {
+              if (date === null) return null;
+              if (!(date instanceof Date) || !Number.isFinite(date.getTime())) fail();
+              return date.toISOString();
+            };
+            value = Object.freeze({
+              readAt: isoOrNull(state.readAt),
+              archivedAt: isoOrNull(state.archivedAt),
+            });
+          } else if (operation.kind === "shell-providers") value = await surfaces.listShellProviders(operation.workspaceId);
           else if (operation.kind === "shell") value = await surfaces.getShell(operation.workspaceId);
           else if (operation.kind === "dashboard") {
             value = { widgets: await surfaces.listDashboard(operation.workspaceId, userId) };

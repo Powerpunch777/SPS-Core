@@ -4,6 +4,7 @@ import type { Socket } from "node:net";
 type ActualRequest = { method: string; target: string; body: Buffer; cookie: string; contentType: string };
 type Reader = { read(proof: string, actual: ActualRequest): Promise<unknown> };
 const FAILURE = "Native Workspace access is unavailable.";
+const INBOX_STATE_TARGET = /^\/api\/companies\/[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\/workspace-inbox\/[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/;
 
 function singleHeader(request: IncomingMessage, name: string, required = true): string {
   const values: string[] = [];
@@ -83,21 +84,41 @@ export function createSpsNativeWorkspaceHttpServer(options: {
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       checkCurrent();
-      if (request.socket.remoteAddress !== "127.0.0.1" || request.method !== "GET"
+      if (request.socket.remoteAddress !== "127.0.0.1"
+        || (request.method !== "GET" && request.method !== "PATCH")
         || typeof request.url !== "string" || pending >= 4) throw new Error(FAILURE);
-      if (singleHeader(request, "transfer-encoding", false)
-        || !["", "0"].includes(singleHeader(request, "content-length", false))
+      const patchState = request.method === "PATCH" && INBOX_STATE_TARGET.test(request.url);
+      if (request.method === "PATCH" && !patchState) throw new Error(FAILURE);
+      const transferEncoding = singleHeader(request, "transfer-encoding", false);
+      const contentLengthText = singleHeader(request, "content-length", false);
+      if (transferEncoding
+        || (patchState
+          ? !/^(?:[1-9]|[1-9][0-9]|1[01][0-9]|12[0-8])$/.test(contentLengthText)
+          : !["", "0"].includes(contentLengthText))
         || ["authorization", "x-sps-desktop-access", "x-sps-desktop-owner-bootstrap"]
           .some(name => Object.hasOwn(request.headers, name))) throw new Error(FAILURE);
       const proof = singleHeader(request, "x-sps-native-workspace-proof");
       const cookie = singleHeader(request, "cookie");
       const contentType = singleHeader(request, "content-type", false);
-      if (contentType !== "") throw new Error(FAILURE);
+      if (patchState ? contentType !== "application/json" : contentType !== "") throw new Error(FAILURE);
       pending++;
       admitted = true;
       timer = setTimeout(() => response.destroy(), 10_000);
+      let body = Buffer.alloc(0);
+      if (patchState) {
+        const chunks: Buffer[] = [];
+        let bytes = 0;
+        for await (const chunk of request) {
+          const part = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+          bytes += part.length;
+          if (bytes > 128) throw new Error(FAILURE);
+          chunks.push(part);
+        }
+        if (bytes !== Number(contentLengthText)) throw new Error(FAILURE);
+        body = Buffer.concat(chunks, bytes);
+      }
       const result = await reader.read(proof, {
-        method: request.method, target: request.url, body: Buffer.alloc(0), cookie, contentType,
+        method: request.method, target: request.url, body, cookie, contentType,
       });
       checkCurrent();
       if (request.aborted || response.destroyed) return;

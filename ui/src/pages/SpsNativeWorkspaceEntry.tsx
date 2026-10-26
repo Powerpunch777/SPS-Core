@@ -10,7 +10,14 @@ import type {
 
 type View = "workspace" | "dashboard" | "inbox";
 type DashboardRow = Readonly<{ title: string; description: string }>;
-type InboxRow = Readonly<{ title: string; summary: string; severity: string }>;
+type InboxRow = Readonly<{
+  id: string;
+  title: string;
+  summary: string;
+  severity: string;
+  unread: boolean;
+  archived: boolean;
+}>;
 type SurfaceModel =
   | Readonly<{ kind: "shell-neutral"; selectionUnavailable: boolean }>
   | Readonly<{ kind: "shell-plugin-unavailable" }>
@@ -23,6 +30,7 @@ const CAPABILITIES = [
   "workspace.dashboard.read",
   "workspace.inbox.read",
 ] as const;
+const INBOX_WRITE = "workspace.inbox.state.write";
 const UNAVAILABLE = "Workspace could not be loaded.";
 
 function plainDataRecord(
@@ -52,17 +60,32 @@ function nonemptyString(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
 }
 
+function parseCapabilities(value: unknown): NativeWorkspaceBootstrap["capabilities"] | null {
+  if (!Array.isArray(value) || (value.length !== CAPABILITIES.length && value.length !== CAPABILITIES.length + 1)) return null;
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const expectedKeys = [...Array.from({ length: value.length }, (_, index) => String(index)), "length"];
+  const actualKeys = Reflect.ownKeys(descriptors);
+  if (actualKeys.length !== expectedKeys.length || actualKeys.some(key => typeof key !== "string" || !expectedKeys.includes(key))) return null;
+  const parsed: string[] = [];
+  for (let index = 0; index < value.length; index += 1) {
+    const descriptor = descriptors[String(index)];
+    if (!descriptor?.enumerable || !Object.hasOwn(descriptor, "value") || typeof descriptor.value !== "string") return null;
+    parsed.push(descriptor.value);
+  }
+  if (parsed.some((capability, index) => capability !== (CAPABILITIES[index] ?? (index === CAPABILITIES.length ? INBOX_WRITE : undefined)))) return null;
+  return Object.freeze(parsed) as NativeWorkspaceBootstrap["capabilities"];
+}
+
 export function parseNativeWorkspaceBootstrap(value: unknown): NativeWorkspaceBootstrap {
   const root = plainDataRecord(value, ["v", "kind", "workspace", "member", "capabilities"]);
   const workspace = plainDataRecord(root.workspace, ["id", "name", "issuePrefix"]);
   const member = plainDataRecord(root.member, ["userId"]);
+  const capabilities = parseCapabilities(root.capabilities);
   if (root.v !== 1 || root.kind !== "sps.native.workspace.bootstrap"
     || typeof workspace.id !== "string" || !UUID.test(workspace.id)
     || !nonemptyString(workspace.name) || !nonemptyString(workspace.issuePrefix)
     || !nonemptyString(member.userId)
-    || !Array.isArray(root.capabilities)
-    || root.capabilities.length !== CAPABILITIES.length
-    || root.capabilities.some((capability, index) => capability !== CAPABILITIES[index])) {
+    || !capabilities) {
     throw new Error(UNAVAILABLE);
   }
   return Object.freeze({
@@ -74,17 +97,17 @@ export function parseNativeWorkspaceBootstrap(value: unknown): NativeWorkspaceBo
       issuePrefix: workspace.issuePrefix,
     }),
     member: Object.freeze({ userId: member.userId }),
-    capabilities: Object.freeze([...CAPABILITIES]),
+    capabilities,
   });
 }
 
-function readSurfaceRequest(view: View): Readonly<{ surface: NativeWorkspaceSurface; archived?: boolean }> {
+function readSurfaceRequest(view: View, archived = false): Readonly<{ surface: NativeWorkspaceSurface; archived?: boolean }> {
   if (view === "workspace") return Object.freeze({ surface: "shell" });
   if (view === "dashboard") return Object.freeze({ surface: "dashboard" });
-  return Object.freeze({ surface: "inbox", archived: false });
+  return Object.freeze({ surface: "inbox", archived });
 }
 
-function parseSurface(view: View, value: unknown): SurfaceModel {
+function parseSurface(view: View, value: unknown, workspaceId: string): SurfaceModel {
   if (view === "workspace") {
     const shell = plainDataRecord(value, ["mode", "providerPluginId", "providerPluginKey", "shell", "fallbackReason"]);
     if (shell.mode === "neutral") {
@@ -113,13 +136,26 @@ function parseSurface(view: View, value: unknown): SurfaceModel {
     const item = plainDataRecord(entry);
     if (!nonemptyString(item.title) || typeof item.summary !== "string"
       || typeof item.severity !== "string"
-      || !["info", "success", "warning", "error"].includes(item.severity)) throw new Error(UNAVAILABLE);
-    return Object.freeze({ title: item.title, summary: item.summary, severity: item.severity });
+      || !["info", "success", "warning", "error"].includes(item.severity)
+      || typeof item.id !== "string" || !UUID.test(item.id)
+      || item.companyId !== workspaceId || typeof item.unread !== "boolean"
+      || (item.readAt !== null && typeof item.readAt !== "string")
+      || (item.archivedAt !== null && typeof item.archivedAt !== "string")) throw new Error(UNAVAILABLE);
+    return Object.freeze({ id: item.id, title: item.title, summary: item.summary, severity: item.severity,
+      unread: item.unread, archived: item.archivedAt !== null });
   });
   return Object.freeze({ kind: "inbox", rows: Object.freeze(rows) });
 }
 
-function SurfaceContent({ model, workspaceName }: { model: SurfaceModel; workspaceName: string }) {
+function SurfaceContent({ model, workspaceName, canWriteInbox = false, updatingItemId = null, onUpdateInbox, onToggleArchived, archived = false }: {
+  model: SurfaceModel;
+  workspaceName: string;
+  canWriteInbox?: boolean;
+  updatingItemId?: string | null;
+  onUpdateInbox?: (item: InboxRow, change: "read" | "archived") => void;
+  onToggleArchived?: () => void;
+  archived?: boolean;
+}) {
   if (model.kind === "shell-neutral") {
     return <SpsEmptyWorkspace workspaceName={workspaceName} selectionUnavailable={model.selectionUnavailable} />;
   }
@@ -160,15 +196,31 @@ function SurfaceContent({ model, workspaceName }: { model: SurfaceModel; workspa
   return (
     <section aria-labelledby="native-inbox-title" className="mx-auto w-full max-w-5xl space-y-4">
       <h2 id="native-inbox-title" className="text-2xl font-semibold">Inbox</h2>
+      <Button type="button" variant="outline" onClick={onToggleArchived} disabled={!onToggleArchived}>
+        {archived ? "Show active" : "Show archived"}
+      </Button>
       {model.rows.length === 0 ? <p className="text-sm text-muted-foreground">No inbox items.</p> : (
         <div className="space-y-3">
-          {model.rows.map((row, index) => (
-            <Card key={`${index}:${row.title}`}>
+          {model.rows.map((row) => (
+            <Card key={row.id}>
               <CardHeader>
                 <CardTitle>{row.title}</CardTitle>
                 <p className="text-xs text-muted-foreground">{row.severity}</p>
+                <p className="text-xs text-muted-foreground">{row.unread ? "Unread" : "Read"}{row.archived ? " · Archived" : ""}</p>
               </CardHeader>
               {row.summary ? <CardContent>{row.summary}</CardContent> : null}
+              {canWriteInbox ? (
+                <CardContent className="flex flex-wrap gap-2">
+                  <Button type="button" variant="outline" disabled={updatingItemId !== null}
+                    onClick={() => onUpdateInbox?.(row, "read")}>
+                    {updatingItemId === row.id ? "Updating..." : row.unread ? "Mark read" : "Mark unread"}
+                  </Button>
+                  <Button type="button" variant="outline" disabled={updatingItemId !== null}
+                    onClick={() => onUpdateInbox?.(row, "archived")}>
+                    {updatingItemId === row.id ? "Updating..." : row.archived ? "Restore" : "Archive"}
+                  </Button>
+                </CardContent>
+              ) : null}
             </Card>
           ))}
         </div>
@@ -184,19 +236,23 @@ export function SpsNativeWorkspaceEntry({ bridge }: { bridge: SpsNativeWorkspace
   const [surface, setSurface] = useState<SurfaceModel | null>(null);
   const [loading, setLoading] = useState(true);
   const [failed, setFailed] = useState(false);
+  const [archived, setArchived] = useState(false);
+  const [updatingItemId, setUpdatingItemId] = useState<string | null>(null);
 
-  const load = useCallback(async (nextView: View) => {
+  const load = useCallback(async (nextView: View, nextArchived = false) => {
     const current = ++generation.current;
     setBootstrap(null);
     setSurface(null);
     setView(nextView);
     setFailed(false);
+    setArchived(nextView === "inbox" ? nextArchived : false);
+    setUpdatingItemId(null);
     setLoading(true);
     try {
       const nextBootstrap = parseNativeWorkspaceBootstrap(await bridge.getBootstrap());
       if (current !== generation.current) return;
       setBootstrap(nextBootstrap);
-      const nextSurface = parseSurface(nextView, await bridge.readSurface(readSurfaceRequest(nextView)));
+      const nextSurface = parseSurface(nextView, await bridge.readSurface(readSurfaceRequest(nextView, nextArchived)), nextBootstrap.workspace.id);
       if (current !== generation.current) return;
       setSurface(nextSurface);
     } catch {
@@ -210,15 +266,17 @@ export function SpsNativeWorkspaceEntry({ bridge }: { bridge: SpsNativeWorkspace
     }
   }, [bridge]);
 
-  const changeView = useCallback(async (nextView: View) => {
+  const changeView = useCallback(async (nextView: View, nextArchived = false) => {
     if (!bootstrap) return;
     const current = ++generation.current;
     setView(nextView);
     setSurface(null);
     setFailed(false);
+    setArchived(nextView === "inbox" ? nextArchived : false);
+    setUpdatingItemId(null);
     setLoading(true);
     try {
-      const nextSurface = parseSurface(nextView, await bridge.readSurface(readSurfaceRequest(nextView)));
+      const nextSurface = parseSurface(nextView, await bridge.readSurface(readSurfaceRequest(nextView, nextArchived)), bootstrap.workspace.id);
       if (current !== generation.current) return;
       setSurface(nextSurface);
     } catch {
@@ -232,13 +290,41 @@ export function SpsNativeWorkspaceEntry({ bridge }: { bridge: SpsNativeWorkspace
     }
   }, [bootstrap, bridge]);
 
+  const toggleArchived = useCallback(() => {
+    if (view !== "inbox" || !bootstrap) return;
+    const nextArchived = !archived;
+    setArchived(nextArchived);
+    void changeView("inbox", nextArchived);
+  }, [archived, bootstrap, changeView, view]);
+
+  const updateInbox = useCallback(async (row: InboxRow, change: "read" | "archived") => {
+    if (!bootstrap || !bootstrap.capabilities.some(capability => capability === INBOX_WRITE) || updatingItemId) return;
+    const current = generation.current;
+    setUpdatingItemId(row.id);
+    try {
+      await bridge.updateInboxState({ itemId: row.id, [change]: change === "read" ? row.unread : !row.archived });
+      if (current !== generation.current) return;
+      const nextSurface = parseSurface("inbox", await bridge.readSurface(readSurfaceRequest("inbox", archived)), bootstrap.workspace.id);
+      if (current !== generation.current) return;
+      setSurface(nextSurface);
+    } catch {
+      if (current === generation.current) {
+        setBootstrap(null);
+        setSurface(null);
+        setFailed(true);
+      }
+    } finally {
+      if (current === generation.current) setUpdatingItemId(null);
+    }
+  }, [archived, bootstrap, bridge, updatingItemId]);
+
   useEffect(() => {
     void load("workspace");
     return () => { generation.current += 1; };
   }, [load]);
 
   const workspaceName = bootstrap?.workspace.name;
-  const retry = () => void load(view);
+  const retry = () => void load(view, archived);
 
   return (
     <div className="min-h-dvh w-full bg-background px-5 py-6 text-foreground md:px-8">
@@ -260,7 +346,7 @@ export function SpsNativeWorkspaceEntry({ bridge }: { bridge: SpsNativeWorkspace
                     type="button"
                     aria-current={view === nextView ? "page" : undefined}
                     variant={view === nextView ? "default" : "outline"}
-                    disabled={!bootstrap || loading}
+                    disabled={!bootstrap || loading || updatingItemId !== null}
                     onClick={() => void changeView(nextView)}
                   >
                     {label}
@@ -268,8 +354,8 @@ export function SpsNativeWorkspaceEntry({ bridge }: { bridge: SpsNativeWorkspace
                 );
               })}
             </nav>
-            <Button type="button" variant="outline" disabled={loading} onClick={retry} aria-busy={loading}>
-              {loading ? "Loading..." : "Refresh"}
+            <Button type="button" variant="outline" disabled={loading || updatingItemId !== null} onClick={retry} aria-busy={loading}>
+              {updatingItemId !== null ? "Updating..." : loading ? "Loading..." : "Refresh"}
             </Button>
           </div>
         </header>
@@ -283,7 +369,12 @@ export function SpsNativeWorkspaceEntry({ bridge }: { bridge: SpsNativeWorkspace
         {!loading && !failed && surface && workspaceName ? (
           surface.kind === "shell-neutral" || surface.kind === "shell-plugin-unavailable"
             ? <SurfaceContent model={surface} workspaceName={workspaceName} />
-            : <main><SurfaceContent model={surface} workspaceName={workspaceName} /></main>
+            : <main><SurfaceContent model={surface} workspaceName={workspaceName}
+              canWriteInbox={view === "inbox" && bootstrap.capabilities.some(capability => capability === INBOX_WRITE)}
+              updatingItemId={updatingItemId}
+              onUpdateInbox={view === "inbox" ? (row, change) => void updateInbox(row, change) : undefined}
+              onToggleArchived={view === "inbox" && updatingItemId === null ? toggleArchived : undefined}
+              archived={archived} /></main>
         ) : null}
       </div>
     </div>

@@ -58,21 +58,28 @@ Identity `userId`, and the fixed capability names `workspace.shell.read`,
 inside the same transaction after the matching device, Workspace and active
 membership are authorized; session and device authority are rechecked before
 return. The response contains no Host, device, certificate, session, Owner or
-Board credential. Capability names describe the currently mounted Core read
+Board credential. The three read capabilities describe mounted Core read
 surfaces; they do not grant Plugin, mutation, WebSocket, Host-administration or
 Source/Node authority. `issuePrefix` is bootstrap metadata only and does not
-authorize routes.
+authorize routes. An active member/admin Workspace role also receives the exact
+`workspace.inbox.state.write` capability; a viewer receives read capabilities
+only. Core derives this capability from the locked current membership role.
 
 The surface reader admits the exact workspace-discovery request above and five
 Workspace-bound GET shapes: bootstrap metadata, shell, shell providers,
-dashboard and inbox (only an optional archived=true/false query). For Workspace
-surfaces it binds the path and proof Workspace IDs, resolves the real Identity
-session, and rechecks that session and approved device inside the same
-transaction as existing Core surface services. Shared row locks keep device,
-active Workspace and active membership authority stable through that
-transaction. Certificate validity and authority are checked again before
-completion. SQL statement/lock deadlines are local to the transaction. No
-actor, Owner bootstrap or legacy administrator fallback is used. Shell GET
+dashboard and inbox (only an optional archived=true/false query). It also
+admits one exact `PATCH /api/companies/<workspace-id>/workspace-inbox/<item-id>`
+with `Content-Type: application/json` and canonical UTF-8 JSON of at most 128
+bytes containing only `read` and/or `archived` booleans. The state update calls
+the existing Core Inbox service in the same authorized transaction and returns
+only `{readAt,archivedAt}`. Viewers cannot mutate. Actions and arbitrary writes
+remain unavailable. For Workspace requests it binds the path and proof Workspace
+IDs, resolves the real Identity session, and rechecks that session and approved
+device inside the same transaction as existing Core surface services. Shared
+row locks keep device, active Workspace and active membership authority stable
+through that transaction. Certificate validity and authority are checked again
+before completion. SQL statement/lock deadlines are local to the transaction.
+No actor, Owner bootstrap or legacy administrator fallback is used. Shell GET
 retains the existing service behavior that can persist fallback metadata; it
 is not a guarantee of a physically write-free read. That write remains inside
 the authorized transaction and rolls back on a failed final check.
@@ -80,10 +87,11 @@ the authorized transaction and rolls back on a failed final check.
 ## Private HTTP adapter
 
 The adapter binds only 127.0.0.1 with an ephemeral port. It delegates exact GET
-targets to the authenticated reader and mounts no ordinary Core routes. Main
+targets and the one bounded Inbox PATCH target to the authenticated reader and
+mounts no ordinary Core routes. Main
 forwards only those same allowlisted origin-form targets over private HTTP, with
 the actual Cookie, certificate DER and request target bound into the proof. It
-rejects bodies, upgrade requests, duplicate relevant headers and Owner/Authorization
+rejects GET bodies, upgrade requests, duplicate relevant headers and Owner/Authorization
 headers. Concurrency, header/socket/read budgets and JSON replies are bounded.
 Replies are no-store and connections close after each request. Parent authority
 is checked before admission and after reads; disposed or stale operations cannot
@@ -103,10 +111,15 @@ company bootstrap, Plugin initialization, ServiceWorker or live-update providers
 Neutral entry reuses the existing empty Workspace component. Plugin shell/views
 are explicitly unavailable until their transport is authorized; Dashboard labels
 describe configured declarations rather than claiming rendered Plugin widgets.
-Inbox shows text without actions or navigation targets. Errors clear retained
+Inbox supports personal read/unread and archive/restore state only when the
+fourth write capability is present. It awaits the mutation and refetches actual
+Inbox data; Plugin actions and navigation targets remain inactive. Errors clear retained
 names/content and obsolete request completions are ignored.
 
-Seven focused UI tests and the scoped UI build passed. The existing repository
+Eleven focused UI tests and the scoped UI build passed for the Inbox-state
+increment. The two selected actual-DB checks (empty Inbox and personal state)
+passed 2/2; HTTP adapter checks passed 8/8. These are scoped checks, not a new
+full server suite/typecheck/build. The existing repository
 token gate failed in unrelated files (79 color, 36 bracket-value, one font-size
 violation); no new Native UI file was listed. Source's actual Electron/bundled UI
 fixture passed window/IPC/isolation and natural shutdown with fixture backend;
