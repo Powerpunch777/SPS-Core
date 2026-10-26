@@ -21,6 +21,30 @@ function recursiveIssueCount(value: unknown, seen = new Set<object>()): number {
 
 const badElements = Array.from({ length: 10_000 }, () => ({ invalid: true }));
 
+function trackedArray(length: number) {
+  let elementReads = 0;
+  const input = new Proxy([], {
+    get(target, property, receiver) {
+      if (property === "length") return length;
+      if (typeof property === "string" && /^\d+$/.test(property)) {
+        elementReads++;
+        return "valid";
+      }
+      return Reflect.get(target, property, receiver);
+    },
+  });
+  return { input, elementReads: () => elementReads };
+}
+
+class TrackedSet<T> extends Set<T> {
+  iterations = 0;
+
+  override values() {
+    this.iterations++;
+    return super.values();
+  }
+}
+
 describe("patched Zod v3 validation issue budget", () => {
   it("bounds issues across an unbounded array while keeping the parse invalid", () => {
     const result = z.array(z.string()).safeParse(badElements);
@@ -49,6 +73,104 @@ describe("patched Zod v3 validation issue budget", () => {
       { code: "invalid_type", expected: "string", received: "number", path: [0], message: "Expected string, received number" },
       { code: "invalid_type", expected: "string", received: "object", path: [1], message: "Expected string, received object" },
     ]);
+  });
+
+  it("rejects over-cap arrays before reading elements in sync and async modes", async () => {
+    let syncTransforms = 0;
+    const syncMax = trackedArray(4);
+    const maxResult = z.array(z.string().transform(value => {
+      syncTransforms++;
+      return value;
+    })).max(2).safeParse(syncMax.input);
+    expect(maxResult.success).toBe(false);
+    if (maxResult.success) throw new Error("Expected max length failure");
+    expect(maxResult.error.issues).toHaveLength(1);
+    expect(maxResult.error.issues[0]).toMatchObject({ code: "too_big", maximum: 2, type: "array", exact: false });
+    expect(syncMax.elementReads()).toBe(0);
+    expect(syncTransforms).toBe(0);
+
+    const syncExact = trackedArray(4);
+    const exactResult = z.array(z.string()).length(2).safeParse(syncExact.input);
+    expect(exactResult.success).toBe(false);
+    if (exactResult.success) throw new Error("Expected exact length failure");
+    expect(exactResult.error.issues[0]).toMatchObject({ code: "too_big", maximum: 2, type: "array", exact: true });
+    expect(syncExact.elementReads()).toBe(0);
+
+    let asyncTransforms = 0;
+    const asyncMax = trackedArray(4);
+    const asyncMaxResult = await z.array(z.string().transform(async value => {
+      asyncTransforms++;
+      return value;
+    })).max(2).safeParseAsync(asyncMax.input);
+    expect(asyncMaxResult.success).toBe(false);
+    expect(asyncMax.elementReads()).toBe(0);
+    expect(asyncTransforms).toBe(0);
+
+    const asyncExact = trackedArray(4);
+    const asyncExactResult = await z.array(z.string()).length(2).safeParseAsync(asyncExact.input);
+    expect(asyncExactResult.success).toBe(false);
+    if (asyncExactResult.success) throw new Error("Expected async exact length failure");
+    expect(asyncExactResult.error.issues[0]).toMatchObject({ code: "too_big", maximum: 2, type: "array", exact: true });
+    expect(asyncExact.elementReads()).toBe(0);
+  });
+
+  it("rejects over-cap sets before iterating values", async () => {
+    const syncSet = new TrackedSet(["one", "two", "three"]);
+    const syncResult = z.set(z.string().transform(value => value)).max(2).safeParse(syncSet);
+    expect(syncResult.success).toBe(false);
+    if (syncResult.success) throw new Error("Expected max set size failure");
+    expect(syncResult.error.issues[0]).toMatchObject({ code: "too_big", maximum: 2, type: "set" });
+    expect(syncSet.iterations).toBe(0);
+
+    let asyncTransforms = 0;
+    const asyncSet = new TrackedSet(["one", "two", "three"]);
+    const asyncResult = await z.set(z.string().transform(async value => {
+      asyncTransforms++;
+      return value;
+    })).max(2).safeParseAsync(asyncSet);
+    expect(asyncResult.success).toBe(false);
+    expect(asyncSet.iterations).toBe(0);
+    expect(asyncTransforms).toBe(0);
+  });
+
+  it("keeps valid bounded array transforms, refinements, catches, and union branches", () => {
+    let transformCalls = 0;
+    let refinementCalls = 0;
+    const bounded = z.array(z.string().transform(value => {
+      transformCalls++;
+      return value.toUpperCase();
+    })).max(2).superRefine(() => {
+      refinementCalls++;
+    });
+    const valid = bounded.safeParse(["ok"]);
+    expect(valid).toEqual({ success: true, data: ["OK"] });
+    expect(transformCalls).toBe(1);
+    expect(refinementCalls).toBe(1);
+
+    expect(z.array(z.string()).max(2).catch(["fallback"]).safeParse(["a", "b", "c"]))
+      .toEqual({ success: true, data: ["fallback"] });
+    expect(z.union([z.array(z.string()).max(2), z.string()]).parse(["ok"])).toEqual(["ok"]);
+    expect(z.union([z.array(z.string()).max(2), z.string()]).parse("fallback")).toBe("fallback");
+
+    let oversizedRefinementCalls = 0;
+    const oversized = z.array(z.string()).max(2).superRefine(() => {
+      oversizedRefinementCalls++;
+    }).safeParse(["one", "two", "three"]);
+    expect(oversized.success).toBe(false);
+    expect(oversizedRefinementCalls).toBe(0);
+  });
+
+  it("omits child diagnostics for oversized invalid bounded arrays", () => {
+    const result = z.array(z.string()).max(2).safeParse([1, 2, 3]);
+    expect(result.success).toBe(false);
+    if (result.success) throw new Error("Expected invalid oversized elements");
+    expect(result.error.issues.map(issue => issue.code)).toEqual(["too_big"]);
+
+    const unionResult = z.union([z.array(z.string()).max(2), z.object({ ok: z.number() })])
+      .safeParse(["one", "two", "three"]);
+    expect(unionResult.success).toBe(false);
+    if (unionResult.success) throw new Error("Expected invalid union input");
+    expect(unionResult.error.issues.map(issue => issue.code)).toEqual(["invalid_union"]);
   });
 
   it("counts nested union errors and keeps a successful later branch successful", () => {
@@ -129,5 +251,15 @@ describe("patched Zod v3 validation issue budget", () => {
     if (result.success) throw new Error("Expected CommonJS parse failure");
     expect(result.error.issues).toHaveLength(ISSUE_LIMIT);
     expect(recursiveIssueCount(result.error)).toBe(ISSUE_LIMIT);
+
+    const tracked = trackedArray(4);
+    const oversized = commonJsZod.z.array(commonJsZod.z.string()).max(2).safeParse(tracked.input);
+    expect(oversized.success).toBe(false);
+    expect(tracked.elementReads()).toBe(0);
+
+    const trackedSet = new TrackedSet(["one", "two", "three"]);
+    const oversizedSet = commonJsZod.z.set(commonJsZod.z.string()).max(2).safeParse(trackedSet);
+    expect(oversizedSet.success).toBe(false);
+    expect(trackedSet.iterations).toBe(0);
   });
 });

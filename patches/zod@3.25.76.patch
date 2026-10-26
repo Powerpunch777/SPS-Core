@@ -1,5 +1,5 @@
 diff --git a/v3/helpers/parseUtil.cjs b/v3/helpers/parseUtil.cjs
-index 36cf2d83395453921f034956b9e2b8c66aba92c4..cb5443570a59bf47191a2e467cf946dc972e1497 100644
+index 36cf2d8..cb54435 100644
 --- a/v3/helpers/parseUtil.cjs
 +++ b/v3/helpers/parseUtil.cjs
 @@ -37,7 +37,20 @@ const makeIssue = (params) => {
@@ -24,7 +24,7 @@ index 36cf2d83395453921f034956b9e2b8c66aba92c4..cb5443570a59bf47191a2e467cf946dc
      const issue = (0, exports.makeIssue)({
          issueData: issueData,
 diff --git a/v3/helpers/parseUtil.js b/v3/helpers/parseUtil.js
-index 91b2afb81b4358fb84d637bc963a868517c6a516..106b6b57d9ccb97b717ad6eb9ff2f36b77063260 100644
+index 91b2afb..106b6b5 100644
 --- a/v3/helpers/parseUtil.js
 +++ b/v3/helpers/parseUtil.js
 @@ -29,7 +29,20 @@ export const makeIssue = (params) => {
@@ -49,7 +49,7 @@ index 91b2afb81b4358fb84d637bc963a868517c6a516..106b6b57d9ccb97b717ad6eb9ff2f36b
      const issue = makeIssue({
          issueData: issueData,
 diff --git a/v3/types.cjs b/v3/types.cjs
-index 11ed4dfc4745f9af1f1501874576b78b77d294ef..e3b83af832be64bdd4ea7315802ccc8a4ddad853 100644
+index 11ed4df..72e6977 100644
 --- a/v3/types.cjs
 +++ b/v3/types.cjs
 @@ -9,6 +9,7 @@ const errors_js_1 = require("./errors.cjs");
@@ -119,7 +119,31 @@ index 11ed4dfc4745f9af1f1501874576b78b77d294ef..e3b83af832be64bdd4ea7315802ccc8a
          const maybeAsyncResult = this._parse({ data, path: ctx.path, parent: ctx });
          const result = await ((0, parseUtil_js_1.isAsync)(maybeAsyncResult) ? maybeAsyncResult : Promise.resolve(maybeAsyncResult));
          return handleResult(ctx, result);
-@@ -2932,7 +2941,7 @@ class ZodFunction extends ZodType {
+@@ -1819,6 +1828,12 @@ class ZodArray extends ZodType {
+                 status.dirty();
+             }
+         }
++        // Reject over-cap arrays before allocating/parsing an element result per item.
++        // Keep existing too_big issue(s), omit child diagnostics, and abort parent effects.
++        if ((def.exactLength !== null && ctx.data.length > def.exactLength.value) ||
++            (def.maxLength !== null && ctx.data.length > def.maxLength.value)) {
++            return parseUtil_js_1.INVALID;
++        }
+         if (ctx.common.async) {
+             return Promise.all([...ctx.data].map((item, i) => {
+                 return def.type._parseAsync(new ParseInputLazyPath(ctx, item, ctx.path, i));
+@@ -2858,6 +2873,10 @@ class ZodSet extends ZodType {
+             }
+             return { status: status.value, value: parsedSet };
+         }
++        // Reject over-cap sets before iterating values or creating element results.
++        if (def.maxSize !== null && ctx.data.size > def.maxSize.value) {
++            return parseUtil_js_1.INVALID;
++        }
+         const elements = [...ctx.data.values()].map((item, i) => valueType._parse(new ParseInputLazyPath(ctx, item, ctx.path, i)));
+         if (ctx.common.async) {
+             return Promise.all(elements).then((elements) => finalizeSet(elements));
+@@ -2932,7 +2951,7 @@ class ZodFunction extends ZodType {
                  },
              });
          }
@@ -128,7 +152,7 @@ index 11ed4dfc4745f9af1f1501874576b78b77d294ef..e3b83af832be64bdd4ea7315802ccc8a
          const fn = ctx.data;
          if (this._def.returns instanceof ZodPromise) {
              // Would love a way to avoid disabling this rule, but we need
-@@ -2940,6 +2949,7 @@ class ZodFunction extends ZodType {
+@@ -2940,6 +2959,7 @@ class ZodFunction extends ZodType {
              // eslint-disable-next-line @typescript-eslint/no-this-alias
              const me = this;
              return (0, parseUtil_js_1.OK)(async function (...args) {
@@ -136,7 +160,7 @@ index 11ed4dfc4745f9af1f1501874576b78b77d294ef..e3b83af832be64bdd4ea7315802ccc8a
                  const error = new ZodError_js_1.ZodError([]);
                  const parsedArgs = await me._def.args.parseAsync(args, params).catch((e) => {
                      error.addIssue(makeArgsIssue(args, e));
-@@ -2961,6 +2971,7 @@ class ZodFunction extends ZodType {
+@@ -2961,6 +2981,7 @@ class ZodFunction extends ZodType {
              // eslint-disable-next-line @typescript-eslint/no-this-alias
              const me = this;
              return (0, parseUtil_js_1.OK)(function (...args) {
@@ -145,7 +169,7 @@ index 11ed4dfc4745f9af1f1501874576b78b77d294ef..e3b83af832be64bdd4ea7315802ccc8a
                  if (!parsedArgs.success) {
                      throw new ZodError_js_1.ZodError([makeArgsIssue(args, parsedArgs.error)]);
 diff --git a/v3/types.js b/v3/types.js
-index 40b11c0f01b2af54e0ed48e198607bd8836d9a63..f57cad6ec3d272f97c9b7109bc58a525c63983af 100644
+index 40b11c0..1b4e527 100644
 --- a/v3/types.js
 +++ b/v3/types.js
 @@ -3,6 +3,7 @@ import { defaultErrorMap, getErrorMap } from "./errors.js";
@@ -215,7 +239,31 @@ index 40b11c0f01b2af54e0ed48e198607bd8836d9a63..f57cad6ec3d272f97c9b7109bc58a525
          const maybeAsyncResult = this._parse({ data, path: ctx.path, parent: ctx });
          const result = await (isAsync(maybeAsyncResult) ? maybeAsyncResult : Promise.resolve(maybeAsyncResult));
          return handleResult(ctx, result);
-@@ -2902,7 +2911,7 @@ export class ZodFunction extends ZodType {
+@@ -1798,6 +1807,12 @@ export class ZodArray extends ZodType {
+                 status.dirty();
+             }
+         }
++        // Reject over-cap arrays before allocating/parsing an element result per item.
++        // Keep existing too_big issue(s), omit child diagnostics, and abort parent effects.
++        if ((def.exactLength !== null && ctx.data.length > def.exactLength.value) ||
++            (def.maxLength !== null && ctx.data.length > def.maxLength.value)) {
++            return INVALID;
++        }
+         if (ctx.common.async) {
+             return Promise.all([...ctx.data].map((item, i) => {
+                 return def.type._parseAsync(new ParseInputLazyPath(ctx, item, ctx.path, i));
+@@ -2829,6 +2844,10 @@ export class ZodSet extends ZodType {
+             }
+             return { status: status.value, value: parsedSet };
+         }
++        // Reject over-cap sets before iterating values or creating element results.
++        if (def.maxSize !== null && ctx.data.size > def.maxSize.value) {
++            return INVALID;
++        }
+         const elements = [...ctx.data.values()].map((item, i) => valueType._parse(new ParseInputLazyPath(ctx, item, ctx.path, i)));
+         if (ctx.common.async) {
+             return Promise.all(elements).then((elements) => finalizeSet(elements));
+@@ -2902,7 +2921,7 @@ export class ZodFunction extends ZodType {
                  },
              });
          }
@@ -224,7 +272,7 @@ index 40b11c0f01b2af54e0ed48e198607bd8836d9a63..f57cad6ec3d272f97c9b7109bc58a525
          const fn = ctx.data;
          if (this._def.returns instanceof ZodPromise) {
              // Would love a way to avoid disabling this rule, but we need
-@@ -2910,6 +2919,7 @@ export class ZodFunction extends ZodType {
+@@ -2910,6 +2929,7 @@ export class ZodFunction extends ZodType {
              // eslint-disable-next-line @typescript-eslint/no-this-alias
              const me = this;
              return OK(async function (...args) {
@@ -232,7 +280,7 @@ index 40b11c0f01b2af54e0ed48e198607bd8836d9a63..f57cad6ec3d272f97c9b7109bc58a525
                  const error = new ZodError([]);
                  const parsedArgs = await me._def.args.parseAsync(args, params).catch((e) => {
                      error.addIssue(makeArgsIssue(args, e));
-@@ -2931,6 +2941,7 @@ export class ZodFunction extends ZodType {
+@@ -2931,6 +2951,7 @@ export class ZodFunction extends ZodType {
              // eslint-disable-next-line @typescript-eslint/no-this-alias
              const me = this;
              return OK(function (...args) {
