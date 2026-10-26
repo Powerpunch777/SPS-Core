@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { sql } from "drizzle-orm";
-import type { Db } from "../compat/paperclip/db.js";
+import { eq, sql } from "drizzle-orm";
+import { companies, type Db } from "../compat/paperclip/db.js";
 import type { createSpsIdentityAuth } from "../auth/sps-identity.js";
 import { spsMemberDeviceService } from "./sps-member-devices.js";
 import { spsWorkspaceSurfaceService } from "./sps-workspace-surfaces.js";
@@ -18,10 +18,19 @@ type Verifier = Readonly<{
 }>;
 type ReadResult =
   | ReadonlyArray<Readonly<{ id: string; name: string }>>
+  | SpsNativeWorkspaceBootstrap
   | Awaited<ReturnType<ReturnType<typeof spsWorkspaceSurfaceService>["listShellProviders"]>>
   | Awaited<ReturnType<ReturnType<typeof spsWorkspaceSurfaceService>["getShell"]>>
   | { widgets: Awaited<ReturnType<ReturnType<typeof spsWorkspaceSurfaceService>["listDashboard"]>> }
   | { items: Awaited<ReturnType<ReturnType<typeof spsWorkspaceSurfaceService>["listInbox"]>> };
+
+type SpsNativeWorkspaceBootstrap = Readonly<{
+  v: 1;
+  kind: "sps.native.workspace.bootstrap";
+  workspace: Readonly<{ id: string; name: string; issuePrefix: string }>;
+  member: Readonly<{ userId: string }>;
+  capabilities: readonly ["workspace.shell.read", "workspace.dashboard.read", "workspace.inbox.read"];
+}>;
 
 type Options = {
   db: Db;
@@ -33,6 +42,7 @@ type Options = {
 
 type SurfaceOperation =
   | { workspaceId: null; kind: "workspace-discovery" }
+  | { workspaceId: string; kind: "workspace-bootstrap" }
   | { workspaceId: string; kind: "shell-providers" }
   | { workspaceId: string; kind: "shell" }
   | { workspaceId: string; kind: "dashboard" }
@@ -58,6 +68,8 @@ function assertCurrent(assertion: () => void) {
 
 function matchTarget(target: string): SurfaceOperation {
   if (target === "/sps-native/v1/workspaces") return { workspaceId: null, kind: "workspace-discovery" };
+  const bootstrap = /^\/api\/companies\/([0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12})\/workspace-bootstrap$/.exec(target);
+  if (bootstrap) return { workspaceId: bootstrap[1]!, kind: "workspace-bootstrap" };
   const shellProviders = /^\/api\/companies\/([0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12})\/workspace-shell\/providers$/.exec(target);
   if (shellProviders) return { workspaceId: shellProviders[1]!, kind: "shell-providers" };
   const shell = /^\/api\/companies\/([0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12})\/workspace-shell$/.exec(target);
@@ -142,6 +154,33 @@ export function createSpsNativeWorkspaceSurfaceReader({ db, identity, hostId, ve
 
           if (!operation.workspaceId) fail();
           const initialGrant = await authorizeDevice();
+          if (operation.kind === "workspace-bootstrap") {
+            const rows = await tx.select({
+              id: companies.id,
+              name: companies.name,
+              issuePrefix: companies.issuePrefix,
+            }).from(companies).where(eq(companies.id, operation.workspaceId)).limit(2);
+            if (!Array.isArray(rows) || rows.length !== 1) fail();
+            const row = rows[0];
+            if (!row || row.id !== operation.workspaceId || typeof row.name !== "string" || row.name.length === 0
+              || typeof row.issuePrefix !== "string" || row.issuePrefix.length === 0) fail();
+            assertCurrent(assertCurrentInput);
+            await assertSession();
+            const finalGrant = await authorizeDevice();
+            if (finalGrant.deviceId !== initialGrant.deviceId || finalGrant.revision !== initialGrant.revision) fail();
+            const capabilities = Object.freeze([
+              "workspace.shell.read",
+              "workspace.dashboard.read",
+              "workspace.inbox.read",
+            ] as const);
+            return Object.freeze({
+              v: 1 as const,
+              kind: "sps.native.workspace.bootstrap" as const,
+              workspace: Object.freeze({ id: row.id, name: row.name, issuePrefix: row.issuePrefix }),
+              member: Object.freeze({ userId }),
+              capabilities,
+            });
+          }
           const surfaces = spsWorkspaceSurfaceService(tx as unknown as Db);
           let value: ReadResult;
           if (operation.kind === "shell-providers") value = await surfaces.listShellProviders(operation.workspaceId);

@@ -56,7 +56,9 @@ describeDatabase("Native read-only Workspace surface consumer", () => {
   let database: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | undefined;
   let certificate!: MemberTlsFixture;
   let companyId!: string;
+  let companyIssuePrefix!: string;
   let secondCompanyId!: string;
+  let secondCompanyIssuePrefix!: string;
   let currentIdentity!: ReturnType<typeof createSpsIdentityAuth>;
   let service!: ReturnType<typeof createSpsNativeWorkspaceSurfaceReader>;
   let privateHttp!: ReturnType<typeof createSpsNativeWorkspaceHttpServer>;
@@ -99,13 +101,15 @@ describeDatabase("Native read-only Workspace surface consumer", () => {
         ipAddress: null, userAgent: null },
     ]);
     companyId = randomUUID();
+    companyIssuePrefix = `N${randomUUID().replaceAll("-", "").slice(0, 8).toUpperCase()}`;
     await db.insert(companies).values({ id: companyId, name: "Native Workspace Fixture",
-      issuePrefix: `N${randomUUID().replaceAll("-", "").slice(0, 8).toUpperCase()}` });
+      issuePrefix: companyIssuePrefix });
     await db.insert(companyMemberships).values({ companyId, principalType: "user", principalId: USER_ID,
       status: "active", membershipRole: "member" });
     secondCompanyId = randomUUID();
+    secondCompanyIssuePrefix = `N${randomUUID().replaceAll("-", "").slice(0, 8).toUpperCase()}`;
     await db.insert(companies).values({ id: secondCompanyId, name: "Second Native Workspace Fixture",
-      issuePrefix: `N${randomUUID().replaceAll("-", "").slice(0, 8).toUpperCase()}` });
+      issuePrefix: secondCompanyIssuePrefix });
     await db.insert(companyMemberships).values({ companyId: secondCompanyId, principalType: "user", principalId: USER_ID,
       status: "active", membershipRole: "viewer" });
 
@@ -176,6 +180,45 @@ describeDatabase("Native read-only Workspace surface consumer", () => {
     expect(await read(`/api/companies/${companyId}/workspace-inbox`)).toEqual({ items: [] });
     expect(await read(`/api/companies/${companyId}/workspace-inbox?archived=true`)).toEqual({ items: [] });
     expect(await read(`/api/companies/${companyId}/workspace-inbox?archived=false`)).toEqual({ items: [] });
+  });
+
+  it("returns only the exact session-bound Workspace bootstrap DTO after current Member authorization", async () => {
+    const target = `/api/companies/${companyId}/workspace-bootstrap`;
+    const result = await read(target);
+    expect(result).toEqual({
+      v: 1,
+      kind: "sps.native.workspace.bootstrap",
+      workspace: { id: companyId, name: "Native Workspace Fixture", issuePrefix: companyIssuePrefix },
+      member: { userId: USER_ID },
+      capabilities: ["workspace.shell.read", "workspace.dashboard.read", "workspace.inbox.read"],
+    });
+    expect(Object.keys(result as object).sort()).toEqual(["capabilities", "kind", "member", "v", "workspace"]);
+    expect("hostId" in (result as object)).toBe(false);
+    expect(JSON.stringify(result)).not.toContain(SESSION_SECRET);
+    expect(JSON.stringify(result)).not.toContain(certificate.certificate);
+    expect(await overPrivateHttp(target)).toEqual({ status: 200, body: result });
+
+    expect(await read(`/api/companies/${secondCompanyId}/workspace-bootstrap`, secondCompanyId)).toEqual({
+      v: 1,
+      kind: "sps.native.workspace.bootstrap",
+      workspace: { id: secondCompanyId, name: "Second Native Workspace Fixture", issuePrefix: secondCompanyIssuePrefix },
+      member: { userId: USER_ID },
+      capabilities: ["workspace.shell.read", "workspace.dashboard.read", "workspace.inbox.read"],
+    });
+    await expect(read(`/api/companies/${secondCompanyId}/workspace-bootstrap`, companyId))
+      .rejects.toMatchObject({ code: "native_workspace_unavailable" });
+    await expect(read(target, companyId, "GET", UNMEMBERED_COOKIE))
+      .rejects.toMatchObject({ code: "native_workspace_unavailable" });
+
+    await db.update(companyMemberships).set({ status: "revoked" })
+      .where(eq(companyMemberships.companyId, companyId));
+    await expect(read(target)).rejects.toMatchObject({ code: "native_workspace_unavailable" });
+    await db.update(companyMemberships).set({ status: "active" })
+      .where(eq(companyMemberships.companyId, companyId));
+
+    await db.update(spsMemberDevices).set({ status: "revoked", revokedAt: new Date() })
+      .where(eq(spsMemberDevices.id, registeredDeviceId));
+    await expect(read(target)).rejects.toMatchObject({ code: "native_workspace_unavailable" });
   });
 
   it("discovers only this authenticated user's active workspaces for the approved Host device", async () => {

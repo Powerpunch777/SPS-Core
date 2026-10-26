@@ -50,18 +50,32 @@ Workspace authority: each later surface request still binds its selected
 Workspace ID and rechecks session, device and membership in that request's
 transaction. Company-wide listing and Owner/Board fallback are not used.
 
-The surface reader admits the exact workspace-discovery request above and four
-Workspace-bound GET families: shell/providers, dashboard and inbox (only an
-optional archived=true/false query). For Workspace surfaces it binds the path
-and proof Workspace IDs, resolves the real Identity session, and rechecks that
-session and approved device inside the same transaction as existing Core surface
-services. Shared row locks keep device, active Workspace and active membership
-authority stable through that transaction. Certificate validity and authority
-are checked again before completion. SQL statement/lock deadlines are local to
-the transaction. No actor, Owner bootstrap or legacy administrator fallback is
-used. Shell GET retains the existing service behavior that can persist fallback
-metadata; it is not a guarantee of a physically write-free read. That write
-remains inside the authorized transaction and rolls back on a failed final check.
+After a Member selects a discovered Workspace, the private reader also accepts
+only `GET /api/companies/<workspace-id>/workspace-bootstrap`. It returns the
+selected Workspace's database-backed `{id,name,issuePrefix}`, the authenticated
+Identity `userId`, and the fixed capability names `workspace.shell.read`,
+`workspace.dashboard.read`, and `workspace.inbox.read`. The company row is read
+inside the same transaction after the matching device, Workspace and active
+membership are authorized; session and device authority are rechecked before
+return. The response contains no Host, device, certificate, session, Owner or
+Board credential. Capability names describe the currently mounted Core read
+surfaces; they do not grant Plugin, mutation, WebSocket, Host-administration or
+Source/Node authority. `issuePrefix` is bootstrap metadata only and does not
+authorize routes.
+
+The surface reader admits the exact workspace-discovery request above and five
+Workspace-bound GET shapes: bootstrap metadata, shell, shell providers,
+dashboard and inbox (only an optional archived=true/false query). For Workspace
+surfaces it binds the path and proof Workspace IDs, resolves the real Identity
+session, and rechecks that session and approved device inside the same
+transaction as existing Core surface services. Shared row locks keep device,
+active Workspace and active membership authority stable through that
+transaction. Certificate validity and authority are checked again before
+completion. SQL statement/lock deadlines are local to the transaction. No
+actor, Owner bootstrap or legacy administrator fallback is used. Shell GET
+retains the existing service behavior that can persist fallback metadata; it
+is not a guarantee of a physically write-free read. That write remains inside
+the authorized transaction and rolls back on a failed final check.
 
 ## Private HTTP adapter
 
@@ -82,7 +96,8 @@ resolution and transaction lifetime before enabling this path.
 
 Focused proof tests passed 12/12, HTTP lifecycle/framing tests passed 7/7,
 channel bootstrap/lifecycle tests passed 9/9, and actual temporary-DB/HTTP
-surface tests passed 5/5. Existing device tests plus transaction lock tests
+surface tests passed 6/6, including the exact session-bound Workspace bootstrap
+DTO and denial cases. Existing device tests plus transaction lock tests
 passed 16/16. Source's real signer/verifier interoperability check uses generated
 actual certificates and needs no DB or AI. Server typecheck is separate; full
 current CI/build remain required before readiness claims. Source's actual Main
