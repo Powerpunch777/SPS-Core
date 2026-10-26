@@ -2,6 +2,7 @@
 import fs from "node:fs/promises";
 import { existsSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { repoRoot } from "./dev-service-profile.ts";
 
 type WorkspaceLinkMismatch = {
@@ -52,13 +53,25 @@ const workspaceDirs = Array.from(
   ),
 ).sort();
 
-function findWorkspaceLinkMismatches(workspaceDir: string): WorkspaceLinkMismatch[] {
-  const nodeModulesDir = path.join(repoRoot, workspaceDir, "node_modules");
+function sameFilesystemPath(left: string, right: string): boolean {
+  const normalizedLeft = path.resolve(left);
+  const normalizedRight = path.resolve(right);
+  return process.platform === "win32"
+    ? normalizedLeft.toLowerCase() === normalizedRight.toLowerCase()
+    : normalizedLeft === normalizedRight;
+}
+
+function findWorkspaceLinkMismatches(
+  workspaceDir: string,
+  rootDir: string,
+  workspacePackagePaths: Map<string, string>,
+): WorkspaceLinkMismatch[] {
+  const nodeModulesDir = path.join(rootDir, workspaceDir, "node_modules");
   if (!existsSync(nodeModulesDir)) {
     return [];
   }
 
-  const packageJson = readJsonFile(path.join(repoRoot, workspaceDir, "package.json"));
+  const packageJson = readJsonFile(path.join(rootDir, workspaceDir, "package.json"));
   const dependencies = {
     ...(packageJson.dependencies as Record<string, unknown> | undefined),
     ...(packageJson.devDependencies as Record<string, unknown> | undefined),
@@ -71,9 +84,9 @@ function findWorkspaceLinkMismatches(workspaceDir: string): WorkspaceLinkMismatc
     const expectedPath = workspacePackagePaths.get(packageName);
     if (!expectedPath) continue;
 
-    const linkPath = path.join(repoRoot, workspaceDir, "node_modules", ...packageName.split("/"));
+    const linkPath = path.join(rootDir, workspaceDir, "node_modules", ...packageName.split("/"));
     const actualPath = existsSync(linkPath) ? path.resolve(realpathSync(linkPath)) : null;
-    if (actualPath === path.resolve(expectedPath)) continue;
+    if (actualPath && sameFilesystemPath(actualPath, expectedPath)) continue;
 
     mismatches.push({
       workspaceDir,
@@ -86,8 +99,58 @@ function findWorkspaceLinkMismatches(workspaceDir: string): WorkspaceLinkMismatc
   return mismatches;
 }
 
-async function ensureWorkspaceLinksCurrent(workspaceDir: string) {
-  const mismatches = findWorkspaceLinkMismatches(workspaceDir);
+export async function createWorkspacePackageLink(expectedPath: string, linkPath: string, nodeModulesDir: string) {
+  const expectedStat = await fs.stat(expectedPath);
+  if (!expectedStat.isDirectory()) throw new Error("Workspace package target is not a directory.");
+  const expectedRealPath = realpathSync(expectedPath);
+
+  const nodeModulesStat = await fs.lstat(nodeModulesDir);
+  if (!nodeModulesStat.isDirectory() || nodeModulesStat.isSymbolicLink()) {
+    throw new Error("Workspace node_modules directory is linked or invalid.");
+  }
+
+  const scopeDir = path.dirname(linkPath);
+  if (!sameFilesystemPath(scopeDir, nodeModulesDir)) {
+    try {
+      const scopeStat = await fs.lstat(scopeDir);
+      if (!scopeStat.isDirectory() || scopeStat.isSymbolicLink()) {
+        throw new Error("Workspace package scope is linked or invalid.");
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") throw error;
+      await fs.mkdir(scopeDir);
+    }
+  }
+
+  try {
+    await fs.lstat(linkPath);
+    let currentRealPath: string;
+    try {
+      currentRealPath = realpathSync(linkPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
+        throw new Error("Workspace package link has a dangling target; preserving it.");
+      }
+      throw error;
+    }
+    if (sameFilesystemPath(currentRealPath, expectedRealPath)) return false;
+    throw new Error("Workspace package path already exists with a different target; preserving it.");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") throw error;
+  }
+
+  const target = process.platform === "win32"
+    ? expectedRealPath
+    : path.relative(path.dirname(linkPath), expectedRealPath);
+  await fs.symlink(target, linkPath, process.platform === "win32" ? "junction" : "dir");
+  return true;
+}
+
+export async function ensureWorkspaceLinksCurrent(
+  workspaceDir: string,
+  { rootDir = repoRoot, workspacePackagePaths = discoverWorkspacePackagePaths(rootDir) } = {},
+) {
+  const mismatches = findWorkspaceLinkMismatches(workspaceDir, rootDir, workspacePackagePaths);
   if (mismatches.length === 0) return;
 
   console.log(`[paperclip] detected stale workspace package links for ${workspaceDir}; relinking dependencies...`);
@@ -98,13 +161,12 @@ async function ensureWorkspaceLinksCurrent(workspaceDir: string) {
   }
 
   for (const mismatch of mismatches) {
-    const linkPath = path.join(repoRoot, mismatch.workspaceDir, "node_modules", ...mismatch.packageName.split("/"));
-    await fs.mkdir(path.dirname(linkPath), { recursive: true });
-    await fs.rm(linkPath, { recursive: true, force: true });
-    await fs.symlink(mismatch.expectedPath, linkPath);
+    const nodeModulesDir = path.join(rootDir, mismatch.workspaceDir, "node_modules");
+    const linkPath = path.join(nodeModulesDir, ...mismatch.packageName.split("/"));
+    await createWorkspacePackageLink(mismatch.expectedPath, linkPath, nodeModulesDir);
   }
 
-  const remainingMismatches = findWorkspaceLinkMismatches(workspaceDir);
+  const remainingMismatches = findWorkspaceLinkMismatches(workspaceDir, rootDir, workspacePackagePaths);
   if (remainingMismatches.length === 0) return;
 
   throw new Error(
@@ -112,6 +174,8 @@ async function ensureWorkspaceLinksCurrent(workspaceDir: string) {
   );
 }
 
-for (const workspaceDir of workspaceDirs) {
-  await ensureWorkspaceLinksCurrent(workspaceDir);
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  for (const workspaceDir of workspaceDirs) {
+    await ensureWorkspaceLinksCurrent(workspaceDir, { rootDir: repoRoot, workspacePackagePaths });
+  }
 }

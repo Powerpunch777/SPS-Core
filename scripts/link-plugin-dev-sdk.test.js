@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { after, before, test } from "node:test";
 
 import { linkSdkInto, readPluginsUnder } from "./link-plugin-dev-sdk.mjs";
@@ -20,6 +20,14 @@ function makePackage(dir) {
   mkdirSync(dir, { recursive: true });
   writeFileSync(join(dir, "package.json"), "{}\n");
   return dir;
+}
+
+function makeDirectoryLink(target, link) {
+  if (process.platform === "win32") {
+    symlinkSync(target, link, "junction");
+  } else {
+    symlinkSync(target, link, "dir");
+  }
 }
 
 test("readPluginsUnder returns [] for a missing directory", () => {
@@ -54,15 +62,19 @@ test("readPluginsUnder stops descending once a package.json is found and skips n
   assert.deepEqual(readPluginsUnder(parent), [pkg]);
 });
 
-test("linkSdkInto creates the plugin-sdk symlink and is idempotent", () => {
+test("linkSdkInto creates a platform-compatible SDK directory link and is idempotent", () => {
   const pkg = makePackage(join(workDir, "link-target"));
 
   assert.equal(linkSdkInto(pkg), true);
 
   const link = join(pkg, "node_modules", "@paperclipai", "plugin-sdk");
   assert.ok(lstatSync(link).isSymbolicLink());
+  assert.equal(realpathSync(link).toLowerCase(), realpathSync(new URL("../packages/plugins/sdk", import.meta.url)).toLowerCase());
+  if (process.platform === "win32") {
+    assert.ok(isAbsolute(readlinkSync(link)), "Windows junction target must be absolute");
+  }
 
-  // Second call is a no-op because the link already points at the in-repo SDK.
+  // Second call is a no-op because the link already resolves to the in-repo SDK.
   assert.equal(linkSdkInto(pkg), false);
 });
 
@@ -77,13 +89,17 @@ test("linkSdkInto leaves a real (non-symlink) install in place", () => {
   assert.ok(!lstatSync(join(scopeDir, "plugin-sdk")).isSymbolicLink());
 });
 
-test("linkSdkInto replaces a symlink that points somewhere else", () => {
+test("linkSdkInto preserves a non-owned directory link", () => {
   const pkg = makePackage(join(workDir, "stale-link"));
   const scopeDir = join(pkg, "node_modules", "@paperclipai");
   mkdirSync(scopeDir, { recursive: true });
-  symlinkSync("../somewhere-else", join(scopeDir, "plugin-sdk"), "dir");
+  const otherTarget = makePackage(join(workDir, "other-sdk"));
+  const link = join(scopeDir, "plugin-sdk");
+  makeDirectoryLink(otherTarget, link);
+  const originalTarget = readlinkSync(link);
 
-  assert.equal(linkSdkInto(pkg), true);
-  assert.notEqual(readlinkSync(join(scopeDir, "plugin-sdk")), "../somewhere-else");
+  assert.equal(linkSdkInto(pkg), false);
+  assert.equal(readlinkSync(link), originalTarget);
+  assert.equal(realpathSync(link), realpathSync(otherTarget));
   assert.ok(existsSync(scopeDir));
 });
