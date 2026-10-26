@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ChildProcess } from "node:child_process";
-import { stopEmbeddedPostgresTestInstance, type EmbeddedPostgresInstance, type FixtureIdentity } from "./test-embedded-postgres.js";
+import { classifyPgCtlFailure, stopEmbeddedPostgresTestInstance, type EmbeddedPostgresInstance, type FixtureIdentity } from "./test-embedded-postgres.js";
 
 const tempDirs: string[] = [];
 afterEach(() => {
@@ -35,6 +35,16 @@ function fixture() {
 }
 
 describe("embedded Postgres test cleanup", () => {
+  it.each([
+    ["could not send stop signal: Access is denied", "access_denied"],
+    ["could not open postmaster.pid", "pid_file"],
+    ["no server running", "server_unavailable"],
+    ["could not send signal to process", "signal_failure"],
+    ["unexpected detail with a private path", "other"],
+  ] as const)("classifies pg_ctl diagnostics without retaining raw output", (output, expected) => {
+    expect(classifyPgCtlFailure(output)).toBe(expected);
+  });
+
   it("uses pg_ctl for the exact owned pid-file and waits for child close before clearing its hook handle", async () => {
     const value = fixture();
     const stdout = { destroyed: false };

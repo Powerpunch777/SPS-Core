@@ -279,12 +279,18 @@ export async function stopEmbeddedPostgresTestInstance(
     if (owned) {
       const pgCtl = await (dependencies.resolvePgCtl ?? resolvePgCtlPath)();
       await new Promise<void>((resolve, reject) => {
+        let stderr = "";
         const process = (dependencies.spawnPgCtl ?? spawn)(pgCtl, ["-D", dataDir, "-m", "fast", "-w", "-t", "20", "stop"], {
-          stdio: ["ignore", "ignore", "ignore"],
+          stdio: ["ignore", "ignore", "pipe"],
           windowsHide: true,
         });
+        const onStderr = (chunk: Buffer | string) => {
+          stderr = `${stderr}${String(chunk)}`.slice(-4096);
+        };
+        process.stderr?.on("data", onStderr);
         const cleanup = () => {
           clearTimeout(timer);
+          process.stderr?.removeListener("data", onStderr);
           process.removeListener("error", onError);
           process.removeListener("close", onClose);
         };
@@ -292,7 +298,7 @@ export async function stopEmbeddedPostgresTestInstance(
         const onClose = (code: number | null) => {
           cleanup();
           if (code === 0) resolve();
-          else reject(new Error(`Embedded PostgreSQL test pg_ctl shutdown failed with exit code ${code}.`));
+          else reject(new Error(`Embedded PostgreSQL test pg_ctl shutdown failed with exit code ${code} (category: ${classifyPgCtlFailure(stderr)}).`));
         };
         const timer = setTimeout(() => {
           cleanup();
@@ -324,11 +330,21 @@ function formatEmbeddedPostgresError(error: unknown): string {
   return "embedded Postgres startup failed";
 }
 
+export function classifyPgCtlFailure(output: string): "access_denied" | "pid_file" | "server_unavailable" | "signal_failure" | "other" {
+  const message = output.toLowerCase();
+  if (/access is denied|permission denied|operation not permitted/.test(message)) return "access_denied";
+  if (/postmaster\.pid|pid file|lock file/.test(message)) return "pid_file";
+  if (/no server running|could not connect|connection refused/.test(message)) return "server_unavailable";
+  if (/could not send.*signal|failed to send.*signal|kill\(\).*failed/.test(message)) return "signal_failure";
+  return "other";
+}
+
 async function probeEmbeddedPostgresSupport(): Promise<EmbeddedPostgresTestSupport> {
   let dataDir: string | null = null;
   let dataDirIdentity: FixtureIdentity | null = null;
   let port: number | null = null;
   let instance: EmbeddedPostgresInstance | null = null;
+  let startupError: unknown;
 
   try {
     const created = await createEmbeddedPostgresTestInstance(
@@ -341,18 +357,21 @@ async function probeEmbeddedPostgresSupport(): Promise<EmbeddedPostgresTestSuppo
     await instance.initialise();
     await instance.start();
     await captureOwnedPostmasterIdentity(dataDir, port, dataDirIdentity);
-    return { supported: true };
   } catch (error) {
-    return {
-      supported: false,
-      reason: formatEmbeddedPostgresError(error),
-    };
-  } finally {
+    startupError = error;
+  }
+  try {
     if (dataDir && dataDirIdentity && port !== null && instance) {
       await stopEmbeddedPostgresTestInstance(dataDir, port, instance, dataDirIdentity);
       await cleanupEmbeddedPostgresTestDirs(dataDir, dataDirIdentity);
     }
+  } catch (cleanupError) {
+    if (startupError) throw new AggregateError([startupError, cleanupError], "Embedded PostgreSQL support probe and cleanup failed.");
+    throw cleanupError;
   }
+  return startupError
+    ? { supported: false, reason: formatEmbeddedPostgresError(startupError) }
+    : { supported: true };
 }
 
 export async function getEmbeddedPostgresTestSupport(): Promise<EmbeddedPostgresTestSupport> {
@@ -394,9 +413,13 @@ export async function startEmbeddedPostgresTestDatabase(
       },
     };
   } catch (error) {
-    if (dataDir && dataDirIdentity && port !== null && instance) {
-      await stopEmbeddedPostgresTestInstance(dataDir, port, instance, dataDirIdentity);
-      await cleanupEmbeddedPostgresTestDirs(dataDir, dataDirIdentity);
+    try {
+      if (dataDir && dataDirIdentity && port !== null && instance) {
+        await stopEmbeddedPostgresTestInstance(dataDir, port, instance, dataDirIdentity);
+        await cleanupEmbeddedPostgresTestDirs(dataDir, dataDirIdentity);
+      }
+    } catch (cleanupError) {
+      throw new AggregateError([error, cleanupError], "Failed to start embedded PostgreSQL test database; fixture cleanup also failed.");
     }
     throw new Error(
       `Failed to start embedded PostgreSQL test database: ${formatEmbeddedPostgresError(error)}`,
