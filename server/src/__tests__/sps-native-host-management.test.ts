@@ -128,10 +128,11 @@ describe("SPS Native Host management", () => {
 
     expect(inspect).toMatchObject({ v: 1, kind: "sps.native.signer.request", operation: "inspect" });
     expect(channel.messages).toHaveLength(1);
-    const metadata = { hostId: management.hostId, serverSpkiSha256: management.serverSpkiSha256 };
-    expect(metadata).toEqual({ hostId: HOST_ID, serverSpkiSha256: SERVER_PIN });
+    const metadata = { hostId: management.hostId, serverSpkiSha256: management.serverSpkiSha256,
+      issuerSpkiSha256: management.issuerSpkiSha256 };
+    expect(metadata).toEqual({ hostId: HOST_ID, serverSpkiSha256: SERVER_PIN, issuerSpkiSha256: ISSUER_PIN });
     expect(Object.keys(management).sort()).toEqual([
-      "assertActive", "dispose", "hostId", "resolveHostSession", "serverSpkiSha256",
+      "assertActive", "dispose", "hostId", "issuerSpkiSha256", "resolveHostSession", "serverSpkiSha256",
     ].sort());
 
     const hostSession = await management.resolveHostSession(authenticatedHostRequest());
@@ -148,7 +149,7 @@ describe("SPS Native Host management", () => {
 
     const returned = `${JSON.stringify(management)} ${JSON.stringify(hostSession)}`;
     expect(JSON.stringify(management)).toBe(JSON.stringify(metadata));
-    expect(returned).not.toContain(ISSUER_PIN);
+    expect(returned).toContain(ISSUER_PIN);
     expect(returned).not.toContain(ISSUER_CERTIFICATE);
     expect(returned).not.toContain(DESKTOP_TOKEN);
     expect(returned).not.toContain(SESSION_COOKIE);

@@ -50,6 +50,7 @@ const apiPrefixes: Record<string, string> = {
   "sps-marketplace.ts": "/api",
   "sps-model-connections.ts": "/api",
   "sps-member-devices.ts": "/api",
+  "sps-native-pairings.ts": "/api",
   "sps-nodes.ts": "/api",
   "sps-workspace-surfaces.ts": "/api",
   "sps-workspace-sources.ts": "/api",
