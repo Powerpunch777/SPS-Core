@@ -17,32 +17,46 @@ import { ThemeProvider } from "./context/ThemeContext";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { initPluginBridge } from "./plugins/bridge-init";
 import { PluginLauncherProvider } from "./plugins/launchers";
+import { SpsNativeWorkspaceEntry } from "./pages/SpsNativeWorkspaceEntry";
 import "@mdxeditor/editor/style.css";
 import "./index.css";
-
-initPluginBridge(React, ReactDOM);
-
-if ("serviceWorker" in navigator) {
-  window.addEventListener("load", () => {
-    navigator.serviceWorker.register("/sw.js");
-  });
-}
-
-const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: {
-      staleTime: 30_000,
-      refetchOnWindowFocus: true,
-    },
-  },
-});
 
 function CompanyAwareBreadcrumbProvider({ children }: { children: React.ReactNode }) {
   const { selectedCompany } = useCompany();
   return <BreadcrumbProvider companyName={selectedCompany?.name ?? null}>{children}</BreadcrumbProvider>;
 }
 
-createRoot(document.getElementById("root")!).render(
+const root = createRoot(document.getElementById("root")!);
+const nativeWorkspaceBridge = window.spsNativeWorkspace;
+
+if (nativeWorkspaceBridge) {
+  root.render(
+    <StrictMode>
+      <ThemeProvider>
+        <TooltipProvider>
+          <SpsNativeWorkspaceEntry bridge={nativeWorkspaceBridge} />
+        </TooltipProvider>
+      </ThemeProvider>
+    </StrictMode>,
+  );
+} else {
+  initPluginBridge(React, ReactDOM);
+  if ("serviceWorker" in navigator) {
+    window.addEventListener("load", () => {
+      navigator.serviceWorker.register("/sw.js");
+    });
+  }
+
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      queries: {
+        staleTime: 30_000,
+        refetchOnWindowFocus: true,
+      },
+    },
+  });
+
+  root.render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
       <ThemeProvider>
@@ -72,4 +86,5 @@ createRoot(document.getElementById("root")!).render(
       </ThemeProvider>
     </QueryClientProvider>
   </StrictMode>
-);
+  );
+}
