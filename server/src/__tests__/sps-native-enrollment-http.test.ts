@@ -81,7 +81,7 @@ function closed(server: HttpServer | HttpsServer): Promise<void> {
   return new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
 }
 
-function createAdapter(actions: { issue?: AdapterCall; complete?: AdapterCall } = {}) {
+function createAdapter(actions: { issue?: AdapterCall; complete?: AdapterCall; reconcile?: AdapterCall } = {}) {
   const issue = vi.fn(async (request: import("node:http").IncomingMessage, input: unknown, active?: () => void) => {
     return actions.issue ? actions.issue(request, input, active) : ISSUE_RESULT;
   });
@@ -95,14 +95,15 @@ function createAdapter(actions: { issue?: AdapterCall; complete?: AdapterCall } 
     };
   });
   return {
-    adapter: { issue, completeFromTlsRequest: complete } as unknown as Adapter,
+    adapter: { issue, completeFromTlsRequest: complete,
+      ...(actions.reconcile ? { reconcileFromTlsRequest: vi.fn(actions.reconcile) } : {}) } as unknown as Adapter,
     issue,
     complete,
   };
 }
 
 function installHandler(
-  actions: { issue?: AdapterCall; complete?: AdapterCall } = {},
+  actions: { issue?: AdapterCall; complete?: AdapterCall; reconcile?: AdapterCall } = {},
   options: HandlerOptions = DEFAULT_OPTIONS,
 ) {
   const mocks = createAdapter(actions);
@@ -252,6 +253,39 @@ function deferred<T = void>() {
 }
 
 describe("SPS Native enrollment HTTP request handler (inactive TLS ingress)", () => {
+  it("exposes only an explicit read-only reconciliation DTO and rejects widened input/results", async () => {
+    const route = "/sps-native/v1/enrollment/reconcile";
+    const body = { enrollmentId: COMPLETE_BODY.enrollmentId };
+    installHandler();
+    expectFailure(await requestTls(route, { body }), 404);
+    for (const status of ["pending", "approved", "revoked"] as const) {
+      const mocks = installHandler({ reconcile: async (_request, input, active) => {
+        active?.();
+        expect(input).toEqual(body);
+        return { deviceId: "44444444-4444-4444-8444-444444444444", status };
+      } });
+      const result = await requestTls(route, { body });
+      expect(result.status).toBe(200);
+      expect(result.body).toEqual({ deviceId: "44444444-4444-4444-8444-444444444444", status });
+      expectResponseHeaders(result);
+      expect(result.headers["set-cookie"]).toBeUndefined();
+      expect(mocks.issue).not.toHaveBeenCalled();
+      expect(mocks.complete).not.toHaveBeenCalled();
+    }
+    const reconcile = vi.fn(async () => ({ deviceId: "44444444-4444-4444-8444-444444444444", status: "pending" }));
+    installHandler({ reconcile });
+    for (const widened of [{ ...body, userId: "body-selected" }, { ...body, pairingSecret: "old-secret" }, {}]) {
+      expectFailure(await requestTls(route, { body: widened }), 400);
+    }
+    expect(reconcile).not.toHaveBeenCalled();
+    for (const result of [{ deviceId: "invalid", status: "pending" },
+      { deviceId: "44444444-4444-4444-8444-444444444444", status: "ready" },
+      { deviceId: "44444444-4444-4444-8444-444444444444", status: "pending", private: "must-not-project" }]) {
+      installHandler({ reconcile: async () => result });
+      expectFailure(await requestTls(route, { body }), 503);
+    }
+  });
+
   beforeAll(async () => {
     fixture = await createMemberTlsFixture({ purpose: "serverAuth" });
     tlsServer = createHttpsServer({

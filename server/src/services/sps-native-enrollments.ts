@@ -1,7 +1,7 @@
 import { createHash, X509Certificate } from "node:crypto";
 import { TLSSocket } from "node:tls";
 import { and, eq } from "drizzle-orm";
-import { spsNativeEnrollments, spsNativePairings, spsNativePairingEvents, type Db } from "../compat/paperclip/db.js";
+import { spsMemberDevices, spsNativeEnrollments, spsNativePairings, spsNativePairingEvents, type Db } from "../compat/paperclip/db.js";
 import { spsNativePairingService, type SpsNativePairingAuthorizer, type SpsNativePairingPolicy } from "./sps-native-pairings.js";
 import { registerPendingSpsMemberDeviceInTransaction } from "./sps-member-devices.js";
 
@@ -9,6 +9,7 @@ type EnrollmentRow = typeof spsNativeEnrollments.$inferSelect;
 type Admission = { pairingId: string; pairingSecret: string; userId: string };
 type IssueInput = Admission & { deviceKeyId: string; requestPem: string };
 type CompleteInput = Admission & { enrollmentId: string; displayName: string };
+type ReconcileInput = { enrollmentId: string; userId: string };
 type SigningRequest = { hostId: string; deviceKeyId: string; requestPem: string; notBefore: number; notAfter: number; signal: AbortSignal };
 // A trusted Main-owned implementation must validate PKCS#10 signature/profile and
 // bind the resulting leaf to this exact request. No CA key crosses this port.
@@ -144,6 +145,63 @@ export function spsNativeEnrollmentService(db: Db, options: Options, sign: SpsNa
   }
 
   return {
+    // A lost completion response must never be repaired by consuming or issuing
+    // again. Only the current session and the exact issued TLS key can read the
+    // already-consumed invitation's live device linkage.
+    reconcileFromTlsPeer(socket: TLSSocket, input: ReconcileInput, authorizeInTransaction: SpsNativeEnrollmentAuthorizer) {
+      return safe(async () => {
+        if (typeof authorizeInTransaction !== "function") deny();
+        const authorize = authorizeInTransaction;
+        assertActive();
+        const raw = record(input, ["enrollmentId", "userId"]);
+        const enrollmentId = uuid(raw.enrollmentId);
+        if (typeof raw.userId !== "string" || !raw.userId.trim() || raw.userId.length > 200
+          || /[\u0000-\u001f\u007f]/.test(raw.userId)) deny();
+        const userId = raw.userId;
+        const fingerprint = peer(socket);
+        currentIssuer();
+        const result = await db.transaction(async tx => {
+          await authorize(tx, userId);
+          assertActive();
+          const [row] = await tx.select().from(spsNativeEnrollments).where(and(
+            eq(spsNativeEnrollments.id, enrollmentId), eq(spsNativeEnrollments.hostId, hostId),
+            eq(spsNativeEnrollments.userId, userId),
+          )).for("share");
+          if (!row || row.status !== "issued" || row.serverSpkiSha256 !== serverPin
+            || row.issuerSpkiSha256 !== issuerPin || row.certificateSha256 !== fingerprint
+            || !row.certificate || !row.issuedAt || row.createdAt.getTime() > Date.now()) deny();
+          const checked = leaf(row.certificate, row.deviceKeyId);
+          if (checked.sha256 !== fingerprint) deny();
+          const [invitation] = await tx.select().from(spsNativePairings).where(and(
+            eq(spsNativePairings.id, row.pairingId), eq(spsNativePairings.hostId, hostId),
+          )).for("share");
+          if (!invitation || invitation.status !== "consumed" || invitation.serverSpkiSha256 !== serverPin
+            || invitation.consumedByUserId !== userId || !invitation.consumedDeviceId
+            || invitation.consumedDeviceId !== invitation.consumedDeviceSnapshotId || !invitation.consumedAt
+            || invitation.expiresAt.getTime() !== row.expiresAt.getTime() || row.createdAt < invitation.createdAt
+            || invitation.consumedAt < row.issuedAt || invitation.consumedAt >= invitation.expiresAt
+            || invitation.consumedAt.getTime() > Date.now()) deny();
+          const [device] = await tx.select().from(spsMemberDevices).where(and(
+            eq(spsMemberDevices.id, invitation.consumedDeviceId), eq(spsMemberDevices.hostId, hostId),
+            eq(spsMemberDevices.ownerUserId, userId),
+          )).for("share");
+          if (!device || !["pending", "approved", "revoked"].includes(device.status)
+            || device.certificate !== row.certificate || device.certificateSha256 !== fingerprint
+            || device.spkiSha256 !== digest(checked.parsed.publicKey.export({ type: "spki", format: "der" }))
+            || device.certificateNotBefore.getTime() !== checked.before
+            || device.certificateNotAfter.getTime() !== checked.after) deny();
+          await authorize(tx, userId);
+          assertActive();
+          if (peer(socket) !== fingerprint || leaf(row.certificate, row.deviceKeyId).sha256 !== fingerprint) deny();
+          return { deviceId: device.id, status: device.status as "pending" | "approved" | "revoked",
+            certificate: row.certificate, deviceKeyId: row.deviceKeyId };
+        });
+        assertActive();
+        currentIssuer();
+        if (peer(socket) !== fingerprint || leaf(result.certificate, result.deviceKeyId).sha256 !== fingerprint) deny();
+        return Object.freeze({ deviceId: result.deviceId, status: result.status });
+      });
+    },
     issue(input: IssueInput, authorizeInTransaction?: SpsNativeEnrollmentAuthorizer) {
       return safe(async () => {
         const authorize = authorizer(authorizeInTransaction);

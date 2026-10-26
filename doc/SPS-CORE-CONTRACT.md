@@ -260,6 +260,30 @@ must verify the exact invited server on that connection and validate the issuer
 certificate before creating pending-key context. No listener, OS trust, firewall
 change or public SDK method is added.
 
+After the user's D8 approval, the inactive enrollment service also offers
+read-only reconciliation of a completion whose response was lost. The exact
+`/sps-native/v1/enrollment/reconcile` path accepts only an enrollment UUID. The
+existing session adapter derives the user from the current SPS session, never
+from the body. The service requires an explicit in-transaction authorizer and
+a real authorized, non-resumed TLS 1.3 peer with the exact committed leaf.
+
+Reconciliation locks and verifies the same Host/server/issuer/user issuance,
+consumed pairing and its live device/snapshot linkage, certificate DER/hash/SPKI
+and dates. Session, peer, current identity and certificate validity are checked
+again before delivery. The invitation may already be expired, but the actual
+device and issuer certificates must still be current. It returns only the
+existing device ID and pending/approved/revoked status; even revoked status
+disclosure is limited to that exact account and issued TLS key. It grants no
+Workspace access, approval, execution or renewal and cannot revive trust.
+
+No invitation secret, issuance, consumption, approval, device write or new audit
+event is used to repair this read. Missing/deleted or inconsistent linkage fails
+closed, including after restore. A read response is a status observation, not
+authorization for a subsequent request or proof against a revocation occurring
+after its transaction. Existing two-operation adapters remain compatible; the
+new HTTP path is unavailable unless its reconciliation method is explicitly
+provided. Product listener/startup and Main persistence/UI remain separate work.
+
 ### Optional Execution Backends
 
 Keep model requests, process/CLI execution, Agent sessions and privileged Agent

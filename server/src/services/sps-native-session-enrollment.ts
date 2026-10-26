@@ -5,9 +5,11 @@ import { SpsNativeEnrollmentError, type spsNativeEnrollmentService } from "./sps
 import type { SpsNativePairingAuthorizer } from "./sps-native-pairings.js";
 
 type Identity = Pick<ReturnType<typeof createSpsIdentityAuth>, "resolveNativeEnrollmentSessionFromHeaders">;
-type Enrollment = Pick<ReturnType<typeof spsNativeEnrollmentService>, "issue" | "completeFromTlsPeer">;
+type Enrollment = Pick<ReturnType<typeof spsNativeEnrollmentService>, "issue" | "completeFromTlsPeer">
+  & Partial<Pick<ReturnType<typeof spsNativeEnrollmentService>, "reconcileFromTlsPeer">>;
 type IssueBody = { pairingId: string; pairingSecret: string; deviceKeyId: string; requestPem: string };
 type CompleteBody = { pairingId: string; pairingSecret: string; enrollmentId: string; displayName: string };
+type ReconcileBody = { enrollmentId: string };
 
 export class SpsNativeSessionEnrollmentError extends Error {
   readonly code = "native_enrollment_request_unavailable";
@@ -89,6 +91,18 @@ export function createSpsNativeSessionEnrollment(identity: Identity, enrollment:
     catch (error) { if (error instanceof SpsNativeEnrollmentError) throw error; deny(); }
   }
   return Object.freeze({
+    reconcileFromTlsRequest(request: IncomingMessage, input: ReconcileBody, assertRequestActive: () => void = () => {}) {
+      return safe(async () => {
+        const value = body(input, ["enrollmentId"]);
+        if (typeof enrollment.reconcileFromTlsPeer !== "function") deny();
+        const { socket, current, authorize, recheck } = await session(request, assertRequestActive);
+        const result = await enrollment.reconcileFromTlsPeer(socket, {
+          enrollmentId: value.enrollmentId!, userId: current.userId,
+        }, authorize);
+        recheck();
+        return result;
+      });
+    },
     issue(request: IncomingMessage, input: IssueBody, assertRequestActive: () => void = () => {}) {
       return safe(async () => {
         const value = body(input, ["pairingId", "pairingSecret", "deviceKeyId", "requestPem"]);

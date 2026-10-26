@@ -3,12 +3,13 @@ import { createServer, connect, type TLSSocket } from "node:tls";
 import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
-  authUsers, companyMemberships, createDb, spsMemberDeviceEvents, spsMemberDevices,
+  authUsers, companyMemberships, createDb, sanitizePostRestoreDatabase, spsMemberDeviceEvents, spsMemberDevices,
   spsNativeEnrollments, spsNativePairingEvents, spsNativePairings,
 } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { createNativeEnrollmentTlsFixture, type NativeEnrollmentTlsFixture } from "./helpers/native-enrollment-tls.js";
 import { createMemberTlsFixture, type MemberTlsFixture } from "./helpers/member-tls.js";
+import { spsMemberDeviceService } from "../services/sps-member-devices.js";
 import { spsNativePairingService } from "../services/sps-native-pairings.js";
 import { spsNativeEnrollmentService, type SpsNativeEnrollmentSigner } from "../services/sps-native-enrollments.js";
 
@@ -41,7 +42,7 @@ describeDatabase("Native invitation-bound issuance and live mTLS completion", ()
   });
   afterAll(async () => { await db?.$client.end(); await database?.cleanup(); });
 
-  async function setup(signOverride?: SpsNativeEnrollmentSigner) {
+  async function setup(signOverride?: SpsNativeEnrollmentSigner, certificateLifetimeMs = 60_000) {
     const hostId = randomUUID(), deviceKeyId = randomUUID();
     const fixture = await createNativeEnrollmentTlsFixture({ hostId, deviceKeyId }); fixtures.push(fixture);
     const actorUserId = "fixture-host", userId = "fixture-member";
@@ -63,7 +64,7 @@ describeDatabase("Native invitation-bound issuance and live mTLS completion", ()
     };
     const options = {
       hostId, serverSpkiSha256: PIN, issuerCertificate: fixture.issuerCertificate,
-      pairingPolicy: POLICY, certificateLifetimeMs: 60_000, signingTimeoutMs: 1000, maxConcurrentSignings: 2,
+      pairingPolicy: POLICY, certificateLifetimeMs, signingTimeoutMs: 1000, maxConcurrentSignings: 2,
     };
     const service = spsNativeEnrollmentService(db, options, signing);
     const input = { pairingId: invitation.pairingId, pairingSecret: invitation.pairingSecret, userId, deviceKeyId, requestPem: fixture.requestPem };
@@ -106,6 +107,17 @@ describeDatabase("Native invitation-bound issuance and live mTLS completion", ()
   function completion(value: Awaited<ReturnType<typeof setup>>, enrollmentId: string) {
     return { pairingId: value.input.pairingId, pairingSecret: value.input.pairingSecret,
       userId: value.input.userId, enrollmentId, displayName: "Fixture Member PC" };
+  }
+  async function persistedState() {
+    return {
+      enrollments: await db.select().from(spsNativeEnrollments),
+      pairings: await db.select().from(spsNativePairings),
+      pairingEvents: await db.select().from(spsNativePairingEvents),
+      devices: await db.select().from(spsMemberDevices),
+      deviceEvents: await db.select().from(spsMemberDeviceEvents),
+      memberships: await db.select().from(companyMemberships),
+      users: await db.select().from(authUsers),
+    };
   }
 
   it("persists exactly one public issuance and replays it after restart without consuming or granting membership", async () => {
@@ -151,6 +163,244 @@ describeDatabase("Native invitation-bound issuance and live mTLS completion", ()
     expect((await value.pairing.listHost())[0]?.status).toBe("consumed");
     expect(await db.select().from(spsNativePairingEvents).where(eq(spsNativePairingEvents.action, "consumed"))).toHaveLength(1);
     expect(await db.select().from(spsMemberDeviceEvents)).toHaveLength(1);
+  });
+
+  it("recovers a lost completion response with two read-only lookups after service restart", async () => {
+    const value = await setup(); const issued = await value.service.issue(value.input);
+    const socket = await peer(value.fixture, new X509Certificate(Buffer.from(issued.certificate, "base64url")).toString());
+    expect(socket.authorized).toBe(true);
+    expect(socket.getProtocol()).toBe("TLSv1.3");
+    expect(socket.isSessionReused()).toBe(false);
+    await value.service.completeFromTlsPeer(socket, completion(value, issued.enrollmentId));
+
+    const [consumedPairing] = await db.select().from(spsNativePairings).where(eq(spsNativePairings.id, value.input.pairingId));
+    expect(consumedPairing?.status).toBe("consumed");
+    const before = await persistedState();
+    const restarted = spsNativeEnrollmentService(db, value.options, async () => { throw new Error("Reconciliation must not sign"); });
+    let authorizationChecks = 0;
+    const authorize = async (_tx: unknown, userId: string) => {
+      authorizationChecks++;
+      expect(userId).toBe(value.input.userId);
+    };
+    const input = { enrollmentId: issued.enrollmentId, userId: value.input.userId };
+
+    const first = await restarted.reconcileFromTlsPeer(socket, input, authorize);
+    const second = await restarted.reconcileFromTlsPeer(socket, input, authorize);
+
+    expect(first).toEqual({ deviceId: consumedPairing!.consumedDeviceId, status: "pending" });
+    expect(second).toEqual(first);
+    expect(Object.isFrozen(first)).toBe(true);
+    expect(Object.isFrozen(second)).toBe(true);
+    expect(Object.keys(first).sort()).toEqual(["deviceId", "status"]);
+    expect(authorizationChecks).toBe(4);
+    expect(await persistedState()).toEqual(before);
+    expect(before.enrollments).toHaveLength(1);
+    expect(before.pairings).toHaveLength(1);
+    expect(before.pairingEvents.filter(event => event.action === "consumed")).toHaveLength(1);
+    expect(before.devices).toHaveLength(1);
+    expect(before.deviceEvents).toHaveLength(1);
+    expect(before.memberships).toEqual([]);
+  });
+
+  it("does not recover an old certificate after successful post-restore sanitization", async () => {
+    const value = await setup(); const issued = await value.service.issue(value.input);
+    const socket = await peer(value.fixture, new X509Certificate(Buffer.from(issued.certificate, "base64url")).toString());
+    await value.service.completeFromTlsPeer(socket, completion(value, issued.enrollmentId));
+    const before = await persistedState();
+    expect(before.enrollments).toHaveLength(1);
+    expect(before.pairings[0]?.status).toBe("consumed");
+    expect(before.devices).toHaveLength(1);
+    expect(before.pairingEvents.some(event => event.action === "consumed")).toBe(true);
+    expect(before.deviceEvents).toHaveLength(1);
+
+    const sanitized = await sanitizePostRestoreDatabase(database.connectionString);
+    expect(sanitized.scrubbedTables.sps_native_enrollments).toBeGreaterThan(0);
+    expect(sanitized.scrubbedTables.sps_native_pairings).toBeGreaterThan(0);
+    expect(sanitized.scrubbedTables.sps_member_devices).toBeGreaterThan(0);
+
+    const afterRestore = await persistedState();
+    expect(afterRestore.enrollments).toEqual([]);
+    expect(afterRestore.pairings).toEqual([]);
+    expect(afterRestore.devices).toEqual([]);
+    expect(afterRestore.memberships).toEqual([]);
+    expect(afterRestore.pairingEvents).toEqual(before.pairingEvents.map(event => ({ ...event, pairingId: null })));
+    expect(afterRestore.deviceEvents).toEqual(before.deviceEvents.map(event => ({ ...event, deviceId: null })));
+    const consumedEvent = afterRestore.pairingEvents.find(event => event.action === "consumed");
+    expect(consumedEvent?.pairingSnapshotId).toBe(value.input.pairingId);
+    expect(consumedEvent?.deviceSnapshotId).toBe(before.devices[0]?.id);
+    expect(afterRestore.deviceEvents[0]?.deviceSnapshotId).toBe(before.devices[0]?.id);
+
+    let authorizationChecks = 0;
+    const authorizeClearedBinding = async (_tx: unknown, userId: string) => {
+      authorizationChecks++;
+      expect(userId).toBe(value.input.userId);
+      if (!afterRestore.enrollments.some(row => row.id === issued.enrollmentId)) {
+        throw new Error("Restore cleared the enrollment authorization binding");
+      }
+    };
+    await expect(value.service.reconcileFromTlsPeer(socket, {
+      enrollmentId: issued.enrollmentId, userId: value.input.userId,
+    }, authorizeClearedBinding)).rejects.toMatchObject({ code: "native_enrollment_unavailable" });
+
+    expect(authorizationChecks).toBe(1);
+    expect(await persistedState()).toEqual(afterRestore);
+  });
+
+  it("requires a consumed invitation rather than an issued enrollment alone", async () => {
+    const value = await setup(); const issued = await value.service.issue(value.input);
+    const socket = await peer(value.fixture, new X509Certificate(Buffer.from(issued.certificate, "base64url")).toString());
+    const before = await persistedState();
+    let authorizationChecks = 0;
+
+    await expect(value.service.reconcileFromTlsPeer(socket, {
+      enrollmentId: issued.enrollmentId, userId: value.input.userId,
+    }, async () => { authorizationChecks++; })).rejects.toMatchObject({ code: "native_enrollment_unavailable" });
+
+    expect(authorizationChecks).toBe(1);
+    expect(await persistedState()).toEqual(before);
+    expect(before.enrollments[0]?.status).toBe("issued");
+    expect(before.pairings[0]?.status).toBe("pending");
+    expect(before.devices).toEqual([]);
+    expect(before.pairingEvents.some(event => event.action === "consumed")).toBe(false);
+    expect(before.memberships).toEqual([]);
+  });
+
+  it("denies wrong users, plain or different peers, wrong server pins, missing authorization and extra fields", async () => {
+    const value = await setup(); const issued = await value.service.issue(value.input);
+    const socket = await peer(value.fixture, new X509Certificate(Buffer.from(issued.certificate, "base64url")).toString());
+    await value.service.completeFromTlsPeer(socket, completion(value, issued.enrollmentId));
+    const input = { enrollmentId: issued.enrollmentId, userId: value.input.userId };
+    const before = await persistedState();
+    const authorize = async (_tx: unknown, userId: string) => {
+      if (userId !== value.input.userId) throw new Error("Session user mismatch");
+    };
+
+    await expect(value.service.reconcileFromTlsPeer(socket, { ...input, userId: "other-member" }, async () => {}))
+      .rejects.toMatchObject({ code: "native_enrollment_unavailable" });
+    await expect(value.service.reconcileFromTlsPeer({ authorized: true } as TLSSocket, input, authorize))
+      .rejects.toMatchObject({ code: "native_enrollment_unavailable" });
+    const differentCertificateSocket = await peer(value.fixture, value.fixture.certPem);
+    await expect(value.service.reconcileFromTlsPeer(differentCertificateSocket, input, authorize))
+      .rejects.toMatchObject({ code: "native_enrollment_unavailable" });
+    const wrongPin = spsNativeEnrollmentService(db, { ...value.options, serverSpkiSha256: "b".repeat(64) }, async () => {
+      throw new Error("Wrong-pin reconciliation must not sign");
+    });
+    await expect(wrongPin.reconcileFromTlsPeer(socket, input, authorize))
+      .rejects.toMatchObject({ code: "native_enrollment_unavailable" });
+    await expect(Reflect.apply(value.service.reconcileFromTlsPeer, value.service, [socket, input]))
+      .rejects.toMatchObject({ code: "native_enrollment_unavailable" });
+    await expect(Reflect.apply(value.service.reconcileFromTlsPeer, value.service, [
+      socket, { ...input, pairingSecret: value.input.pairingSecret }, authorize,
+    ])).rejects.toMatchObject({ code: "native_enrollment_unavailable" });
+
+    expect(await persistedState()).toEqual(before);
+  });
+
+  it("requires exact persisted Host, server-pin, issuer-pin and user bindings", async () => {
+    const value = await setup(); const issued = await value.service.issue(value.input);
+    const socket = await peer(value.fixture, new X509Certificate(Buffer.from(issued.certificate, "base64url")).toString());
+    await value.service.completeFromTlsPeer(socket, completion(value, issued.enrollmentId));
+    const before = await persistedState();
+    const mutate = async (set: Partial<typeof spsNativeEnrollments.$inferInsert>) => {
+      await db.update(spsNativeEnrollments).set(set).where(eq(spsNativeEnrollments.id, issued.enrollmentId));
+    };
+    const cases: Array<{ tamper: () => Promise<unknown>; restore: () => Promise<unknown> }> = [
+      { tamper: () => mutate({ hostId: randomUUID() }), restore: () => mutate({ hostId: value.hostId }) },
+      { tamper: () => mutate({ serverSpkiSha256: "b".repeat(64) }), restore: () => mutate({ serverSpkiSha256: PIN }) },
+      { tamper: () => mutate({ issuerSpkiSha256: "b".repeat(64) }), restore: () => mutate({ issuerSpkiSha256: value.fixture.issuerSpkiSha256 }) },
+      { tamper: () => mutate({ userId: "other-member" }), restore: () => mutate({ userId: value.input.userId }) },
+    ];
+
+    for (const binding of cases) {
+      await binding.tamper();
+      await expect(value.service.reconcileFromTlsPeer(socket, {
+        enrollmentId: issued.enrollmentId, userId: value.input.userId,
+      }, async () => {})).rejects.toMatchObject({ code: "native_enrollment_unavailable" });
+      await binding.restore();
+    }
+
+    expect(await persistedState()).toEqual(before);
+  });
+
+  it("denies reconciliation when the consumed device snapshot binding is tampered", async () => {
+    const value = await setup(); const issued = await value.service.issue(value.input);
+    const socket = await peer(value.fixture, new X509Certificate(Buffer.from(issued.certificate, "base64url")).toString());
+    await value.service.completeFromTlsPeer(socket, completion(value, issued.enrollmentId));
+    await db.update(spsNativePairings).set({ consumedDeviceSnapshotId: randomUUID() })
+      .where(eq(spsNativePairings.id, value.input.pairingId));
+    const before = await persistedState();
+
+    await expect(value.service.reconcileFromTlsPeer(socket, {
+      enrollmentId: issued.enrollmentId, userId: value.input.userId,
+    }, async () => {})).rejects.toMatchObject({ code: "native_enrollment_unavailable" });
+
+    expect(await persistedState()).toEqual(before);
+    expect(before.devices).toHaveLength(1);
+    expect(before.pairings[0]?.consumedDeviceSnapshotId).not.toBe(before.pairings[0]?.consumedDeviceId);
+  });
+
+  it.each(["approved", "revoked"] as const)("projects %s status without changing approval state or audit", async status => {
+    const value = await setup(); const issued = await value.service.issue(value.input);
+    const socket = await peer(value.fixture, new X509Certificate(Buffer.from(issued.certificate, "base64url")).toString());
+    await value.service.completeFromTlsPeer(socket, completion(value, issued.enrollmentId));
+    const [device] = await db.select().from(spsMemberDevices);
+    const management = spsMemberDeviceService(db, value.hostId);
+    if (status === "approved") await management.approve(device!.id, "fixture-host");
+    else await management.revoke(device!.id, "fixture-host");
+    const before = await persistedState();
+
+    let authorizationChecks = 0;
+    const result = await value.service.reconcileFromTlsPeer(socket, {
+      enrollmentId: issued.enrollmentId, userId: value.input.userId,
+    }, async () => { authorizationChecks++; });
+
+    expect(result).toEqual({ deviceId: device!.id, status });
+    expect(Object.isFrozen(result)).toBe(true);
+    expect(authorizationChecks).toBe(2);
+    expect(await persistedState()).toEqual(before);
+    expect(before.devices[0]?.status).toBe(status);
+    expect(before.memberships).toEqual([]);
+  });
+
+  it("reconciles a consumed invitation after its expiry while the exact leaf remains current", async () => {
+    const { vi } = await import("vitest");
+    const value = await setup(undefined, 90_000); const issued = await value.service.issue(value.input);
+    const certificate = new X509Certificate(Buffer.from(issued.certificate, "base64url"));
+    const socket = await peer(value.fixture, certificate.toString());
+    await value.service.completeFromTlsPeer(socket, completion(value, issued.enrollmentId));
+    const before = await persistedState();
+    const afterInvitationExpiry = value.invitation.expiresAt + 1;
+    expect(Date.parse(certificate.validTo)).toBeGreaterThan(afterInvitationExpiry);
+    const clock = vi.spyOn(Date, "now").mockReturnValue(afterInvitationExpiry);
+    try {
+      expect(Date.now()).toBeGreaterThan(value.invitation.expiresAt);
+      const result = await value.service.reconcileFromTlsPeer(socket, {
+        enrollmentId: issued.enrollmentId, userId: value.input.userId,
+      }, async () => {});
+      expect(result).toEqual({ deviceId: before.pairings[0]?.consumedDeviceId, status: "pending" });
+      expect(Object.isFrozen(result)).toBe(true);
+      expect(await persistedState()).toEqual(before);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it("withholds a read when transaction authorization expires after the lookup", async () => {
+    const value = await setup(); const issued = await value.service.issue(value.input);
+    const socket = await peer(value.fixture, new X509Certificate(Buffer.from(issued.certificate, "base64url")).toString());
+    await value.service.completeFromTlsPeer(socket, completion(value, issued.enrollmentId));
+    const before = await persistedState();
+    let authorizationChecks = 0;
+
+    await expect(value.service.reconcileFromTlsPeer(socket, {
+      enrollmentId: issued.enrollmentId, userId: value.input.userId,
+    }, async () => {
+      authorizationChecks++;
+      if (authorizationChecks === 2) throw new Error("Session expired before projection");
+    })).rejects.toMatchObject({ code: "native_enrollment_unavailable" });
+
+    expect(authorizationChecks).toBe(2);
+    expect(await persistedState()).toEqual(before);
   });
 
   it("rejects another user, request, pin and an unverified account without signing again", async () => {

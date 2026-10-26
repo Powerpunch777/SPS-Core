@@ -3,11 +3,14 @@ import { assertSpsNativeEnrollmentTlsRequest, SpsNativeSessionEnrollmentError,
   type createSpsNativeSessionEnrollment } from "./sps-native-session-enrollment.js";
 import { SpsNativeEnrollmentError } from "./sps-native-enrollments.js";
 
-type Adapter = ReturnType<typeof createSpsNativeSessionEnrollment>;
+type SessionAdapter = ReturnType<typeof createSpsNativeSessionEnrollment>;
+type Adapter = Pick<SessionAdapter, "issue" | "completeFromTlsRequest">
+  & Partial<Pick<SessionAdapter, "reconcileFromTlsRequest">>;
 type Options = { maxBodyBytes: number; readTimeoutMs: number; operationTimeoutMs: number; maxConcurrentRequests: number };
 type Pending = { cancelled: boolean; response: ServerResponse; operation?: Promise<unknown> };
 const ISSUE = "/sps-native/v1/enrollment/issue";
 const COMPLETE = "/sps-native/v1/enrollment/complete";
+const RECONCILE = "/sps-native/v1/enrollment/reconcile";
 const CODE = "native_enrollment_request_unavailable";
 const UUID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/;
 class RequestFailure extends Error { constructor(readonly status: number) { super(CODE); } }
@@ -95,24 +98,31 @@ function read(request: IncomingMessage, expected: number, timeoutMs: number, sig
     if (signal.aborted) onAbort();
   });
 }
-function input(bytes: Buffer, issue: boolean) {
+function input(bytes: Buffer, operation: string) {
   try {
     const text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
     const value: unknown = JSON.parse(text);
     // Private v1 wire format is compact JSON.stringify UTF-8. This rejects
     // duplicate/escaped duplicate keys without another permissive JSON parser.
     if (JSON.stringify(value) !== text) fail(400);
-    const fields = data(value, issue ? ["pairingId", "pairingSecret", "deviceKeyId", "requestPem"]
-      : ["pairingId", "pairingSecret", "enrollmentId", "displayName"]);
+    const fields = data(value, operation === RECONCILE ? ["enrollmentId"]
+      : operation === ISSUE ? ["pairingId", "pairingSecret", "deviceKeyId", "requestPem"]
+        : ["pairingId", "pairingSecret", "enrollmentId", "displayName"]);
     for (const [key, field] of Object.entries(fields)) {
       if (typeof field !== "string" || !field || field.length > (key === "requestPem" ? 3000 : 200)) fail(400);
     }
     return fields;
   } catch { fail(400); }
 }
-function project(value: unknown, issue: boolean) {
+function project(value: unknown, operation: string) {
   try {
-    if (!issue) {
+    if (operation === RECONCILE) {
+      const fields = data(value, ["deviceId", "status"]);
+      if (typeof fields.deviceId !== "string" || !UUID.test(fields.deviceId)
+        || !["pending", "approved", "revoked"].includes(fields.status as string)) fail(503);
+      return fields;
+    }
+    if (operation !== ISSUE) {
       if (!value || typeof value !== "object") fail(503);
       const fields = Object.getOwnPropertyDescriptors(value);
       if (!fields.id || !("value" in fields.id) || typeof fields.id.value !== "string" || !UUID.test(fields.id.value)
@@ -152,7 +162,8 @@ export function createSpsNativeEnrollmentRequestHandler(adapter: Adapter, inputO
     try {
       if (!(request instanceof IncomingMessage) || !(response instanceof ServerResponse)) fail(403);
       if (disposed) fail(503);
-      if (request.url !== ISSUE && request.url !== COMPLETE) fail(404);
+      if (request.url !== ISSUE && request.url !== COMPLETE && request.url !== RECONCILE) fail(404);
+      if (request.url === RECONCILE && typeof adapter.reconcileFromTlsRequest !== "function") fail(404);
       size = length(request, limits.maxBodyBytes);
       if (active.size >= limits.maxConcurrentRequests) fail(429);
     } catch (error) { send(response, failureStatus(error), { code: CODE }); return; }
@@ -168,11 +179,16 @@ export function createSpsNativeEnrollmentRequestHandler(adapter: Adapter, inputO
     void (async () => {
       let settled = true, timer: ReturnType<typeof setTimeout> | undefined;
       try {
-        const fields = input(await read(request, size, limits.readTimeoutMs, controller.signal), request.url === ISSUE);
+        const fields = input(await read(request, size, limits.readTimeoutMs, controller.signal), request.url!);
         assertActive();
         settled = false;
         const operation = Promise.resolve().then<unknown>(() => {
           assertActive();
+          if (request.url === RECONCILE) {
+            if (typeof adapter.reconcileFromTlsRequest !== "function") fail(404);
+            return adapter.reconcileFromTlsRequest(request,
+              fields as Parameters<NonNullable<Adapter["reconcileFromTlsRequest"]>>[1], assertActive);
+          }
           return request.url === ISSUE
             ? adapter.issue(request, fields as Parameters<Adapter["issue"]>[1], assertActive)
             : adapter.completeFromTlsRequest(request, fields as Parameters<Adapter["completeFromTlsRequest"]>[1], assertActive);
@@ -182,7 +198,7 @@ export function createSpsNativeEnrollmentRequestHandler(adapter: Adapter, inputO
           timer = setTimeout(() => { state.cancelled = true; reject(new RequestFailure(408)); }, limits.operationTimeoutMs);
         })]);
         assertActive();
-        send(response, 200, project(result, request.url === ISSUE));
+        send(response, 200, project(result, request.url!));
       } catch (error) { send(response, failureStatus(error), { code: CODE }); }
       finally {
         clearTimeout(timer);

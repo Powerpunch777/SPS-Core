@@ -8,7 +8,7 @@ import express from "express";
 import request from "supertest";
 import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { agents, plugins, authSessions, authUsers, companyMemberships, createDb, spsMemberDeviceEvents,
+import { agents, plugins, authSessions, authUsers, companyMemberships, createDb, sanitizePostRestoreDatabase, spsMemberDeviceEvents,
   spsMemberDevices, spsNativeEnrollments, spsNativePairingEvents, spsNativePairings } from "@paperclipai/db";
 import type { Config } from "../config.js";
 import { createSpsIdentityAuth } from "../auth/sps-identity.js";
@@ -184,6 +184,62 @@ describeDatabase("Native enrollment with actual SPS sessions and loopback HTTPS"
     const [row] = await db.select().from(spsNativePairings);
     expect(row).toMatchObject({ status: "consumed", consumedByUserId: value.account.userId });
     expect(JSON.stringify({ issued, completed })).not.toContain(value.account.cookie);
+  });
+
+  it("reconciles consumed registration over the actual session and fresh mTLS without replaying an invitation", async () => {
+    const value = await setup();
+    const issued = await value.call("/issue", value.input, { cookie: value.account.cookie });
+    expect(issued.status).toBe(200);
+    const completed = await value.call("/complete", { pairingId: value.input.pairingId,
+      pairingSecret: value.input.pairingSecret, enrollmentId: issued.body.enrollmentId, displayName: "Fixture device" },
+    { cookie: value.account.cookie, certificate: issued.body.certificate });
+    expect(completed.status).toBe(200);
+    const route = "/sps-native/v1/enrollment/reconcile";
+    const body = { enrollmentId: issued.body.enrollmentId };
+    const options = { cookie: value.account.cookie, certificate: issued.body.certificate };
+    const before = JSON.stringify({ devices: await db.select().from(spsMemberDevices),
+      pairings: await db.select().from(spsNativePairings), deviceEvents: await db.select().from(spsMemberDeviceEvents),
+      pairingEvents: await db.select().from(spsNativePairingEvents) });
+    for (let index = 0; index < 2; index++) {
+      const result = await value.call(route, body, options);
+      expect(result.status).toBe(200);
+      expect(result.body).toEqual(completed.body);
+      expect(result.headers["set-cookie"]).toBeUndefined();
+    }
+    expect(JSON.stringify({ devices: await db.select().from(spsMemberDevices),
+      pairings: await db.select().from(spsNativePairings), deviceEvents: await db.select().from(spsMemberDeviceEvents),
+      pairingEvents: await db.select().from(spsNativePairingEvents) })).toBe(before);
+    expect((await value.call(route, body, { certificate: issued.body.certificate })).status).toBe(403);
+    expect((await value.call(route, body, { cookie: value.account.cookie })).status).toBe(409);
+    const other = await value.login("other-member");
+    expect((await value.call(route, body, { cookie: other.cookie, certificate: issued.body.certificate })).status).toBe(409);
+    expect((await value.call(route, { ...body, userId: value.account.userId }, options)).status).toBe(400);
+    expect((await request(value.loginApp).post("/identity/logout").set("Cookie", value.account.cookie).send({})).status).toBe(204);
+    expect((await value.call(route, body, options)).status).toBe(403);
+    expect(value.signs()).toBe(1);
+    expect(await db.select().from(companyMemberships)).toEqual([]);
+  });
+
+  it("cannot recover scrubbed device trust with an old or freshly authenticated session after restore", async () => {
+    const value = await setup();
+    const issued = await value.call("/issue", value.input, { cookie: value.account.cookie });
+    expect(issued.status).toBe(200);
+    const completed = await value.call("/complete", { pairingId: value.input.pairingId,
+      pairingSecret: value.input.pairingSecret, enrollmentId: issued.body.enrollmentId, displayName: "Fixture device" },
+    { cookie: value.account.cookie, certificate: issued.body.certificate });
+    expect(completed.status).toBe(200);
+    await sanitizePostRestoreDatabase(database.connectionString);
+    const path = "/sps-native/v1/enrollment/reconcile";
+    const body = { enrollmentId: issued.body.enrollmentId };
+    expect((await value.call(path, body, { cookie: value.account.cookie, certificate: issued.body.certificate })).status).toBe(403);
+    const fresh = await value.login("native-member");
+    expect(fresh.userId).toBe(value.account.userId);
+    expect((await value.call(path, body, { cookie: fresh.cookie, certificate: issued.body.certificate })).status).toBe(409);
+    expect(await db.select().from(spsNativeEnrollments)).toEqual([]);
+    expect(await db.select().from(spsNativePairings)).toEqual([]);
+    expect(await db.select().from(spsMemberDevices)).toEqual([]);
+    expect(await db.select().from(companyMemberships)).toEqual([]);
+    expect(value.signs()).toBe(1);
   });
 
   it("rejects missing sessions, API-key substitutes, browser origins and body-selected users before signing", async () => {
