@@ -143,6 +143,23 @@ export const spsNodeCommandCompleteSchema = z.object({
   error: z.string().trim().max(16_000).nullable().optional(),
 });
 
+const spsNodeUsageTokenCountSchema = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
+
+export const spsNodeUsageReportSchema = z.object({
+  schemaVersion: z.literal(1),
+  source: z.literal("claude_model_usage_v1"),
+  inputTokens: spsNodeUsageTokenCountSchema.nullable(),
+  cachedInputTokens: spsNodeUsageTokenCountSchema.nullable(),
+  outputTokens: spsNodeUsageTokenCountSchema.nullable(),
+}).strict().refine(
+  (report) => report.inputTokens !== null || report.cachedInputTokens !== null || report.outputTokens !== null,
+  { message: "At least one token count must be reported" },
+);
+
+export const spsPluginNodeRunCompleteSchema = spsNodeCommandCompleteSchema.extend({
+  usageReport: spsNodeUsageReportSchema.optional(),
+});
+
 export const reportSpsNodeRunnerAvailabilitySchema = z.object({
   runners: z.array(z.object({
     runnerKey: z.string().trim().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,119}$/),
@@ -188,4 +205,6 @@ export type SpsNodeHeartbeat = z.infer<typeof spsNodeHeartbeatSchema>;
 export type SpsNodeSignedRequest = z.infer<typeof spsNodeSignedRequestSchema>;
 export type SpsNodeCommandEvent = z.infer<typeof spsNodeCommandEventSchema>;
 export type SpsNodeCommandComplete = z.infer<typeof spsNodeCommandCompleteSchema>;
+export type SpsNodeUsageReport = z.infer<typeof spsNodeUsageReportSchema>;
+export type SpsPluginNodeRunComplete = z.infer<typeof spsPluginNodeRunCompleteSchema>;
 export type ReportSpsNodeRunnerAvailability = z.infer<typeof reportSpsNodeRunnerAvailabilitySchema>;

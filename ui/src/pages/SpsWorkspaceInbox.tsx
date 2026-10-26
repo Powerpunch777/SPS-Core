@@ -139,7 +139,7 @@ export function SpsWorkspaceInbox() {
   }
 
   function handleListKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
-    if (items.length === 0) return;
+    if (event.target !== event.currentTarget || items.length === 0) return;
     if (event.key === "ArrowDown" || event.key === "j") {
       event.preventDefault();
       setSelectedIndex((current) => Math.min(items.length - 1, current + 1));

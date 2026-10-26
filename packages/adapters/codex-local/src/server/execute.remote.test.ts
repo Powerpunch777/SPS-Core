@@ -84,6 +84,95 @@ describe("codex remote execution", () => {
     }
   });
 
+  it("launches local CLI MCP servers as required without logging their bound secrets", async () => {
+    const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-codex-mcp-"));
+    cleanupDirs.push(rootDir);
+    const workspaceDir = path.join(rootDir, "workspace");
+    const codexHomeDir = path.join(rootDir, "codex-home");
+    await mkdir(workspaceDir, { recursive: true });
+    await mkdir(codexHomeDir, { recursive: true });
+    await writeFile(path.join(codexHomeDir, "auth.json"), "{}", "utf8");
+
+    runChildProcess.mockResolvedValueOnce({
+      exitCode: 0,
+      signal: null,
+      timedOut: false,
+      stdout: "",
+      stderr: "",
+      pid: 123,
+      startedAt: new Date().toISOString(),
+    });
+    const logs: string[] = [];
+    const metadata: unknown[] = [];
+
+    await execute({
+      runId: "run-local-mcp",
+      agent: {
+        id: "agent-1",
+        companyId: "company-1",
+        name: "CodexWorker",
+        adapterType: "codex_local",
+        adapterConfig: {},
+      },
+      runtime: {
+        sessionId: null,
+        sessionParams: null,
+        sessionDisplayId: null,
+        taskKey: null,
+      },
+      config: {
+        command: "codex",
+        engine: "cli",
+        model: "gpt-5.6",
+        search: true,
+        fastMode: true,
+        extraArgs: ["--sandbox", "workspace-write", "--ask-for-approval", "on-request"],
+        env: { CODEX_HOME: codexHomeDir },
+      },
+      context: {
+        paperclipWorkspace: { cwd: workspaceDir, source: "project_primary" },
+      },
+      externalTools: {
+        mcpServers: [{
+          kind: "stdio",
+          name: "local_mcp",
+          command: "node",
+          args: ["bridge.mjs"],
+          env: [{ name: "SPS_TEST_MCP_TOKEN", value: "very-secret-mcp-token" }],
+          identity: "core.test",
+          revision: "revision-1",
+        }],
+      },
+      onLog: async (_stream, chunk) => { logs.push(chunk); },
+      onMeta: async (meta) => { metadata.push(meta); },
+    });
+
+    const call = runChildProcess.mock.calls[0] as unknown as
+      | [string, string, string[], { env: Record<string, string> }]
+      | undefined;
+    expect(runChildProcess).toHaveBeenCalledTimes(1);
+    expect(call?.[2]).toContain("mcp_servers.local_mcp.required=true");
+    expect(call?.[2]).toContain('mcp_servers.local_mcp.env_vars=["SPS_TEST_MCP_TOKEN"]');
+    expect(call?.[2]).toContain("--model");
+    expect(call?.[2]).toContain("gpt-5.6");
+    expect(call?.[2]).toContain("--search");
+    expect(call?.[2]).toContain('service_tier="fast"');
+    expect(call?.[2]).toContain("features.fast_mode=true");
+    expect(call?.[2]).toContain("--sandbox");
+    expect(call?.[2]).toContain("workspace-write");
+    expect(call?.[2]).toContain("--ask-for-approval");
+    expect(call?.[2]).toContain("on-request");
+    expect(call?.[2]?.at(-1)).toBe("-");
+    expect(call?.[2]?.join(" ")).not.toContain("very-secret-mcp-token");
+    expect(call?.[3].env.SPS_TEST_MCP_TOKEN).toBe("very-secret-mcp-token");
+    const resolverCall = resolveCommandForLogs.mock.calls[0] as unknown as
+      | [string, string, Record<string, string>]
+      | undefined;
+    expect(resolverCall?.[2].SPS_TEST_MCP_TOKEN).toBeUndefined();
+    expect(JSON.stringify(metadata)).not.toContain("very-secret-mcp-token");
+    expect(logs.join("\n")).not.toContain("very-secret-mcp-token");
+  });
+
   it("prepares the workspace, syncs CODEX_HOME, and restores workspace changes for remote SSH execution", async () => {
     const rootDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-codex-remote-"));
     cleanupDirs.push(rootDir);
@@ -97,7 +186,20 @@ describe("codex remote execution", () => {
     const alternateWorkspaceDir = path.join(rootDir, "alternate-workspace");
     await mkdir(alternateWorkspaceDir, { recursive: true });
 
-    await execute({
+    runChildProcess.mockResolvedValueOnce({
+      exitCode: 0,
+      signal: null,
+      timedOut: false,
+      stdout: JSON.stringify({
+        type: "turn.completed",
+        usage: { input_tokens: 0, cached_input_tokens: "2", output_tokens: 5 },
+      }),
+      stderr: "",
+      pid: 123,
+      startedAt: new Date().toISOString(),
+    });
+
+    const result = await execute({
       runId: "run-1",
       agent: {
         id: "agent-1",
@@ -158,6 +260,8 @@ describe("codex remote execution", () => {
       },
       onLog: async () => {},
     });
+
+    expect(result.usageReportedFields).toEqual(["inputTokens", "outputTokens"]);
 
     expect(prepareWorkspaceForSshExecution).toHaveBeenCalledTimes(1);
     expect(prepareWorkspaceForSshExecution).toHaveBeenCalledWith(expect.objectContaining({

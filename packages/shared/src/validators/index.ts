@@ -1,3 +1,12 @@
+export { createSpsModelConnectionSchema, updateSpsModelConnectionStatusSchema, grantSpsModelConnectionSchema, type CreateSpsModelConnection } from "./sps-model-connections.js";
+export {
+  approveSpsMemberDeviceSchema,
+  createSpsMemberDeviceRequestSchema,
+  revokeSpsMemberDeviceSchema,
+  type ApproveSpsMemberDevice,
+  type CreateSpsMemberDeviceRequest,
+  type RevokeSpsMemberDevice,
+} from "./sps-member-devices.js";
 export {
   instanceSettingsSchema,
   instanceGeneralSettingsSchema,
@@ -678,6 +687,8 @@ export {
   spsNodeSignedRequestSchema,
   spsNodeCommandEventSchema,
   spsNodeCommandCompleteSchema,
+  spsNodeUsageReportSchema,
+  spsPluginNodeRunCompleteSchema,
   reportSpsNodeRunnerAvailabilitySchema,
   spsNodeSignedRequestMessage,
   type SpsNodeCapability,
@@ -694,6 +705,8 @@ export {
   type SpsNodeSignedRequest,
   type SpsNodeCommandEvent,
   type SpsNodeCommandComplete,
+  type SpsNodeUsageReport,
+  type SpsPluginNodeRunComplete,
   type ReportSpsNodeRunnerAvailability,
 } from "./sps-nodes.js";
 

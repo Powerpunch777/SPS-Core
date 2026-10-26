@@ -1,5 +1,5 @@
-import { and, desc, eq, gt, isNull } from "drizzle-orm";
-import type { Db } from "@paperclipai/db";
+import { and, desc, eq, gt, isNull, lt, inArray } from "drizzle-orm";
+import type { Db } from "../compat/paperclip/db.js";
 import {
   spsNodes,
   spsNodeRunnerProfiles,
@@ -8,10 +8,11 @@ import {
   spsPluginNodeRunEvents,
   spsPluginNodeRuns,
   spsWorkspaceSources,
-} from "@paperclipai/db";
-import { spsNodeExecutableRuntimeKindSchema } from "@paperclipai/shared";
+} from "../compat/paperclip/db.js";
+import { spsNodeExecutableRuntimeKindSchema } from "../compat/paperclip/shared.js";
+import { normalizeSpsPluginExecutionTimeout } from "./sps-execution-timeout.js";
+import { describeSpsRuntimeConnection, isSpsNodeHeartbeatRecent } from "./sps-runtime-connection.js";
 
-const ONLINE_WINDOW_MS = 2 * 60 * 1000;
 const RUNNER_COMMAND_BY_KIND = {
   claude_cli: "claude",
   codex_cli: "codex",
@@ -24,10 +25,6 @@ const RUNNER_COMMAND_BY_KIND = {
 } as const;
 
 type ExecutableRuntimeKind = keyof typeof RUNNER_COMMAND_BY_KIND;
-
-function isNodeOnline(lastSeenAt: Date | null, now = Date.now()) {
-  return lastSeenAt != null && now - lastSeenAt.getTime() <= ONLINE_WINDOW_MS;
-}
 
 function requiredString(value: string, field: string, maxLength: number) {
   const normalized = value.trim();
@@ -70,7 +67,8 @@ function publicSource(source: typeof spsWorkspaceSources.$inferSelect) {
 function publicRunner(input: {
   node: typeof spsNodes.$inferSelect;
   runner: typeof spsNodeRunnerProfiles.$inferSelect;
-}) {
+}, now = Date.now()) {
+  const connection = describeSpsRuntimeConnection(input.node, now);
   return {
     id: input.runner.id,
     nodeId: input.node.id,
@@ -84,7 +82,8 @@ function publicRunner(input: {
     availabilityDetail: input.runner.availabilityDetail,
     availabilityObservedAt: input.runner.availabilityObservedAt?.toISOString() ?? null,
     retryAfter: input.runner.retryAfter?.toISOString() ?? null,
-    online: isNodeOnline(input.node.lastSeenAt),
+    online: isSpsNodeHeartbeatRecent(input.node.lastSeenAt, now),
+    connection,
   };
 }
 
@@ -233,7 +232,7 @@ export function spsPluginExecutionService(db: Db, pluginKey: string) {
       throw new Error("The selected SPS Workspace Source is not active in this company");
     }
     if (input.requireRunnable) {
-      if (!isNodeOnline(node.lastSeenAt)) throw new Error(`SPS Node \"${node.displayName}\" is offline`);
+      if (!isSpsNodeHeartbeatRecent(node.lastSeenAt)) throw new Error(`SPS Node \"${node.displayName}\" is offline or its heartbeat freshness is unknown`);
       if (!runnerCanAcceptRun(runner)) {
         throw new Error(`SPS Node Runner Profile \"${runner.label}\" is not ready to execute`);
       }
@@ -258,12 +257,14 @@ export function spsPluginExecutionService(db: Db, pluginKey: string) {
         .innerJoin(spsNodes, eq(spsNodes.id, spsNodeRunnerProfiles.nodeId))
         .where(and(
           eq(spsNodeRunnerProfiles.companyId, input.companyId),
+          eq(spsNodes.companyId, input.companyId),
           input.nodeId ? eq(spsNodeRunnerProfiles.nodeId, input.nodeId) : undefined,
         ))
         .orderBy(spsNodes.displayName, spsNodeRunnerProfiles.label);
+      const now = Date.now();
       return rows
         .filter(({ runner }) => spsNodeExecutableRuntimeKindSchema.safeParse(runner.kind).success)
-        .map(publicRunner);
+        .map(row => publicRunner(row, now));
     },
 
     async listExecutionGrants(input: { companyId: string; subjectKey?: string | null; includeRevoked?: boolean }) {
@@ -388,7 +389,7 @@ export function spsPluginExecutionService(db: Db, pluginKey: string) {
         workspaceSourceId: grant.workspaceSourceId,
         requireRunnable: true,
       });
-      const timeoutMs = input.timeoutMs == null ? null : Math.max(1_000, Math.min(Math.floor(input.timeoutMs), 4 * 60 * 60 * 1000));
+      const timeoutMs = normalizeSpsPluginExecutionTimeout(input.timeoutMs);
       const stdin = input.stdin == null ? null : String(input.stdin);
       if (stdin !== null && stdin.length > 1_000_000) throw new Error("stdin must not exceed 1,000,000 characters");
       const run = await db
@@ -410,6 +411,36 @@ export function spsPluginExecutionService(db: Db, pluginKey: string) {
         })
         .returning()
         .then((rows) => rows[0]!);
+      return publicRun(run);
+    },
+
+    async listRuns(input: { companyId: string; subjectKey?: string | null; status?: string | null; limit?: number | null; beforeId?: string | null }) {
+      const limit = input.limit ?? 50;
+      if (!Number.isInteger(limit) || limit < 1 || limit > 200) throw new Error("limit must be an integer between 1 and 200");
+      const statuses = ["queued", "claimed", "running", "cancelling", "cancelled", "succeeded", "failed"];
+      if (input.status != null && !statuses.includes(input.status)) throw new Error("Unknown SPS run status");
+      if (input.beforeId != null && !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(input.beforeId)) throw new Error("beforeId must be a run UUID");
+      const rows = await db.select().from(spsPluginNodeRuns).where(and(
+        eq(spsPluginNodeRuns.companyId, input.companyId),
+        eq(spsPluginNodeRuns.pluginKey, normalizedPluginKey),
+        input.subjectKey != null ? eq(spsPluginNodeRuns.subjectKey, requiredString(input.subjectKey, "subjectKey", 240)) : undefined,
+        input.status != null ? eq(spsPluginNodeRuns.status, input.status) : undefined,
+        input.beforeId != null ? lt(spsPluginNodeRuns.id, input.beforeId) : undefined,
+      )).orderBy(desc(spsPluginNodeRuns.id)).limit(limit);
+      return rows.map(publicRun);
+    },
+
+    async cancelRun(input: { companyId: string; runId: string }) {
+      const scope = and(eq(spsPluginNodeRuns.id, input.runId), eq(spsPluginNodeRuns.companyId, input.companyId),
+        eq(spsPluginNodeRuns.pluginKey, normalizedPluginKey));
+      // CAS updates prevent a queued cancellation from racing a successful claim.
+      const now = new Date();
+      await db.update(spsPluginNodeRuns).set({ status: "cancelled", error: "Cancelled before dispatch.", finishedAt: now, updatedAt: now })
+        .where(and(scope, eq(spsPluginNodeRuns.status, "queued")));
+      await db.update(spsPluginNodeRuns).set({ status: "cancelling", error: "Cancellation requested by the owning plugin.", updatedAt: now })
+        .where(and(scope, inArray(spsPluginNodeRuns.status, ["claimed", "running"])));
+      const run = await db.select().from(spsPluginNodeRuns).where(scope).then(rows => rows[0] ?? null);
+      if (!run) throw new Error("SPS plugin run was not found");
       return publicRun(run);
     },
 

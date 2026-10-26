@@ -44,7 +44,10 @@ interface UpgradeContext {
   companyId: string;
   actorType: "board" | "agent";
   actorId: string;
+  revalidateMemberDevice?: () => Promise<unknown>;
 }
+
+type AuthorizeMemberDevice = (req: IncomingMessage, companyId: string, userId: string) => Promise<unknown>;
 
 interface IncomingMessageWithContext extends IncomingMessage {
   paperclipWebSocketHandled?: boolean;
@@ -122,6 +125,7 @@ async function authorizeUpgrade(
   opts: {
     deploymentMode: DeploymentMode;
     resolveSessionFromHeaders?: (headers: Headers) => Promise<BetterAuthSessionResult | null>;
+    authorizeMemberDevice?: AuthorizeMemberDevice;
   },
 ): Promise<UpgradeContext | null> {
   const queryToken = url.searchParams.get("token")?.trim() ?? "";
@@ -130,7 +134,7 @@ async function authorizeUpgrade(
 
   // Browser board context has no bearer token in local_trusted and authenticated modes.
   if (!token) {
-    if (opts.deploymentMode === "local_trusted") {
+    if (opts.deploymentMode === "local_trusted" && !opts.authorizeMemberDevice) {
       return {
         companyId,
         actorType: "board",
@@ -165,15 +169,27 @@ async function authorizeUpgrade(
     ]);
 
     const hasCompanyMembership = memberships.some((row) => row.companyId === companyId);
-    if (!roleRow && !hasCompanyMembership) return null;
+    if (!hasCompanyMembership && (opts.authorizeMemberDevice || !roleRow)) return null;
+    if (opts.authorizeMemberDevice) {
+      try { await opts.authorizeMemberDevice(req, companyId, userId); }
+      catch { return null; }
+    }
 
     return {
       companyId,
       actorType: "board",
       actorId: userId,
+      ...(opts.authorizeMemberDevice ? {
+        revalidateMemberDevice: async () => {
+          const currentSession = await opts.resolveSessionFromHeaders!(headersFromIncomingMessage(req));
+          if (currentSession?.user?.id !== userId) throw new Error("SPS Member session is no longer valid");
+          await opts.authorizeMemberDevice!(req, companyId, userId);
+        },
+      } : {}),
     };
   }
 
+  if (opts.authorizeMemberDevice) return null;
   const tokenHash = hashToken(token);
   const key = await db
     .select()
@@ -203,6 +219,8 @@ export function setupLiveEventsWebSocketServer(
   opts: {
     deploymentMode: DeploymentMode;
     resolveSessionFromHeaders?: (headers: Headers) => Promise<BetterAuthSessionResult | null>;
+    // Dedicated authenticated Native ingress only; legacy local/Agent lanes must not opt in.
+    authorizeMemberDevice?: AuthorizeMemberDevice;
   },
 ) {
   const wss = new WebSocketServer({ noServer: true });
@@ -227,9 +245,23 @@ export function setupLiveEventsWebSocketServer(
       return;
     }
 
+    let delivery = Promise.resolve();
+    let pending = 0;
     const unsubscribe = subscribeCompanyLiveEvents(context.companyId, (event) => {
       if (socket.readyState !== WebSocket.OPEN) return;
-      socket.send(JSON.stringify(event));
+      if (!context.revalidateMemberDevice) {
+        socket.send(JSON.stringify(event));
+        return;
+      }
+      if (++pending > 64) {
+        socket.terminate();
+        return;
+      }
+      delivery = delivery.then(async () => {
+        if (socket.readyState !== WebSocket.OPEN) return;
+        await context.revalidateMemberDevice!();
+        if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(event));
+      }).catch(() => socket.terminate()).finally(() => { pending--; });
     });
 
     cleanupByClient.set(socket, unsubscribe);
@@ -286,6 +318,7 @@ export function setupLiveEventsWebSocketServer(
     void authorizeUpgrade(db, req, companyId, url, {
       deploymentMode: opts.deploymentMode,
       resolveSessionFromHeaders: opts.resolveSessionFromHeaders,
+      authorizeMemberDevice: opts.authorizeMemberDevice,
     })
       .then((context) => {
         if (!context) {

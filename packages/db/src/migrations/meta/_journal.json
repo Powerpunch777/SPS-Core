@@ -1121,6 +1121,48 @@
       "when": 1786046400000,
       "tag": "0161_sps_marketplace_assistant_sessions",
       "breakpoints": true
+    },
+    {
+      "idx": 162,
+      "version": "7",
+      "when": 1792812066964,
+      "tag": "0162_sps_node_usage",
+      "breakpoints": true
+    },
+    {
+      "idx": 163,
+      "version": "7",
+      "when": 1792904186123,
+      "tag": "0163_sps_model_execution",
+      "breakpoints": true
+    },
+    {
+      "idx": 164,
+      "version": "7",
+      "when": 1792904638309,
+      "tag": "0164_sps_model_credential_version",
+      "breakpoints": true
+    },
+    {
+      "idx": 165,
+      "version": "7",
+      "when": 1792910860834,
+      "tag": "0165_hot_jimmy_woo",
+      "breakpoints": true
+    },
+    {
+      "idx": 166,
+      "version": "7",
+      "when": 1792913390693,
+      "tag": "0166_magenta_speed_demon",
+      "breakpoints": true
+    },
+    {
+      "idx": 167,
+      "version": "7",
+      "when": 1792923679960,
+      "tag": "0167_absurd_loki",
+      "breakpoints": true
     }
   ]
 }

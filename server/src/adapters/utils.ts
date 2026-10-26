@@ -85,6 +85,7 @@ export async function runChildProcess(
     timeoutSec: number;
     graceSec: number;
     onLog: (stream: "stdout" | "stderr", chunk: string) => Promise<void>;
+    onSpawn?: Parameters<typeof _runChildProcess>[3]["onSpawn"];
   },
 ): Promise<RunProcessResult> {
   return _runChildProcess(runId, command, args, {

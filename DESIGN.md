@@ -14,6 +14,13 @@ SPS is a local-first desktop platform for building custom AI workspaces. Core ow
 
 The desktop shell uses cool neutral surfaces, restrained SPS blue accents, compact information density, and independently scrolling panes. Rounded framing clarifies containment without turning every section into a card. The approved reference is the SPS Workbench Open Design project and its `SPS-UI-DESIGN-SPEC.md`.
 
+The stable application shell above describes shared technical primitives, not
+mandatory navigation on every Plugin screen. The SPS baseline's no-Shell
+Workspace entry is deliberately unframed and does not mount the retained common
+navigation. Existing selected-Plugin pages and explicit Dashboard/Inbox/settings
+routes retain compatibility chrome until the standalone presentation contract
+is delivered. Native Core Settings remains independent of these working screens.
+
 ## The token layer (where visual values live)
 
 The single token source is **`ui/src/index.css`** (Tailwind v4; there is no tailwind config file — tokens are CSS custom properties consumed via `@theme`). Do NOT create a parallel token source such as `ui/src/tokens/` — that would produce two sources of truth. If index.css grows unwieldy, extracted values may live in a `tokens.css` **imported by index.css** so the pipeline still has one root.

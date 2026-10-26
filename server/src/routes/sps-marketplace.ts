@@ -2,19 +2,23 @@ import { randomUUID } from "node:crypto";
 import { Router, type Request } from "express";
 import { and, eq } from "drizzle-orm";
 import { z } from "zod";
-import type { Db } from "@paperclipai/db";
-import { agents } from "@paperclipai/db";
-import { isAgentStatusInvokable } from "@paperclipai/shared";
+import type { Db } from "../compat/paperclip/db.js";
+import { agents } from "../compat/paperclip/db.js";
+import { isAgentStatusInvokable } from "../compat/paperclip/shared.js";
 import { badRequest, conflict, forbidden, notFound, unauthorized } from "../errors.js";
 import { getServerAdapter } from "../adapters/index.js";
 import { validate } from "../middleware/validate.js";
-import { accessService, logActivity } from "../services/index.js";
-import { heartbeatService } from "../services/heartbeat.js";
-import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
+import {
+  accessService,
+  assertBoard,
+  assertCompanyAccess,
+  heartbeatService,
+  logActivity,
+  type PluginWorkerManager,
+} from "../compat/paperclip/control-plane.js";
 import { createSpsMarketplaceAssistantService } from "../services/sps-marketplace-assistant.js";
 import { coreMarketplaceToolBridge } from "../services/sps-marketplace-tool-bridge.js";
 import { getMarketplacePlugin, searchMarketplacePlugins } from "../services/sps-marketplace.js";
-import { assertBoard, assertCompanyAccess } from "./authz.js";
 
 const createAssistantSessionSchema = z.object({
   agentId: z.string().uuid(),

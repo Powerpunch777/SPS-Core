@@ -1686,6 +1686,21 @@ export function authorizationService(db: Db) {
           });
         }
       }
+      // Protected configuration actions intentionally have no single permission
+      // key: evaluate their direct/suggest grant contract before the fallback.
+      if (input.action === "agent_config:read") {
+        return decideWithAgentConfigReadGrant("user", input.actor.userId);
+      }
+      if (input.action === "agent_config:update") {
+        return decideWithProtectedChangeGrants("user", input.actor.userId, {
+          direct: "agents:configure", suggest: "agents:suggest-changes",
+        });
+      }
+      if (input.action === "skill_config:update") {
+        return decideWithProtectedChangeGrants("user", input.actor.userId, {
+          direct: "skills:create", suggest: "skills:suggest-changes",
+        });
+      }
       if (!permissionKey) {
         if (
           input.action === "agent:read" ||
@@ -1735,21 +1750,6 @@ export function authorizationService(db: Db) {
         const policyEffect = taskAssignmentPolicyEffect ?? await assignmentPolicyEffect(input.resource);
         if (policyEffect.kind === "restricted") return denyRestrictedAssignmentPolicy(policyEffect);
         return grantDecision;
-      }
-      if (input.action === "agent_config:read") {
-        return decideWithAgentConfigReadGrant("user", input.actor.userId);
-      }
-      if (input.action === "agent_config:update") {
-        return decideWithProtectedChangeGrants("user", input.actor.userId, {
-          direct: "agents:configure",
-          suggest: "agents:suggest-changes",
-        });
-      }
-      if (input.action === "skill_config:update") {
-        return decideWithProtectedChangeGrants("user", input.actor.userId, {
-          direct: "skills:create",
-          suggest: "skills:suggest-changes",
-        });
       }
       return decidePrincipalGrant({
         companyId,

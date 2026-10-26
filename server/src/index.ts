@@ -4,7 +4,7 @@
 // instrumentationReady before opening DB connections or constructing the
 // HTTP server, so trace coverage does not depend on incidental timing.
 import { instrumentationReady, shutdownInstrumentation } from "./instrumentation.js";
-import { existsSync, readFileSync, rmSync } from "node:fs";
+import { createReadStream, existsSync, readFileSync, rmSync } from "node:fs";
 import { createServer } from "node:http";
 import { resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
@@ -31,6 +31,9 @@ import {
 } from "@paperclipai/db";
 import detectPort from "detect-port";
 import { createApp } from "./app.js";
+import { shutdownSpsModelBroker } from "./services/sps-model-broker.js";
+import { attachSpsOwnedShutdown } from "./services/sps-owned-shutdown.js";
+import { createSpsNativeHostManagement, type SpsNativeHostManagement } from "./services/sps-native-host-management.js";
 import { loadConfig } from "./config.js";
 import { logger } from "./middleware/logger.js";
 import { setupEnvironmentCustomImageTerminalWebSocketServer } from "./realtime/environment-custom-image-terminal-ws.js";
@@ -536,6 +539,7 @@ export async function startServer(): Promise<StartedServer> {
   let authReady = config.deploymentMode === "local_trusted";
   let betterAuthHandler: RequestHandler | undefined;
   let spsIdentityHandler: RequestHandler | undefined;
+  let nativeConnectivityManagement: SpsNativeHostManagement | undefined;
   let resolveSession:
     | ((req: ExpressRequest) => Promise<BetterAuthSessionResult | null>)
     | undefined;
@@ -556,6 +560,14 @@ export async function startServer(): Promise<StartedServer> {
       spsIdentityHandler = identityAuth.routes;
       resolveSession = (req) => identityAuth.resolveSession(req);
       resolveSessionFromHeaders = (headers) => identityAuth.resolveSessionFromHeaders(headers);
+      // Desktop explicitly opts into local device management only after its
+      // protected Host identity is prepared. No Native network listener opens.
+      if (process.env.SPS_NATIVE_HOST_MANAGEMENT === "1") {
+        try { nativeConnectivityManagement = await createSpsNativeHostManagement(identityAuth, {
+          ownerUserId: process.env.SPS_NATIVE_HOST_OWNER_USER_ID ?? "",
+        }); }
+        catch { logger.warn("Native Host device management is unavailable; existing Host access is unchanged."); }
+      }
       logger.info(
         {
           issuer: config.authIdentityIssuer,
@@ -719,6 +731,7 @@ export async function startServer(): Promise<StartedServer> {
     hostVersion,
     betterAuthHandler,
     spsIdentityHandler,
+    nativeConnectivityManagement,
     resolveSession,
     pluginWorkerManager,
   });
@@ -1180,6 +1193,7 @@ export async function startServer(): Promise<StartedServer> {
   
   {
     const shutdown = async (signal: "SIGINT" | "SIGTERM") => {
+      nativeConnectivityManagement?.dispose();
       heartbeatSchedulerStopped = true;
       if (heartbeatSchedulerInterval) {
         clearInterval(heartbeatSchedulerInterval);
@@ -1202,8 +1216,14 @@ export async function startServer(): Promise<StartedServer> {
         }
       }
 
-      const appShutdown = (app as { locals?: { paperclipShutdown?: () => void } }).locals?.paperclipShutdown;
-      appShutdown?.();
+      const appShutdown = (app as { locals?: { paperclipShutdown?: () => Promise<void> | void } }).locals?.paperclipShutdown;
+      await shutdownSpsModelBroker(db);
+      let pluginShutdownFailed = false;
+      try { await appShutdown?.(); }
+      catch (err) {
+        pluginShutdownFailed = true;
+        logger.error({ err }, "Failed to stop plugin runtime cleanly");
+      }
 
       if (embeddedPostgres && embeddedPostgresStartedByThisProcess) {
         logger.info({ signal }, "Stopping embedded PostgreSQL");
@@ -1218,15 +1238,29 @@ export async function startServer(): Promise<StartedServer> {
       // await the exporter's final batch is dropped on exit.
       await shutdownInstrumentation();
 
-      process.exit(0);
+      process.exit(pluginShutdownFailed ? 1 : 0);
     };
 
-    process.once("SIGINT", () => {
-      void shutdown("SIGINT");
-    });
-    process.once("SIGTERM", () => {
-      void shutdown("SIGTERM");
-    });
+    let stopping: Promise<void> | undefined;
+    const requestShutdown = (signal: "SIGINT" | "SIGTERM") => stopping ??= shutdown(signal);
+    // Windows child.kill(SIGINT) is abrupt termination, not a JS signal event.
+    // Only an originally connected direct owner gets the independent stop pipe;
+    // Native signer invalidation still disconnects the IPC channel immediately.
+    const canAttachOwnedStopPipe = process.connected === true
+      && typeof process.send === "function"
+      && process.env.SPS_DESKTOP_OWNED_SHUTDOWN_PIPE === "1";
+    let ownedStopPipe: ReturnType<typeof createReadStream> | undefined;
+    if (canAttachOwnedStopPipe) {
+      try {
+        // The fd is authoritative; Node permits a null path here although its types do not.
+        ownedStopPipe = createReadStream(null as unknown as string, { fd: 4, autoClose: true });
+      } catch {
+        logger.warn("Could not attach owned Core stop pipe");
+      }
+    }
+    attachSpsOwnedShutdown(process, () => requestShutdown("SIGTERM"), ownedStopPipe);
+    process.once("SIGINT", () => { void requestShutdown("SIGINT"); });
+    process.once("SIGTERM", () => { void requestShutdown("SIGTERM"); });
   }
 
   return {

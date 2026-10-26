@@ -328,6 +328,81 @@ describe("plugin-worker-manager stderr failure context", () => {
     }
   });
 
+  it("scopes workspace Jobs to their company for nested host calls", async () => {
+    const companiesGet = vi.fn(async (params: { companyId: string }) => ({ id: params.companyId }));
+    const scopedCompaniesGet = vi.fn();
+    const hostHandlers = createHostClientHandlers({
+      pluginId: "test.plugin",
+      capabilities: ["companies.read"],
+      services: {
+        companies: {
+          get: companiesGet,
+        },
+      } as unknown as HostServices,
+    });
+    const baseCompaniesGet = hostHandlers["companies.get"]!;
+    (hostHandlers as Record<string, unknown>)["companies.get"] = async (params: unknown, context?: unknown) => {
+      scopedCompaniesGet(params, context);
+      return baseCompaniesGet(params as never, context as never);
+    };
+    const handle = createPluginWorkerHandle("test.plugin", {
+      entrypointPath: INVOCATION_SCOPE_WORKER_ENTRYPOINT,
+      manifest: TEST_MANIFEST,
+      config: {},
+      instanceInfo: {
+        instanceId: "instance-1",
+        hostVersion: "1.0.0",
+      },
+      apiVersion: 1,
+      hostHandlers,
+    });
+
+    try {
+      await handle.start();
+
+      await expect(handle.call("runJob", {
+        job: {
+          jobKey: "scope-probe",
+          runId: "job-run-1",
+          trigger: "schedule",
+          scheduledAt: new Date().toISOString(),
+          companyId: "company-a",
+          requestedCompanyId: "company-a",
+          mode: "echo",
+        },
+      } as HostToWorkerMethods["runJob"][0])).resolves.toEqual({ id: "company-a" });
+
+      await expect(handle.call("runJob", {
+        job: {
+          jobKey: "scope-probe",
+          runId: "job-run-2",
+          trigger: "schedule",
+          scheduledAt: new Date().toISOString(),
+          companyId: "company-a",
+          requestedCompanyId: "company-b",
+          mode: "echo",
+        },
+      } as HostToWorkerMethods["runJob"][0])).rejects.toMatchObject({
+        code: PLUGIN_RPC_ERROR_CODES.INVOCATION_SCOPE_DENIED,
+        message: expect.stringContaining('requested company "company-b"'),
+      });
+
+      expect(companiesGet).toHaveBeenCalledTimes(1);
+      expect(scopedCompaniesGet).toHaveBeenNthCalledWith(
+        1,
+        { companyId: "company-a" },
+        { invocationScope: { companyId: "company-a" } },
+      );
+      expect(scopedCompaniesGet).toHaveBeenNthCalledWith(
+        2,
+        { companyId: "company-b" },
+        { invocationScope: { companyId: "company-a" } },
+      );
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
   it("rejects performAction nested host calls that omit the invocation id", async () => {
     const handlers = createHostClientHandlers({
       pluginId: "test.plugin",

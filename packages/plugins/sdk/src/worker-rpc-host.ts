@@ -427,13 +427,22 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
     const spsTransport: PluginSpsRuntimeTransport = Object.freeze({
       request(operation: PluginSpsRuntimeOperation, input: Record<string, unknown>): Promise<unknown> {
         switch (operation) {
+          case "sps.executions.list":
+          case "sps.executions.get":
+          case "sps.executions.summarize":
           case "sps.workspaceSources.list":
           case "sps.runtimes.list":
+          case "sps.models.list":
+          case "sps.models.submit":
+          case "sps.models.get":
+          case "sps.models.cancel":
           case "sps.executionGrants.list":
           case "sps.executionGrants.upsert":
           case "sps.executionGrants.revoke":
           case "sps.runs.dispatch":
           case "sps.runs.get":
+          case "sps.runs.list":
+          case "sps.runs.cancel":
           case "sps.runs.listEvents":
           case "sps.artifacts.publish":
           case "sps.artifacts.list":
@@ -445,6 +454,23 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
     });
 
     const sps: PluginSpsClient = {
+      models: {
+        async list(companyId) { return callHost("sps.models.list", { companyId }); },
+        async submit(input) { return callHost("sps.models.submit", input); },
+        async get(companyId, runId) { return callHost("sps.models.get", { companyId, runId }); },
+        async cancel(companyId, runId) { return callHost("sps.models.cancel", { companyId, runId }); },
+      },
+      executions: {
+        async summarize(companyId, options) {
+          return spsTransport.request("sps.executions.summarize", { ...options, companyId }) as Promise<Awaited<ReturnType<PluginSpsClient["executions"]["summarize"]>>>;
+        },
+        async list(companyId, options = {}) {
+          return spsTransport.request("sps.executions.list", { ...options, companyId }) as Promise<Awaited<ReturnType<PluginSpsClient["executions"]["list"]>>>;
+        },
+        async get(companyId, lane, runId) {
+          return spsTransport.request("sps.executions.get", { companyId, lane, runId }) as Promise<Awaited<ReturnType<PluginSpsClient["executions"]["get"]>>>;
+        },
+      },
       workspaceSources: {
         async list(companyId: string) {
           return spsTransport.request("sps.workspaceSources.list", { companyId }) as Promise<ReturnType<PluginSpsClient["workspaceSources"]["list"]> extends Promise<infer T> ? T : never>;
@@ -467,6 +493,12 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
         },
       },
       runs: {
+        async list(companyId: string, options = {}) {
+          return spsTransport.request("sps.runs.list", { ...options, companyId }) as Promise<Awaited<ReturnType<PluginSpsClient["runs"]["list"]>>>;
+        },
+        async cancel(companyId: string, runId: string) {
+          return spsTransport.request("sps.runs.cancel", { companyId, runId }) as Promise<Awaited<ReturnType<PluginSpsClient["runs"]["cancel"]>>>;
+        },
         async dispatch(input) {
           return spsTransport.request("sps.runs.dispatch", input) as Promise<ReturnType<PluginSpsClient["runs"]["dispatch"]> extends Promise<infer T> ? T : never>;
         },
@@ -1134,6 +1166,9 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
       },
 
       agents: {
+        async describeExecution(agentId: string, companyId: string) {
+          return callHost("agents.describeExecution", { agentId, companyId });
+        },
         async list(input) {
           return callHost("agents.list", {
             companyId: input.companyId,
@@ -1174,6 +1209,12 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
         },
 
         sessions: {
+          async getRun(sessionId: string, companyId: string, runId: string) {
+            return callHost("agents.sessions.getRun", { sessionId, companyId, runId });
+          },
+          async cancel(sessionId: string, companyId: string, runId: string) {
+            return callHost("agents.sessions.cancel", { sessionId, companyId, runId });
+          },
           async create(agentId: string, companyId: string, opts?: { taskKey?: string; reason?: string; context?: AgentSessionContext }) {
             return callHost("agents.sessions.create", {
               agentId,

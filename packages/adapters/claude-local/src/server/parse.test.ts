@@ -409,6 +409,11 @@ describe("parseClaudeStreamJson usage extraction", () => {
       outputTokens: 77_000,
       cachedInputTokens: 300_000,
     });
+    expect(parsed.usageReportedFields).toEqual([
+      "inputTokens",
+      "cachedInputTokens",
+      "outputTokens",
+    ]);
     expect(parsed.usageBasis).toBe("per_run");
     expect(parsed.costUsd).toBeCloseTo(1.25);
   });
@@ -420,6 +425,66 @@ describe("parseClaudeStreamJson usage extraction", () => {
       outputTokens: 1_800,
       cachedInputTokens: 20,
     });
+    expect(parsed.usageReportedFields).toEqual([
+      "inputTokens",
+      "cachedInputTokens",
+      "outputTokens",
+    ]);
     expect(parsed.usageBasis).toBeNull();
+  });
+
+  it("reports valid top-level fields including explicit zeroes, excluding invalid values", () => {
+    const parsed = parseClaudeStreamJson(
+      `${resultEvent({
+        usage: { input_tokens: 0, cache_read_input_tokens: 0, output_tokens: "4" },
+      })}\n`,
+    );
+    expect(parsed.usage).toEqual({ inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 });
+    expect(parsed.usageReportedFields).toEqual(["inputTokens", "cachedInputTokens"]);
+  });
+
+  it("does not report absent or invalid usage fields", () => {
+    const absent = parseClaudeStreamJson(`${resultEvent({ usage: undefined })}\n`);
+    expect(absent.usage).toEqual({ inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 });
+    expect(absent.usageReportedFields).toEqual([]);
+    expect(parseClaudeStreamJson("").usageReportedFields).toEqual([]);
+
+    const invalid = parseClaudeStreamJson(
+      `${resultEvent({
+        usage: { input_tokens: "0", cache_read_input_tokens: -1, output_tokens: 1.5 },
+      })}\n`,
+    );
+    expect(invalid.usageReportedFields).toEqual([]);
+  });
+
+  it("masks modelUsage fields unless every model entry reports the complete field", () => {
+    const parsed = parseClaudeStreamJson(
+      `${resultEvent({
+        modelUsage: {
+          "claude-sonnet": {
+            inputTokens: 2,
+            cacheCreationInputTokens: 3,
+            cacheReadInputTokens: 0,
+            outputTokens: 0,
+          },
+          "claude-haiku": {
+            inputTokens: 0,
+            cacheReadInputTokens: 4,
+            outputTokens: 6,
+          },
+        },
+      })}\n`,
+    );
+
+    expect(parsed.usage).toEqual({ inputTokens: 5, cachedInputTokens: 4, outputTokens: 6 });
+    expect(parsed.usageReportedFields).toEqual(["cachedInputTokens", "outputTokens"]);
+  });
+
+  it("does not hide malformed model entries when reporting completeness", () => {
+    const parsed = parseClaudeStreamJson(`${resultEvent({ modelUsage: {
+      valid: { inputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0, outputTokens: 0 },
+      malformed: null,
+    } })}\n`);
+    expect(parsed.usageReportedFields).toEqual([]);
   });
 });

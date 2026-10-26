@@ -191,13 +191,14 @@ function setInputValue(input: HTMLInputElement, value: string) {
 async function renderForm(
   environments: Environment[],
   agentOverrides: Partial<Agent> = {},
-  options: { showAdapterTestEnvironmentButton?: boolean } = {},
+  options: { showAdapterTestEnvironmentButton?: boolean; showDefaultWorkingDirectory?: boolean } = {},
 ) {
   mockEnvironmentsApi.list.mockResolvedValue(environments);
 
   const container = document.createElement("div");
   document.body.appendChild(container);
   const root = createRoot(container);
+  const onSave = vi.fn();
   const queryClient = new QueryClient({
     defaultOptions: {
       queries: { retry: false },
@@ -212,10 +213,11 @@ async function renderForm(
           <AgentConfigForm
             mode="edit"
             agent={makeAgent(agentOverrides)}
-            onSave={vi.fn()}
+            onSave={onSave}
             hidePromptTemplate
             showAdapterTypeField={false}
             showAdapterTestEnvironmentButton={options.showAdapterTestEnvironmentButton ?? false}
+            showDefaultWorkingDirectory={options.showDefaultWorkingDirectory}
           />
         </TooltipProvider>
       </QueryClientProvider>,
@@ -223,13 +225,13 @@ async function renderForm(
   });
 
   await flushReact();
-  return { container, root };
+  return { container, root, onSave };
 }
 
 async function renderCreateForm(
   environments: Environment[],
   valueOverrides: Partial<typeof defaultCreateValues> = {},
-  options: { showAdapterTestEnvironmentButton?: boolean } = {},
+  options: { showAdapterTestEnvironmentButton?: boolean; showDefaultWorkingDirectory?: boolean } = {},
 ) {
   mockEnvironmentsApi.list.mockResolvedValue(environments);
 
@@ -261,6 +263,7 @@ async function renderCreateForm(
             hidePromptTemplate
             showAdapterTypeField={false}
             showAdapterTestEnvironmentButton={options.showAdapterTestEnvironmentButton ?? false}
+            showDefaultWorkingDirectory={options.showDefaultWorkingDirectory}
           />
         </TooltipProvider>
       </QueryClientProvider>,
@@ -300,6 +303,28 @@ describe("AgentConfigForm environment selector", () => {
     roots = [];
     document.body.innerHTML = "";
     vi.clearAllMocks();
+  });
+
+  it("shows an independent default folder on the neutral Assistant create form", async () => {
+    const result = await renderCreateForm([], {}, { showDefaultWorkingDirectory: true });
+    roots.push(result.root);
+    expect(result.container.textContent).toContain("Default working folder");
+    expect(result.container.textContent).not.toContain("Working directory (deprecated)");
+    const input = result.container.querySelector<HTMLInputElement>('input[aria-label="Default working folder"]');
+    await act(async () => { setInputValue(input!, "C:\\plugins\\new-plugin"); });
+    expect(result.onChange).toHaveBeenCalledWith({ cwd: "C:\\plugins\\new-plugin" });
+  });
+
+  it("saves only this Assistant's folder while preserving unrelated runtime configuration", async () => {
+    const result = await renderForm([], { adapterConfig: { model: "gpt-6-luna", cwd: "C:\\old", env: { SHARED_CONFIG: "unchanged" } } }, { showDefaultWorkingDirectory: true });
+    roots.push(result.root);
+    const input = result.container.querySelector<HTMLInputElement>('input[aria-label="Default working folder"]');
+    await act(async () => { setInputValue(input!, "C:\\plugins\\new-plugin"); });
+    await flushReact();
+    const save = Array.from(result.container.querySelectorAll("button")).find(button => button.textContent?.includes("Save"));
+    expect(save).toBeTruthy();
+    await act(async () => { save?.click(); });
+    expect(result.onSave).toHaveBeenCalledWith(expect.objectContaining({ adapterConfig: expect.objectContaining({ cwd: "C:\\plugins\\new-plugin", model: "gpt-6-luna", env: { SHARED_CONFIG: "unchanged" } }) }));
   });
 
   it("hides the environment override when Local is the only configured environment", async () => {

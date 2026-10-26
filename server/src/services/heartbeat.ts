@@ -152,6 +152,10 @@ import { buildPlanReviewContext } from "./plan-review-context.js";
 import { executionWorkspaceService, mergeExecutionWorkspaceConfig } from "./execution-workspaces.js";
 import { workspaceOperationService, type WorkspaceOperationRecorder } from "./workspace-operations.js";
 import { isProcessGroupAlive, terminateLocalService } from "./local-service-supervisor.js";
+import { hasSpsSessionCancellation, preserveSpsSessionCancellationContext } from "./sps-agent-session-runs.js";
+import { buildSpsUsageEvidence } from "./sps-execution-usage.js";
+import { createSpsExecutionUsageReceipt } from "./sps-execution-usage-receipt.js";
+import { spsAgentUsageReceiptScope } from "./sps-execution-usage-context.js";
 import {
   isSpsNodeExecutionAdapterType,
   resolveSpsNodeExecutionTarget,
@@ -245,6 +249,8 @@ import { environmentService } from "./environments.js";
 import { parseExecutionPolicyBootstrapEnv } from "./execution-policy-bootstrap.js";
 import { environmentRuntimeService } from "./environment-runtime.js";
 import { skillVersionSelectionMap } from "./runtime-skill-selections.js";
+import { applyPluginConversationRuntime, preparePluginConversationContext, readPluginConversationContext } from "./plugin-conversation-runtime.js";
+import { createPluginConversationExternalTools } from "./plugin-conversation-tools.js";
 import { environmentRunOrchestrator } from "./environment-run-orchestrator.js";
 import { isUnsafeSessionWorkspaceCwd } from "./session-workspace-cwd.js";
 import {
@@ -5027,7 +5033,16 @@ function readMarketplaceAssistantRunContext(
   return sessionId && userId && message ? { sessionId, userId, message } : null;
 }
 
-function resolveMarketplaceAssistantMcpEntryPath() {
+function resolveMarketplaceAssistantMcpEntryPath(
+  runtimeEnv: Record<string, string | undefined>,
+) {
+  const configured = runtimeEnv.SPS_MARKETPLACE_MCP_ENTRY?.trim();
+  if (configured) {
+    if (!path.isAbsolute(configured)) {
+      throw new Error("SPS_MARKETPLACE_MCP_ENTRY must be an absolute path.");
+    }
+    return configured;
+  }
   const servicesDir = path.dirname(fileURLToPath(import.meta.url));
   return path.resolve(
     servicesDir,
@@ -5055,7 +5070,11 @@ export function createMarketplaceAssistantExternalTools(input: {
   runId: string;
   companyId: string;
   remoteNode: boolean;
+  localEntryPath?: string;
 }) {
+  if (!input.remoteNode && !input.localEntryPath) {
+    throw new Error("Marketplace Assistant requires a local MCP entry path.");
+  }
   return {
     mcpServers: [{
       kind: "stdio" as const,
@@ -5071,7 +5090,7 @@ export function createMarketplaceAssistantExternalTools(input: {
             "--eval",
             "import { pathToFileURL } from 'node:url'; await import(pathToFileURL(process.env.SPS_MARKETPLACE_MCP_ENTRY).href);",
           ]
-        : [resolveMarketplaceAssistantMcpEntryPath()],
+        : [input.localEntryPath!],
       env: [
         { name: "SPS_API_BASE_URL", value: input.apiBaseUrl },
         { name: "SPS_SCOPED_BEARER_TOKEN", value: input.scopedToken },
@@ -8321,6 +8340,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     agent: typeof agents.$inferSelect,
     now: Date,
   ) {
+    if (hasSpsSessionCancellation(await getRun(run.id))) return null;
     const existingRetry = await db
       .select()
       .from(heartbeatRuns)
@@ -8945,6 +8965,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       delayMs?: number;
     },
   ) {
+    if (hasSpsSessionCancellation(await getRun(run.id))) {
+      return { outcome: "not_scheduled" as const, reason: "Agent session cancellation requested", errorCode: "cancelled" as const, issueId: null };
+    }
     const now = opts?.now ?? new Date();
     const retryReason = opts?.retryReason ?? BOUNDED_TRANSIENT_HEARTBEAT_RETRY_REASON;
     const wakeReason = opts?.wakeReason ?? BOUNDED_TRANSIENT_HEARTBEAT_RETRY_WAKE_REASON;
@@ -11689,6 +11712,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       ...effectiveResolvedConfig,
       paperclipRuntimeSkills: runtimeSkillEntries,
     };
+    runtimeConfig = applyPluginConversationRuntime(runtimeConfig, context);
     if (marketplaceAssistantContext) {
       runtimeConfig = {
         ...runtimeConfig,
@@ -12136,7 +12160,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       await db
         .update(heartbeatRuns)
         .set({
-          contextSnapshot: context,
+          contextSnapshot: preserveSpsSessionCancellationContext(context),
           updatedAt: new Date(),
         })
         .where(eq(heartbeatRuns.id, run.id));
@@ -12261,6 +12285,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     } else {
       delete context.paperclipScratch;
     }
+    context.spsExecutionRuntime = { adapterType: agent.adapterType };
     context.paperclipEnvironment = {
       id: selectedEnvironment.id,
       name: selectedEnvironment.name,
@@ -12288,7 +12313,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     await db
       .update(heartbeatRuns)
       .set({
-        contextSnapshot: context,
+        contextSnapshot: preserveSpsSessionCancellationContext(context),
         updatedAt: new Date(),
       })
       .where(eq(heartbeatRuns.id, run.id));
@@ -12497,7 +12522,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         .set({
           startedAt,
           sessionIdBefore: runtimeForAdapter.sessionDisplayId ?? runtimeForAdapter.sessionId,
-          contextSnapshot: context,
+          contextSnapshot: preserveSpsSessionCancellationContext(context),
           updatedAt: new Date(),
         })
         .where(eq(heartbeatRuns.id, run.id))
@@ -12709,7 +12734,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         await db
           .update(heartbeatRuns)
           .set({
-            contextSnapshot: context,
+            contextSnapshot: preserveSpsSessionCancellationContext(context),
             updatedAt: new Date(),
           })
           .where(eq(heartbeatRuns.id, run.id));
@@ -12789,6 +12814,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       if (marketplaceAssistantContext && !authToken) {
         throw new Error("Marketplace Assistant requires a scoped local Agent token.");
       }
+      const pluginConversation = readPluginConversationContext(context);
       const externalTools = marketplaceAssistantContext && authToken
         ? createMarketplaceAssistantExternalTools({
             apiBaseUrl: runtimeEnv.PAPERCLIP_API_URL ?? "",
@@ -12796,8 +12822,18 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             runId: run.id,
             companyId: agent.companyId,
             remoteNode: Boolean(spsNodeExecutionTarget),
+            localEntryPath: spsNodeExecutionTarget
+              ? undefined
+              : resolveMarketplaceAssistantMcpEntryPath(runtimeEnv),
           })
-        : undefined;
+        : pluginConversation && authToken && (!executionTarget || executionTarget.kind === "local")
+          && adapter.supportsExternalTools && adapter.acp?.supportsMcpStdio
+          ? createPluginConversationExternalTools({
+              apiBaseUrl: runtimeEnv.PAPERCLIP_API_URL ?? "",
+              authToken, runId: run.id, companyId: agent.companyId, agentId: agent.id,
+              pluginKey: pluginConversation.pluginKey,
+            })
+          : undefined;
       if (marketplaceAssistantContext && !runtimeEnv.PAPERCLIP_API_URL?.trim()) {
         throw new Error("Marketplace Assistant requires PAPERCLIP_API_URL.");
       }
@@ -12981,6 +13017,12 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
       let adapterResult: Awaited<ReturnType<typeof adapter.execute>>;
       try {
+        if (hasSpsSessionCancellation(await getRun(run.id))) {
+          await cancelRunInternal(run.id);
+          await db.update(heartbeatRuns).set({ contextSnapshot: sql`coalesce(${heartbeatRuns.contextSnapshot}, '{}'::jsonb) || '{"spsSessionCancellationTermination":"confirmed"}'::jsonb` }).where(eq(heartbeatRuns.id, run.id));
+          return;
+        }
+        preparePluginConversationContext(context);
         adapterResult = await adapter.execute({
           runId: run.id,
           agent,
@@ -12999,7 +13041,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             await recordCurrentHeartbeatRunRuntimeProgress(run, progress, issueId);
           },
           onSpawn: async (meta) => {
-            await persistRunProcessMetadata(run.id, {
+            const spawned = await persistRunProcessMetadata(run.id, {
               pid: meta.pid,
               processGroupId:
                 "processGroupId" in meta && typeof meta.processGroupId === "number"
@@ -13007,6 +13049,12 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
                   : null,
               startedAt: meta.startedAt,
             });
+            if (hasSpsSessionCancellation(spawned)) {
+              await terminateHeartbeatRunProcess({ pid: meta.pid, processGroupId: spawned?.processGroupId });
+              if (!isProcessAlive(meta.pid) && !isProcessGroupAlive(spawned?.processGroupId ?? null)) {
+                await db.update(heartbeatRuns).set({ contextSnapshot: sql`coalesce(${heartbeatRuns.contextSnapshot}, '{}'::jsonb) || '{"spsSessionCancellationTermination":"confirmed"}'::jsonb` }).where(eq(heartbeatRuns.id, run.id));
+              }
+            }
           },
           authToken: authToken ?? undefined,
         });
@@ -13061,7 +13109,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         await db
           .update(heartbeatRuns)
           .set({
-            contextSnapshot: context,
+            contextSnapshot: preserveSpsSessionCancellationContext(context),
             updatedAt: new Date(),
           })
           .where(eq(heartbeatRuns.id, run.id));
@@ -13180,8 +13228,23 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
               model: readNonEmptyString(adapterResult.model) ?? "unknown",
               ...(adapterResult.costUsd != null ? { costUsd: adapterResult.costUsd } : {}),
               billingType: normalizeLedgerBillingType(adapterResult.billingType),
+              spsUsageEvidence: buildSpsUsageEvidence({
+                usage: adapterResult.usage,
+                normalizedUsage,
+                usageBasis: adapterResult.usageBasis,
+                usageReportedFields: adapterResult.usageReportedFields,
+                derivedFromSessionTotals: sessionUsageResolution.derivedFromSessionTotals,
+                costUsd: adapterResult.costUsd,
+                costUsdBasis: adapterResult.costUsdBasis,
+                billingType: adapterResult.billingType,
+              }),
             } as Record<string, unknown>)
           : null;
+
+      const usageReceiptScope = spsAgentUsageReceiptScope(run);
+      const sealedUsageJson = usageJson && usageReceiptScope
+        ? { ...usageJson, spsUsageReceipt: createSpsExecutionUsageReceipt(usageReceiptScope, usageJson.spsUsageEvidence) }
+        : usageJson;
 
       const persistedResultJson = mergeHeartbeatRunResultJson(
         mergeRunStopMetadataForAgent(agent, outcome, {
@@ -13208,7 +13271,9 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         errorCode: runErrorCode,
         exitCode: adapterResult.exitCode,
         signal: adapterResult.signal,
-        usageJson,
+        // Receipt and terminal transition are one guarded write. Duplicate or
+        // late callbacks cannot replace this execution's first accepted report.
+        usageJson: sealedUsageJson,
         resultJson: persistedResultJson,
         sessionIdAfter: nextSessionState.displayId ?? nextSessionState.legacySessionId,
         stdoutExcerpt,

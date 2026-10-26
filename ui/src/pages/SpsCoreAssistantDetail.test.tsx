@@ -93,6 +93,7 @@ describe("SpsCoreAssistantDetail", () => {
     expect(mockConfigProps).toHaveBeenCalledWith(expect.objectContaining({
       hideWorkflowIdentityFields: true,
       hidePromptTemplate: true,
+      showDefaultWorkingDirectory: true,
     }));
 
     await act(async () => {

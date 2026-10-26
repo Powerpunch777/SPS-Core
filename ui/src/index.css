@@ -2,8 +2,8 @@
 @plugin "@tailwindcss/typography";
 
 @font-face {
-  font-family: "InterVariable";
-  src: url("../fonts/InterVariable.woff2") format("woff2");
+  font-family: "Pretendard Variable";
+  src: url("/fonts/PretendardVariable.woff2") format("woff2");
   font-display: swap;
   font-style: normal;
   font-weight: 100 900;
@@ -11,7 +11,15 @@
 
 @font-face {
   font-family: "InterVariable";
-  src: url("../fonts/InterVariable-Italic.woff2") format("woff2");
+  src: url("/fonts/InterVariable.woff2") format("woff2");
+  font-display: swap;
+  font-style: normal;
+  font-weight: 100 900;
+}
+
+@font-face {
+  font-family: "InterVariable";
+  src: url("/fonts/InterVariable-Italic.woff2") format("woff2");
   font-display: swap;
   font-style: italic;
   font-weight: 100 900;
@@ -20,7 +28,7 @@
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {
-  --font-sans: "InterVariable", "Inter", "Pretendard Variable", "Pretendard", "Noto Sans KR", "Malgun Gothic", "Segoe UI Variable", "Segoe UI", ui-sans-serif, system-ui, sans-serif;
+  --font-sans: "Pretendard Variable", "InterVariable", "Segoe UI", ui-sans-serif, system-ui, sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
   --color-background: var(--background);
   --color-foreground: var(--foreground);
@@ -86,18 +94,18 @@
   color-scheme: light;
   --radius: 0.5rem;
   --radius-pane: 0.75rem;
-  --radius-card: 0.625rem;
+  --radius-card: 0.5rem;
   --radius-control: 0.5rem;
   --radius-compact: 0.375rem;
-  --app-canvas: oklch(0.968 0.012 245);
-  --app-surface: oklch(0.985 0.008 245);
+  --app-canvas: oklch(0.974 0 0);
+  --app-surface: oklch(0.974 0 0);
   --app-panel: oklch(1 0 0);
-  --app-border: oklch(0.9 0.018 245);
+  --app-border: oklch(0.91 0 0);
   --app-accent: oklch(0.56 0.18 258);
   --app-accent-soft: oklch(0.95 0.035 258);
-  --shadow-panel: 0 1px 2px color-mix(in oklab, var(--foreground) 5%, transparent), 0 8px 24px color-mix(in oklab, var(--foreground) 4%, transparent);
+  --shadow-panel: 0 1px 3px color-mix(in oklab, var(--foreground) 3%, transparent);
   --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
+  --foreground: oklch(0.24 0 0);
   --card: oklch(1 0 0);
   --card-foreground: oklch(0.145 0 0);
   --popover: oklch(1 0 0);
@@ -107,7 +115,7 @@
   --secondary: oklch(0.97 0 0);
   --secondary-foreground: oklch(0.205 0 0);
   --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
+  --muted-foreground: oklch(0.49 0 0);
   --accent: oklch(0.97 0 0);
   --accent-foreground: oklch(0.205 0 0);
   --destructive: oklch(0.577 0.245 27.325);
@@ -120,7 +128,7 @@
   --chart-3: oklch(0.439 0 0);
   --chart-4: oklch(0.371 0 0);
   --chart-5: oklch(0.269 0 0);
-  --sidebar: oklch(0.985 0 0);
+  --sidebar: var(--app-surface);
   --sidebar-foreground: oklch(0.145 0 0);
   --sidebar-primary: oklch(0.205 0 0);
   --sidebar-primary-foreground: oklch(0.985 0 0);
@@ -307,6 +315,9 @@
   body {
     @apply antialiased bg-app-canvas text-foreground;
     font-family: var(--font-sans);
+    font-size: 14px;
+    line-height: 1.6;
+    letter-spacing: 0;
     height: 100%;
     overflow: hidden;
   }

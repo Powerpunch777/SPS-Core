@@ -36,6 +36,9 @@ const TABLES_TO_DELETE = [
   "sps_node_runner_profiles",
   "sps_node_heartbeats",
   "sps_nodes",
+  "sps_native_enrollments",
+  "sps_native_pairings",
+  "sps_member_devices",
   "environment_leases",
 ] as const;
 
@@ -47,6 +50,24 @@ type UpdatePlan = {
 };
 
 const UPDATE_PLANS: UpdatePlan[] = [
+  {
+    table: "sps_model_connections",
+    assignments: { status: "'disabled'", secret_id: "NULL", updated_at: "NOW()" },
+  },
+  {
+    table: "sps_model_grants",
+    assignments: { status: "'revoked'", revoked_at: "NOW()", binding_id: "NULL", updated_at: "NOW()" },
+  },
+  {
+    table: "sps_model_runs",
+    assignments: { resource_pending: "false", lease_owner_id: "NULL", lease_expires_at: "NULL", updated_at: "NOW()" },
+  },
+  {
+    table: "sps_model_runs",
+    assignments: { status: "'interrupted'", error_code: "'host_restored'", finished_at: "COALESCE(\"finished_at\", NOW())", updated_at: "NOW()" },
+    requiredWhereColumns: ["status"],
+    where: `"status" IN ('queued', 'running')`,
+  },
   {
     table: "cloud_upstream_connections",
     assignments: {

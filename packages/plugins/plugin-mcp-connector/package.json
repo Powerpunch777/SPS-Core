@@ -43,7 +43,7 @@
   ],
   "scripts": {
     "prebuild": "pnpm -C ../../.. --filter @paperclipai/plugin-sdk ensure-build-deps",
-    "build": "rm -rf dist && tsc",
+    "build": "node scripts/clean-dist.mjs && tsc",
     "clean": "rm -rf dist",
     "typecheck": "pnpm -C ../../.. --filter @paperclipai/plugin-sdk ensure-build-deps && tsc --noEmit",
     "test": "vitest run --config vitest.config.ts",
@@ -51,7 +51,7 @@
     "postpack": "node ../../../scripts/restore-package-json.mjs"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@modelcontextprotocol/sdk": "^1.32.0",
     "@paperclipai/plugin-sdk": "workspace:*",
     "zod": "^3.24.2"
   },

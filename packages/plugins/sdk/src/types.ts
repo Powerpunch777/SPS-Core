@@ -9,6 +9,8 @@
  * @see PLUGIN_SPEC.md §29.2 — SDK Versioning
  */
 
+import type { PluginSpsModelConnection, PluginSpsModelRun, PluginSpsModelSubmitInput } from "./sps-model-types.js";
+export type { PluginSpsModelConnection, PluginSpsModelTextResult, PluginSpsModelRun, PluginSpsModelSubmitInput } from "./sps-model-types.js";
 import type {
   PaperclipPluginManifestV1,
   PluginStateScopeKind,
@@ -264,8 +266,9 @@ export interface ToolRunContext {
   runId: string;
   /** UUID of the company the run belongs to. */
   companyId: string;
-  /** UUID of the project the run belongs to. */
-  projectId: string;
+  /** UUID of the retained project, when present. Projectless calls are limited
+   * to the invoking plugin's verified active Agent session. */
+  projectId?: string;
 }
 
 /**
@@ -566,6 +569,13 @@ export interface PluginSpsWorkspaceSource {
 }
 
 /** Safe Node-local runtime metadata. Provider credentials never leave the Node. */
+export interface PluginSpsRuntimeConnection {
+  executionOwner: "node";
+  authorization: "execution_grant_required";
+  state: "inactive" | "unverified" | "recently_seen" | "offline" | "unknown";
+  observedAt: string | null;
+}
+
 export interface PluginSpsRuntime {
   id: string;
   nodeId: string;
@@ -579,7 +589,10 @@ export interface PluginSpsRuntime {
   availabilityDetail: string | null;
   availabilityObservedAt: string | null;
   retryAfter: string | null;
+  /** Legacy cached heartbeat liveness only, never approval or execution readiness. */
   online: boolean;
+  /** Cached Node heartbeat/approval only, not execution authorization or readiness. */
+  connection?: PluginSpsRuntimeConnection;
 }
 
 /** A technical allowance for one plugin-defined subject to use one runtime. */
@@ -641,18 +654,98 @@ export interface PluginSpsArtifact {
   updatedAt: string;
 }
 
-/**
- * The finite Worker-to-Host operation set that forms SPS's public Runtime
- * transport contract. It intentionally excludes general plugin RPC methods.
- */
+export type PluginSpsExecutionLane = "node" | "agent_session" | "model_request";
+export interface PluginSpsUsageMetric {
+  value: number | null;
+  provenance: "reported" | "estimated" | "unavailable";
+}
+export interface PluginSpsUsageEvidence {
+  inputTokens: PluginSpsUsageMetric;
+  cachedInputTokens: PluginSpsUsageMetric;
+  outputTokens: PluginSpsUsageMetric;
+  costUsd: PluginSpsUsageMetric;
+  currency: "USD" | null;
+  billingType: "metered_api" | "subscription_included" | "subscription_overage" | "credits" | "fixed" | "unknown";
+  costBasis: "incremental_api" | "subscription_reference" | "unknown";
+}
+export interface PluginSpsExecutionCursor {
+  createdAt: string;
+  runId: string;
+  lane: PluginSpsExecutionLane;
+}
+/** Safe technical metadata. Reported usage means adapter-reported, not a bill. */
+export interface PluginSpsExecution {
+  lane: PluginSpsExecutionLane;
+  runId: string;
+  companyId: string;
+  pluginKey: string;
+  agentId: string | null;
+  sessionId: string | null;
+  subjectKey: string | null;
+  runtime: { kind: string | null; model: string | null; modelSource: "reported" | "configured" | "unavailable" };
+  status: string;
+  phase: "queued" | "active" | "stopping" | "succeeded" | "failed" | "cancelled" | "interrupted" | "unknown";
+  cancellationRequested: boolean;
+  termination: "not_applicable" | "pending" | "confirmed";
+  failure: { category: "authorization" | "configuration" | "provider_limit" | "timeout" | "cancelled" | "execution" | "unknown"; code: string | null; retrySafety: "requires_review" } | null;
+  createdAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  elapsedMs: number | null;
+  usage: PluginSpsUsageEvidence;
+}
+export interface PluginSpsExecutionPage {
+  items: PluginSpsExecution[];
+  nextCursor: PluginSpsExecutionCursor | null;
+}
+export interface PluginSpsUsageAggregateMetric {
+  reported: number | null;
+  estimated: number | null;
+  reportedExecutions: number;
+  estimatedExecutions: number;
+  unavailableExecutions: number;
+  overflowed: boolean;
+}
+export interface PluginSpsExecutionSummaryOptions {
+  /** Canonical UTC millisecond timestamps; createdAt window [from, to), at most 31 days. */
+  from: string;
+  to: string;
+  lane?: PluginSpsExecutionLane;
+  agentId?: string;
+}
+export interface PluginSpsExecutionSummary {
+  companyId: string;
+  pluginKey: string;
+  window: { from: string; to: string };
+  generatedAt: string;
+  executionCount: number;
+  terminalCount: number;
+  inFlightCount: number;
+  unknownPhaseCount: number;
+  tokens: { inputTokens: PluginSpsUsageAggregateMetric; cachedInputTokens: PluginSpsUsageAggregateMetric; outputTokens: PluginSpsUsageAggregateMetric };
+  /** Costs are adapter reports, not invoices. Never sum these three billing bases together. */
+  costs: { currency: "USD"; incrementalApi: PluginSpsUsageAggregateMetric; subscriptionReference: PluginSpsUsageAggregateMetric; other: PluginSpsUsageAggregateMetric };
+  duration: { totalMs: number | null; knownExecutions: number; unavailableExecutions: number; overflowed: boolean };
+}
+
+/** Finite SPS Runtime operations, excluding general plugin RPC methods. */
 export type PluginSpsRuntimeOperation =
+  | "sps.executions.list"
+  | "sps.executions.get"
+  | "sps.executions.summarize"
   | "sps.workspaceSources.list"
   | "sps.runtimes.list"
+  | "sps.models.list"
+  | "sps.models.submit"
+  | "sps.models.get"
+  | "sps.models.cancel"
   | "sps.executionGrants.list"
   | "sps.executionGrants.upsert"
   | "sps.executionGrants.revoke"
   | "sps.runs.dispatch"
   | "sps.runs.get"
+  | "sps.runs.list"
+  | "sps.runs.cancel"
   | "sps.runs.listEvents"
   | "sps.artifacts.publish"
   | "sps.artifacts.list";
@@ -673,6 +766,17 @@ export interface PluginSpsRuntimeTransport {
  * the calling plugin; Core does not interpret it as an Agent, Task, or role.
  */
 export interface PluginSpsClient {
+  models: {
+    list(companyId: string): Promise<PluginSpsModelConnection[]>;
+    submit(input: PluginSpsModelSubmitInput): Promise<PluginSpsModelRun>;
+    get(companyId: string, runId: string): Promise<PluginSpsModelRun | null>;
+    cancel(companyId: string, runId: string): Promise<PluginSpsModelRun | null>;
+  };
+  executions: {
+    list(companyId: string, options?: { lane?: PluginSpsExecutionLane; limit?: number; before?: PluginSpsExecutionCursor }): Promise<PluginSpsExecutionPage>;
+    get(companyId: string, lane: PluginSpsExecutionLane, runId: string): Promise<PluginSpsExecution | null>;
+    summarize(companyId: string, options: PluginSpsExecutionSummaryOptions): Promise<PluginSpsExecutionSummary>;
+  };
   workspaceSources: {
     list(companyId: string): Promise<PluginSpsWorkspaceSource[]>;
   };
@@ -700,6 +804,8 @@ export interface PluginSpsClient {
       timeoutMs?: number | null;
     }): Promise<PluginSpsRun>;
     get(companyId: string, runId: string): Promise<PluginSpsRun>;
+    list(companyId: string, options?: { subjectKey?: string | null; status?: string | null; limit?: number | null; beforeId?: string | null }): Promise<PluginSpsRun[]>;
+    cancel(companyId: string, runId: string): Promise<PluginSpsRun>;
     listEvents(companyId: string, runId: string, options?: { afterSequence?: number | null }): Promise<PluginSpsRunEvent[]>;
   };
   artifacts: {
@@ -1788,8 +1894,21 @@ export interface PluginIssuesClient {
  * Requires `agents.read` for reads; `agents.pause` / `agents.resume` /
  * `agents.invoke` for write operations.
  */
+export interface PluginAgentExecutionDescriptor {
+  agentId: string;
+  adapterType: string;
+  state: "configured" | "disabled" | "unknown";
+  adapterRegistration: "registered" | "unavailable";
+  executionOwner: "adapter" | "node";
+  authorization: "recheck_on_dispatch";
+  readiness: "unknown";
+  node: { id: string | null; state: PluginSpsRuntimeConnection["state"]; observedAt: string | null } | null;
+}
+
 export interface PluginAgentsClient {
   list(input: { companyId: string; status?: Agent["status"]; limit?: number; offset?: number }): Promise<Agent[]>;
+  /** Bounded cached execution metadata; not login, readiness or authorization evidence. */
+  describeExecution(agentId: string, companyId: string): Promise<PluginAgentExecutionDescriptor>;
   get(agentId: string, companyId: string): Promise<Agent | null>;
   /** Pause an agent. Throws if agent is terminated or not found. Requires `agents.pause`. */
   pause(agentId: string, companyId: string): Promise<Agent>;
@@ -1855,6 +1974,17 @@ export interface AgentSessionSendResult {
  * Requires `agent.sessions.create` for create, `agent.sessions.list` for list,
  * `agent.sessions.send` for sendMessage, `agent.sessions.close` for close.
  */
+export interface AgentSessionRunState {
+  runId: string;
+  status: string;
+  cancellationRequested: boolean;
+  termination: "not_applicable" | "pending" | "confirmed";
+  errorCode: string | null;
+  error: string | null;
+  /** Additive metadata; absent on older development Hosts. */
+  execution?: PluginSpsExecution;
+}
+
 export interface PluginAgentSessionsClient {
   /** Create a new conversational session with an agent. Requires `agent.sessions.create`. */
   create(agentId: string, companyId: string, opts?: {
@@ -1865,6 +1995,11 @@ export interface PluginAgentSessionsClient {
 
   /** List active sessions for an agent owned by this plugin. Requires `agent.sessions.list`. */
   list(agentId: string, companyId: string): Promise<AgentSession[]>;
+
+  /** Read one owned session run. Requires `agent.sessions.read`. */
+  getRun(sessionId: string, companyId: string, runId: string): Promise<AgentSessionRunState>;
+  /** Request cancellation of this exact run, not the whole Agent or session. */
+  cancel(sessionId: string, companyId: string, runId: string): Promise<AgentSessionRunState>;
 
   /**
    * Send a message to a session and receive streaming events via the `onEvent` callback.

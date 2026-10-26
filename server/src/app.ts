@@ -53,12 +53,18 @@ import { authRoutes } from "./routes/auth.js";
 import { assetRoutes } from "./routes/assets.js";
 import { accessRoutes } from "./routes/access.js";
 import { spsNodeRoutes } from "./routes/sps-nodes.js";
+import { spsExecutionRoutes } from "./routes/sps-executions.js";
+import { spsModelConnectionRoutes } from "./routes/sps-model-connections.js";
+import { spsMemberDeviceRoutes } from "./routes/sps-member-devices.js";
+import type { SpsNativeHostManagement } from "./services/sps-native-host-management.js";
+import { getSpsModelBroker } from "./services/sps-model-broker.js";
 import { spsWorkspaceSourceRoutes } from "./routes/sps-workspace-sources.js";
 import { spsMarketplaceRoutes } from "./routes/sps-marketplace.js";
 import { pluginRoutes } from "./routes/plugins.js";
 import { adapterRoutes } from "./routes/adapters.js";
 import { pluginUiStaticRoutes } from "./routes/plugin-ui-static.js";
-import { readBrandedStaticIndexHtml } from "./static-index-html.js";
+import { createBrandedStaticIndexHandler } from "./static-index-html.js";
+import { resolveStaticUiDist } from "./static-ui-dist.js";
 import { applyUiBranding } from "./ui-branding.js";
 import { logger } from "./middleware/logger.js";
 import { DEFAULT_LOCAL_PLUGIN_DIR, pluginLoader } from "./services/plugin-loader.js";
@@ -77,6 +83,11 @@ import { createPluginHostServiceCleanup } from "./services/plugin-host-service-c
 import { createPluginCanonicalDiagnostics } from "./services/plugin-canonical-diagnostics.js";
 import { pluginRegistryService } from "./services/plugin-registry.js";
 import { installConfiguredBundledPlugins, parseBundledPluginPaths } from "./services/bundled-plugin-bootstrap.js";
+import {
+  pluginRecoveryMessage,
+  resolvePluginRecoveryState,
+  runPluginStartupUnlessRecovering,
+} from "./services/sps-plugin-recovery.js";
 import { createHostClientHandlers } from "@paperclipai/plugin-sdk";
 import type { BetterAuthSessionResult } from "./auth/better-auth.js";
 import { createCachedViteHtmlRenderer } from "./vite-html-renderer.js";
@@ -164,6 +175,8 @@ export async function createApp(
     authReady: boolean;
     companyDeletionEnabled: boolean;
     instanceId?: string;
+    nativeConnectivityHostId?: string;
+    nativeConnectivityManagement?: SpsNativeHostManagement;
     hostVersion?: string;
     localPluginDir?: string;
     registryStagingDir?: string;
@@ -174,6 +187,11 @@ export async function createApp(
     spsIdentityHandler?: express.RequestHandler;
   },
 ) {
+  if (opts.nativeConnectivityManagement && opts.nativeConnectivityHostId
+    && opts.nativeConnectivityManagement.hostId !== opts.nativeConnectivityHostId) {
+    throw new TypeError("Native Host management binding mismatch.");
+  }
+  const pluginRecoveryState = resolvePluginRecoveryState();
   const app = express();
   app.locals.paperclipDb = db;
   const captureRawBody = (req: express.Request, _res: express.Response, buf: Buffer) => {
@@ -289,7 +307,9 @@ export async function createApp(
     databaseBackupService: opts.databaseBackupService,
   });
   const memoryProviderRuntime = createCompanyMemoryProviderRuntime({ db, workerManager });
-  eventBus.observe((event) => memoryProviderRuntime.handleEvent(event));
+  if (!pluginRecoveryState.enabled) {
+    eventBus.observe((event) => memoryProviderRuntime.handleEvent(event));
+  }
   const scheduler = createPluginJobScheduler({
     db,
     jobStore,
@@ -313,6 +333,7 @@ export async function createApp(
     {
       localPluginDir: opts.localPluginDir ?? DEFAULT_LOCAL_PLUGIN_DIR,
       migrationDb: opts.pluginMigrationDb,
+      recoveryState: pluginRecoveryState,
     },
     {
       workerManager,
@@ -376,11 +397,21 @@ export async function createApp(
       },
       lifecycle,
       { diagnostics: canonicalPluginDiagnostics },
+      pluginRecoveryState,
     ),
   );
   api.use(spsWorkspaceSurfaceRoutes(db, workerManager));
   api.use(adapterRoutes());
   api.use(spsNodeRoutes(db));
+  api.use(spsExecutionRoutes(db));
+  api.use(spsModelConnectionRoutes(db));
+  if (opts.nativeConnectivityManagement || opts.nativeConnectivityHostId) {
+    api.use(spsMemberDeviceRoutes(db, {
+      hostId: opts.nativeConnectivityManagement?.hostId ?? opts.nativeConnectivityHostId!,
+      management: opts.nativeConnectivityManagement,
+    }));
+  }
+  getSpsModelBroker(db); // Recovery never replays inputs or starts a provider request.
   api.use(spsWorkspaceSourceRoutes(db));
   api.use(spsMarketplaceRoutes(db, workerManager));
   api.use(
@@ -398,24 +429,14 @@ export async function createApp(
   });
   app.use(pluginUiStaticRoutes(db, {
     localPluginDir: opts.localPluginDir ?? DEFAULT_LOCAL_PLUGIN_DIR,
+    recoveryState: pluginRecoveryState,
   }));
 
   const __dirname = path.dirname(fileURLToPath(import.meta.url));
   if (opts.uiMode === "static") {
-    // Try published location first (server/ui-dist/), then monorepo dev location (../../ui/dist)
-    const candidates = [
-      path.resolve(__dirname, "../ui-dist"),
-      path.resolve(__dirname, "../../ui/dist"),
-    ];
-    const uiDist = candidates.find((p) => fs.existsSync(path.join(p, "index.html")));
+    const uiDist = resolveStaticUiDist(__dirname);
     if (uiDist) {
-      const sendBrandedStaticIndex = (_req: express.Request, res: express.Response) => {
-        res
-          .status(200)
-          .set("Content-Type", "text/html")
-          .set("Cache-Control", "no-cache")
-          .end(readBrandedStaticIndexHtml(uiDist));
-      };
+      const sendBrandedStaticIndex = createBrandedStaticIndexHandler(uiDist);
       // express.static would otherwise serve the raw index before runtime
       // branding and Workplane mode metadata can be injected.
       app.get(["/", "/index.html"], sendBrandedStaticIndex);
@@ -449,16 +470,12 @@ export async function createApp(
       // with a MIME-type error, and cache that broken response. Return 404
       // instead. The index.html response itself is no-cache so a subsequent
       // deploy's updated asset hashes are picked up on next load.
-      app.get(/.*/, (req, res) => {
+      app.get(/.*/, (req, res, next) => {
         if (req.path.startsWith("/assets/")) {
           res.status(404).end();
           return;
         }
-        res
-          .status(200)
-          .set("Content-Type", "text/html")
-          .set("Cache-Control", "no-cache")
-          .end(readBrandedStaticIndexHtml(uiDist));
+        sendBrandedStaticIndex(req, res, next);
       });
     } else {
       console.warn("[paperclip] UI dist not found; running in API-only mode");
@@ -511,8 +528,15 @@ export async function createApp(
 
   app.use(errorHandler);
 
-  jobCoordinator.start();
-  scheduler.start();
+  if (!pluginRecoveryState.enabled) {
+    jobCoordinator.start();
+    scheduler.start();
+  } else {
+    logger.warn(
+      { invalidConfiguration: pluginRecoveryState.invalidConfiguration },
+      pluginRecoveryMessage(pluginRecoveryState),
+    );
+  }
   let feedbackExportShuttingDown = false;
   let feedbackExportTimer: ReturnType<typeof setInterval> | null = null;
   const disableFeedbackExportFlushes = () => {
@@ -545,13 +569,17 @@ export async function createApp(
   if (opts.feedbackExportService) {
     void flushPendingFeedbackExports();
   }
-  void toolDispatcher.initialize().catch((err) => {
-    logger.error({ err }, "Failed to initialize plugin tool dispatcher");
-  });
-  const devWatcher = createPluginDevWatcher(
-    lifecycle,
-    async (pluginId) => (await pluginRegistry.getById(pluginId))?.packagePath ?? null,
-  );
+  if (!pluginRecoveryState.enabled) {
+    void toolDispatcher.initialize().catch((err) => {
+      logger.error({ err }, "Failed to initialize plugin tool dispatcher");
+    });
+  }
+  const devWatcher = pluginRecoveryState.enabled
+    ? null
+    : createPluginDevWatcher(
+      lifecycle,
+      async (pluginId) => (await pluginRegistry.getById(pluginId))?.packagePath ?? null,
+    );
   // Auto-install the bundled kubernetes sandbox-provider plugin so the
   // "kubernetes" sandbox provider is registered for agent runs. The plugin is
   // excluded from the pnpm workspace and built standalone into the image (see
@@ -635,32 +663,61 @@ export async function createApp(
       pluginRegistry,
     }, { installMissing: false });
   };
-  void ensureBundledKubernetesPlugin()
-    .then(() => ensureConfiguredBundledPlugins())
-    .then(() => refreshConfiguredBundledPlugins())
-    .then(() => loader.loadAll())
-    .then((result) => {
-    if (!result) return;
-    for (const loaded of result.results) {
-      if (devWatcher && loaded.success && loaded.plugin.packagePath) {
-        devWatcher.watch(loaded.plugin.id, loaded.plugin.packagePath);
-      }
-    }
-  }).catch((err) => {
+  let pluginRuntimeStopping = false;
+  const pluginStartup = runPluginStartupUnlessRecovering(pluginRecoveryState, () =>
+    ensureBundledKubernetesPlugin()
+      .then(() => ensureConfiguredBundledPlugins())
+      .then(() => refreshConfiguredBundledPlugins())
+      .then(() => loader.loadAll())
+      .then((result) => {
+        if (!result || pluginRuntimeStopping) return;
+        for (const loaded of result.results) {
+          if (devWatcher && loaded.success && loaded.plugin.packagePath) {
+            devWatcher.watch(loaded.plugin.id, loaded.plugin.packagePath);
+          }
+        }
+      }),
+  );
+  void pluginStartup?.catch((err) => {
     logger.error({ err }, "Failed to load ready plugins on startup");
   });
   let appServicesShutdown = false;
+  let pluginDiscoveryStopped = false;
+  const stopPluginDiscovery = () => {
+    if (pluginDiscoveryStopped) return;
+    pluginDiscoveryStopped = true;
+    scheduler.stop();
+    jobCoordinator.stop();
+    devWatcher?.close();
+  };
   const shutdownAppServices = () => {
     if (appServicesShutdown) return;
     appServicesShutdown = true;
     disableFeedbackExportFlushes();
-    devWatcher?.close();
+    stopPluginDiscovery();
     viteHtmlRenderer?.dispose();
     canonicalPluginDiagnostics.dispose();
     hostServiceCleanup.disposeAll();
     hostServiceCleanup.teardown();
   };
-  app.locals.paperclipShutdown = shutdownAppServices;
+  let pluginRuntimeShutdown: Promise<void> | undefined;
+  const shutdownPluginRuntime = () => {
+    if (pluginRuntimeShutdown) return pluginRuntimeShutdown;
+    pluginRuntimeStopping = true;
+    stopPluginDiscovery();
+    // Close admission synchronously, before a still-running startup can fork
+    // another worker. Keep Host services alive until owned workers have stopped.
+    const stoppingWorkers = workerManager.shutdown();
+    pluginRuntimeShutdown = Promise.allSettled([
+      Promise.resolve(pluginStartup).catch(() => undefined),
+      stoppingWorkers,
+    ]).then(results => {
+      const failures = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
+      if (failures.length) throw new AggregateError(failures.map(result => result.reason), "Plugin runtime shutdown failed.");
+    }).finally(shutdownAppServices);
+    return pluginRuntimeShutdown;
+  };
+  app.locals.paperclipShutdown = shutdownPluginRuntime;
 
   process.once("exit", shutdownAppServices);
   process.once("beforeExit", () => {

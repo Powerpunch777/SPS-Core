@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Copy, Link2, MailPlus, ShieldCheck, UserRoundMinus, XCircle } from "lucide-react";
 import { accessApi } from "@/api/access";
@@ -45,21 +45,32 @@ function errorMessage(error: unknown, fallback: string) {
  */
 export function SpsCoreTeamAccess() {
   const { selectedCompany, selectedCompanyId } = useCompany();
+  // Shareable links and pending mutation state belong to one Workspace lifetime.
+  return <WorkspaceTeamAccess key={selectedCompanyId ?? "none"} companyId={selectedCompanyId} companyName={selectedCompany?.name ?? "Workspace"} />;
+}
+
+function WorkspaceTeamAccess({ companyId: selectedCompanyId, companyName }: { companyId: string | null; companyName: string }) {
   const { setBreadcrumbs } = useBreadcrumbs();
   const { pushToast } = useToast();
   const queryClient = useQueryClient();
   const desktopInviteInputRef = useRef<HTMLInputElement | null>(null);
+  const activeRef = useRef(true);
   const [expiresInMinutes, setExpiresInMinutes] = useState<InviteExpiryMinutes>(60);
   const [latestInvite, setLatestInvite] = useState<LatestInvite | null>(null);
   const [copied, setCopied] = useState(false);
 
+  useLayoutEffect(() => {
+    activeRef.current = true;
+    return () => { activeRef.current = false; };
+  }, []);
+
   useEffect(() => {
     setBreadcrumbs([
-      { label: selectedCompany?.name ?? "Workspace", href: "/dashboard" },
+      { label: companyName, href: "/dashboard" },
       { label: "Host settings", href: "/company/settings" },
       { label: "Team access" },
     ]);
-  }, [selectedCompany?.name, setBreadcrumbs]);
+  }, [companyName, setBreadcrumbs]);
 
   const invitesQuery = useQuery({
     queryKey: ["sps-core", "team-invites", selectedCompanyId],
@@ -85,29 +96,31 @@ export function SpsCoreTeamAccess() {
       });
     },
     onSuccess: async (invite) => {
-      setLatestInvite({ token: invite.token, inviteUrl: invite.inviteUrl, expiresAt: invite.expiresAt });
-      setCopied(false);
+      if (activeRef.current) {
+        setLatestInvite({ token: invite.token, inviteUrl: invite.inviteUrl, expiresAt: invite.expiresAt });
+        setCopied(false);
+      }
       await queryClient.invalidateQueries({ queryKey: ["sps-core", "team-invites", selectedCompanyId] });
+      if (!activeRef.current) return;
       pushToast({ title: "Member invitation created", body: "Share the full SPS Desktop invitation below.", tone: "success" });
     },
-    onError: (error) => pushToast({
-      title: "Could not create member invitation",
-      body: errorMessage(error, "Unknown error"),
-      tone: "error",
-    }),
+    onError: (error) => {
+      if (!activeRef.current) return;
+      pushToast({ title: "Could not create member invitation", body: errorMessage(error, "Unknown error"), tone: "error" });
+    },
   });
 
   const revokeInviteMutation = useMutation({
     mutationFn: (inviteId: string) => accessApi.revokeInvite(inviteId),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["sps-core", "team-invites", selectedCompanyId] });
+      if (!activeRef.current) return;
       pushToast({ title: "Invitation revoked", tone: "success" });
     },
-    onError: (error) => pushToast({
-      title: "Could not revoke invitation",
-      body: errorMessage(error, "Unknown error"),
-      tone: "error",
-    }),
+    onError: (error) => {
+      if (!activeRef.current) return;
+      pushToast({ title: "Could not revoke invitation", body: errorMessage(error, "Unknown error"), tone: "error" });
+    },
   });
 
   const revokeMemberMutation = useMutation({
@@ -118,6 +131,7 @@ export function SpsCoreTeamAccess() {
     onSuccess: async (result) => {
       await queryClient.invalidateQueries({ queryKey: ["sps-core", "technical-members", selectedCompanyId] });
       await queryClient.invalidateQueries({ queryKey: ["sps-nodes", selectedCompanyId] });
+      if (!activeRef.current) return;
       pushToast({
         title: "Member access removed",
         body: result.revokedNodeCount > 0
@@ -126,11 +140,10 @@ export function SpsCoreTeamAccess() {
         tone: "success",
       });
     },
-    onError: (error) => pushToast({
-      title: "Could not remove member access",
-      body: errorMessage(error, "Unknown error"),
-      tone: "error",
-    }),
+    onError: (error) => {
+      if (!activeRef.current) return;
+      pushToast({ title: "Could not remove member access", body: errorMessage(error, "Unknown error"), tone: "error" });
+    },
   });
 
   const desktopInvite = useMemo(
@@ -146,10 +159,12 @@ export function SpsCoreTeamAccess() {
     try {
       if (!navigator.clipboard?.writeText) throw new Error("Clipboard unavailable");
       await navigator.clipboard.writeText(desktopInvite);
+      if (!activeRef.current) return;
       setCopied(true);
-      window.setTimeout(() => setCopied(false), 1600);
+      window.setTimeout(() => { if (activeRef.current) setCopied(false); }, 1600);
       pushToast({ title: "Desktop invitation copied", tone: "success" });
     } catch {
+      if (!activeRef.current) return;
       desktopInviteInputRef.current?.focus();
       desktopInviteInputRef.current?.select();
       pushToast({ title: "Copy the selected invitation manually", tone: "warn" });
@@ -208,12 +223,20 @@ export function SpsCoreTeamAccess() {
         </CardHeader>
         <CardContent className="space-y-2 pb-5">
           {membersQuery.isLoading ? <p className="text-sm text-muted-foreground">Loading connected members...</p> : null}
-          {membersQuery.isError ? <p className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">{errorMessage(membersQuery.error, "Connected members could not be loaded.")}</p> : null}
+          {membersQuery.isError ? <div role="alert" className="space-y-2 text-sm text-destructive">
+            <p>Connected members could not be loaded.</p>
+            <Button type="button" size="sm" variant="outline" disabled={membersQuery.isFetching} onClick={() => void membersQuery.refetch()}>Retry members</Button>
+          </div> : null}
           {!membersQuery.isLoading && !membersQuery.isError && technicalMembers.length === 0 ? <p className="text-sm text-muted-foreground">No one has connected to this Workspace yet.</p> : null}
           {technicalMembers.map((member) => (
             <div key={member.id} className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-border px-3 py-2 text-sm">
               <div className="min-w-0 space-y-0.5">
-                <p className="break-all font-medium">{member.accountId}{member.isHost ? " (SPS Host)" : ""}</p>
+                <p className="break-all font-medium">{member.accountId.startsWith("sps_identity_")
+                  ? member.isHost ? "SPS Host" : `Member · ${member.accountId.slice(-6)}`
+                  : `${member.accountId}${member.isHost ? " (SPS Host)" : ""}`}</p>
+                {member.accountId.startsWith("sps_identity_") ? <details className="text-xs text-muted-foreground">
+                  <summary className="cursor-pointer">Account ID</summary><p className="break-all font-mono">{member.accountId}</p>
+                </details> : null}
                 <p className="text-xs text-muted-foreground">
                   {member.status === "active"
                     ? `${member.activeNodeCount} active of ${member.nodeCount} connected Node${member.nodeCount === 1 ? "" : "s"}`
@@ -239,7 +262,7 @@ export function SpsCoreTeamAccess() {
           <CardContent className="space-y-3 pb-5">
             {desktopInvite ? (
               <div className="flex flex-wrap gap-2">
-                <Input ref={desktopInviteInputRef} aria-label="Full SPS Desktop invitation" readOnly value={desktopInvite} className="min-w-[16rem] flex-1 font-mono text-xs" />
+                <Input ref={desktopInviteInputRef} aria-label="Full SPS Desktop invitation" readOnly value={desktopInvite} className="min-w-64 flex-1 font-mono text-xs" />
                 <Button type="button" variant="outline" onClick={() => void copyDesktopInvite()}><Copy className="h-4 w-4" />{copied ? "Copied" : "Copy full invitation"}</Button>
               </div>
             ) : null}
@@ -258,7 +281,10 @@ export function SpsCoreTeamAccess() {
         </CardHeader>
         <CardContent className="space-y-2 pb-5">
           {invitesQuery.isLoading ? <p className="text-sm text-muted-foreground">Loading invitations...</p> : null}
-          {invitesQuery.isError ? <p className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">{errorMessage(invitesQuery.error, "Invitations could not be loaded.")}</p> : null}
+          {invitesQuery.isError ? <div role="alert" className="space-y-2 text-sm text-destructive">
+            <p>Invitations could not be loaded.</p>
+            <Button type="button" size="sm" variant="outline" disabled={invitesQuery.isFetching} onClick={() => void invitesQuery.refetch()}>Retry invitations</Button>
+          </div> : null}
           {!invitesQuery.isLoading && !invitesQuery.isError && inviteHistory.length === 0 ? <p className="text-sm text-muted-foreground">No invitations have been created for this Workspace.</p> : null}
           {inviteHistory.map((invite) => (
             <div key={invite.id} className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-border px-3 py-2 text-sm">

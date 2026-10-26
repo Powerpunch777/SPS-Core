@@ -10,6 +10,14 @@ function readWorkflow(name) {
   return readFileSync(path.join(repoRoot, ".github/workflows", name), "utf8").replace(/\r\n/g, "\n");
 }
 
+test("PR lanes verify the committed lockfile without regenerating or replacing it", () => {
+  const workflow = readWorkflow("pr.yml");
+  assert.match(workflow, /pnpm install --lockfile-only --ignore-scripts --frozen-lockfile/);
+  assert.match(workflow, /git diff --exit-code -- pnpm-lock\.yaml/);
+  assert.doesNotMatch(workflow, /Block manual lockfile edits|--no-frozen-lockfile|pr-lockfile|regen_lockfile|lockfile_regenerated/);
+  assert.doesNotMatch(workflow, /git checkout -- pnpm-lock\.yaml|git add pnpm-lock\.yaml/);
+});
+
 test("release workflow delegates stable and canary verification to the reusable workflow", () => {
   const releaseWorkflow = readWorkflow("release.yml");
 

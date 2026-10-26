@@ -11,6 +11,7 @@ import {
   ensureLocalPluginBuilt,
   pluginLoader,
   REPO_ROOT,
+  resolvePnpmInvocation,
 } from "../services/plugin-loader.js";
 import {
   getEmbeddedPostgresTestSupport,
@@ -55,6 +56,60 @@ type FixturePlugin = {
 
 const repoPluginRoot = path.join(REPO_ROOT, "packages", "plugins");
 const standaloneRepoPluginRoot = path.join(repoPluginRoot, "sandbox-providers");
+
+describe("pnpm subprocess resolution", () => {
+  const cleanupPaths = new Set<string>();
+
+  afterEach(async () => {
+    for (const cleanupPath of cleanupPaths) {
+      await rm(cleanupPath, { recursive: true, force: true });
+    }
+    cleanupPaths.clear();
+  });
+
+  it("runs an injected SPS_PNPM_CLI through Node", async () => {
+    const tempRoot = await mkdtemp(path.join(os.tmpdir(), "paperclip-pnpm-cli-"));
+    cleanupPaths.add(tempRoot);
+    const cliPath = path.join(tempRoot, "pnpm.cjs");
+    await writeFile(cliPath, "", "utf8");
+
+    expect(
+      resolvePnpmInvocation(
+        ["--filter", "@paperclipai/example", "build"],
+        { SPS_PNPM_CLI: cliPath, SPS_PLUGIN_NODE_COMMAND: process.execPath },
+        "win32",
+      ),
+    ).toEqual({
+      file: process.execPath,
+      args: [cliPath, "--filter", "@paperclipai/example", "build"],
+    });
+  });
+
+  it("resolves a Windows pnpm.cmd shim to its JS CLI without shell execution", async () => {
+    const tempRoot = await mkdtemp(path.join(os.tmpdir(), "paperclip-pnpm-shim-"));
+    cleanupPaths.add(tempRoot);
+    const shimPath = path.join(tempRoot, "pnpm.cmd");
+    const cliPath = path.join(tempRoot, "node", "node_modules", "pnpm", "bin", "pnpm.mjs");
+    await mkdir(path.dirname(cliPath), { recursive: true });
+    await writeFile(cliPath, "", "utf8");
+    await writeFile(
+      shimPath,
+      `@echo off\r\n"%~dp0node\\node_modules\\pnpm\\bin\\pnpm.mjs" %*\r\n`,
+      "utf8",
+    );
+
+    expect(
+      resolvePnpmInvocation(
+        ["install", "--ignore-workspace", "--no-lockfile"],
+        { PATH: tempRoot, SPS_PLUGIN_NODE_COMMAND: process.execPath },
+        "win32",
+      ),
+    ).toEqual({
+      file: process.execPath,
+      args: [cliPath, "install", "--ignore-workspace", "--no-lockfile"],
+    });
+  });
+});
 
 async function createBundledPluginFixture(
   nameSuffix: string,

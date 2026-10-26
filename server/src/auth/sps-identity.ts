@@ -1,14 +1,22 @@
 import { createHash, createPublicKey, randomBytes, verify } from "node:crypto";
 import { Router, type Request, type Response } from "express";
 import { and, eq, gt } from "drizzle-orm";
-import type { Db } from "@paperclipai/db";
-import { authSessions, authUsers } from "@paperclipai/db";
+import type { Db } from "../compat/paperclip/db.js";
+import { authSessions, authUsers } from "../compat/paperclip/db.js";
 import type { Config } from "../config.js";
+import type { SpsNativePairingTransaction } from "../services/sps-native-pairings.js";
 import type { BetterAuthSessionResult } from "./better-auth.js";
 
 const SESSION_COOKIE = "sps_identity_session";
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const JWKS_CACHE_TTL_MS = 5 * 60 * 1000;
+const MAX_NATIVE_COOKIE_HEADER_LENGTH = 8_192;
+const NATIVE_SESSION_TOKEN = /^[A-Za-z0-9_-]{64}$/;
+
+export type SpsIdentityNativeEnrollmentSession = Readonly<{
+  userId: string;
+  authorizeInTransaction(tx: SpsNativePairingTransaction, expectedUserId: string): Promise<void>;
+}>;
 
 type IdentityJwk = {
   kty?: string;
@@ -37,6 +45,9 @@ type IdentityProfile = {
   picture: string | null;
 };
 
+type SessionMetadata = { ipAddress: string | null; userAgent: string | null };
+type SessionWriter = Pick<Db, "insert">;
+
 function value(input: unknown): string {
   return typeof input === "string" ? input.trim() : "";
 }
@@ -62,6 +73,40 @@ function sessionTokenFromHeaders(headers: Headers): string | null {
     return token || null;
   }
   return null;
+}
+
+function nativeSessionUnavailable(): Error {
+  return new Error("SPS Identity session is unavailable.");
+}
+
+function nativeSessionTokenFromHeaders(headers: Headers): string {
+  try {
+    if (!(headers instanceof Headers)) throw nativeSessionUnavailable();
+    const raw = Headers.prototype.get.call(headers, "cookie");
+    if (typeof raw !== "string" || raw.length === 0 || raw.length > MAX_NATIVE_COOKIE_HEADER_LENGTH) {
+      throw nativeSessionUnavailable();
+    }
+    let token: string | null = null;
+    for (const rawEntry of raw.split(";")) {
+      const entry = rawEntry.trim();
+      if (!entry) continue;
+      const separator = entry.indexOf("=");
+      const name = (separator < 0 ? entry : entry.slice(0, separator)).trim();
+      if (name !== SESSION_COOKIE) continue;
+      if (token !== null || separator < 0) throw nativeSessionUnavailable();
+      const candidate = entry.slice(separator + 1);
+      if (!NATIVE_SESSION_TOKEN.test(candidate)) throw nativeSessionUnavailable();
+      token = candidate;
+    }
+    if (!token) throw nativeSessionUnavailable();
+    return token;
+  } catch {
+    throw nativeSessionUnavailable();
+  }
+}
+
+function assertNativeSessionLive(expiresAtMs: number) {
+  if (!Number.isFinite(expiresAtMs) || expiresAtMs <= Date.now()) throw nativeSessionUnavailable();
 }
 
 function headerToken(request: Request): string | null {
@@ -175,10 +220,10 @@ export function createSpsIdentityAuth(db: Db, config: Config) {
     return profileFromClaims(claims);
   }
 
-  async function upsertUser(profile: IdentityProfile): Promise<string> {
+  async function upsertUser(profile: IdentityProfile, writer: SessionWriter): Promise<string> {
     const userId = localUserId(profile.subject);
     const now = new Date();
-    await db
+    await writer
       .insert(authUsers)
       .values({
         id: userId,
@@ -202,21 +247,41 @@ export function createSpsIdentityAuth(db: Db, config: Config) {
     return userId;
   }
 
-  async function createSession(profile: IdentityProfile, request: Request): Promise<string> {
-    const userId = await upsertUser(profile);
+  async function createSession(profile: IdentityProfile, metadata: SessionMetadata, writer: SessionWriter,
+    assertRequestActive: () => void): Promise<string> {
+    assertRequestActive();
+    const userId = await upsertUser(profile, writer);
+    assertRequestActive();
     const rawToken = randomBytes(48).toString("base64url");
     const now = new Date();
-    await db.insert(authSessions).values({
+    await writer.insert(authSessions).values({
       id: `sps_identity_${randomBytes(18).toString("base64url")}`,
       token: sha256(rawToken),
       userId,
       expiresAt: new Date(now.getTime() + SESSION_TTL_MS),
       createdAt: now,
       updatedAt: now,
-      ipAddress: request.ip || null,
-      userAgent: request.header("user-agent") || null,
+      ipAddress: metadata.ipAddress,
+      userAgent: metadata.userAgent,
     });
+    assertRequestActive();
     return rawToken;
+  }
+
+  // Shared authentication/persistence only. Native transport and pairing
+  // authority remain separate; this grants no membership or device approval.
+  async function exchangeSession(accessToken: string, metadata: SessionMetadata,
+    assertRequestActive: () => void = () => {}) {
+    if (typeof assertRequestActive !== "function") throw nativeSessionUnavailable();
+    assertRequestActive();
+    const profile = await verifyAccessToken(accessToken);
+    assertRequestActive();
+    const token = await db.transaction(tx => createSession(profile, metadata, tx, assertRequestActive));
+    // A disconnected request must not receive a committed credential. This
+    // check cannot undo a completed COMMIT and must never imply rollback.
+    assertRequestActive();
+    return Object.freeze({ profile: Object.freeze(profile), token,
+      expiresInSeconds: Math.floor(SESSION_TTL_MS / 1000) });
   }
 
   async function resolveSessionFromHeaders(headers: Headers): Promise<BetterAuthSessionResult | null> {
@@ -237,6 +302,100 @@ export function createSpsIdentityAuth(db: Db, config: Config) {
     return { session, user };
   }
 
+  async function resolveNativeEnrollmentSessionFromHeaders(
+    headers: Headers,
+  ): Promise<SpsIdentityNativeEnrollmentSession> {
+    try {
+      const tokenHash = sha256(nativeSessionTokenFromHeaders(headers));
+      const sessions = await db
+        .select({
+          id: authSessions.id,
+          token: authSessions.token,
+          userId: authSessions.userId,
+          expiresAt: authSessions.expiresAt,
+        })
+        .from(authSessions)
+        .where(eq(authSessions.token, tokenHash))
+        .limit(2);
+      if (!Array.isArray(sessions) || sessions.length !== 1) throw nativeSessionUnavailable();
+      const session = sessions[0];
+      if (!session || typeof session.id !== "string" || !session.id
+        || session.token !== tokenHash || typeof session.userId !== "string" || !session.userId
+        || !(session.expiresAt instanceof Date)) {
+        throw nativeSessionUnavailable();
+      }
+      const expiresAtMs = session.expiresAt.getTime();
+      assertNativeSessionLive(expiresAtMs);
+
+      const users = await db
+        .select({ id: authUsers.id, emailVerified: authUsers.emailVerified })
+        .from(authUsers)
+        .where(eq(authUsers.id, session.userId))
+        .limit(2);
+      assertNativeSessionLive(expiresAtMs);
+      if (!Array.isArray(users) || users.length !== 1 || users[0]?.id !== session.userId
+        || users[0]?.emailVerified !== true) {
+        throw nativeSessionUnavailable();
+      }
+
+      const sessionId = session.id;
+      const userId = session.userId;
+      const expiresAt = new Date(expiresAtMs);
+      const authorizeInTransaction = async (
+        tx: SpsNativePairingTransaction,
+        expectedUserId: string,
+      ): Promise<void> => {
+        try {
+          if (expectedUserId !== userId) throw nativeSessionUnavailable();
+          assertNativeSessionLive(expiresAtMs);
+          const currentSessions = await tx
+            .select({
+              id: authSessions.id,
+              token: authSessions.token,
+              userId: authSessions.userId,
+              expiresAt: authSessions.expiresAt,
+            })
+            .from(authSessions)
+            .where(and(
+              eq(authSessions.id, sessionId),
+              eq(authSessions.token, tokenHash),
+              eq(authSessions.userId, userId),
+              eq(authSessions.expiresAt, expiresAt),
+              gt(authSessions.expiresAt, new Date()),
+            ))
+            .for("share")
+            .limit(2);
+          assertNativeSessionLive(expiresAtMs);
+          if (!Array.isArray(currentSessions) || currentSessions.length !== 1
+            || currentSessions[0]?.id !== sessionId || currentSessions[0]?.token !== tokenHash
+            || currentSessions[0]?.userId !== userId
+            || !(currentSessions[0]?.expiresAt instanceof Date)
+            || currentSessions[0].expiresAt.getTime() !== expiresAtMs) {
+            throw nativeSessionUnavailable();
+          }
+
+          const currentUsers = await tx
+            .select({ id: authUsers.id, emailVerified: authUsers.emailVerified })
+            .from(authUsers)
+            .where(eq(authUsers.id, userId))
+            .for("share")
+            .limit(2);
+          assertNativeSessionLive(expiresAtMs);
+          if (!Array.isArray(currentUsers) || currentUsers.length !== 1
+            || currentUsers[0]?.id !== userId || currentUsers[0]?.emailVerified !== true) {
+            throw nativeSessionUnavailable();
+          }
+        } catch {
+          throw nativeSessionUnavailable();
+        }
+      };
+
+      return Object.freeze({ userId, authorizeInTransaction });
+    } catch {
+      throw nativeSessionUnavailable();
+    }
+  }
+
   async function resolveSession(request: Request): Promise<BetterAuthSessionResult | null> {
     const headers = new Headers();
     for (const [name, input] of Object.entries(request.headers)) {
@@ -254,12 +413,13 @@ export function createSpsIdentityAuth(db: Db, config: Config) {
       return;
     }
     try {
-      const profile = await verifyAccessToken(accessToken);
-      const sessionToken = await createSession(profile, request);
-      setSessionCookie(response, sessionToken, config);
+      const { profile, token, expiresInSeconds } = await exchangeSession(accessToken, {
+        ipAddress: request.ip || null, userAgent: request.header("user-agent") || null,
+      });
+      setSessionCookie(response, token, config);
       response.status(201).json({
         account: { email: profile.email, name: profile.name },
-        expiresInSeconds: Math.floor(SESSION_TTL_MS / 1000),
+        expiresInSeconds,
       });
     } catch (error) {
       response.status(401).json({
@@ -276,5 +436,12 @@ export function createSpsIdentityAuth(db: Db, config: Config) {
     response.status(204).end();
   });
 
-  return { routes, resolveSession, resolveSessionFromHeaders, verifyAccessToken };
+  return {
+    routes,
+    resolveSession,
+    resolveSessionFromHeaders,
+    resolveNativeEnrollmentSessionFromHeaders,
+    verifyAccessToken,
+    exchangeSession,
+  };
 }

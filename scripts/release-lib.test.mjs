@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { getReleasePackages } from "./release-package-map.mjs";
 
 function toBashPath(path) {
   const normalized = path.replaceAll("\\", "/");
@@ -136,6 +137,129 @@ ${helperCall}
     status,
   };
 }
+
+function removeOwnedCliVersionFixture(fixtureDir, expectedFixtureDir, canonicalTempRoot) {
+  const originalStat = lstatSync(fixtureDir);
+  if (!originalStat.isDirectory() || originalStat.isSymbolicLink()) {
+    throw new Error("refusing to remove a non-directory or linked CLI release fixture");
+  }
+
+  const canonicalFixtureDir = realpathSync(fixtureDir);
+  const relativeFixture = relative(canonicalTempRoot, canonicalFixtureDir);
+  const isOwnedChild =
+    relativeFixture !== "" &&
+    relativeFixture !== ".." &&
+    !relativeFixture.startsWith(`..${sep}`) &&
+    !isAbsolute(relativeFixture);
+  if (
+    !isOwnedChild ||
+    dirname(canonicalFixtureDir) !== canonicalTempRoot ||
+    !basename(canonicalFixtureDir).startsWith("paperclip-release-cli-version-") ||
+    expectedFixtureDir !== resolve(canonicalTempRoot, basename(fixtureDir)) ||
+    canonicalFixtureDir !== expectedFixtureDir
+  ) {
+    throw new Error("refusing to remove a CLI release fixture outside its owned temp directory");
+  }
+
+  const canonicalStat = lstatSync(canonicalFixtureDir);
+  if (!canonicalStat.isDirectory() || canonicalStat.isSymbolicLink()) {
+    throw new Error("refusing to remove a non-directory or linked CLI release fixture");
+  }
+
+  rmSync(canonicalFixtureDir, { recursive: true, force: true });
+}
+
+function runCliVersionAssertion({ releasePlan, cliVersion, targetVersion }) {
+  const canonicalTempRoot = realpathSync(tmpdir());
+  const fixtureDir = mkdtempSync(join(canonicalTempRoot, "paperclip-release-cli-version-"));
+  const expectedFixtureDir = realpathSync(fixtureDir);
+  try {
+    const releaseScript = readFileSync(new URL("./release.sh", import.meta.url), "utf8").replace(/\r\n/g, "\n");
+    const helper = releaseScript.match(/^assert_cli_release_version_if_enrolled\(\) \{[\s\S]*?^\}/m)?.[0];
+    assert.ok(helper, "release.sh must define the CLI release-plan version assertion");
+    writeFileSync(join(fixtureDir, "package.json"), JSON.stringify({ version: cliVersion }));
+
+    let status = 0;
+    let output = "";
+    try {
+      output = execFileSync(
+        "bash",
+        [
+          "-c",
+          [
+            "set -euo pipefail",
+            helper,
+            'release_info() { printf "%s\\n" "$*"; }',
+            'release_fail() { printf "%s\\n" "$*" >&2; exit 1; }',
+            'assert_cli_release_version_if_enrolled "$VERSIONED_PACKAGE_INFO" "$TARGET_PUBLISH_VERSION"',
+          ].join("\n"),
+        ],
+        {
+          cwd: fixtureDir,
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            CLI_DIR: toBashPath(fixtureDir),
+            TARGET_PUBLISH_VERSION: targetVersion,
+            VERSIONED_PACKAGE_INFO: releasePlan,
+          },
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      );
+    } catch (error) {
+      status = error.status ?? 1;
+      output = `${error.stdout ?? ""}${error.stderr ?? ""}`;
+    }
+
+    return { status, output };
+  } finally {
+    removeOwnedCliVersionFixture(fixtureDir, expectedFixtureDir, canonicalTempRoot);
+  }
+}
+
+test("release script asserts CLI version only when CLI is in the trusted CI publish plan", () => {
+  const releaseScript = readFileSync(new URL("./release.sh", import.meta.url), "utf8");
+  assert.match(releaseScript, /VERSIONED_PACKAGE_INFO="\$\(list_public_package_info\)"/);
+  assert.match(
+    releaseScript,
+    /assert_cli_release_version_if_enrolled "\$VERSIONED_PACKAGE_INFO" "\$TARGET_PUBLISH_VERSION"/,
+  );
+
+  const cliPackage = JSON.parse(readFileSync(new URL("../cli/package.json", import.meta.url), "utf8"));
+  const targetVersion = "2026.1025.0-canary.7";
+  const currentReleasePackages = getReleasePackages();
+  const currentReleasePlan = currentReleasePackages
+    .map(({ dir, name, version }) => `${dir}\t${name}\t${version}`)
+    .join("\n");
+  assert.equal(currentReleasePackages.some(({ dir }) => dir === "cli"), false);
+  assert.notEqual(cliPackage.version, targetVersion);
+
+  const offTrain = runCliVersionAssertion({
+    releasePlan: currentReleasePlan,
+    cliVersion: cliPackage.version,
+    targetVersion,
+  });
+  assert.equal(offTrain.status, 0);
+  assert.match(offTrain.output, /not part of this publish plan/);
+
+  const enrolledPlan = `cli\tpaperclipai\t${targetVersion}`;
+  const enrolledMismatch = runCliVersionAssertion({
+    releasePlan: enrolledPlan,
+    cliVersion: cliPackage.version,
+    targetVersion,
+  });
+  assert.notEqual(enrolledMismatch.status, 0);
+  assert.match(enrolledMismatch.output, /versioning drift detected/);
+  assert.ok(enrolledMismatch.output.includes(`Expected ${targetVersion} but found ${cliPackage.version}`));
+
+  const enrolledMatch = runCliVersionAssertion({
+    releasePlan: enrolledPlan,
+    cliVersion: targetVersion,
+    targetVersion,
+  });
+  assert.equal(enrolledMatch.status, 0);
+  assert.doesNotMatch(enrolledMatch.output, /versioning drift detected/);
+});
 
 test("publish_package_to_npm returns after a successful pnpm publish", () => {
   const result = runPublishHelper({ pnpmMode: "success" });

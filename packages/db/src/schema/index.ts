@@ -101,6 +101,9 @@ export {
   spsNodeCommands,
   spsNodeCommandEvents,
 } from "./sps_nodes.js";
+export { spsMemberDevices, spsMemberDeviceEvents } from "./sps_member_devices.js";
+export { spsNativePairings, spsNativePairingEvents } from "./sps_native_pairings.js";
+export { spsNativeEnrollments } from "./sps_native_enrollments.js";
 export {
   spsWorkspaceSources,
   spsWorkspaceSourceNodeGrants,
@@ -127,6 +130,7 @@ export { userSecretDefinitions } from "./user_secret_definitions.js";
 export { companySecrets } from "./company_secrets.js";
 export { companySecretVersions } from "./company_secret_versions.js";
 export { companySecretBindings } from "./company_secret_bindings.js";
+export { spsModelConnections, spsModelGrants, spsModelRuns } from "./sps_model_execution.js";
 export { userSecretDeclarations } from "./user_secret_declarations.js";
 export { secretAccessEvents } from "./secret_access_events.js";
 export {

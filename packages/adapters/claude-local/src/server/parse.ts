@@ -16,6 +16,12 @@ const CLAUDE_PROVIDER_QUOTA_RE =
 const CLAUDE_EXTRA_USAGE_RESET_RE =
   /(?:you(?:'|’)ve\s+hit\s+your\s+session\s+limit|session\s+limit\s+(?:reached|exceeded)|out\s+of\s+extra\s+usage|extra\s+usage|usage\s+limit\s+reached|usage\s+cap\s+reached|5[-\s]?hour\s+limit\s+reached|weekly\s+limit\s+reached|claude\s+usage\s+limit\s+reached)[\s\S]{0,120}?\bresets?\s+(?:at\s+)?([^\n()]+?)(?:\s*\(([^)]+)\))?(?:[.!]|\n|$)/i;
 
+type UsageReportedField = "inputTokens" | "cachedInputTokens" | "outputTokens";
+
+function isReportedTokenCount(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
 /**
  * Sum the per-model usage ledger from a Claude CLI result event. The result
  * event's top-level `usage` reflects only the main-loop message chain, so it
@@ -39,6 +45,35 @@ export function claudeModelUsageTotals(modelUsage: unknown): UsageSummary | null
   }
   if (!sawEntry) return null;
   return { inputTokens, outputTokens, cachedInputTokens };
+}
+
+export function claudeModelUsageReportedFields(modelUsage: unknown): UsageReportedField[] {
+  const entries = Object.values(parseObject(modelUsage))
+    .map((value) => parseObject(value));
+  if (entries.length === 0) return [];
+
+  return [
+    ...(entries.every((entry) =>
+      isReportedTokenCount(entry.inputTokens) && isReportedTokenCount(entry.cacheCreationInputTokens),
+    )
+      ? ["inputTokens" as const]
+      : []),
+    ...(entries.every((entry) => isReportedTokenCount(entry.cacheReadInputTokens))
+      ? ["cachedInputTokens" as const]
+      : []),
+    ...(entries.every((entry) => isReportedTokenCount(entry.outputTokens))
+      ? ["outputTokens" as const]
+      : []),
+  ];
+}
+
+export function claudeUsageReportedFields(usage: unknown): UsageReportedField[] {
+  const usageObj = parseObject(usage);
+  return [
+    ...(isReportedTokenCount(usageObj.input_tokens) ? ["inputTokens" as const] : []),
+    ...(isReportedTokenCount(usageObj.cache_read_input_tokens) ? ["cachedInputTokens" as const] : []),
+    ...(isReportedTokenCount(usageObj.output_tokens) ? ["outputTokens" as const] : []),
+  ];
 }
 
 export function parseClaudeStreamJson(stdout: string) {
@@ -87,6 +122,7 @@ export function parseClaudeStreamJson(stdout: string) {
       model,
       costUsd: null as number | null,
       usage: null as UsageSummary | null,
+      usageReportedFields: [] as UsageReportedField[],
       usageBasis: null as "per_run" | null,
       summary: assistantTexts.join("\n\n").trim(),
       resultJson: null as Record<string, unknown> | null,
@@ -100,6 +136,9 @@ export function parseClaudeStreamJson(stdout: string) {
     cachedInputTokens: asNumber(usageObj.cache_read_input_tokens, 0),
     outputTokens: asNumber(usageObj.output_tokens, 0),
   };
+  const usageReportedFields = modelUsageTotals
+    ? claudeModelUsageReportedFields(finalResult.modelUsage)
+    : claudeUsageReportedFields(finalResult.usage);
   const costRaw = finalResult.total_cost_usd;
   const costUsd = typeof costRaw === "number" && Number.isFinite(costRaw) ? costRaw : null;
   const summary = asString(finalResult.result, assistantTexts.join("\n\n")).trim();
@@ -109,6 +148,7 @@ export function parseClaudeStreamJson(stdout: string) {
     model,
     costUsd,
     usage,
+    usageReportedFields,
     // modelUsage covers exactly this CLI invocation, so mark it per-run to
     // keep the server from applying its session-cumulative delta heuristic.
     usageBasis: modelUsageTotals ? ("per_run" as const) : null,

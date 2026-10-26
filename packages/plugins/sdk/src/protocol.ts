@@ -77,6 +77,15 @@ import type {
   PluginAuthorizationPolicySummary,
   PluginMemoryLifecyclePublishInput,
   PluginSpsArtifact,
+  PluginSpsModelConnection,
+  PluginSpsModelRun,
+  PluginSpsModelSubmitInput,
+  PluginSpsExecution,
+  PluginSpsExecutionCursor,
+  PluginSpsExecutionLane,
+  PluginSpsExecutionPage,
+  PluginSpsExecutionSummary,
+  PluginSpsExecutionSummaryOptions,
   PluginSpsExecutionGrant,
   PluginSpsRun,
   PluginSpsRunEvent,
@@ -325,6 +334,11 @@ export interface InitializeParams {
   };
   /** Host API version. */
   apiVersion: number;
+  /** Optional registered RPC snapshot, not a capability grant or backend readiness. */
+  spsHost?: {
+    contractVersion: "1.0";
+    operations: string[];
+  };
   /** Host-derived plugin database namespace, when the manifest declares database access. */
   databaseNamespace?: string | null;
 }
@@ -1003,6 +1017,22 @@ export interface WorkerToHostMethods {
   ];
 
   // Workflow-neutral SPS infrastructure
+  "sps.models.list": [params: { companyId: string }, result: PluginSpsModelConnection[]];
+  "sps.models.submit": [params: PluginSpsModelSubmitInput, result: PluginSpsModelRun];
+  "sps.models.get": [params: { companyId: string; runId: string }, result: PluginSpsModelRun | null];
+  "sps.models.cancel": [params: { companyId: string; runId: string }, result: PluginSpsModelRun | null];
+  "sps.executions.list": [
+    params: { companyId: string; lane?: PluginSpsExecutionLane; limit?: number; before?: PluginSpsExecutionCursor },
+    result: PluginSpsExecutionPage,
+  ];
+  "sps.executions.get": [
+    params: { companyId: string; lane: PluginSpsExecutionLane; runId: string },
+    result: PluginSpsExecution | null,
+  ];
+  "sps.executions.summarize": [
+    params: PluginSpsExecutionSummaryOptions & { companyId: string },
+    result: PluginSpsExecutionSummary,
+  ];
   "sps.workspaceSources.list": [
     params: { companyId: string },
     result: PluginSpsWorkspaceSource[],
@@ -1041,6 +1071,14 @@ export interface WorkerToHostMethods {
     result: PluginSpsRun,
   ];
   "sps.runs.get": [
+    params: { companyId: string; runId: string },
+    result: PluginSpsRun,
+  ];
+  "sps.runs.list": [
+    params: { companyId: string; subjectKey?: string | null; status?: string | null; limit?: number | null; beforeId?: string | null },
+    result: PluginSpsRun[],
+  ];
+  "sps.runs.cancel": [
     params: { companyId: string; runId: string },
     result: PluginSpsRun,
   ];
@@ -1595,6 +1633,10 @@ export interface WorkerToHostMethods {
   ];
 
   // Agents (read)
+  "agents.describeExecution": [
+    params: { companyId: string; agentId: string },
+    result: import("./types.js").PluginAgentExecutionDescriptor,
+  ];
   "agents.list": [
     params: { companyId: string; status?: string; limit?: number; offset?: number },
     result: Agent[],
@@ -1631,6 +1673,14 @@ export interface WorkerToHostMethods {
   ];
 
   // Agent Sessions
+  "agents.sessions.getRun": [
+    params: { sessionId: string; companyId: string; runId: string },
+    result: import("./types.js").AgentSessionRunState,
+  ];
+  "agents.sessions.cancel": [
+    params: { sessionId: string; companyId: string; runId: string },
+    result: import("./types.js").AgentSessionRunState,
+  ];
   "agents.sessions.create": [
     params: { agentId: string; companyId: string; taskKey?: string; reason?: string; context?: AgentSessionContext },
     result: { sessionId: string; agentId: string; companyId: string; status: "active" | "closed"; createdAt: string; context?: AgentSessionContext; lastRunId: string | null; lastError: string | null },

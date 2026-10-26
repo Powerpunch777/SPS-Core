@@ -77,6 +77,8 @@ export interface AdapterExecutionResult {
   retryNotBefore?: string | null;
   errorMeta?: Record<string, unknown>;
   usage?: UsageSummary;
+  /** Actually reported token fields, excluding parser defaults. Omit for legacy adapters. */
+  usageReportedFields?: Array<"inputTokens" | "cachedInputTokens" | "outputTokens">;
   /**
    * How `usage` totals are scoped. "per_run" means the tokens cover only this
    * execution; "session_cumulative" means they are running totals for the
@@ -95,6 +97,8 @@ export interface AdapterExecutionResult {
   model?: string | null;
   billingType?: AdapterBillingType | null;
   costUsd?: number | null;
+  /** Explicit cost scope; absent means unknown. Independent from token usageBasis. */
+  costUsdBasis?: "per_run" | "session_cumulative" | null;
   resultJson?: Record<string, unknown> | null;
   runtimeServices?: AdapterRuntimeServiceReport[];
   summary?: string | null;

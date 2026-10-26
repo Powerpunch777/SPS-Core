@@ -81,6 +81,11 @@ import { sanitizeRecord } from "../redaction.js";
 import { isCoreManagedMemoryLifecycleSubscription } from "./memory-providers.js";
 import { spsPluginExecutionService } from "./sps-plugin-execution.js";
 import { spsWorkspaceSurfaceService } from "./sps-workspace-surfaces.js";
+import { spsAgentSessionRunService } from "./sps-agent-session-runs.js";
+import { spsExecutionHistoryService } from "./sps-execution-history.js";
+import { describeSpsAgentExecution } from "./sps-agent-execution-descriptor.js";
+import { findActiveServerAdapter } from "../adapters/registry.js";
+import { getSpsModelBroker } from "./sps-model-broker.js";
 
 // ---------------------------------------------------------------------------
 // SSRF protection for plugin HTTP fetch
@@ -561,6 +566,8 @@ export function buildHostServices(
     manifest: options.manifest,
   });
   const spsExecution = spsPluginExecutionService(db, pluginKey);
+  const modelBroker = getSpsModelBroker(db);
+  const executionHistory = spsExecutionHistoryService(db, pluginKey);
   const workspaceSurfaces = spsWorkspaceSurfaceService(db);
   const heartbeat = heartbeatService(db, {
     pluginWorkerManager: options.pluginWorkerManager,
@@ -1208,6 +1215,37 @@ export function buildHostServices(
     },
 
     sps: {
+      models: {
+        list: params => modelBroker.list(params.companyId, pluginId),
+        submit: params => modelBroker.submit(pluginId, params),
+        get: params => modelBroker.get(params.companyId, pluginId, params.runId),
+        cancel: params => modelBroker.cancel(params.companyId, pluginId, params.runId),
+      },
+      async summarizeExecutions(companyIdInput, options) {
+        const companyId = ensureCompanyId(companyIdInput);
+        await ensurePluginAvailableForCompany(companyId);
+        return executionHistory.summarize(companyId, options);
+      },
+      async listExecutions(companyIdInput, options) {
+        const companyId = ensureCompanyId(companyIdInput);
+        await ensurePluginAvailableForCompany(companyId);
+        return executionHistory.list(companyId, options);
+      },
+      async getExecution(companyIdInput, lane, runId) {
+        const companyId = ensureCompanyId(companyIdInput);
+        await ensurePluginAvailableForCompany(companyId);
+        return executionHistory.get(companyId, lane, runId);
+      },
+      async listRuns(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        return spsExecution.listRuns({ ...params, companyId });
+      },
+      async cancelRun(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        return spsExecution.cancelRun({ companyId, runId: params.runId });
+      },
       async listWorkspaceSources(params) {
         const companyId = ensureCompanyId(params.companyId);
         await ensurePluginAvailableForCompany(companyId);
@@ -2389,6 +2427,11 @@ export function buildHostServices(
     },
 
     agents: {
+      async describeExecution(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        return describeSpsAgentExecution(db, { companyId, agentId: params.agentId }, type => Boolean(findActiveServerAdapter(type)));
+      },
       async list(params) {
         const companyId = ensureCompanyId(params.companyId);
         await ensurePluginAvailableForCompany(companyId);
@@ -2827,6 +2870,16 @@ export function buildHostServices(
     },
 
     agentSessions: {
+      async getRun(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        return spsAgentSessionRunService(db, pluginKey, runId => heartbeat.cancelRun(runId)).getRun({ ...params, companyId });
+      },
+      async cancel(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        return spsAgentSessionRunService(db, pluginKey, runId => heartbeat.cancelRun(runId)).cancel({ ...params, companyId });
+      },
       async create(params) {
         const companyId = ensureCompanyId(params.companyId);
         await ensurePluginAvailableForCompany(companyId);
@@ -2952,7 +3005,7 @@ export function buildHostServices(
             and(
               eq(agentTaskSessionsTable.agentId, params.agentId),
               eq(agentTaskSessionsTable.companyId, companyId),
-              like(agentTaskSessionsTable.taskKey, `plugin:${pluginKey}:session:%`),
+              sql`starts_with(${agentTaskSessionsTable.taskKey}, ${`plugin:${pluginKey}:session:`})`,
             ),
           )
           .orderBy(desc(agentTaskSessionsTable.createdAt));
@@ -2986,7 +3039,7 @@ export function buildHostServices(
             and(
               eq(agentTaskSessionsTable.id, params.sessionId),
               eq(agentTaskSessionsTable.companyId, companyId),
-              like(agentTaskSessionsTable.taskKey, `plugin:${pluginKey}:session:%`),
+              sql`starts_with(${agentTaskSessionsTable.taskKey}, ${`plugin:${pluginKey}:session:`})`,
             ),
           )
           .then((rows) => rows[0] ?? null);
@@ -2999,6 +3052,7 @@ export function buildHostServices(
           payload: { prompt: params.prompt },
           contextSnapshot: {
             taskKey: session.taskKey,
+            spsPluginConversation: { pluginKey, sessionId: session.id, message: params.prompt },
             wakeSource: "automation",
             wakeTriggerDetail: "system",
             ...(session.contextJson ? session.contextJson : {}),
@@ -3015,7 +3069,7 @@ export function buildHostServices(
             and(
               eq(agentTaskSessionsTable.id, params.sessionId),
               eq(agentTaskSessionsTable.companyId, companyId),
-              like(agentTaskSessionsTable.taskKey, `plugin:${pluginKey}:session:%`),
+              sql`starts_with(${agentTaskSessionsTable.taskKey}, ${`plugin:${pluginKey}:session:`})`,
             ),
           );
 
@@ -3078,7 +3132,8 @@ export function buildHostServices(
                   and(
                     eq(agentTaskSessionsTable.id, params.sessionId),
                     eq(agentTaskSessionsTable.companyId, companyId),
-                    like(agentTaskSessionsTable.taskKey, `plugin:${pluginKey}:session:%`),
+                    sql`starts_with(${agentTaskSessionsTable.taskKey}, ${`plugin:${pluginKey}:session:`})`,
+                    eq(agentTaskSessionsTable.lastRunId, run.id),
                   ),
                 );
             } catch (error) {
@@ -3196,7 +3251,7 @@ export function buildHostServices(
             and(
               eq(agentTaskSessionsTable.id, params.sessionId),
               eq(agentTaskSessionsTable.companyId, companyId),
-              like(agentTaskSessionsTable.taskKey, `plugin:${pluginKey}:session:%`),
+              sql`starts_with(${agentTaskSessionsTable.taskKey}, ${`plugin:${pluginKey}:session:`})`,
             ),
           )
           .returning()

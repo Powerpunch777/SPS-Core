@@ -1,11 +1,13 @@
 import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { resolvePluginRecoveryState, type PluginRecoveryState } from "../services/sps-plugin-recovery.js";
 
 const mockRegistry = vi.hoisted(() => ({
   getById: vi.fn(),
   getByKey: vi.fn(),
   listInstalled: vi.fn(),
+  listByStatus: vi.fn(),
   upsertConfig: vi.fn(),
   getCompanySettings: vi.fn(),
   upsertCompanySettings: vi.fn(),
@@ -64,6 +66,7 @@ async function createApp(
     toolDeps?: unknown;
     bridgeDeps?: unknown;
     diagnosticsDeps?: unknown;
+    recoveryState?: PluginRecoveryState;
     captureJsonContext?: (context: unknown, body: unknown) => void;
   } = {},
 ) {
@@ -104,6 +107,7 @@ async function createApp(
     undefined,
     undefined,
     routeOverrides.diagnosticsDeps as never,
+    routeOverrides.recoveryState,
   ));
   app.use(errorHandler);
 
@@ -766,6 +770,68 @@ describe.sequential("plugin tool and bridge authz", () => {
     mockAccess.hasPermission.mockReset();
     mockAccess.canUser.mockResolvedValue(false);
     mockAccess.hasPermission.mockResolvedValue(false);
+  });
+
+  it("permits a projectless owned active Plugin Agent session without creating a Core project", async () => {
+    readyPlugin();
+    const sessionId = "88888888-8888-4888-8888-888888888888";
+    const taskKey = "plugin:paperclip.example:session:conversation";
+    const executeTool = vi.fn().mockResolvedValue({ content: "ok" });
+    const { app } = await createApp(agentActor(), {}, {
+      db: createSelectQueueDb([
+        [{ companyId: companyA, status: "running" }],
+        [{ companyId: companyA, agentId: agentA, status: "running", contextSnapshot: {
+          taskKey, spsPluginConversation: { pluginKey: "paperclip.example", sessionId, message: "Hello" },
+        } }],
+        [{ id: sessionId, companyId: companyA, agentId: agentA, taskKey, status: "active", closedAt: null }],
+      ]),
+      toolDeps: { toolDispatcher: {
+        listToolsForAgent: vi.fn(),
+        getTool: vi.fn(() => ({ pluginId: "paperclip.example", pluginDbId: pluginId, name: "search" })),
+        executeTool,
+      } },
+    });
+    const res = await request(app).post("/api/plugins/tools/execute").send({
+      tool: "paperclip.example:search", parameters: {}, runContext: { agentId: agentA, companyId: companyA, runId: runA },
+    });
+    expect(res.status).toBe(200);
+    expect(executeTool).toHaveBeenCalledWith("paperclip.example:search", {}, { agentId: agentA, companyId: companyA, runId: runA });
+  });
+
+  it.each([boardActor(), agentActor({ runId: undefined }), agentActor({ runId: projectA }), agentActor({ source: "agent_key" })])(
+    "rejects a projectless caller without the exact run-bound Agent identity: %j", async actor => {
+      const executeTool = vi.fn();
+      const { app } = await createApp(actor, {}, { toolDeps: { toolDispatcher: {
+        listToolsForAgent: vi.fn(), getTool: vi.fn(), executeTool,
+      } } });
+      const res = await request(app).post("/api/plugins/tools/execute").send({
+        tool: "paperclip.example:search", parameters: {}, runContext: { agentId: agentA, companyId: companyA, runId: runA },
+      });
+      expect(res.status).toBe(403);
+      expect(executeTool).not.toHaveBeenCalled();
+    },
+  );
+
+  it("rejects another plugin's tool from a projectless session", async () => {
+    const sessionId = "88888888-8888-4888-8888-888888888888";
+    const taskKey = "plugin:paperclip.example:session:conversation";
+    const executeTool = vi.fn();
+    const { app } = await createApp(agentActor(), {}, {
+      db: createSelectQueueDb([
+        [{ companyId: companyA, status: "running" }],
+        [{ companyId: companyA, agentId: agentA, status: "running", contextSnapshot: {
+          taskKey, spsPluginConversation: { pluginKey: "paperclip.example", sessionId, message: "Hello" },
+        } }],
+        [{ id: sessionId, companyId: companyA, agentId: agentA, taskKey, status: "active", closedAt: null }],
+      ]),
+      toolDeps: { toolDispatcher: { listToolsForAgent: vi.fn(),
+        getTool: vi.fn(() => ({ pluginId: "other.plugin", pluginDbId: pluginId, name: "search" })), executeTool } },
+    });
+    const res = await request(app).post("/api/plugins/tools/execute").send({
+      tool: "other.plugin:search", runContext: { agentId: agentA, companyId: companyA, runId: runA },
+    });
+    expect(res.status).toBe(403);
+    expect(executeTool).not.toHaveBeenCalled();
   });
 
   it("rejects tool execution when the board user cannot access runContext.companyId", async () => {
@@ -1634,5 +1700,157 @@ describe.sequential("plugin tool and bridge authz", () => {
     const response = await request(app).get(`/api/plugins/${pluginId}/diagnostics`);
     expect(response.status).toBe(403);
     expect(diagnostics.snapshot).not.toHaveBeenCalled();
+  });
+});
+
+describe.sequential("plugin recovery gate routes", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockRegistry.listInstalled.mockResolvedValue([]);
+  });
+
+  const recoveryState = () => resolvePluginRecoveryState("all-disabled");
+  const pluginRecord = (status = "ready") => ({
+    id: pluginId,
+    pluginKey: "paperclip.example",
+    packageName: "@example/plugin",
+    version: "1.0.0",
+    apiVersion: 1,
+    categories: [],
+    status,
+    installOrder: 1,
+    packagePath: "C:/plugins/example",
+    lastError: "plugin-provided detail",
+    manifestJson: {
+      id: "paperclip.example",
+      version: "1.0.0",
+      ui: { slots: [{ type: "page", routePath: "/example" }] },
+    },
+    installedAt: new Date("2026-01-01T00:00:00.000Z"),
+    updatedAt: new Date("2026-01-02T00:00:00.000Z"),
+  });
+
+  it("returns sanitized package status without manifest contributions or host paths", async () => {
+    mockRegistry.listInstalled.mockResolvedValue([pluginRecord()]);
+    const { app } = await createApp(boardActor(), {}, { recoveryState: recoveryState() });
+
+    const response = await request(app).get("/api/plugins");
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject([{
+      id: pluginId,
+      pluginKey: "paperclip.example",
+      packageName: "@example/plugin",
+      status: "ready",
+      manifestJson: null,
+    }]);
+    expect(response.body[0]).not.toHaveProperty("packagePath");
+    expect(response.body[0]).not.toHaveProperty("lastError");
+  });
+
+  it("blocks UI contributions and installation, and still requires authentication", async () => {
+    const loaderInstall = vi.fn();
+    const { app, loader } = await createApp(boardActor(), { installPlugin: loaderInstall }, {
+      recoveryState: recoveryState(),
+    });
+
+    const contributions = await request(app).get("/api/plugins/ui-contributions");
+    const install = await request(app).post("/api/plugins/install").send({ packageName: "@example/plugin" });
+
+    expect(contributions.status).toBe(423);
+    expect(contributions.body.code).toBe("plugin_recovery_active");
+    expect(install.status).toBe(423);
+    expect(loader.installPlugin).not.toHaveBeenCalled();
+    expect(mockRegistry.listByStatus).not.toHaveBeenCalled();
+
+    const anonymous = await createApp({ type: "none" }, {}, { recoveryState: recoveryState() });
+    const unauthenticated = await request(anonymous.app).post("/api/plugins/install").send({});
+    expect(unauthenticated.status).toBe(401);
+  });
+
+  it("blocks unsupported package and activation mutations without changing persisted choices", async () => {
+    const persisted = {
+      package: { status: "ready", version: "1.0.0", configJson: { retained: true } },
+      activation: { enabled: true, settingsJson: { retained: true } },
+    };
+    const before = structuredClone(persisted);
+    const loaderInstall = vi.fn().mockImplementation(async () => {
+      persisted.package.status = "ready";
+      persisted.package.version = "2.0.0";
+      return { manifest: { id: "paperclip.example" } };
+    });
+    mockLifecycle.upgrade.mockImplementation(async () => {
+      persisted.package.version = "2.0.0";
+    });
+    mockLifecycle.enable.mockImplementation(async () => {
+      persisted.package.status = "ready";
+    });
+    mockLifecycle.unload.mockImplementation(async () => {
+      persisted.package.status = "uninstalled";
+    });
+    mockRegistry.upsertConfig.mockImplementation(async (_pluginId, configJson) => {
+      persisted.package.configJson = configJson;
+    });
+    mockRegistry.upsertCompanySettings.mockImplementation(async (_pluginId, _companyId, settings) => {
+      persisted.activation = settings;
+    });
+    const { app, loader } = await createApp(
+      boardActor({ isInstanceAdmin: true }),
+      { installPlugin: loaderInstall },
+      { recoveryState: recoveryState() },
+    );
+
+    const attempts = [
+      request(app).post("/api/plugins/install").send({ packageName: "@example/plugin" }),
+      request(app).post(`/api/plugins/${pluginId}/upgrade`).send({}),
+      request(app).post(`/api/plugins/${pluginId}/enable`).send({}),
+      request(app).post(`/api/plugins/${pluginId}/config`).send({ configJson: { changed: true } }),
+      request(app).delete(`/api/plugins/${pluginId}`),
+      request(app).put(`/api/plugins/${pluginId}/companies/${companyA}/activation`).send({ enabled: false }),
+      request(app).get("/api/plugins/tools"),
+      request(app).post(`/api/plugins/${pluginId}/data/health`).send({}),
+    ];
+    const responses = await Promise.all(attempts);
+
+    expect(responses.map((response) => [response.status, response.body.code])).toEqual(
+      responses.map(() => [423, "plugin_recovery_active"]),
+    );
+    expect(persisted).toEqual(before);
+    expect(loader.installPlugin).not.toHaveBeenCalled();
+    expect(mockLifecycle.upgrade).not.toHaveBeenCalled();
+    expect(mockLifecycle.enable).not.toHaveBeenCalled();
+    expect(mockLifecycle.unload).not.toHaveBeenCalled();
+    expect(mockRegistry.upsertConfig).not.toHaveBeenCalled();
+    expect(mockRegistry.upsertCompanySettings).not.toHaveBeenCalled();
+  });
+
+  it("retains package-status and Host-disable authorization checks", async () => {
+    const unauthorizedApp = await createApp({ type: "none" }, {}, { recoveryState: recoveryState() });
+    const status = await request(unauthorizedApp.app).get("/api/plugins");
+    expect(status.status).toBe(403);
+    expect(mockRegistry.listInstalled).not.toHaveBeenCalled();
+
+    const memberApp = await createApp(boardActor(), {}, { recoveryState: recoveryState() });
+    const disable = await request(memberApp.app).post(`/api/plugins/${pluginId}/disable`).send({});
+    expect(disable.status).toBe(403);
+    expect(mockLifecycle.disable).not.toHaveBeenCalled();
+  });
+
+  it("keeps the authenticated Host disable action available", async () => {
+    const ready = pluginRecord();
+    const disabled = pluginRecord("disabled");
+    mockRegistry.getById.mockResolvedValue(ready);
+    mockRegistry.listInstalled.mockResolvedValue([ready]);
+    mockLifecycle.disable.mockResolvedValue(disabled);
+    const { app } = await createApp(boardActor({ source: "local_implicit", companyIds: [] }), {}, {
+      recoveryState: recoveryState(),
+    });
+
+    const response = await request(app)
+      .post(`/api/plugins/${pluginId}/disable`)
+      .send({ reason: "recovery" });
+
+    expect(response.status).toBe(200);
+    expect(mockLifecycle.disable).toHaveBeenCalledWith(pluginId, "recovery");
   });
 });

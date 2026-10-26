@@ -45,6 +45,7 @@ import { getUIAdapter } from "../adapters";
 import { ClaudeLocalAdvancedFields } from "../adapters/claude-local/config-fields";
 import { MarkdownEditor } from "./MarkdownEditor";
 import { ChoosePathButton } from "./PathInstructionsModal";
+import { AgentWorkingDirectoryField } from "./AgentWorkingDirectoryField";
 import { OpenCodeLogoIcon } from "./OpenCodeLogoIcon";
 import { ReportsToPicker } from "./ReportsToPicker";
 import {
@@ -87,6 +88,8 @@ type AgentConfigFormProps = {
   showCreateRunPolicySection?: boolean;
   /** Hide role/reporting identity fields when Core is configuring a workflow-neutral Assistant. */
   hideWorkflowIdentityFields?: boolean;
+  /** SPS Assistant defaults reuse adapter cwd without imposing an issue workspace. */
+  showDefaultWorkingDirectory?: boolean;
   hideInstructionsFile?: boolean;
   /** Hide the prompt template field from the Identity section (used when it's shown in a separate Prompts tab). */
   hidePromptTemplate?: boolean;
@@ -380,7 +383,7 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
   const isLocal = adapterCaps.supportsInstructionsBundle || adapterCaps.supportsSkills || adapterCaps.supportsLocalAgentJwt;
   
   const showLegacyWorkingDirectoryField =
-    isLocal && shouldShowLegacyWorkingDirectoryField({ isCreate, adapterConfig: config });
+    isLocal && !props.showDefaultWorkingDirectory && shouldShowLegacyWorkingDirectoryField({ isCreate, adapterConfig: config });
   const uiAdapter = useMemo(() => getUIAdapter(adapterType), [adapterType]);
   const supportedEnvironmentDrivers = useMemo(
     () => new Set(supportedEnvironmentDriversForAdapter(adapterType)),
@@ -1102,9 +1105,10 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
                     // Reset all adapter-specific fields to defaults when switching adapter type
                     const { adapterType: _at, ...defaults } = defaultCreateValues;
                     const nextValues: CreateConfigValues = { ...defaults, adapterType: t };
+                    if (props.showDefaultWorkingDirectory) nextValues.dangerouslySkipPermissions = false;
                     if (t === "codex_local") {
                       nextValues.dangerouslyBypassSandbox =
-                        DEFAULT_CODEX_LOCAL_BYPASS_APPROVALS_AND_SANDBOX;
+                        props.showDefaultWorkingDirectory ? false : DEFAULT_CODEX_LOCAL_BYPASS_APPROVALS_AND_SANDBOX;
                     } else if (t === "gemini_local") {
                       nextValues.model = DEFAULT_GEMINI_LOCAL_MODEL;
                     } else if (t === "cursor") {
@@ -1121,6 +1125,7 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
                       adapterType: t,
                       modelProfiles: { cheap: { cleared: true } },
                       adapterConfig: {
+                        ...(props.showDefaultWorkingDirectory ? { dangerouslySkipPermissions: false } : {}),
                         model:
                           t === "gemini_local"
                             ? DEFAULT_GEMINI_LOCAL_MODEL
@@ -1136,7 +1141,7 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
                         ...(t === "codex_local"
                           ? {
                               dangerouslyBypassApprovalsAndSandbox:
-                                DEFAULT_CODEX_LOCAL_BYPASS_APPROVALS_AND_SANDBOX,
+                                props.showDefaultWorkingDirectory ? false : DEFAULT_CODEX_LOCAL_BYPASS_APPROVALS_AND_SANDBOX,
                             }
                           : {}),
                       },
@@ -1161,6 +1166,13 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
           )}
 
           {/* Working directory */}
+          {isLocal && props.showDefaultWorkingDirectory ? (
+            <Field label="Default working folder" hint="Default folder for this Agent. Plugins may supply an authorized execution workspace. This setting is not a filesystem access boundary; CLI account usage is shared.">
+              <AgentWorkingDirectoryField key={`${selectedCompanyId}:${isCreate ? "create" : props.agent.id}:${adapterType}`}
+                value={isCreate ? val!.cwd : eff("adapterConfig", "cwd", String(config.cwd ?? ""))}
+                onCommit={v => isCreate ? set!({ cwd: v }) : mark("adapterConfig", "cwd", v || undefined)} />
+            </Field>
+          ) : null}
           {showLegacyWorkingDirectoryField && (
             <Field label="Working directory (deprecated)" hint={help.cwd}>
               <div className="flex items-center gap-2 rounded-md border border-border px-2.5 py-1.5">

@@ -1,5 +1,6 @@
 {
   "name": "@sps/mcp-server",
+  "private": true,
   "version": "0.1.0",
   "license": "MIT",
   "homepage": "https://github.com/Powerpunch777/SPS-Core",
@@ -20,7 +21,6 @@
     ".": "./src/index.ts"
   },
   "publishConfig": {
-    "access": "public",
     "bin": {
       "sps-mcp-server": "./dist/stdio.js",
       "sps-marketplace-assistant-mcp": "./dist/marketplace-assistant-stdio.js"
@@ -45,7 +45,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@modelcontextprotocol/sdk": "^1.32.0",
     "@paperclipai/shared": "workspace:*",
     "zod": "^3.24.2"
   },

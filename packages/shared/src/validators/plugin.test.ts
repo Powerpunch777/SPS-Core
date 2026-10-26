@@ -1,10 +1,45 @@
 import { describe, expect, it } from "vitest";
 import { PLUGIN_CAPABILITIES } from "../constants.js";
-import { pluginJobDeclarationSchema, pluginManagedRoutineDeclarationSchema, pluginManifestV1Schema, pluginUiSlotDeclarationSchema } from "./plugin.js";
+import { pluginJobDeclarationSchema, pluginManagedRoutineDeclarationSchema, pluginManifestV1Schema, pluginUiSlotDeclarationSchema, pluginSpsCoreDeclarationSchema, SPS_CORE_PRIMITIVE_CAPABILITIES } from "./plugin.js";
 
 describe("plugin capability constants", () => {
   it("exposes each capability once", () => {
     expect(new Set(PLUGIN_CAPABILITIES).size).toBe(PLUGIN_CAPABILITIES.length);
+  });
+  it("requires an independent capability for neutral run cancellation", () => {
+    expect(pluginSpsCoreDeclarationSchema.parse({ contractVersion: "2.0", primitives: ["runs.observe", "runs.cancel"] }).primitives).toEqual(["runs.observe", "runs.cancel"]);
+    expect(SPS_CORE_PRIMITIVE_CAPABILITIES["runs.cancel"]).toEqual(["sps.runs.cancel"]);
+    expect(SPS_CORE_PRIMITIVE_CAPABILITIES["runs.observe"]).toEqual(["sps.runs.read"]);
+    expect(PLUGIN_CAPABILITIES).toContain("sps.runs.cancel");
+  });
+  it("maps execution observation to its dedicated read capability", () => {
+    expect(pluginSpsCoreDeclarationSchema.parse({ contractVersion: "2.0", primitives: ["executions.observe"] }).primitives)
+      .toEqual(["executions.observe"]);
+    expect(SPS_CORE_PRIMITIVE_CAPABILITIES["executions.observe"]).toEqual(["sps.executions.read"]);
+    expect(PLUGIN_CAPABILITIES).toContain("sps.executions.read");
+
+    const manifest = {
+      id: "sps.execution-history",
+      apiVersion: 1,
+      version: "1.0.0",
+      displayName: "Execution History",
+      description: "Reads safe execution metadata.",
+      author: "SPS",
+      categories: ["automation"],
+      capabilities: ["agent.tools.register", "sps.executions.read"],
+      entrypoints: { worker: "./dist/worker.js" },
+      sps: { contractVersion: "2.0", primitives: ["executions.observe"] },
+    };
+    expect(pluginManifestV1Schema.safeParse(manifest).success).toBe(true);
+    const missingCapability = pluginManifestV1Schema.safeParse({
+      ...manifest,
+      capabilities: ["agent.tools.register"],
+    });
+    expect(missingCapability.success).toBe(false);
+    if (missingCapability.success) return;
+    expect(missingCapability.error.issues.some((issue) => issue.message.includes(
+      "SPS Core primitive 'executions.observe' requires capability 'sps.executions.read'",
+    ))).toBe(true);
   });
 });
 

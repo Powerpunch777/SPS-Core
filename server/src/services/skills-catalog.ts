@@ -10,6 +10,7 @@ import type {
   CatalogSkillListQuery,
   CatalogSkillSource,
 } from "@paperclipai/shared";
+import { canonicalCatalogBytes } from "@paperclipai/skills-catalog/canonical-bytes";
 import { HttpError, conflict, notFound, unprocessable } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { ghFetch, resolveRawGitHubUrl } from "./github-fetch.js";
@@ -236,7 +237,10 @@ async function readCatalogFileBytes(
     throw notFound("Catalog skill file not found");
   }
 
-  const bytes = await fetchCatalogSourceFile(skill, relativePath);
+  const bytes = canonicalCatalogBytes(await fetchCatalogSourceFile(skill, relativePath));
+  if (bytes.byteLength !== fileEntry.sizeBytes) {
+    throw unprocessable(`Pinned catalog file size mismatch for ${skill.id}:${relativePath}.`);
+  }
   const actualSha = createHash("sha256").update(bytes).digest("hex");
   if (actualSha !== fileEntry.sha256) {
     throw unprocessable(`Pinned catalog file hash mismatch for ${skill.id}:${relativePath}.`);

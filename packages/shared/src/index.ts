@@ -1084,6 +1084,7 @@ export type {
   ProviderQuotaResult,
 } from "./types/index.js";
 export { COMPANY_SEARCH_SCOPES, COMPANY_SEARCH_SORTS, COMPANY_SEARCH_UPDATED_WITHIN_OPTIONS } from "./types/index.js";
+export type { SpsMemberDevice, SpsMemberDeviceEvent, SpsMemberDeviceStatus } from "./types/sps-member-devices.js";
 export {
   ISSUE_REFERENCE_IDENTIFIER_RE,
   buildIssueReferenceHref,
@@ -1609,6 +1610,8 @@ export {
   spsNodeSignedRequestSchema,
   spsNodeCommandEventSchema,
   spsNodeCommandCompleteSchema,
+  spsNodeUsageReportSchema,
+  spsPluginNodeRunCompleteSchema,
   reportSpsNodeRunnerAvailabilitySchema,
   spsNodeSignedRequestMessage,
   type SpsNodeCapability,
@@ -1625,12 +1628,18 @@ export {
   type SpsNodeSignedRequest,
   type SpsNodeCommandEvent,
   type SpsNodeCommandComplete,
+  type SpsNodeUsageReport,
+  type SpsPluginNodeRunComplete,
   type ReportSpsNodeRunnerAvailability,
   upsertSpsHostProjectShareSchema,
   grantSpsHostProjectShareNodeSchema,
   type UpsertSpsHostProjectShare,
   type GrantSpsHostProjectShareNode,
   createSpsWorkspaceSourceSchema,
+  createSpsModelConnectionSchema,
+  updateSpsModelConnectionStatusSchema,
+  grantSpsModelConnectionSchema,
+  type CreateSpsModelConnection,
   updateSpsWorkspaceSourceSchema,
   grantSpsWorkspaceSourceNodeSchema,
   type CreateSpsWorkspaceSource,
@@ -1772,6 +1781,15 @@ export {
   type SetPluginState,
   type ListPluginState,
 } from "./validators/index.js";
+
+export {
+  approveSpsMemberDeviceSchema,
+  createSpsMemberDeviceRequestSchema,
+  revokeSpsMemberDeviceSchema,
+  type ApproveSpsMemberDevice,
+  type CreateSpsMemberDeviceRequest,
+  type RevokeSpsMemberDevice,
+} from "./validators/sps-member-devices.js";
 
 export { API_PREFIX, API } from "./api.js";
 export { normalizeAgentUrlKey, deriveAgentUrlKey, isUuidLike } from "./agent-url-key.js";

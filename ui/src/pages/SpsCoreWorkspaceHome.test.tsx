@@ -61,8 +61,19 @@ async function settle() {
   });
 }
 
-function assistant() {
-  return { id: "assistant-1", name: "Workspace Assistant", title: "Lead", status: "idle", adapterType: "codex_local" };
+function assistant(overrides: Partial<{
+  id: string;
+  name: string;
+  status: string;
+  adapterType: string;
+}> = {}) {
+  return {
+    id: "assistant-1",
+    name: "Workspace Assistant",
+    status: "idle",
+    adapterType: "codex_local",
+    ...overrides,
+  };
 }
 
 function neutralShell(overrides: Record<string, unknown> = {}) {
@@ -112,9 +123,10 @@ describe("SpsCoreWorkspaceHome", () => {
     await settle();
     await settle();
 
-    expect(container.textContent).toContain("Core keeps the Workspace available");
-    expect(container.textContent).toContain("Plugins own their workflow UI");
-    expect(container.textContent).toContain("No Dashboard widgets yet");
+    expect(container.textContent).toContain("Manage your Agents");
+    expect(container.textContent).not.toContain("Core contract");
+    expect(container.textContent).toContain("No plugin updates to show");
+    expect(container.querySelector('a[href="/company/settings/agents"]')).not.toBeNull();
     expect(container.innerHTML).toContain('href="/company/settings/instance/plugins"');
     expect(container.querySelector('[data-sps-surface-owner="core"]')).not.toBeNull();
     expect(container.innerHTML).not.toContain("agent-rooms");
@@ -130,7 +142,7 @@ describe("SpsCoreWorkspaceHome", () => {
     await settle();
     await settle();
 
-    expect(container.textContent).toContain("Neutral Shell restored");
+    expect(container.textContent).toContain("Default Workspace restored");
     expect(container.textContent).toContain("The selected shell is no longer active.");
     expect(container.innerHTML).toContain('href="/company/settings/instance/plugins"');
     expect(container.innerHTML).not.toContain("workspace-appearance");
@@ -162,5 +174,95 @@ describe("SpsCoreWorkspaceHome", () => {
       expect.objectContaining({ widgetId: "second", position: 0 }),
       expect.objectContaining({ widgetId: "first", position: 1 }),
     ]);
+  });
+
+  it("lists every nonterminated Assistant with status, adapter, and its detail link", async () => {
+    apiMocks.agentsList.mockResolvedValue([
+      assistant(),
+      assistant({ id: "assistant-2", name: "Authoring Assistant", status: "paused", adapterType: "codex_local" }),
+      assistant({ id: "assistant-old", name: "Retired Assistant", status: "terminated" }),
+    ]);
+    render();
+    await settle();
+    await settle();
+
+    expect(container.querySelector('a[href="/assistants/assistant-1"]')?.textContent).toBe("Workspace Assistant");
+    expect(container.querySelector('a[href="/assistants/assistant-2"]')?.textContent).toBe("Authoring Assistant");
+    expect(container.querySelector('a[href="/assistants/assistant-old"]')).toBeNull();
+    expect(container.textContent).toContain("Status: idle");
+    expect(container.textContent).toContain("Status: paused");
+    expect(container.textContent).toContain("Adapter: codex_local");
+    expect(container.querySelector('a[href="/assistants/new"]')?.textContent).toContain("Add Agent");
+  });
+
+  it("keeps the empty Workspace visible while an empty Agent list refetches", async () => {
+    let resolveAgents!: (value: ReturnType<typeof assistant>[]) => void;
+    apiMocks.agentsList.mockImplementationOnce(() => new Promise((resolve) => {
+      resolveAgents = resolve;
+    }));
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    queryClient.setQueryData(["agents", "workspace-1"], []);
+    act(() => {
+      root.render(<QueryClientProvider client={queryClient}><SpsCoreWorkspaceHome /></QueryClientProvider>);
+    });
+    await settle();
+
+    expect(container.querySelector('[data-redirect="/assistants/new"]')).toBeNull();
+    expect(container.querySelector('a[href="/assistants/new"]')?.textContent).toContain("Add Agent");
+
+    await act(async () => {
+      resolveAgents([]);
+      await Promise.resolve();
+    });
+    await settle();
+
+    expect(container.querySelector('[data-redirect="/assistants/new"]')).toBeNull();
+    expect(container.textContent).toContain("No active Agents.");
+    expect(container.querySelector('a[href="/company/settings/agents"]')).not.toBeNull();
+    expect(apiMocks.agentsList).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders an explicit empty state when there are zero Agents", async () => {
+    apiMocks.agentsList.mockResolvedValue([]);
+    render();
+    await settle();
+    await settle();
+
+    expect(container.textContent).toContain("No active Agents.");
+    expect(container.querySelector('[data-redirect="/assistants/new"]')).toBeNull();
+    expect(container.querySelector('a[href="/assistants/new"]')?.textContent).toContain("Add Agent");
+    expect(container.querySelector('a[href="/company/settings/agents"]')?.textContent).toBe("Manage Agents");
+    expect(apiMocks.agentsList).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders an explicit empty state when all Agents are terminated", async () => {
+    apiMocks.agentsList.mockResolvedValue([
+      assistant({ id: "assistant-old", status: "terminated" }),
+    ]);
+    render();
+    await settle();
+    await settle();
+
+    expect(container.textContent).toContain("No active Agents.");
+    expect(container.querySelector('a[href="/assistants/assistant-old"]')).toBeNull();
+    expect(container.querySelector('[data-redirect="/assistants/new"]')).toBeNull();
+    expect(container.querySelector('a[href="/assistants/new"]')?.textContent).toContain("Add Agent");
+    expect(container.querySelector('a[href="/company/settings/agents"]')?.textContent).toBe("Manage Agents");
+    expect(apiMocks.agentsList).toHaveBeenCalledTimes(1);
+  });
+
+  it("offers independent retry when Agents or Dashboard cannot load", async () => {
+    apiMocks.agentsList.mockRejectedValueOnce(new Error("offline"));
+    apiMocks.getDashboard.mockRejectedValueOnce(new Error("offline"));
+    render(); await settle(); await settle();
+    expect(container.textContent).toContain("Could not load Agents.");
+    expect(container.textContent).toContain("Could not load Dashboard.");
+    const buttons = [...container.querySelectorAll<HTMLButtonElement>("button")];
+    act(() => buttons.find(button => button.textContent === "Retry Agents")?.click());
+    act(() => buttons.find(button => button.textContent === "Retry Dashboard")?.click());
+    await settle(); await settle();
+    expect(apiMocks.agentsList).toHaveBeenCalledTimes(2);
+    expect(apiMocks.getDashboard).toHaveBeenCalledTimes(2);
+    expect(container.textContent).not.toContain("Could not load Agents.");
   });
 });

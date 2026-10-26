@@ -174,7 +174,7 @@ export function Sidebar() {
 
   if (spsCoreBaselineShell) {
     return (
-      <aside className="w-full h-full min-h-0 border-r border-border bg-background flex flex-col">
+      <aside className="w-full h-full min-h-0 bg-app-surface flex flex-col">
         <div className="flex items-center gap-1 px-3 h-12 shrink-0">
           <ProductBrand compact={rail} className="mr-auto" />
           {!rail && !isMobile && !collapseLocked ? (
@@ -197,7 +197,7 @@ export function Sidebar() {
             <SidebarCompanyMenu />
           </div>
 
-          <SidebarSection label="Core Workspace">
+          <SidebarSection label="Workspace">
             <SidebarNavItem to="/dashboard" label="Dashboard" icon={LayoutDashboard} />
             <SidebarNavItem
               to="/inbox"
@@ -233,7 +233,7 @@ export function Sidebar() {
           ) : null}
 
           {canManageCoreHost ? (
-            <SidebarSection label="Core Platform" collapsible={{ open: companyOpen, onOpenChange: setCompanyOpen }}>
+            <SidebarSection label="Host" collapsible={{ open: companyOpen, onOpenChange: setCompanyOpen }}>
               <SidebarNavItem to="/company/settings" label="Host settings" icon={Settings} />
             </SidebarSection>
           ) : null}
@@ -243,7 +243,7 @@ export function Sidebar() {
   }
 
   return (
-    <aside className="w-full h-full min-h-0 border-r border-border bg-background flex flex-col">
+    <aside className="w-full h-full min-h-0 bg-app-surface flex flex-col">
       {/* Top bar: Company name (bold) + Search — aligned with top sections (no visible border) */}
       <div className="flex items-center gap-1 px-3 h-12 shrink-0">
         <ProductBrand compact={rail} className="mr-auto" />
