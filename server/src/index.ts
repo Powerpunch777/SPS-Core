@@ -36,6 +36,7 @@ import { attachSpsOwnedShutdown } from "./services/sps-owned-shutdown.js";
 import { createSpsNativeHostManagement, type SpsNativeHostManagement } from "./services/sps-native-host-management.js";
 import { createSpsNativeParentEnrollmentService, type SpsNativeParentEnrollment } from "./services/sps-native-parent-enrollment.js";
 import { createSpsNativeParentIngress } from "./services/sps-native-parent-ingress.js";
+import { createSpsNativeWorkspaceChannel } from "./services/sps-native-workspace-channel.js";
 import { loadConfig } from "./config.js";
 import { logger } from "./middleware/logger.js";
 import { setupEnvironmentCustomImageTerminalWebSocketServer } from "./realtime/environment-custom-image-terminal-ws.js";
@@ -544,6 +545,7 @@ export async function startServer(): Promise<StartedServer> {
   let nativeConnectivityManagement: SpsNativeHostManagement | undefined;
   let nativeParentEnrollment: SpsNativeParentEnrollment | undefined;
   let nativeParentIngress: ReturnType<typeof createSpsNativeParentIngress> | undefined;
+  let nativeWorkspaceChannel: ReturnType<typeof createSpsNativeWorkspaceChannel> | undefined;
   let resolveSession:
     | ((req: ExpressRequest) => Promise<BetterAuthSessionResult | null>)
     | undefined;
@@ -572,9 +574,9 @@ export async function startServer(): Promise<StartedServer> {
         }); }
         catch { logger.warn("Native Host device management is unavailable; existing Host access is unchanged."); }
       }
-      // This is a private Main-to-Core IPC capability. It never opens an HTTP
-      // route or socket; Desktop Main must explicitly prepare the Host and set
-      // both opt-in flags before Core binds the dispatcher to its owned child.
+      // This private Main-to-Core enrollment dispatcher opens no HTTP route or
+      // socket. Desktop Main must prepare the Host and set explicit opt-in flags
+      // before Core binds it to its owned child.
       if (process.env.SPS_NATIVE_PARENT_INGRESS === "1") {
         if (!nativeConnectivityManagement) {
           logger.warn("Native parent ingress is unavailable because Native Host management was not prepared.");
@@ -606,6 +608,40 @@ export async function startServer(): Promise<StartedServer> {
             nativeParentEnrollment?.dispose();
             nativeParentEnrollment = undefined;
             logger.warn("Native parent ingress is unavailable; no Native network listener was opened.");
+          }
+        }
+      }
+      // Workspace surfaces use a separate per-child key and a dedicated
+      // loopback listener. The enrollment IPC remains independently usable if
+      // this optional bootstrap fails.
+      if (process.env.SPS_NATIVE_WORKSPACE_CHANNEL === "1") {
+        if (!nativeConnectivityManagement || !nativeParentEnrollment || !nativeParentIngress) {
+          logger.warn("Native Workspace channel is unavailable because prepared Host ingress is not active.");
+        } else {
+          try {
+            const management = nativeConnectivityManagement;
+            const enrollment = nativeParentEnrollment;
+            const parentIngress = nativeParentIngress;
+            const binding = enrollment.identity;
+            nativeWorkspaceChannel = createSpsNativeWorkspaceChannel({
+              db: db as any,
+              identity: identityAuth,
+              hostId: binding.hostId,
+              serverSpkiSha256: binding.serverSpkiSha256,
+              issuerSpkiSha256: binding.issuerSpkiSha256,
+              assertCurrent: () => {
+                management.assertActive();
+                enrollment.assertActive();
+                parentIngress.assertAvailable();
+              },
+            });
+            await nativeWorkspaceChannel.ready;
+            nativeWorkspaceChannel.assertAvailable();
+          } catch {
+            try { await nativeWorkspaceChannel?.dispose(); }
+            catch { process.exitCode = 1; }
+            nativeWorkspaceChannel = undefined;
+            logger.warn("Native Workspace channel is unavailable; existing Host ingress remains active.");
           }
         }
       }
@@ -1234,6 +1270,11 @@ export async function startServer(): Promise<StartedServer> {
   
   {
     const shutdown = async (signal: "SIGINT" | "SIGTERM") => {
+      try { await nativeWorkspaceChannel?.dispose(); }
+      catch {
+        process.exitCode = 1;
+        logger.warn("Native Workspace channel did not stop cleanly.");
+      }
       nativeConnectivityManagement?.dispose();
       nativeParentIngress?.dispose();
       nativeParentEnrollment?.dispose();
@@ -1281,7 +1322,7 @@ export async function startServer(): Promise<StartedServer> {
       // await the exporter's final batch is dropped on exit.
       await shutdownInstrumentation();
 
-      process.exit(pluginShutdownFailed ? 1 : 0);
+      process.exit(pluginShutdownFailed || process.exitCode === 1 ? 1 : 0);
     };
 
     let stopping: Promise<void> | undefined;

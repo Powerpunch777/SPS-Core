@@ -109,7 +109,12 @@ describe("SPS Native Workspace request proof codec", () => {
     const header = encode(signed, key);
     expect(() => verifier({ key, hostId: randomUUID() }).verify(header, actual())).toThrow();
     expect(() => verify.verify(encode(signed, randomBytes(32)), actual())).toThrow();
-    expect(() => verify.verify(`${header.slice(0, -1)}A`, actual())).toThrow();
+    const [payload, mac] = header.split(".");
+    const alteredMac = Buffer.from(mac!, "base64url");
+    alteredMac[0] = alteredMac[0]! ^ 1;
+    const alteredHeader = `${payload}.${alteredMac.toString("base64url")}`;
+    expect(alteredHeader).not.toBe(header);
+    expect(() => verify.verify(alteredHeader, actual())).toThrow();
     for (const malformed of ["", "a", `${header}.x`, `${header.split(".")[0]}.${"A".repeat(42)}`,
       encode({ ...Object.fromEntries(signed.map((value, index) => [String(index), value])), extra: true }, key),
       encode([...signed, "extra"], key), encode(replaceField(signed, 0, 2), key)]) {

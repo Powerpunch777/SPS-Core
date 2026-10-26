@@ -39,7 +39,8 @@ Workspace, Agent or Plugin. Reads and writes recheck the exact session inside
 their DB transaction; parent-channel loss/disposal also fences final projections.
 No Authorization token, legacy role or matching non-Owner session substitutes
 for this authority. Preparing keys requires an explicit Host restart to mount
-management; a lost channel is not silently rebound. Core opens no Native socket.
+management; a lost channel is not silently rebound. Core opens no external Native
+TLS socket; the separately gated Workspace channel uses private loopback HTTP.
 Desktop can separately opt into registration and local Owner invitation actions;
 these grant no Workspace/Node/Source access.
 
@@ -97,11 +98,16 @@ Host identity persistence, certificate issuance/key storage and a zero-Plugin
 local management UI have separate source implementations in SPS-Source. Complete
 HTTP/subresource/other-upgrade coverage, certificate renewal and physical two-PC
 qualification remain required beyond the bounded registration ingress.
-An explicitly constructed private loopback Workspace adapter and request-proof
-codec now have source-level DB/HTTP tests for selected surface queries. They are
-not mounted by product startup and do not make the ordinary Core listener a
-Native ingress. See [private Workspace channel](SPS-NATIVE-WORKSPACE-CHANNEL.md)
-for request/session/device transaction boundaries and remaining composition.
+An explicitly constructed private loopback Workspace adapter, request-proof
+codec, and child-IPC startup composition now have source-level DB/HTTP and
+channel lifecycle tests for selected surface queries. Core mounts them only for
+a directly owned child when prepared Host management, the existing parent
+ingress, and `SPS_NATIVE_WORKSPACE_CHANNEL=1` are all present. The matching Main
+channel must be deployed before enabling that flag. This does not make the
+ordinary Core listener a Native ingress or provide full Workspace assets,
+WebSockets, Plugin, Source or Node access. See
+[private Workspace channel](SPS-NATIVE-WORKSPACE-CHANNEL.md) for
+request/session/device transaction boundaries and remaining composition.
 Do not enable an ordinary listener, broaden a bind or reuse Node credentials as
 a shortcut. No Connection API is added to the public SDK in this increment.
 
