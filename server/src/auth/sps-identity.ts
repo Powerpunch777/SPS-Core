@@ -45,6 +45,9 @@ type IdentityProfile = {
   picture: string | null;
 };
 
+type SessionMetadata = { ipAddress: string | null; userAgent: string | null };
+type SessionWriter = Pick<Db, "insert">;
+
 function value(input: unknown): string {
   return typeof input === "string" ? input.trim() : "";
 }
@@ -217,10 +220,10 @@ export function createSpsIdentityAuth(db: Db, config: Config) {
     return profileFromClaims(claims);
   }
 
-  async function upsertUser(profile: IdentityProfile): Promise<string> {
+  async function upsertUser(profile: IdentityProfile, writer: SessionWriter): Promise<string> {
     const userId = localUserId(profile.subject);
     const now = new Date();
-    await db
+    await writer
       .insert(authUsers)
       .values({
         id: userId,
@@ -244,21 +247,41 @@ export function createSpsIdentityAuth(db: Db, config: Config) {
     return userId;
   }
 
-  async function createSession(profile: IdentityProfile, request: Request): Promise<string> {
-    const userId = await upsertUser(profile);
+  async function createSession(profile: IdentityProfile, metadata: SessionMetadata, writer: SessionWriter,
+    assertRequestActive: () => void): Promise<string> {
+    assertRequestActive();
+    const userId = await upsertUser(profile, writer);
+    assertRequestActive();
     const rawToken = randomBytes(48).toString("base64url");
     const now = new Date();
-    await db.insert(authSessions).values({
+    await writer.insert(authSessions).values({
       id: `sps_identity_${randomBytes(18).toString("base64url")}`,
       token: sha256(rawToken),
       userId,
       expiresAt: new Date(now.getTime() + SESSION_TTL_MS),
       createdAt: now,
       updatedAt: now,
-      ipAddress: request.ip || null,
-      userAgent: request.header("user-agent") || null,
+      ipAddress: metadata.ipAddress,
+      userAgent: metadata.userAgent,
     });
+    assertRequestActive();
     return rawToken;
+  }
+
+  // Shared authentication/persistence only. Native transport and pairing
+  // authority remain separate; this grants no membership or device approval.
+  async function exchangeSession(accessToken: string, metadata: SessionMetadata,
+    assertRequestActive: () => void = () => {}) {
+    if (typeof assertRequestActive !== "function") throw nativeSessionUnavailable();
+    assertRequestActive();
+    const profile = await verifyAccessToken(accessToken);
+    assertRequestActive();
+    const token = await db.transaction(tx => createSession(profile, metadata, tx, assertRequestActive));
+    // A disconnected request must not receive a committed credential. This
+    // check cannot undo a completed COMMIT and must never imply rollback.
+    assertRequestActive();
+    return Object.freeze({ profile: Object.freeze(profile), token,
+      expiresInSeconds: Math.floor(SESSION_TTL_MS / 1000) });
   }
 
   async function resolveSessionFromHeaders(headers: Headers): Promise<BetterAuthSessionResult | null> {
@@ -390,12 +413,13 @@ export function createSpsIdentityAuth(db: Db, config: Config) {
       return;
     }
     try {
-      const profile = await verifyAccessToken(accessToken);
-      const sessionToken = await createSession(profile, request);
-      setSessionCookie(response, sessionToken, config);
+      const { profile, token, expiresInSeconds } = await exchangeSession(accessToken, {
+        ipAddress: request.ip || null, userAgent: request.header("user-agent") || null,
+      });
+      setSessionCookie(response, token, config);
       response.status(201).json({
         account: { email: profile.email, name: profile.name },
-        expiresInSeconds: Math.floor(SESSION_TTL_MS / 1000),
+        expiresInSeconds,
       });
     } catch (error) {
       response.status(401).json({
@@ -418,5 +442,6 @@ export function createSpsIdentityAuth(db: Db, config: Config) {
     resolveSessionFromHeaders,
     resolveNativeEnrollmentSessionFromHeaders,
     verifyAccessToken,
+    exchangeSession,
   };
 }

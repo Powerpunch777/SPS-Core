@@ -1,7 +1,9 @@
 import { constants, createHash, generateKeyPairSync, randomUUID, sign, X509Certificate } from "node:crypto";
 import { createServer, request as httpsRequest, type Server } from "node:https";
-import { IncomingMessage } from "node:http";
+import { IncomingMessage, type IncomingHttpHeaders } from "node:http";
 import { Socket } from "node:net";
+import type { Duplex } from "node:stream";
+import { checkServerIdentity } from "node:tls";
 import express from "express";
 import request from "supertest";
 import { eq } from "drizzle-orm";
@@ -12,6 +14,7 @@ import type { Config } from "../config.js";
 import { createSpsIdentityAuth } from "../auth/sps-identity.js";
 import { createSpsNativeSessionEnrollment } from "../services/sps-native-session-enrollment.js";
 import { createSpsNativeEnrollmentRequestHandler } from "../services/sps-native-enrollment-http.js";
+import { createSpsNativeSessionExchangeRequestHandler } from "../services/sps-native-session-exchange-http.js";
 import { spsNativeEnrollmentService } from "../services/sps-native-enrollments.js";
 import { spsNativePairingService } from "../services/sps-native-pairings.js";
 import { createNativeEnrollmentTlsFixture, type NativeEnrollmentTlsFixture } from "./helpers/native-enrollment-tls.js";
@@ -24,9 +27,9 @@ if (!support.supported) console.warn(`Native session enrollment unavailable: ${s
 const issuer = "https://identity.example.test", audience = "sps-core", kid = "native-session-fixture";
 const keys = generateKeyPairSync("rsa", { modulusLength: 2048 });
 const publicJwk = keys.publicKey.export({ format: "jwk" });
-const hostId = randomUUID(), deviceKeyId = randomUUID(), pin = "a".repeat(64);
+const hostId = randomUUID(), deviceKeyId = randomUUID();
 const policy = { maxTtlMs: 60_000, maxAttempts: 2, maxActiveInvites: 4 };
-const hash = (input: string) => createHash("sha256").update(input).digest("hex");
+const hash = (input: string | Buffer) => createHash("sha256").update(input).digest("hex");
 
 function token(subject: string): string {
   const header = Buffer.from(JSON.stringify({ alg: "RS256", typ: "JWT", kid })).toString("base64url");
@@ -42,7 +45,8 @@ describeDatabase("Native enrollment with actual SPS sessions and loopback HTTPS"
   const originalFetch = globalThis.fetch;
   const servers: Server[] = [];
   const handlers: ReturnType<typeof createSpsNativeEnrollmentRequestHandler>[] = [];
-  const sockets = new Set<Socket>();
+  const exchanges: ReturnType<typeof createSpsNativeSessionExchangeRequestHandler>[] = [];
+  const sockets = new Set<Duplex>();
   beforeAll(async () => {
     database = await startEmbeddedPostgresTestDatabase("sps-native-session-enrollment-");
     db = createDb(database.connectionString);
@@ -52,6 +56,7 @@ describeDatabase("Native enrollment with actual SPS sessions and loopback HTTPS"
   afterEach(async () => {
     globalThis.fetch = originalFetch;
     for (const handler of handlers.splice(0)) handler.dispose();
+    for (const exchange of exchanges.splice(0)) exchange.dispose();
     for (const socket of sockets) socket.destroy();
     sockets.clear();
     for (const server of servers.splice(0)) await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
@@ -77,22 +82,14 @@ describeDatabase("Native enrollment with actual SPS sessions and loopback HTTPS"
     const identity = createSpsIdentityAuth(db, { authIdentityEnabled: true, authIdentityIssuer: issuer,
       authIdentityAudience: audience, authIdentityJwksUrl: `${issuer}/.well-known/jwks.json`,
       authPublicBaseUrl: "https://native.example.test" } as Config);
+    const serverPin = hash(new X509Certificate(serverIdentity.certPem).publicKey.export({ type: "spki", format: "der" }));
     const loginApp = express(); loginApp.use(express.json()); loginApp.use("/identity", identity.routes);
-    async function login(subject: string) {
-      const result = await request(loginApp).post("/identity/session").set("Authorization", `Bearer ${token(subject)}`).send({});
-      expect(result.status).toBe(201);
-      const cookie = result.headers["set-cookie"][0]!.split(";", 1)[0]!;
-      const current = await identity.resolveNativeEnrollmentSessionFromHeaders(new Headers({ cookie }));
-      if (!current) throw new Error("Fixture session did not resolve");
-      return { cookie, userId: current.userId };
-    }
-    const account = await login("native-member");
     const at = new Date();
     await db.insert(authUsers).values({ id: "native-host", name: "Fixture Host", email: "native-host@example.test", emailVerified: true, createdAt: at, updatedAt: at });
-    const pairing = spsNativePairingService(db, hostId, policy, { serverSpkiSha256: pin });
+    const pairing = spsNativePairingService(db, hostId, policy, { serverSpkiSha256: serverPin });
     const invitation = await pairing.issue({ actorUserId: "native-host", target: { kind: "any_verified_user" }, ttlMs: 60_000 });
     let signs = 0;
-    const service = spsNativeEnrollmentService(db, { hostId, serverSpkiSha256: pin, issuerCertificate: member.issuerCertificate,
+    const service = spsNativeEnrollmentService(db, { hostId, serverSpkiSha256: serverPin, issuerCertificate: member.issuerCertificate,
       pairingPolicy: policy, certificateLifetimeMs: 60_000, signingTimeoutMs: 2000, maxConcurrentSignings: 2 }, async input => {
       signs++;
       return { certificate: await (signing ? signing(input) : member.sign(input)), requestSha256: hash(input.requestPem) };
@@ -102,32 +99,68 @@ describeDatabase("Native enrollment with actual SPS sessions and loopback HTTPS"
       maxBodyBytes: 8192, readTimeoutMs: 1000, operationTimeoutMs: 10000, maxConcurrentRequests: 4, ...limits,
     });
     handlers.push(handler);
+    const exchange = createSpsNativeSessionExchangeRequestHandler(identity, {
+      readTimeoutMs: 1000, operationTimeoutMs: 10000, maxConcurrentRequests: 2,
+    });
+    exchanges.push(exchange);
+    let exchangeRequests = 0;
     const server = createServer({ key: serverIdentity.keyPem, cert: serverIdentity.certPem,
       ca: new X509Certificate(Buffer.from(member.issuerCertificate, "base64url")).toString(), requestCert: true,
-      rejectUnauthorized: false, minVersion: "TLSv1.3", maxVersion: "TLSv1.3", secureOptions: constants.SSL_OP_NO_TICKET }, handler.handle);
+      rejectUnauthorized: false, minVersion: "TLSv1.3", maxVersion: "TLSv1.3", secureOptions: constants.SSL_OP_NO_TICKET }, (req, res) => {
+      if (req.url === "/sps-native/v1/session/exchange") { exchangeRequests++; exchange.handle(req, res); }
+      else handler.handle(req, res);
+    });
     servers.push(server);
     server.on("connection", socket => { sockets.add(socket); socket.on("error", () => {}); socket.once("close", () => sockets.delete(socket)); });
     server.on("tlsClientError", () => {});
     await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
     const address = server.address();
     if (!address || typeof address === "string") throw new Error("Fixture server did not listen");
-    function call(path: string, input: unknown, options: { cookie?: string; certificate?: string; headers?: Record<string, string> } = {}) {
-      return new Promise<{ status: number; body: Record<string, string> }>((resolve, reject) => {
-        const bytes = Buffer.from(JSON.stringify(input));
-        const route = path === "/issue" ? "/sps-native/v1/enrollment/issue" : path === "/complete" ? "/sps-native/v1/enrollment/complete" : path;
+    function call(path: string, input: unknown, options: { cookie?: string; certificate?: string; headers?: Record<string, string>; pin?: string } = {}) {
+      return new Promise<{ status: number; body: Record<string, string>; headers: IncomingHttpHeaders }>((resolve, reject) => {
+        const bytes = path === "/exchange" ? Buffer.alloc(0) : Buffer.from(JSON.stringify(input));
+        const route = path === "/exchange" ? "/sps-native/v1/session/exchange"
+          : path === "/issue" ? "/sps-native/v1/enrollment/issue" : path === "/complete" ? "/sps-native/v1/enrollment/complete" : path;
         const req = httpsRequest({ hostname: "127.0.0.1", port: (address as { port: number }).port, path: route,
           method: "POST", agent: false, ca: serverIdentity.certPem, minVersion: "TLSv1.3", maxVersion: "TLSv1.3",
+          checkServerIdentity(host, certificate) {
+            const failure = checkServerIdentity(host, certificate);
+            if (failure) return failure;
+            if (hash(new X509Certificate(certificate.raw).publicKey.export({ type: "spki", format: "der" })) !== (options.pin ?? serverPin)) {
+              return new Error("Fixture Native server pin mismatch");
+            }
+            return undefined;
+          },
           ...(options.certificate ? { cert: new X509Certificate(Buffer.from(options.certificate, "base64url")).toString(), key: member.keyPem } : {}),
           headers: { "Content-Type": "application/json", "Content-Length": String(bytes.length),
             ...(options.cookie ? { Cookie: options.cookie } : {}), ...options.headers } }, res => {
           const received: Buffer[] = [];
           res.on("data", data => received.push(data));
           res.on("error", reject);
-          res.once("end", () => { try { resolve({ status: res.statusCode!, body: JSON.parse(Buffer.concat(received).toString("utf8")) }); } catch (error) { reject(error); } });
+          res.once("end", () => { try { resolve({ status: res.statusCode!, body: JSON.parse(Buffer.concat(received).toString("utf8")), headers: res.headers }); } catch (error) { reject(error); } });
         });
         req.on("error", reject); req.setTimeout(8000, () => req.destroy(new Error("Fixture HTTPS request timed out"))); req.end(bytes);
       });
     }
+    async function login(subject: string) {
+      const result = await call("/exchange", null, { headers: { Authorization: `Bearer ${token(subject)}` } });
+      expect(result.status).toBe(201);
+      const fullCookie = result.headers["set-cookie"]?.[0];
+      expect(fullCookie).toContain("Secure");
+      expect(fullCookie).toContain("HttpOnly");
+      expect(result.body).toEqual({ expiresInSeconds: 604800 });
+      const cookie = fullCookie!.split(";", 1)[0]!;
+      const current = await identity.resolveNativeEnrollmentSessionFromHeaders(new Headers({ cookie }));
+      return { cookie, userId: current.userId };
+    }
+    // A failed server-pin check must happen before HTTP authorization reaches
+    // even this local fixture. This is not a production Main client proof.
+    const countBefore = exchangeRequests;
+    await expect(call("/exchange", null, { pin: "0".repeat(64), headers: { Authorization: `Bearer ${token("wrong-pin")}` } }))
+      .rejects.toThrow("Fixture Native server pin mismatch");
+    expect(exchangeRequests).toBe(countBefore);
+    expect(await db.select().from(authSessions)).toEqual([]);
+    const account = await login("native-member");
     const input = { pairingId: invitation.pairingId, pairingSecret: invitation.pairingSecret, deviceKeyId, requestPem: member.requestPem };
     return { facade, input, account, login, loginApp, invitation, call, signs: () => signs };
   }
@@ -155,11 +188,12 @@ describeDatabase("Native enrollment with actual SPS sessions and loopback HTTPS"
 
   it("rejects missing sessions, API-key substitutes, browser origins and body-selected users before signing", async () => {
     const value = await setup();
-    for (const options of [{}, { headers: { Authorization: "Bearer fixture-agent-token" } },
+    const rejected: NonNullable<Parameters<typeof value.call>[2]>[] = [{}, { headers: { Authorization: "Bearer fixture-agent-token" } },
       { cookie: "sps_identity_session=fixture-invalid", headers: { "X-SPS-User-Id": value.account.userId } },
       { cookie: value.account.cookie, headers: { Authorization: "Bearer fixture-agent-token" } },
       { cookie: value.account.cookie, headers: { Origin: "https://native.example.test" } },
-      { cookie: value.account.cookie, headers: { "Sec-Fetch-Site": "same-origin" } }]) {
+      { cookie: value.account.cookie, headers: { "Sec-Fetch-Site": "same-origin" } }];
+    for (const options of rejected) {
       expect((await value.call("/issue", value.input, options)).status).toBe(403);
     }
     expect((await value.call("/issue", { ...value.input, userId: value.account.userId }, { cookie: value.account.cookie })).status).toBe(400);

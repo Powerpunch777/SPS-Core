@@ -192,6 +192,31 @@ trust. Loopback HTTPS/temporary DB acceptance is not app enrollment, Native LAN
 or physical two-PC qualification. The compact wire encoding is a new private v1
 contract; existing Core APIs and Plugin SDK messages are unchanged.
 
+An additional inactive session-exchange handler accepts one exact private v1
+path over a fresh TLS 1.3 POST connection, before enrollment. Its only credential
+is one bounded SPS Identity Bearer token; Cookie, browser metadata, proxy
+credentials, encoded or nonempty bodies and ambiguous headers are rejected.
+It reuses the same configured RSA/JWKS verifier, user mapping, hashed seven-day
+session storage and logout as the existing Identity route, not a second token
+broker or authentication database. User upsert and session insertion now share
+one transaction in both callers. Request guards fence those writes and final
+credential delivery; loss after COMMIT withholds the result but does not undo
+the committed session. There is no automatic retry or new idempotency promise.
+The existing hub cookie policy is unchanged. This TLS-only handler always sets
+Secure, HttpOnly, SameSite=Lax, Path=/, with no Domain; the token and profile are
+never returned in JSON. It grants no pairing, device approval, membership,
+Plugin capability, Node/CLI execution or Source access.
+
+Read/operation/concurrency limits remain explicit, per-handler inputs. Timeout
+or disposal cannot free an unsettled operation's slot or deliver a late cookie;
+the future listener still needs socket admission and rate/resource budgets.
+Server-side TLS does not prove that a caller is Desktop Main. The future Main
+client must verify the invited certificate/pin on the actual credential-bearing
+connection before sending any token. Loopback tests exercise that ordering with
+an RSA-signed fixture token, not production Google OAuth or an active Main client.
+The handler is unmounted: creating it opens no listener, supplies no browser
+cookie jar and does not share existing hub cookies with a different origin.
+
 Product session-to-request activation, issued-credential persistence, enrollment
 UI and Native TLS ingress remain unwired. Current network listeners, Tailscale,
 Workspace/Plugin/Node/CLI/Source permissions and public SDK are unchanged.
