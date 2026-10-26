@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -182,6 +182,78 @@ describe("PluginWorkerManager shutdown", () => {
     }
   });
 
+  it("rejects startup when stopWorker races initialize and waits for the child to exit", async () => {
+    const directory = createTempDirectory();
+    const manager = createPluginWorkerManager();
+    const initializeMarker = path.join(directory, "initialize.txt");
+    const initializeRelease = path.join(directory, "initialize-release.txt");
+    const shutdownMarker = path.join(directory, "shutdown.txt");
+    let handle: Awaited<ReturnType<typeof manager.startWorker>> | undefined;
+    let stopping: Promise<void> | undefined;
+
+    try {
+      const startPromise = manager.startWorker(
+        "test.plugin",
+        createOptions(directory, {
+          SPS_TEST_INITIALIZE_MARKER: initializeMarker,
+          SPS_TEST_INITIALIZE_RELEASE_FILE: initializeRelease,
+          SPS_TEST_SHUTDOWN_MARKER: shutdownMarker,
+          SPS_TEST_SHUTDOWN_EXIT_DELAY_MS: "350",
+        }),
+      );
+      const startRejected = expect(startPromise).rejects.toThrow();
+      await waitForFile(initializeMarker);
+
+      handle = manager.getWorker("test.plugin");
+      expect(handle).toBeDefined();
+      expect(handle!.status).toBe("starting");
+      const pid = handle!.diagnostics().pid;
+      expect(pid).not.toBeNull();
+
+      let stopRequested = false;
+      let runningAfterStop = 0;
+      let readyAfterStop = 0;
+      handle!.on("status", ({ status }) => {
+        if (stopRequested && status === "running") runningAfterStop++;
+      });
+      handle!.on("ready", () => {
+        if (stopRequested) readyAfterStop++;
+      });
+
+      stopRequested = true;
+      stopping = manager.stopWorker("test.plugin");
+      let stopSettled = false;
+      void stopping.then(
+        () => { stopSettled = true; },
+        () => { stopSettled = true; },
+      );
+
+      await waitForFile(shutdownMarker);
+      await delay(25);
+      expect(stopSettled).toBe(false);
+      expect(isProcessAlive(pid!)).toBe(true);
+
+      writeFileSync(initializeRelease, "release");
+      await startRejected;
+      expect(handle!.status).toBe("stopping");
+      expect(stopSettled).toBe(false);
+      expect(isProcessAlive(pid!)).toBe(true);
+      await stopping;
+      expect(handle!.status).toBe("stopped");
+      expect(handle!.diagnostics().pid).toBeNull();
+      expect(runningAfterStop).toBe(0);
+      expect(readyAfterStop).toBe(0);
+      expect(manager.getWorker("test.plugin")).toBeUndefined();
+      await waitForProcessExit(pid!);
+      expect(isProcessAlive(pid!)).toBe(false);
+    } finally {
+      if (stopping) await stopping.catch(() => undefined);
+      if (handle) await handle.stop().catch(() => undefined);
+      await manager.shutdown().catch(() => undefined);
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("does not retry a worker whose process exits during initialize", async () => {
     const directory = createTempDirectory();
     const manager = createPluginWorkerManager();
@@ -231,6 +303,74 @@ describe("PluginWorkerManager shutdown", () => {
       expect(second.status).toBe("stopped");
       expect(readPids(directory)).toHaveLength(2);
     } finally {
+      await manager.shutdown().catch(() => undefined);
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("fences starts and retained-handle restarts during reusable stopAll", async () => {
+    const directory = createTempDirectory();
+    const manager = createPluginWorkerManager();
+    const shutdownMarker = path.join(directory, "shutdown.txt");
+    let retainedHandle: Awaited<ReturnType<typeof manager.startWorker>> | undefined;
+    let bulkStop: Promise<void> | undefined;
+    let restartRejected: Promise<void> | undefined;
+
+    try {
+      retainedHandle = await manager.startWorker(
+        "test.plugin",
+        createOptions(directory, {
+          SPS_TEST_SHUTDOWN_MARKER: shutdownMarker,
+          SPS_TEST_SHUTDOWN_EXIT_DELAY_MS: "350",
+        }),
+      );
+      const oldPid = retainedHandle.diagnostics().pid;
+      expect(oldPid).not.toBeNull();
+
+      bulkStop = manager.stopAll();
+      expect(manager.stopAll()).toBe(bulkStop);
+      await waitForFile(shutdownMarker);
+      await delay(25);
+      expect(isProcessAlive(oldPid!)).toBe(true);
+
+      await expect(
+        manager.startWorker("concurrent.plugin", createOptions(directory)),
+      ).rejects.toThrow(/stopping all workers/);
+      await expect(retainedHandle.start()).rejects.toThrow(/stopping/);
+      restartRejected = expect(retainedHandle.restart()).rejects.toThrow();
+
+      await bulkStop;
+      await restartRejected;
+      expect(manager.getWorker("test.plugin")).toBeUndefined();
+      expect(readPids(directory)).toEqual([oldPid]);
+      await waitForProcessExit(oldPid!);
+
+      await expect(retainedHandle.start()).rejects.toThrow();
+      await expect(retainedHandle.restart()).rejects.toThrow();
+      expect(readPids(directory)).toEqual([oldPid]);
+
+      const restarted = await manager.startWorker("test.plugin", createOptions(directory));
+      const restartedPid = restarted.diagnostics().pid;
+      expect(restartedPid).not.toBeNull();
+      expect(restartedPid).not.toBe(oldPid);
+      expect(readPids(directory)).toHaveLength(2);
+
+      await expect(retainedHandle!.start()).rejects.toThrow();
+      await expect(retainedHandle!.restart()).rejects.toThrow();
+      expect(manager.getWorker("test.plugin")).toBe(restarted);
+      expect(readPids(directory)).toHaveLength(2);
+
+      await manager.shutdown();
+      expect(restarted.status).toBe("stopped");
+      expect(restarted.diagnostics().pid).toBeNull();
+      const pids = readPids(directory);
+      expect(pids).toHaveLength(2);
+      await Promise.all(pids.map(waitForProcessExit));
+      expect(pids.some(isProcessAlive)).toBe(false);
+    } finally {
+      if (bulkStop) await bulkStop.catch(() => undefined);
+      if (restartRejected) await restartRejected.catch(() => undefined);
+      if (retainedHandle) await retainedHandle.stop().catch(() => undefined);
       await manager.shutdown().catch(() => undefined);
       rmSync(directory, { recursive: true, force: true });
     }

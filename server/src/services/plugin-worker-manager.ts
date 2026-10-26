@@ -338,7 +338,8 @@ export interface PluginWorkerManager {
   isRunning(pluginId: string): boolean;
 
   /**
-   * Stop all managed workers. Called during server shutdown.
+   * Stop all current workers while temporarily fencing new starts.
+   * Reusable after completion; failed workers remain tracked and reject the call.
    */
   stopAll(): Promise<void>;
 
@@ -944,14 +945,21 @@ export function createPluginWorkerHandle(
   // Start / Stop
   // -----------------------------------------------------------------------
 
+  function assertManagerAcceptsStart(): void {
+    if (!canStart()) {
+      throw new Error(`Cannot start worker for plugin "${pluginId}" — manager is shut down or stopping all workers`);
+    }
+  }
+
+  // Process and stop callbacks can change status while initialization is awaited.
+  function currentStatus(): WorkerStatus { return status; }
+
   async function startInternal(): Promise<void> {
     if (status === "stopping") {
       throw new Error(`Cannot start worker for plugin "${pluginId}" while it is stopping`);
     }
 
-    if (!canStart()) {
-      throw new Error(`Cannot start worker for plugin "${pluginId}" — manager is shut down`);
-    }
+    assertManagerAcceptsStart();
 
     if (status === "running" || status === "starting") {
       throw new Error(`Worker for plugin "${pluginId}" is already ${status}`);
@@ -985,6 +993,9 @@ export function createPluginWorkerHandle(
       if (!result || !result.ok) {
         throw new Error("Worker initialize returned ok=false");
       }
+      if (intentionalStop || currentStatus() !== "starting") {
+        throw new Error("Worker was stopped during initialize");
+      }
       supportedMethods = result.supportedMethods ?? [];
     } catch (err) {
       // Initialize failed — kill the process and propagate
@@ -992,8 +1003,10 @@ export function createPluginWorkerHandle(
       log.error({ err: msg }, "worker initialize failed");
       intentionalStop = true;
       cancelPendingRestart();
-      await killProcess();
-      setStatus("crashed");
+      if (currentStatus() !== "stopping" && currentStatus() !== "stopped") {
+        await killProcess();
+        setStatus("crashed");
+      }
       throw new Error(`Worker initialize failed for "${pluginId}": ${msg}`);
     }
 
@@ -1278,6 +1291,7 @@ export function createPluginWorkerHandle(
     },
 
     async restart() {
+      assertManagerAcceptsStart();
       await stop();
       await startInternal();
     },
@@ -1405,6 +1419,8 @@ export function createPluginWorkerManager(
   const startupLocks = new Map<string, Promise<PluginWorkerHandle>>();
   let closed = false;
   let shutdownPromise: Promise<void> | null = null;
+  let stoppingAll = false;
+  let stopAllPromise: Promise<void> | null = null;
 
   return {
     async startWorker(
@@ -1413,6 +1429,9 @@ export function createPluginWorkerManager(
     ): Promise<PluginWorkerHandle> {
       if (closed) {
         throw new Error("Plugin worker manager is shut down");
+      }
+      if (stoppingAll) {
+        throw new Error("Plugin worker manager is stopping all workers");
       }
 
       // Mutex: if a start is already in-flight for this plugin, wait for it
@@ -1429,7 +1448,8 @@ export function createPluginWorkerManager(
         );
       }
 
-      const handle = createPluginWorkerHandle(pluginId, options, () => !closed);
+      const handle = createPluginWorkerHandle(pluginId, options,
+        () => !closed && !stoppingAll && workers.get(pluginId) === handle);
       workers.set(pluginId, handle);
 
       // Subscribe to crash/ready events for live event forwarding
@@ -1476,7 +1496,7 @@ export function createPluginWorkerManager(
 
       log.info({ pluginId }, "stopping plugin worker");
       await handle.stop();
-      workers.delete(pluginId);
+      if (workers.get(pluginId) === handle) workers.delete(pluginId);
     },
 
     getWorker(pluginId: string): PluginWorkerHandle | undefined {
@@ -1488,23 +1508,32 @@ export function createPluginWorkerManager(
       return handle?.status === "running";
     },
 
-    async stopAll(): Promise<void> {
+    stopAll(): Promise<void> {
+      if (stopAllPromise) return stopAllPromise;
+      stoppingAll = true;
       log.info({ count: workers.size }, "stopping all plugin workers");
-      const promises = Array.from(workers.values()).map(async (handle) => {
-        try {
+      const existingWorkers = Array.from(workers.entries());
+      const inFlightStarts = Array.from(startupLocks.values());
+      const current = (async () => {
+        await Promise.allSettled(inFlightStarts);
+        const results = await Promise.allSettled(existingWorkers.map(async ([pluginId, handle]) => {
           await handle.stop();
-        } catch (err) {
-          log.error(
-            {
-              pluginId: handle.pluginId,
-              err: err instanceof Error ? err.message : String(err),
-            },
-            "error stopping worker during shutdown",
-          );
+          const diagnostics = handle.diagnostics();
+          if (diagnostics.status !== "stopped" || diagnostics.pid !== null) {
+            throw new Error(`Worker for plugin "${pluginId}" did not confirm process exit`);
+          }
+          if (workers.get(pluginId) === handle) workers.delete(pluginId);
+        }));
+        const failures = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
+        if (failures.length) {
+          throw new AggregateError(failures.map(result => result.reason), "One or more plugin workers failed to stop");
         }
+      })().finally(() => {
+        stoppingAll = false;
+        if (stopAllPromise === current) stopAllPromise = null;
       });
-      await Promise.all(promises);
-      workers.clear();
+      stopAllPromise = current;
+      return current;
     },
 
     shutdown(): Promise<void> {

@@ -63,6 +63,13 @@ A shutdown RPC acknowledgement alone is not process-exit evidence. A child still
 alive after the bounded termination sequence makes shutdown fail, and Core exits
 nonzero rather than recording a clean shutdown. This is local lifecycle control,
 not physical two-PC, distributed cancellation, or arbitrary descendant proof.
+The reusable bulk stop also joins current startup and temporarily rejects new
+starts, then reopens admission after completion. Only the exact successfully
+stopped handles are removed; failed handles remain tracked and reject the call.
+An old handle removed by individual or bulk stop cannot later spawn an untracked
+process. Initialization that finishes after a stop request cannot publish
+`running` or `ready` again. These are technical lifecycle guards, not plugin
+workflow cancellation or permission changes.
 
 Approval/revocation and redacted audit events commit together. Certificate and
 SPKI are immutable; a revoked key is terminal. Approval grants no Workspace

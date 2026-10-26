@@ -27,7 +27,7 @@ rl.on("line", (line) => {
     }
 
     const delayMs = Number(process.env.SPS_TEST_INITIALIZE_DELAY_MS ?? 0);
-    setTimeout(() => {
+    const respond = () => {
       send({
         jsonrpc: "2.0",
         id: message.id,
@@ -36,7 +36,17 @@ rl.on("line", (line) => {
           supportedMethods: [],
         },
       });
-    }, delayMs);
+    };
+    const releaseFile = process.env.SPS_TEST_INITIALIZE_RELEASE_FILE;
+    if (releaseFile) {
+      const waitForRelease = () => {
+        if (fs.existsSync(releaseFile)) respond();
+        else setTimeout(waitForRelease, 10);
+      };
+      waitForRelease();
+    } else {
+      setTimeout(respond, delayMs);
+    }
     return;
   }
 
