@@ -94,6 +94,25 @@ resolution and transaction lifetime before enabling this path.
 
 ## Verification and remaining work
 
+### Native mode in the existing Workspace build
+
+The Core UI build now detects the dedicated Desktop Native preload and mounts a
+capability-scoped entry in that same build. It reads the real bootstrap and
+shell/dashboard/inbox through the fixed bridge; it does not mount ordinary Board
+company bootstrap, Plugin initialization, ServiceWorker or live-update providers.
+Neutral entry reuses the existing empty Workspace component. Plugin shell/views
+are explicitly unavailable until their transport is authorized; Dashboard labels
+describe configured declarations rather than claiming rendered Plugin widgets.
+Inbox shows text without actions or navigation targets. Errors clear retained
+names/content and obsolete request completions are ignored.
+
+Seven focused UI tests and the scoped UI build passed. The existing repository
+token gate failed in unrelated files (79 color, 36 bracket-value, one font-size
+violation); no new Native UI file was listed. Source's actual Electron/bundled UI
+fixture passed window/IPC/isolation and natural shutdown with fixture backend;
+it does not qualify installed real Host/Member access. Full workspace checks were
+not repeated for this increment, following the requested focused workflow.
+
 Focused proof tests passed 12/12, HTTP lifecycle/framing tests passed 7/7,
 channel bootstrap/lifecycle tests passed 9/9, and actual temporary-DB/HTTP
 surface tests passed 6/6, including the exact session-bound Workspace bootstrap
