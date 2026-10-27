@@ -48,6 +48,18 @@ inside the Native authorization transaction. Completion effects that require
 the root DB are queued until commit. Authority loss after commit withholds the
 response; it does not promise rollback or automatically retry the operation.
 
+For a Plugin run using a Workspace Source, current authority also requires the
+active Source's nonempty canonical share path to equal that run's recorded
+`cwdHint`, with an active Node-scoped Source grant using a supported credential
+envelope. A changed or cleared route invalidates its lease. Losing this run's
+authority fails that exact active run; a same-subject sibling on another Source
+is not cancelled as a workflow side effect. The Node's bounded lease polling
+handles local termination; this is not instantaneous distributed revocation.
+Retained Agent commands using Host Project Shares apply the same current-path
+and supported-grant checks against their captured descriptor and `cwdHint`.
+Losing one command's authority fails that exact command. Administrative bulk
+Node/Agent revocation keeps its existing separate scope.
+
 Same-key Native registration does not synchronize existing Agent grants onto
 newly advertised runners. An existing runner key cannot change its runtime kind,
 and the Source transport public key cannot change during that refresh. These

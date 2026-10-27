@@ -120,12 +120,17 @@ export function createSpsNodeOperations(dbInput: NodeDatabase, { effectDb = dbIn
     if (workspaceAccess?.kind !== "sps_host_share") return true;
     const shareId = typeof workspaceAccess.shareId === "string" ? workspaceAccess.shareId : null;
     if (!shareId) return false;
-    const sourceGrant = await db.select({ id: spsHostProjectShareNodeGrants.id }).from(spsHostProjectShareNodeGrants)
-      .innerJoin(spsHostProjectShares, eq(spsHostProjectShares.id, spsHostProjectShareNodeGrants.shareId)).where(and(
+    const [share, sourceGrant] = await Promise.all([
+      db.select({ sharePath: spsHostProjectShares.sharePath }).from(spsHostProjectShares).where(and(
+        eq(spsHostProjectShares.id, shareId), eq(spsHostProjectShares.companyId, node.companyId),
+        eq(spsHostProjectShares.status, "active"))).then(rows => rows[0] ?? null),
+      db.select({ id: spsHostProjectShareNodeGrants.id, credentialAlgorithm: spsHostProjectShareNodeGrants.credentialAlgorithm })
+        .from(spsHostProjectShareNodeGrants).where(and(
         eq(spsHostProjectShareNodeGrants.shareId, shareId), eq(spsHostProjectShareNodeGrants.nodeId, node.id),
-        eq(spsHostProjectShareNodeGrants.companyId, node.companyId), isNull(spsHostProjectShareNodeGrants.revokedAt),
-        eq(spsHostProjectShares.companyId, node.companyId), eq(spsHostProjectShares.status, "active"))).then(rows => rows[0] ?? null);
-    return Boolean(sourceGrant);
+        eq(spsHostProjectShareNodeGrants.companyId, node.companyId), isNull(spsHostProjectShareNodeGrants.revokedAt))).then(rows => rows[0] ?? null),
+    ]);
+    return Boolean(share?.sharePath && command.cwdHint === share.sharePath && workspaceAccess.sharePath === share.sharePath && sourceGrant
+      && (sourceGrant.credentialAlgorithm === "rsa-oaep-sha256" || sourceGrant.credentialAlgorithm === "rsa-oaep-sha256+a256gcm"));
   }
   async function commandRunnerCanStart(command: Command) {
     if (!command.runnerProfileId) return true;
@@ -148,32 +153,31 @@ export function createSpsNodeOperations(dbInput: NodeDatabase, { effectDb = dbIn
       || (grant.workspaceSourceId ?? null) !== (run.workspaceSourceId ?? null)) return false;
     if (!run.workspaceSourceId) return true;
     const [source, sourceGrant] = await Promise.all([
-      db.select({ id: spsWorkspaceSources.id }).from(spsWorkspaceSources).where(and(
+      db.select({ id: spsWorkspaceSources.id, sharePath: spsWorkspaceSources.sharePath }).from(spsWorkspaceSources).where(and(
       eq(spsWorkspaceSources.id, run.workspaceSourceId), eq(spsWorkspaceSources.companyId, node.companyId),
       eq(spsWorkspaceSources.status, "active"))).then(rows => rows[0] ?? null),
-      db.select({ id: spsWorkspaceSourceNodeGrants.id }).from(spsWorkspaceSourceNodeGrants).where(and(
+      db.select({ id: spsWorkspaceSourceNodeGrants.id, credentialAlgorithm: spsWorkspaceSourceNodeGrants.credentialAlgorithm })
+        .from(spsWorkspaceSourceNodeGrants).where(and(
         eq(spsWorkspaceSourceNodeGrants.sourceId, run.workspaceSourceId), eq(spsWorkspaceSourceNodeGrants.companyId, node.companyId),
         eq(spsWorkspaceSourceNodeGrants.nodeId, node.id), isNull(spsWorkspaceSourceNodeGrants.revokedAt))).then(rows => rows[0] ?? null),
     ]);
-    return Boolean(source && sourceGrant);
+    return Boolean(source?.sharePath && run.cwdHint === source.sharePath && sourceGrant
+      && (sourceGrant.credentialAlgorithm === "rsa-oaep-sha256" || sourceGrant.credentialAlgorithm === "rsa-oaep-sha256+a256gcm"));
   }
   async function pluginRunRunnerCanStart(run: PluginRun) {
     const runner = await db.select().from(spsNodeRunnerProfiles).where(eq(spsNodeRunnerProfiles.id, run.runnerProfileId)).then(rows => rows[0] ?? null);
     return runner !== null && spsNodeExecutableRuntimeKindSchema.safeParse(runner.kind).success
       && runner.credentialStatus !== "auth_required" && (runner.availabilityStatus === "available" || runner.availabilityStatus === "unknown");
   }
-  async function failActiveNodeCommands(input: { nodeId: string; agentId?: string; reason: string }) {
-    const predicates = [eq(spsNodeCommands.nodeId, input.nodeId), inArray(spsNodeCommands.status, ["queued", "claimed", "running"] as const)];
-    if (input.agentId) predicates.push(eq(spsNodeCommands.agentId, input.agentId));
+  async function failActiveNodeCommand(input: { commandId: string; reason: string }) {
     const now = new Date();
-    await db.update(spsNodeCommands).set({ status: "failed", error: input.reason, finishedAt: now, updatedAt: now }).where(and(...predicates));
+    await db.update(spsNodeCommands).set({ status: "failed", error: input.reason, finishedAt: now, updatedAt: now })
+      .where(and(eq(spsNodeCommands.id, input.commandId), inArray(spsNodeCommands.status, ["claimed", "running"] as const)));
   }
-  async function failActivePluginRuns(input: { nodeId: string; pluginKey?: string; subjectKey?: string; reason: string }) {
-    const predicates = [eq(spsPluginNodeRuns.nodeId, input.nodeId), inArray(spsPluginNodeRuns.status, ["queued", "claimed", "running"] as const)];
-    if (input.pluginKey) predicates.push(eq(spsPluginNodeRuns.pluginKey, input.pluginKey));
-    if (input.subjectKey) predicates.push(eq(spsPluginNodeRuns.subjectKey, input.subjectKey));
+  async function failActivePluginRun(input: { runId: string; reason: string }) {
     const now = new Date();
-    await db.update(spsPluginNodeRuns).set({ status: "failed", error: input.reason, finishedAt: now, updatedAt: now }).where(and(...predicates));
+    await db.update(spsPluginNodeRuns).set({ status: "failed", error: input.reason, finishedAt: now, updatedAt: now })
+      .where(and(eq(spsPluginNodeRuns.id, input.runId), inArray(spsPluginNodeRuns.status, ["claimed", "running"] as const)));
   }
 
   async function register(input: { workspaceId: string; payload: unknown }, context: SpsNodeOperationContext): Promise<SpsNodeOperationResult> {
@@ -358,7 +362,7 @@ export function createSpsNodeOperations(dbInput: NodeDatabase, { effectDb = dbIn
       const parent = command.heartbeatRunId ? await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, command.heartbeatRunId)).then(rows => rows[0] ?? null) : null;
       if (command.heartbeatRunId && (!parent || !["queued", "running"].includes(parent.status) || hasSpsSessionCancellation(parent))) return { status: 200, data: { active: false, status: "cancelling", error: "Agent session cancellation requested" } };
       if (!await commandHasCurrentAuthority(node, command)) {
-        await failActiveNodeCommands({ nodeId: node.id, agentId: command.agentId, reason: "SPS Node access was revoked or reassigned while this command was running." });
+        await failActiveNodeCommand({ commandId: command.id, reason: "SPS Node access was revoked or reassigned while this command was running." });
         return { status: 200, data: { active: false, status: "failed", error: "SPS Node access was revoked or reassigned while this command was running." } };
       }
       return { status: 200, data: { active: true, status: command.status, error: null } };
@@ -369,7 +373,7 @@ export function createSpsNodeOperations(dbInput: NodeDatabase, { effectDb = dbIn
       if (!command) throw notFound("SPS Node command not found");
       if (command.status !== "claimed" && command.status !== "running") throw forbidden("SPS Node command is not accepting output");
       if (!await commandHasCurrentAuthority(node, command)) {
-        await failActiveNodeCommands({ nodeId: node.id, agentId: command.agentId, reason: "SPS Node access was revoked or reassigned while this command was running." });
+        await failActiveNodeCommand({ commandId: command.id, reason: "SPS Node access was revoked or reassigned while this command was running." });
         throw forbidden("SPS Node command access was revoked while it was running");
       }
       if (event.sequence !== command.lastEventSeq + 1) throw badRequest("SPS Node command output sequence is out of order");
@@ -389,7 +393,7 @@ export function createSpsNodeOperations(dbInput: NodeDatabase, { effectDb = dbIn
       if (command.status === "succeeded" || command.status === "failed") return { status: 200, data: command };
       if (command.status !== "claimed" && command.status !== "running") throw forbidden("SPS Node command is not active");
       if (!await commandHasCurrentAuthority(node, command)) {
-        await failActiveNodeCommands({ nodeId: node.id, agentId: command.agentId, reason: "SPS Node access was revoked or reassigned while this command was running." });
+        await failActiveNodeCommand({ commandId: command.id, reason: "SPS Node access was revoked or reassigned while this command was running." });
         const failed = await db.select().from(spsNodeCommands).where(eq(spsNodeCommands.id, command.id)).then(rows => rows[0]!);
         return { status: 200, data: failed };
       }
@@ -458,7 +462,7 @@ export function createSpsNodeOperations(dbInput: NodeDatabase, { effectDb = dbIn
       if (run.status !== "claimed" && run.status !== "running") return { status: 200, data: { active: false, status: run.status, error: run.error ?? null } };
       if (!await pluginRunHasCurrentAuthority(node, run)) {
         const reason = "SPS plugin execution access was revoked or changed while this run was active.";
-        await failActivePluginRuns({ nodeId: node.id, pluginKey: run.pluginKey, subjectKey: run.subjectKey, reason });
+        await failActivePluginRun({ runId: run.id, reason });
         return { status: 200, data: { active: false, status: "failed", error: reason } };
       }
       return { status: 200, data: { active: true, status: run.status, error: null } };
@@ -470,7 +474,7 @@ export function createSpsNodeOperations(dbInput: NodeDatabase, { effectDb = dbIn
       if (run.status !== "claimed" && run.status !== "running") throw forbidden("SPS plugin run is not accepting output");
       if (!await pluginRunHasCurrentAuthority(node, run)) {
         const reason = "SPS plugin execution access was revoked or changed while this run was active.";
-        await failActivePluginRuns({ nodeId: node.id, pluginKey: run.pluginKey, subjectKey: run.subjectKey, reason });
+        await failActivePluginRun({ runId: run.id, reason });
         throw forbidden(reason);
       }
       if (event.sequence !== run.lastEventSeq + 1) throw badRequest("SPS plugin run output sequence is out of order");
@@ -494,7 +498,7 @@ export function createSpsNodeOperations(dbInput: NodeDatabase, { effectDb = dbIn
       if (!["claimed", "running", "cancelling"].includes(run.status)) throw forbidden("SPS plugin run is not active");
       if (run.status !== "cancelling" && !await pluginRunHasCurrentAuthority(node, run)) {
         const reason = "SPS plugin execution access was revoked or changed while this run was active.";
-        await failActivePluginRuns({ nodeId: node.id, pluginKey: run.pluginKey, subjectKey: run.subjectKey, reason });
+        await failActivePluginRun({ runId: run.id, reason });
         const failed = await db.select().from(spsPluginNodeRuns).where(eq(spsPluginNodeRuns.id, run.id)).then(rows => rows[0]!);
         return { status: 200, data: failed };
       }

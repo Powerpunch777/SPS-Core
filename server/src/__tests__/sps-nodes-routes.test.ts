@@ -41,6 +41,7 @@ import { spsAgentSessionRunService } from "../services/sps-agent-session-runs.js
 import { spsExecutionHistoryService } from "../services/sps-execution-history.js";
 import { buildSpsUsageEvidence } from "../services/sps-execution-observation.js";
 import { createSpsExecutionUsageReceipt } from "../services/sps-execution-usage-receipt.js";
+import type { PluginSpsExecutionCursor, PluginSpsExecutionPage } from "../compat/paperclip/plugin-sdk.js";
 import { plugins } from "@paperclipai/db";
 import { spsExecutionRoutes } from "../routes/sps-executions.js";
 
@@ -918,6 +919,62 @@ describeEmbeddedPostgres("SPS Node routes", () => {
     expect(complete.body.status).toBe("succeeded");
   });
 
+  it("rechecks legacy Host Project Share routes per command and preserves sibling commands", async () => {
+    const fixture = await createCompanyFixture(db);
+    const app = await createApp(db, boardActor(fixture.company.id, fixture.ownerUserId, "owner"));
+    const node = createNodePayload();
+    const registered = await request(app).post(`/api/companies/${fixture.company.id}/sps-nodes`).send(node.payload).expect(201);
+    const nodeId = registered.body.id;
+    await request(app).post(`/api/sps-nodes/${nodeId}/heartbeat`).send(createSignedHeartbeat(nodeId, node.privateKey)).expect(200);
+    await request(app).post(`/api/sps-nodes/${nodeId}/approve`).send({}).expect(200);
+    await request(app).put(`/api/sps-nodes/${nodeId}/agent-grants/${fixture.agent.id}`).send({}).expect(200);
+    await request(app).put(`/api/agents/${fixture.agent.id}/sps-node-binding`).send({ nodeId }).expect(200);
+
+    const project = await db.insert(projects).values({ companyId: fixture.company.id, name: "Legacy Source lease" }).returning().then(rows => rows[0]!);
+    const siblingProject = await db.insert(projects).values({ companyId: fixture.company.id, name: "Sibling Source lease" }).returning().then(rows => rows[0]!);
+    const sharePath = "\\\\host.example.ts.net\\SPS_legacy";
+    const siblingSharePath = "\\\\host.example.ts.net\\SPS_legacy_sibling";
+    const share = await db.insert(spsHostProjectShares).values({ companyId: fixture.company.id, projectId: project.id,
+      sharePath, createdByUserId: fixture.ownerUserId }).returning().then(rows => rows[0]!);
+    const siblingShare = await db.insert(spsHostProjectShares).values({ companyId: fixture.company.id, projectId: siblingProject.id,
+      sharePath: siblingSharePath, createdByUserId: fixture.ownerUserId }).returning().then(rows => rows[0]!);
+    const grant = await db.insert(spsHostProjectShareNodeGrants).values({ companyId: fixture.company.id, shareId: share.id,
+      nodeId, credentialAlgorithm: "rsa-oaep-sha256", credentialEnvelope: Buffer.alloc(128, 4).toString("base64"),
+      grantedByUserId: fixture.ownerUserId }).returning().then(rows => rows[0]!);
+    const siblingGrant = await db.insert(spsHostProjectShareNodeGrants).values({ companyId: fixture.company.id, shareId: siblingShare.id,
+      nodeId, credentialAlgorithm: "rsa-oaep-sha256", credentialEnvelope: Buffer.alloc(128, 5).toString("base64"),
+      grantedByUserId: fixture.ownerUserId }).returning().then(rows => rows[0]!);
+    const command = (shareId: string, path: string, envelope: string) => db.insert(spsNodeCommands).values({
+      companyId: fixture.company.id, nodeId, agentId: fixture.agent.id, command: "codex", args: ["exec"], env: {},
+      status: "claimed", claimedAt: new Date(), startedAt: new Date(), cwdHint: path,
+      workspaceAccess: { kind: "sps_host_share", shareId, sharePath: path, credentialAlgorithm: "rsa-oaep-sha256", credentialEnvelope: envelope },
+    }).returning().then(rows => rows[0]!);
+    const firstCommand = await command(share.id, sharePath, Buffer.alloc(128, 4).toString("base64"));
+    const siblingCommand = await command(siblingShare.id, siblingSharePath, Buffer.alloc(128, 5).toString("base64"));
+
+    await db.update(spsHostProjectShares).set({ sharePath: "\\\\host.example.ts.net\\SPS_legacy_replaced" })
+      .where(eq(spsHostProjectShares.id, share.id));
+    const firstLeasePath = `/sps-nodes/${nodeId}/commands/${firstCommand.id}/lease`;
+    const firstLease = await request(app).post(`/api${firstLeasePath}`)
+      .send(createSignedNodeRequest(nodeId, node.privateKey, firstLeasePath, {})).expect(200);
+    expect(firstLease.body).toMatchObject({ active: false, status: "failed" });
+
+    const siblingLeasePath = `/sps-nodes/${nodeId}/commands/${siblingCommand.id}/lease`;
+    const siblingLease = await request(app).post(`/api${siblingLeasePath}`)
+      .send(createSignedNodeRequest(nodeId, node.privateKey, siblingLeasePath, {})).expect(200);
+    expect(siblingLease.body).toMatchObject({ active: true, status: "claimed" });
+
+    await db.update(spsHostProjectShareNodeGrants).set({ credentialAlgorithm: "unsupported" })
+      .where(eq(spsHostProjectShareNodeGrants.id, siblingGrant.id));
+    const badCredentialLease = await request(app).post(`/api${siblingLeasePath}`)
+      .send(createSignedNodeRequest(nodeId, node.privateKey, siblingLeasePath, {})).expect(200);
+    expect(badCredentialLease.body).toMatchObject({ active: false, status: "failed" });
+    expect((await db.select().from(spsHostProjectShareNodeGrants).where(eq(spsHostProjectShareNodeGrants.id, siblingGrant.id)))[0]!.revokedAt)
+      .toBeNull();
+    expect((await db.select().from(spsHostProjectShareNodeGrants).where(eq(spsHostProjectShareNodeGrants.id, grant.id)))[0]!.revokedAt)
+      .toBeNull();
+  });
+
   it("keeps Agent-session cancellation pending until signed Node completion and rejects late output", async () => {
     const fixture = await createCompanyFixture(db);
     const app = await createApp(db, boardActor(fixture.company.id, fixture.ownerUserId, "owner"));
@@ -1078,11 +1135,21 @@ describeEmbeddedPostgres("SPS Node routes", () => {
     const sourceGrant = await db.insert(spsWorkspaceSourceNodeGrants).values({ companyId: fixture.company.id,
       sourceId: source.id, nodeId, credentialAlgorithm: "rsa-oaep-sha256", credentialEnvelope: Buffer.alloc(128, 8).toString("base64"),
       grantedByUserId: fixture.ownerUserId }).returning().then(rows => rows[0]!);
+    const siblingSource = await db.insert(spsWorkspaceSources).values({ companyId: fixture.company.id,
+      displayName: "Sibling Source", sharePath: "\\\\host.example.ts.net\\SPS_sibling", createdByUserId: fixture.ownerUserId })
+      .returning().then(rows => rows[0]!);
+    const siblingSourceGrant = await db.insert(spsWorkspaceSourceNodeGrants).values({ companyId: fixture.company.id,
+      sourceId: siblingSource.id, nodeId, credentialAlgorithm: "rsa-oaep-sha256", credentialEnvelope: Buffer.alloc(128, 9).toString("base64"),
+      grantedByUserId: fixture.ownerUserId }).returning().then(rows => rows[0]!);
     const execution = spsPluginExecutionService(db, "sps.source-grant-test");
     const grant = await execution.upsertExecutionGrant({ companyId: fixture.company.id, subjectKey: "source-worker",
       nodeId, runnerProfileId: runner.id, workspaceSourceId: source.id });
+    const siblingExecutionGrant = await execution.upsertExecutionGrant({ companyId: fixture.company.id, subjectKey: "source-worker",
+      nodeId, runnerProfileId: runner.id, workspaceSourceId: siblingSource.id });
     const run = await execution.dispatchRun({ companyId: fixture.company.id, executionGrantId: grant.id, args: ["exec"] });
     const claimPath = `/sps-nodes/${nodeId}/plugin-runs/claim-next`;
+    await request(app).post(`/api${claimPath}`).send(createSignedNodeRequest(nodeId, node.privateKey, claimPath, {})).expect(200);
+    const siblingRun = await execution.dispatchRun({ companyId: fixture.company.id, executionGrantId: siblingExecutionGrant.id, args: ["exec"] });
     await request(app).post(`/api${claimPath}`).send(createSignedNodeRequest(nodeId, node.privateKey, claimPath, {})).expect(200);
 
     await db.update(spsWorkspaceSourceNodeGrants).set({ revokedAt: new Date() })
@@ -1091,6 +1158,26 @@ describeEmbeddedPostgres("SPS Node routes", () => {
     const lease = await request(app).post(`/api${leasePath}`)
       .send(createSignedNodeRequest(nodeId, node.privateKey, leasePath, {})).expect(200);
     expect(lease.body).toMatchObject({ active: false, status: "failed" });
+    const siblingLeasePath = `/sps-nodes/${nodeId}/plugin-runs/${siblingRun.id}/lease`;
+    const siblingLease = await request(app).post(`/api${siblingLeasePath}`)
+      .send(createSignedNodeRequest(nodeId, node.privateKey, siblingLeasePath, {})).expect(200);
+    expect(siblingLease.body).toMatchObject({ active: true, status: "claimed" });
+
+    await db.update(spsWorkspaceSources).set({ sharePath: "\\\\host.example.ts.net\\SPS_sibling_replaced" })
+      .where(eq(spsWorkspaceSources.id, siblingSource.id));
+    const staleRouteLease = await request(app).post(`/api${siblingLeasePath}`)
+      .send(createSignedNodeRequest(nodeId, node.privateKey, siblingLeasePath, {})).expect(200);
+    expect(staleRouteLease.body).toMatchObject({ active: false, status: "failed" });
+    expect(await db.select().from(spsWorkspaceSourceNodeGrants).where(eq(spsWorkspaceSourceNodeGrants.id, siblingSourceGrant.id)))
+      .toMatchObject([{ revokedAt: null }]);
+    const credentialRun = await execution.dispatchRun({ companyId: fixture.company.id, executionGrantId: siblingExecutionGrant.id, args: ["exec"] });
+    await request(app).post(`/api${claimPath}`).send(createSignedNodeRequest(nodeId, node.privateKey, claimPath, {})).expect(200);
+    await db.update(spsWorkspaceSourceNodeGrants).set({ credentialAlgorithm: "unsupported" })
+      .where(eq(spsWorkspaceSourceNodeGrants.id, siblingSourceGrant.id));
+    const credentialLeasePath = `/sps-nodes/${nodeId}/plugin-runs/${credentialRun.id}/lease`;
+    const credentialLease = await request(app).post(`/api${credentialLeasePath}`)
+      .send(createSignedNodeRequest(nodeId, node.privateKey, credentialLeasePath, {})).expect(200);
+    expect(credentialLease.body).toMatchObject({ active: false, status: "failed" });
     const eventPath = `/sps-nodes/${nodeId}/plugin-runs/${run.id}/events`;
     await request(app).post(`/api${eventPath}`).send(createSignedNodeRequest(nodeId, node.privateKey, eventPath,
       { sequence: 1, stream: "stdout", body: "must be rejected after grant revocation" })).expect(403);
@@ -1313,7 +1400,7 @@ describeEmbeddedPostgres("SPS Node routes", () => {
     await db.update(spsPluginNodeRuns).set({ createdAt: sql`${sameMillisecond + "001Z"}::timestamptz` });
     await insertRun(randomUUID(), { ...context, spsPluginConversation: { ...context.spsPluginConversation, pluginKey: "sps.other" } });
     await insertRun(randomUUID(), { ...context, taskKey: "plugin:sps.historyXtest:session:not-owned" });
-    await insertRun(randomUUID(), { ...context, spsPluginConversation: { ...context.spsPluginConversation, sessionId: "invalid" } });
+    await insertRun(randomUUID(), { ...context, spsPluginConversation: { ...context.spsPluginConversation, sessionId: "invalid" as typeof sessionId } });
     const history = spsExecutionHistoryService(db, pluginKey);
     const all = await history.list(fixture.company.id);
     expect(all.items).toHaveLength(3);
@@ -1330,14 +1417,14 @@ describeEmbeddedPostgres("SPS Node routes", () => {
     expect(again.tokens).toEqual(summary.tokens); // Read repetition never appends charges.
     const [registryPlugin] = await db.insert(plugins).values({
       pluginKey, packageName: "@sps/history-fixture", version: "0.0.1", status: "disabled",
-      manifestJson: { id: pluginKey, apiVersion: 1, version: "0.0.1", displayName: "History fixture", author: "SPS", categories: [], capabilities: [] },
+      manifestJson: { id: pluginKey, apiVersion: 1, version: "0.0.1", displayName: "History fixture", description: "History fixture", author: "SPS", categories: [], capabilities: [], entrypoints: { worker: "./worker.js" } },
     }).returning();
     const hostApp = await createApp(db, boardActor(fixture.company.id, fixture.ownerUserId, "owner", { source: "local_implicit" }));
     const historyEndpoint = `/api/companies/${fixture.company.id}/sps-executions`;
-    const hostPages = [];
-    let hostCursor;
+    const hostPages: PluginSpsExecutionPage["items"] = [];
+    let hostCursor: PluginSpsExecutionCursor | null = null;
     do {
-      const response = await request(hostApp).get(historyEndpoint).query({ pluginId: registryPlugin.id, limit: 1,
+      const response: { headers: Record<string, string | string[] | undefined>; body: PluginSpsExecutionPage } = await request(hostApp).get(historyEndpoint).query({ pluginId: registryPlugin.id, limit: 1,
         ...(hostCursor ? { beforeCreatedAt: hostCursor.createdAt, beforeRunId: hostCursor.runId, beforeLane: hostCursor.lane } : {}) }).expect(200);
       expect(response.headers["cache-control"]).toBe("no-store");
       expect(JSON.stringify(response.body)).not.toContain("secret");
@@ -1362,7 +1449,7 @@ describeEmbeddedPostgres("SPS Node routes", () => {
     expect(repeatSummary.body.tokens).toEqual(summary.tokens);
     const unrelatedPlugin = await db.insert(plugins).values({
       pluginKey: "sps.history-empty", packageName: "@sps/history-empty", version: "0.0.1",
-      manifestJson: { id: "sps.history-empty", apiVersion: 1, version: "0.0.1", displayName: "Empty fixture", author: "SPS", categories: [], capabilities: [] },
+      manifestJson: { id: "sps.history-empty", apiVersion: 1, version: "0.0.1", displayName: "Empty fixture", description: "Empty history fixture", author: "SPS", categories: [], capabilities: [], entrypoints: { worker: "./worker.js" } },
     }).returning().then(rows => rows[0]!);
     const emptySummary = await request(hostApp).get(endpoint).query({ pluginId: unrelatedPlugin.id, ...summaryWindow }).expect(200);
     expect(emptySummary.body.executionCount).toBe(0);
