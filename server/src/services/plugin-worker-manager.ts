@@ -214,12 +214,18 @@ interface PendingRequest {
   deliveryCancelled?: boolean;
   /** Removes the abort listener after the RPC actually settles. */
   removeAbortListener?: () => void;
+  onTerminal?: (reason: "response" | "worker_exit" | "not_dispatched") => void;
+  timedOut?: boolean;
 }
 
 /** Host-only authority for one Native invocation; never included in RPC payloads. */
 export interface WorkerInvocationAuthority {
   assertCurrent: () => void | Promise<void>;
   signal?: AbortSignal;
+  /** Allows an exact Host runJob invocation (scope `{}`) to use host authority fencing. */
+  allowHostInvocation?: boolean;
+  /** Fires only when the worker returns the actual RPC response or exits. A local timeout is not a terminal acknowledgement. */
+  onTerminal?: (reason: "response" | "worker_exit" | "not_dispatched") => void;
   readNativeConnectivity?: NonNullable<WorkerHostCallContext["readNativeConnectivity"]>;
 }
 
@@ -279,6 +285,7 @@ export interface PluginWorkerHandle {
     params: HostToWorkerMethods[M][0],
     timeoutMs?: number,
     authority?: WorkerInvocationAuthority,
+    terminalObserver?: (reason: "response" | "worker_exit" | "not_dispatched") => void,
   ): Promise<HostToWorkerMethods[M][1]>;
 
   /**
@@ -382,6 +389,7 @@ export interface PluginWorkerManager {
     params: HostToWorkerMethods[M][0],
     timeoutMs?: number,
     authority?: WorkerInvocationAuthority,
+    terminalObserver?: (reason: "response" | "worker_exit" | "not_dispatched") => void,
   ): Promise<HostToWorkerMethods[M][1]>;
 }
 
@@ -419,6 +427,7 @@ export function createPluginWorkerHandle(
   const pendingRequests = new Map<string | number, PendingRequest>();
   let nextRequestId = 1;
   const activeInvocations = new Map<string, ActiveInvocation>();
+  const lateTerminalAcks = new Map<string | number, { invocationId: string; onTerminal: (reason: "response" | "worker_exit" | "not_dispatched") => void }>();
   // Optional methods reported by the worker during initialization
   let supportedMethods: string[] = [];
 
@@ -514,9 +523,20 @@ export function createPluginWorkerHandle(
 
     const pending = pendingRequests.get(id);
     if (!pending) {
+      const late = lateTerminalAcks.get(id);
+      if (late) {
+        lateTerminalAcks.delete(id);
+        const entry = activeInvocations.get(late.invocationId);
+        if (entry?.timer) clearTimeout(entry.timer);
+        activeInvocations.delete(late.invocationId);
+        void Promise.resolve(late.onTerminal("response")).catch(() => undefined);
+        return;
+      }
       log.warn({ id }, "received response for unknown request id");
       return;
     }
+
+    if (pending.onTerminal) void Promise.resolve(pending.onTerminal("response")).catch(() => undefined);
 
     const invocation = pending.invocationId ? activeInvocations.get(pending.invocationId) : undefined;
     if (pending.deliveryCancelled) {
@@ -1022,6 +1042,7 @@ export function createPluginWorkerHandle(
   function rejectAllPending(error: Error): void {
     for (const [id, pending] of pendingRequests) {
       clearTimeout(pending.timer);
+      if (pending.onTerminal) void Promise.resolve(pending.onTerminal("worker_exit")).catch(() => undefined);
       pending.resolve(
         createErrorResponse(
           pending.id,
@@ -1031,6 +1052,13 @@ export function createPluginWorkerHandle(
       );
     }
     pendingRequests.clear();
+    for (const [id, late] of lateTerminalAcks) {
+      const entry = activeInvocations.get(late.invocationId);
+      if (entry?.timer) clearTimeout(entry.timer);
+      activeInvocations.delete(late.invocationId);
+      void Promise.resolve(late.onTerminal("worker_exit")).catch(() => undefined);
+      lateTerminalAcks.delete(id);
+    }
     for (const invocation of activeInvocations.values()) {
       if (invocation.timer) clearTimeout(invocation.timer);
     }
@@ -1322,25 +1350,34 @@ export function createPluginWorkerHandle(
     params: HostToWorkerMethods[M][0],
     timeoutMs?: number,
     authority?: WorkerInvocationAuthority,
+    terminalObserver?: (reason: "response" | "worker_exit" | "not_dispatched") => void,
   ): Promise<HostToWorkerMethods[M][1]> {
     const invocationScope = deriveInvocationScope(method, params);
     if (authority) {
-      if (!invocationScope?.companyId) return Promise.reject(invocationDenied());
-      if (authority.signal?.aborted) return Promise.reject(invocationDenied());
+      if (!invocationScope || (!invocationScope.companyId && !authority.allowHostInvocation)) {
+        void Promise.resolve((authority.onTerminal ?? terminalObserver)?.("not_dispatched")).catch(() => undefined);
+        return Promise.reject(invocationDenied());
+      }
+      if (authority.signal?.aborted) {
+        void Promise.resolve((authority.onTerminal ?? terminalObserver)?.("not_dispatched")).catch(() => undefined);
+        return Promise.reject(invocationDenied());
+      }
       return (async () => {
         try {
           await assertAuthorityCurrent(authority);
         } catch {
+          void Promise.resolve((authority.onTerminal ?? terminalObserver)?.("not_dispatched")).catch(() => undefined);
           throw invocationDenied();
         }
         if (authority.signal?.aborted || !childProcess?.stdin?.writable ||
           (status !== "running" && status !== "starting")) {
+          void Promise.resolve((authority.onTerminal ?? terminalObserver)?.("not_dispatched")).catch(() => undefined);
           throw invocationDenied();
         }
-        return dispatchCall(method, params, timeoutMs, authority, invocationScope);
+        return dispatchCall(method, params, timeoutMs, authority, invocationScope, terminalObserver);
       })();
     }
-    return dispatchCall(method, params, timeoutMs, undefined, invocationScope);
+    return dispatchCall(method, params, timeoutMs, undefined, invocationScope, terminalObserver);
   }
 
   function dispatchCall<M extends HostToWorkerMethodName>(
@@ -1349,9 +1386,11 @@ export function createPluginWorkerHandle(
     timeoutMs: number | undefined,
     authority: WorkerInvocationAuthority | undefined,
     invocationScope: PluginInvocationScope | null,
+    terminalObserver?: (reason: "response" | "worker_exit" | "not_dispatched") => void,
   ): Promise<HostToWorkerMethods[M][1]> {
     const rpcPromise = new Promise<HostToWorkerMethods[M][1]>((resolve, reject) => {
       if (!childProcess?.stdin?.writable) {
+        void Promise.resolve((authority?.onTerminal ?? terminalObserver)?.("not_dispatched")).catch(() => undefined);
         reject(
           new Error(
             `Cannot call "${method}" — worker for "${pluginId}" is not running`,
@@ -1377,11 +1416,18 @@ export function createPluginWorkerHandle(
         clearTimeout(timer);
         pendingRequests.delete(id);
         pending.removeAbortListener?.();
-        clearInvocation(invocation);
+        if (pending.timedOut && pending.onTerminal && invocation?.id) {
+          const active = activeInvocations.get(invocation.id);
+          if (active) active.invalidated = true;
+          lateTerminalAcks.set(id, { invocationId: invocation.id, onTerminal: pending.onTerminal });
+        } else {
+          clearInvocation(invocation);
+        }
         fn(value);
       };
 
       const timer = setTimeout(() => {
+        pending.timedOut = true;
         settle(
           reject,
           new JsonRpcCallError({
@@ -1406,6 +1452,7 @@ export function createPluginWorkerHandle(
         timer,
         sentAt: Date.now(),
         invocationId: invocation?.id,
+        onTerminal: authority?.onTerminal ?? terminalObserver,
       };
 
       if (authority?.signal) {
@@ -1424,6 +1471,7 @@ export function createPluginWorkerHandle(
           clearTimeout(timer);
           clearInvocation(invocation);
           pendingRequests.delete(id);
+          void Promise.resolve((authority.onTerminal ?? terminalObserver)?.("not_dispatched")).catch(() => undefined);
           reject(invocationDenied());
           return;
         }
@@ -1442,6 +1490,7 @@ export function createPluginWorkerHandle(
         pendingRequests.delete(id);
         pending.removeAbortListener?.();
         clearInvocation(invocation);
+        void Promise.resolve((authority?.onTerminal ?? terminalObserver)?.("not_dispatched")).catch(() => undefined);
         reject(
           new Error(
             `Failed to send "${method}" to worker: ${
@@ -1497,15 +1546,17 @@ export function createPluginWorkerHandle(
       params: HostToWorkerMethods[M][0],
       timeoutMs?: number,
       authority?: WorkerInvocationAuthority,
+      terminalObserver?: (reason: "response" | "worker_exit" | "not_dispatched") => void,
     ): Promise<HostToWorkerMethods[M][1]> {
       if (status !== "running" && status !== "starting") {
+        void Promise.resolve(authority?.onTerminal?.("not_dispatched")).catch(() => undefined);
         return Promise.reject(
           new Error(
             `Cannot call "${method}" — worker for "${pluginId}" is ${status}`,
           ),
         );
       }
-      return callInternal(method, params, timeoutMs, authority);
+      return callInternal(method, params, timeoutMs, authority, terminalObserver);
     },
 
     notify(method: string, params: unknown) {
@@ -1785,14 +1836,16 @@ export function createPluginWorkerManager(
       params: HostToWorkerMethods[M][0],
       timeoutMs?: number,
       authority?: WorkerInvocationAuthority,
+      terminalObserver?: (reason: "response" | "worker_exit" | "not_dispatched") => void,
     ): Promise<HostToWorkerMethods[M][1]> {
       const handle = workers.get(pluginId);
       if (!handle) {
+        void Promise.resolve(terminalObserver?.("not_dispatched")).catch(() => undefined);
         return Promise.reject(
           new Error(`No worker registered for plugin "${pluginId}"`),
         );
       }
-      return handle.call(method, params, timeoutMs, authority);
+      return handle.call(method, params, timeoutMs, authority, terminalObserver);
     },
   };
 }

@@ -21,6 +21,7 @@ import { badRequest, forbidden, notFound } from "../errors.js";
 import { hasSpsSessionCancellation, } from "../services/sps-agent-session-runs.js";
 import { createSpsNodeUsageReceipt } from "../services/sps-node-usage.js";
 import { normalizeSpsPluginExecutionTimeout } from "../services/sps-execution-timeout.js";
+import { assertSpsWorkspaceExecutionActive, lockSpsWorkspaceExecutionControl, withSpsWorkspaceExecutionAdmission } from "../services/sps-workspace-execution-control.js";
 import { heartbeatService } from "../compat/paperclip/control-plane.js";
 
 type Node = typeof spsNodes.$inferSelect;
@@ -69,6 +70,9 @@ export function createSpsNodeOperations(dbInput: NodeDatabase, { effectDb = dbIn
       return await (dbInput as Db).transaction(tx => work(tx as NodeDatabase));
     }
     return await work(dbInput);
+  }
+  async function withWorkspaceExecutionAdmission<T>(companyId: string, action: (tx: NodeDatabase, epoch: string) => Promise<T>): Promise<T> {
+    return withSpsWorkspaceExecutionAdmission(dbInput as Db, companyId, async (tx, epoch) => action(tx as NodeDatabase, epoch));
   }
   async function getNode(nodeId: string) {
     const node = await db.select().from(spsNodes).where(eq(spsNodes.id, nodeId)).then(rows => rows[0] ?? null);
@@ -317,48 +321,57 @@ export function createSpsNodeOperations(dbInput: NodeDatabase, { effectDb = dbIn
     }
     if (input.operation === "claim-command") {
       if (node.status !== "active" || !node.keyVerifiedAt) throw forbidden("This SPS Node is not approved for command execution");
+      return await withWorkspaceExecutionAdmission(node.companyId, async (tx, workspaceExecutionEpoch) => {
       const now = new Date(), staleBefore = new Date(now.getTime() - 10 * 60 * 1000);
       if (context.requeueStaleClaims !== false) {
         context.assertCurrent?.();
-        await db.update(spsNodeCommands).set({ status: "queued", claimedAt: null, startedAt: null, updatedAt: now }).where(and(
+        await tx.update(spsNodeCommands).set({ status: "queued", claimedAt: null, startedAt: null, updatedAt: now }).where(and(
           eq(spsNodeCommands.nodeId, node.id), eq(spsNodeCommands.status, "claimed"), lt(spsNodeCommands.updatedAt, staleBefore)));
       }
       while (true) {
         context.assertCurrent?.();
-        const candidate = await db.select().from(spsNodeCommands).where(and(eq(spsNodeCommands.nodeId, node.id), eq(spsNodeCommands.status, "queued")))
+        const candidate = await tx.select().from(spsNodeCommands).where(and(eq(spsNodeCommands.nodeId, node.id), eq(spsNodeCommands.status, "queued")))
           .orderBy(spsNodeCommands.createdAt).limit(1).then(rows => rows[0] ?? null);
         context.assertCurrent?.();
         if (!candidate) return { status: 204, data: null };
+        if (candidate.workspaceExecutionEpoch !== workspaceExecutionEpoch) {
+          await tx.update(spsNodeCommands).set({ status: "failed", error: "Workspace execution generation changed before command claim.", finishedAt: now, updatedAt: now })
+            .where(and(eq(spsNodeCommands.id, candidate.id), eq(spsNodeCommands.status, "queued")));
+          continue;
+        }
         if (!await commandHasCurrentAuthority(node, candidate)) {
           context.assertCurrent?.();
-          await db.update(spsNodeCommands).set({ status: "failed", error: "SPS Node access was revoked or reassigned before this command was claimed.", finishedAt: now, updatedAt: now })
+          await tx.update(spsNodeCommands).set({ status: "failed", error: "SPS Node access was revoked or reassigned before this command was claimed.", finishedAt: now, updatedAt: now })
             .where(and(eq(spsNodeCommands.id, candidate.id), eq(spsNodeCommands.status, "queued")));
           continue;
         }
         if (!await commandRunnerCanStart(candidate)) {
           context.assertCurrent?.();
-          await db.update(spsNodeCommands).set({ status: "failed", error: "The selected SPS Node Runner Profile is unavailable, requires a local sign-in, or no longer exists.", finishedAt: now, updatedAt: now })
+          await tx.update(spsNodeCommands).set({ status: "failed", error: "The selected SPS Node Runner Profile is unavailable, requires a local sign-in, or no longer exists.", finishedAt: now, updatedAt: now })
             .where(and(eq(spsNodeCommands.id, candidate.id), eq(spsNodeCommands.status, "queued")));
           continue;
         }
         const agent = await getAgent(candidate.agentId), runtimeKind = agent ? spsNodeCapabilityForAdapter(agent.adapterType) : null;
         if (!agent || agent.companyId !== node.companyId || !runtimeKind) {
           context.assertCurrent?.();
-          await db.update(spsNodeCommands).set({ status: "failed", error: "SPS Node command could not be matched to an approved Agent runtime.", finishedAt: now, updatedAt: now })
+          await tx.update(spsNodeCommands).set({ status: "failed", error: "SPS Node command could not be matched to an approved Agent runtime.", finishedAt: now, updatedAt: now })
             .where(and(eq(spsNodeCommands.id, candidate.id), eq(spsNodeCommands.status, "queued")));
           continue;
         }
         context.assertCurrent?.();
-        const claimed = await db.update(spsNodeCommands).set({ status: "claimed", claimedAt: now, startedAt: now, updatedAt: now })
+        const claimed = await tx.update(spsNodeCommands).set({ status: "claimed", claimedAt: now, startedAt: now, updatedAt: now })
           .where(and(eq(spsNodeCommands.id, candidate.id), eq(spsNodeCommands.status, "queued"))).returning().then(rows => rows[0] ?? null);
         if (claimed) return { status: 200, data: { ...claimed, runtimeKind } };
       }
+      });
     }
     if (input.operation === "command-lease") {
       const commandId = input.resourceId!;
       const command = await db.select().from(spsNodeCommands).where(and(eq(spsNodeCommands.id, commandId), eq(spsNodeCommands.nodeId, node.id))).then(rows => rows[0] ?? null);
       if (!command) throw notFound("SPS Node command not found");
       if (command.status !== "claimed" && command.status !== "running") return { status: 200, data: { active: false, status: command.status, error: command.error ?? null } };
+      try { await assertSpsWorkspaceExecutionActive(db, node.companyId, command.workspaceExecutionEpoch); }
+      catch { return { status: 200, data: { active: false, status: "cancelled", error: "Workspace execution was stopped" } }; }
       const parent = command.heartbeatRunId ? await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, command.heartbeatRunId)).then(rows => rows[0] ?? null) : null;
       if (command.heartbeatRunId && (!parent || !["queued", "running"].includes(parent.status) || hasSpsSessionCancellation(parent))) return { status: 200, data: { active: false, status: "cancelling", error: "Agent session cancellation requested" } };
       if (!await commandHasCurrentAuthority(node, command)) {
@@ -371,6 +384,7 @@ export function createSpsNodeOperations(dbInput: NodeDatabase, { effectDb = dbIn
       const event = spsNodeCommandEventSchema.parse(body), commandId = input.resourceId!;
       const command = await db.select().from(spsNodeCommands).where(and(eq(spsNodeCommands.id, commandId), eq(spsNodeCommands.nodeId, node.id))).then(rows => rows[0] ?? null);
       if (!command) throw notFound("SPS Node command not found");
+      await assertSpsWorkspaceExecutionActive(db, node.companyId, command.workspaceExecutionEpoch);
       if (command.status !== "claimed" && command.status !== "running") throw forbidden("SPS Node command is not accepting output");
       if (!await commandHasCurrentAuthority(node, command)) {
         await failActiveNodeCommand({ commandId: command.id, reason: "SPS Node access was revoked or reassigned while this command was running." });
@@ -379,6 +393,8 @@ export function createSpsNodeOperations(dbInput: NodeDatabase, { effectDb = dbIn
       if (event.sequence !== command.lastEventSeq + 1) throw badRequest("SPS Node command output sequence is out of order");
       const now = new Date();
       await transaction(async tx => {
+        await lockSpsWorkspaceExecutionControl(tx, node.companyId);
+        await assertSpsWorkspaceExecutionActive(tx, node.companyId, command.workspaceExecutionEpoch);
         const accepted = await tx.update(spsNodeCommands).set({ status: "running", lastEventSeq: event.sequence, updatedAt: now })
           .where(and(eq(spsNodeCommands.id, command.id), inArray(spsNodeCommands.status, ["claimed", "running"]), eq(spsNodeCommands.lastEventSeq, event.sequence - 1))).returning({ id: spsNodeCommands.id });
         if (!accepted.length) throw forbidden("SPS Node command stopped accepting output");
@@ -390,28 +406,45 @@ export function createSpsNodeOperations(dbInput: NodeDatabase, { effectDb = dbIn
       const completion = spsNodeCommandCompleteSchema.parse(body), commandId = input.resourceId!;
       const command = await db.select().from(spsNodeCommands).where(and(eq(spsNodeCommands.id, commandId), eq(spsNodeCommands.nodeId, node.id))).then(rows => rows[0] ?? null);
       if (!command) throw notFound("SPS Node command not found");
-      if (command.status === "succeeded" || command.status === "failed") return { status: 200, data: command };
-      if (command.status !== "claimed" && command.status !== "running") throw forbidden("SPS Node command is not active");
-      if (!await commandHasCurrentAuthority(node, command)) {
+      if (["succeeded", "failed", "cancelled"].includes(command.status)) return { status: 200, data: command };
+      if (command.status !== "claimed" && command.status !== "running" && command.status !== "cancelling") throw forbidden("SPS Node command is not active");
+      if (command.status !== "cancelling" && !await commandHasCurrentAuthority(node, command)) {
         await failActiveNodeCommand({ commandId: command.id, reason: "SPS Node access was revoked or reassigned while this command was running." });
         const failed = await db.select().from(spsNodeCommands).where(eq(spsNodeCommands.id, command.id)).then(rows => rows[0]!);
         return { status: 200, data: failed };
       }
       const { updated, cancelled } = await transaction(async tx => {
+        const control = await lockSpsWorkspaceExecutionControl(tx, node.companyId);
+        const commandEpoch = BigInt(command.workspaceExecutionEpoch ?? "0"), currentEpoch = BigInt(control.epoch);
+        if (commandEpoch > currentEpoch) throw forbidden("SPS Node command generation is invalid");
+        const cancellationRequested = command.status === "cancelling" || commandEpoch < currentEpoch || control.state === "stopped";
+        if (!cancellationRequested) await assertSpsWorkspaceExecutionActive(tx, node.companyId, command.workspaceExecutionEpoch);
         const parent = command.heartbeatRunId ? await tx.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, command.heartbeatRunId)).for("update").then(rows => rows[0]) : null;
-        const updated = await tx.update(spsNodeCommands).set({ status: completion.status, exitCode: completion.exitCode,
-          signal: completion.signal ?? null, timedOut: completion.timedOut ? 1 : 0, error: completion.error ?? null,
+        const updated = await tx.update(spsNodeCommands).set({ status: cancellationRequested ? "cancelled" : completion.status, exitCode: completion.exitCode,
+          signal: completion.signal ?? null, timedOut: completion.timedOut ? 1 : 0, error: cancellationRequested ? command.error ?? "Workspace execution was stopped." : completion.error ?? null,
           finishedAt: new Date(), updatedAt: new Date() }).where(and(eq(spsNodeCommands.id, command.id),
-          inArray(spsNodeCommands.status, ["claimed", "running"]))).returning().then(rows => rows[0] ?? null);
+          inArray(spsNodeCommands.status, ["claimed", "running", "cancelling"]))).returning().then(rows => rows[0] ?? null);
         if (!updated) return { updated: command, cancelled: false };
         if (!parent) return { updated, cancelled: false };
-        const receipts = { ...(parent.contextSnapshot?.spsNodeCompletionReceipts as Record<string, unknown> | undefined), [command.id]: true };
-        await tx.update(heartbeatRuns).set({ contextSnapshot: { ...parent.contextSnapshot, spsNodeCompletionReceipts: receipts } }).where(eq(heartbeatRuns.id, parent.id));
-        if (!hasSpsSessionCancellation(parent)) return { updated, cancelled: false };
-        const others = await tx.select({ id: spsNodeCommands.id }).from(spsNodeCommands).where(and(eq(spsNodeCommands.heartbeatRunId, parent.id), inArray(spsNodeCommands.status, ["claimed", "running"]))).limit(1);
-        if (others.length) return { updated, cancelled: false };
-        await tx.update(heartbeatRuns).set({ contextSnapshot: sql`coalesce(${heartbeatRuns.contextSnapshot}, '{}'::jsonb) || '{"spsSessionCancellationTermination":"confirmed"}'::jsonb` }).where(eq(heartbeatRuns.id, parent.id));
-        return { updated, cancelled: true };
+        const cancellationRequestedForParent = cancellationRequested || hasSpsSessionCancellation(parent);
+        const parentContext = cancellationRequestedForParent && !hasSpsSessionCancellation(parent)
+          ? { ...parent.contextSnapshot, spsSessionCancellationRequested: true,
+              spsSessionCancellationTermination: "pending", spsSessionCancellationWasQueued: parent.status === "queued" }
+          : parent.contextSnapshot;
+        const receipts = { ...(parentContext?.spsNodeCompletionReceipts as Record<string, unknown> | undefined), [command.id]: true };
+        let terminationConfirmed = false;
+        if (cancellationRequestedForParent) {
+          const others = await tx.select({ id: spsNodeCommands.id }).from(spsNodeCommands).where(and(
+            eq(spsNodeCommands.heartbeatRunId, parent.id), inArray(spsNodeCommands.status, ["claimed", "running", "cancelling"]),
+          )).limit(1);
+          terminationConfirmed = others.length === 0;
+        }
+        await tx.update(heartbeatRuns).set({ contextSnapshot: {
+          ...parentContext,
+          spsNodeCompletionReceipts: receipts,
+          ...(terminationConfirmed ? { spsSessionCancellationTermination: "confirmed" } : {}),
+        } }).where(eq(heartbeatRuns.id, parent.id));
+        return { updated, cancelled: terminationConfirmed };
       });
       if (cancelled && command.heartbeatRunId) {
         const effect = () => heartbeatService(effectDb).cancelRun(command.heartbeatRunId!);
@@ -422,44 +455,53 @@ export function createSpsNodeOperations(dbInput: NodeDatabase, { effectDb = dbIn
     }
     if (input.operation === "claim-plugin-run") {
       if (node.status !== "active" || !node.keyVerifiedAt) throw forbidden("This SPS Node is not approved for plugin execution");
+      return await withWorkspaceExecutionAdmission(node.companyId, async (tx, workspaceExecutionEpoch) => {
       const now = new Date();
       while (true) {
         context.assertCurrent?.();
-        const candidate = await db.select().from(spsPluginNodeRuns).where(and(eq(spsPluginNodeRuns.nodeId, node.id), eq(spsPluginNodeRuns.status, "queued")))
+        const candidate = await tx.select().from(spsPluginNodeRuns).where(and(eq(spsPluginNodeRuns.nodeId, node.id), eq(spsPluginNodeRuns.status, "queued")))
           .orderBy(spsPluginNodeRuns.createdAt).limit(1).then(rows => rows[0] ?? null);
         context.assertCurrent?.();
         if (!candidate) return { status: 204, data: null };
+        if (candidate.workspaceExecutionEpoch !== workspaceExecutionEpoch) {
+          await tx.update(spsPluginNodeRuns).set({ status: "cancelled", error: "Workspace execution generation changed before plugin claim.", finishedAt: now, updatedAt: now })
+            .where(and(eq(spsPluginNodeRuns.id, candidate.id), eq(spsPluginNodeRuns.status, "queued")));
+          continue;
+        }
         let timeoutMs: number | null;
         try { timeoutMs = normalizeSpsPluginExecutionTimeout(candidate.timeoutMs); }
         catch {
           context.assertCurrent?.();
-          await db.update(spsPluginNodeRuns).set({ status: "failed", error: "Invalid SPS plugin execution timeout.", finishedAt: now, updatedAt: now }).where(and(eq(spsPluginNodeRuns.id, candidate.id), eq(spsPluginNodeRuns.status, "queued")));
+          await tx.update(spsPluginNodeRuns).set({ status: "failed", error: "Invalid SPS plugin execution timeout.", finishedAt: now, updatedAt: now }).where(and(eq(spsPluginNodeRuns.id, candidate.id), eq(spsPluginNodeRuns.status, "queued")));
           continue;
         }
         if (!await pluginRunHasCurrentAuthority(node, candidate)) {
           context.assertCurrent?.();
-          await db.update(spsPluginNodeRuns).set({ status: "failed", error: "SPS plugin execution access was revoked or changed before this run was claimed.", finishedAt: now, updatedAt: now }).where(and(eq(spsPluginNodeRuns.id, candidate.id), eq(spsPluginNodeRuns.status, "queued")));
+          await tx.update(spsPluginNodeRuns).set({ status: "failed", error: "SPS plugin execution access was revoked or changed before this run was claimed.", finishedAt: now, updatedAt: now }).where(and(eq(spsPluginNodeRuns.id, candidate.id), eq(spsPluginNodeRuns.status, "queued")));
           continue;
         }
         if (!await pluginRunRunnerCanStart(candidate)) {
-          await db.update(spsPluginNodeRuns).set({ status: "failed", error: "The selected SPS Node Runner Profile is unavailable, requires a local sign-in, or no longer supports direct execution.", finishedAt: now, updatedAt: now }).where(and(eq(spsPluginNodeRuns.id, candidate.id), eq(spsPluginNodeRuns.status, "queued")));
+          await tx.update(spsPluginNodeRuns).set({ status: "failed", error: "The selected SPS Node Runner Profile is unavailable, requires a local sign-in, or no longer supports direct execution.", finishedAt: now, updatedAt: now }).where(and(eq(spsPluginNodeRuns.id, candidate.id), eq(spsPluginNodeRuns.status, "queued")));
           continue;
         }
         const runner = await db.select({ kind: spsNodeRunnerProfiles.kind }).from(spsNodeRunnerProfiles).where(eq(spsNodeRunnerProfiles.id, candidate.runnerProfileId)).then(rows => rows[0] ?? null);
         const runtime = spsNodeExecutableRuntimeKindSchema.safeParse(runner?.kind);
         if (!runtime.success) {
-          await db.update(spsPluginNodeRuns).set({ status: "failed", error: "The selected SPS Node Runner Profile does not support direct SPS CLI execution.", finishedAt: now, updatedAt: now }).where(and(eq(spsPluginNodeRuns.id, candidate.id), eq(spsPluginNodeRuns.status, "queued")));
+          await tx.update(spsPluginNodeRuns).set({ status: "failed", error: "The selected SPS Node Runner Profile does not support direct SPS CLI execution.", finishedAt: now, updatedAt: now }).where(and(eq(spsPluginNodeRuns.id, candidate.id), eq(spsPluginNodeRuns.status, "queued")));
           continue;
         }
-        const claimed = await db.update(spsPluginNodeRuns).set({ status: "claimed", claimedAt: now, startedAt: now, updatedAt: now, timeoutMs })
+        const claimed = await tx.update(spsPluginNodeRuns).set({ status: "claimed", claimedAt: now, startedAt: now, updatedAt: now, timeoutMs })
           .where(and(eq(spsPluginNodeRuns.id, candidate.id), eq(spsPluginNodeRuns.status, "queued"))).returning().then(rows => rows[0] ?? null);
         if (claimed) return { status: 200, data: { ...claimed, runtimeKind: runtime.data } };
       }
+      });
     }
     if (input.operation === "plugin-lease") {
       const run = await db.select().from(spsPluginNodeRuns).where(and(eq(spsPluginNodeRuns.id, input.resourceId!), eq(spsPluginNodeRuns.nodeId, node.id))).then(rows => rows[0] ?? null);
       if (!run) throw notFound("SPS plugin run not found");
       if (run.status !== "claimed" && run.status !== "running") return { status: 200, data: { active: false, status: run.status, error: run.error ?? null } };
+      try { await assertSpsWorkspaceExecutionActive(db, node.companyId, run.workspaceExecutionEpoch); }
+      catch { return { status: 200, data: { active: false, status: "cancelled", error: "Workspace execution was stopped" } }; }
       if (!await pluginRunHasCurrentAuthority(node, run)) {
         const reason = "SPS plugin execution access was revoked or changed while this run was active.";
         await failActivePluginRun({ runId: run.id, reason });
@@ -471,6 +513,7 @@ export function createSpsNodeOperations(dbInput: NodeDatabase, { effectDb = dbIn
       const event = spsNodeCommandEventSchema.parse(body);
       const run = await db.select().from(spsPluginNodeRuns).where(and(eq(spsPluginNodeRuns.id, input.resourceId!), eq(spsPluginNodeRuns.nodeId, node.id))).then(rows => rows[0] ?? null);
       if (!run) throw notFound("SPS plugin run not found");
+      await assertSpsWorkspaceExecutionActive(db, node.companyId, run.workspaceExecutionEpoch);
       if (run.status !== "claimed" && run.status !== "running") throw forbidden("SPS plugin run is not accepting output");
       if (!await pluginRunHasCurrentAuthority(node, run)) {
         const reason = "SPS plugin execution access was revoked or changed while this run was active.";
@@ -480,6 +523,8 @@ export function createSpsNodeOperations(dbInput: NodeDatabase, { effectDb = dbIn
       if (event.sequence !== run.lastEventSeq + 1) throw badRequest("SPS plugin run output sequence is out of order");
       const now = new Date();
       await transaction(async tx => {
+        await lockSpsWorkspaceExecutionControl(tx, node.companyId);
+        await assertSpsWorkspaceExecutionActive(tx, node.companyId, run.workspaceExecutionEpoch);
         const accepted = await tx.update(spsPluginNodeRuns).set({ status: "running", lastEventSeq: event.sequence, updatedAt: now })
           .where(and(eq(spsPluginNodeRuns.id, run.id), inArray(spsPluginNodeRuns.status, ["claimed", "running"]), eq(spsPluginNodeRuns.lastEventSeq, event.sequence - 1)))
           .returning({ id: spsPluginNodeRuns.id });
@@ -507,13 +552,20 @@ export function createSpsNodeOperations(dbInput: NodeDatabase, { effectDb = dbIn
         try { usageJson = createSpsNodeUsageReceipt(run, completion.usageReport); }
         catch { throw badRequest("SPS usage report does not match this execution"); }
       }
-      const updated = await db.update(spsPluginNodeRuns).set({
-        status: sql`case when ${spsPluginNodeRuns.status} = 'cancelling' then 'cancelled' else ${completion.status} end`,
-        exitCode: completion.exitCode, signal: completion.signal ?? null, timedOut: completion.timedOut ? 1 : 0,
-        error: sql`case when ${spsPluginNodeRuns.status} = 'cancelling' then ${spsPluginNodeRuns.error} else ${completion.error ?? null} end`,
-        usageJson, finishedAt: new Date(), updatedAt: new Date(),
-      }).where(and(eq(spsPluginNodeRuns.id, run.id), inArray(spsPluginNodeRuns.status, ["claimed", "running", "cancelling"])))
-        .returning().then(rows => rows[0] ?? null);
+      const updated = await transaction(async tx => {
+        const control = await lockSpsWorkspaceExecutionControl(tx, node.companyId);
+        const runEpoch = BigInt(run.workspaceExecutionEpoch ?? "0"), currentEpoch = BigInt(control.epoch);
+        if (runEpoch > currentEpoch) throw forbidden("SPS plugin run generation is invalid");
+        const cancellationRequested = run.status === "cancelling" || runEpoch < currentEpoch || control.state === "stopped";
+        if (!cancellationRequested) await assertSpsWorkspaceExecutionActive(tx, node.companyId, run.workspaceExecutionEpoch);
+        return tx.update(spsPluginNodeRuns).set({
+          status: cancellationRequested ? "cancelled" : completion.status,
+          exitCode: completion.exitCode, signal: completion.signal ?? null, timedOut: completion.timedOut ? 1 : 0,
+          error: cancellationRequested ? run.error ?? "Workspace execution was stopped." : completion.error ?? null,
+          usageJson, finishedAt: new Date(), updatedAt: new Date(),
+        }).where(and(eq(spsPluginNodeRuns.id, run.id), inArray(spsPluginNodeRuns.status, ["claimed", "running", "cancelling"])))
+          .returning().then(rows => rows[0] ?? null);
+      });
       return { status: 200, data: updated ?? await db.select().from(spsPluginNodeRuns).where(eq(spsPluginNodeRuns.id, run.id)).then(rows => rows[0]) };
     }
     throw badRequest("Unknown SPS Node operation");

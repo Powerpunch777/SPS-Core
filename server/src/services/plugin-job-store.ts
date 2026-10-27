@@ -30,7 +30,7 @@
  * @see PLUGIN_SPEC.md §21.3 — `plugin_jobs` / `plugin_job_runs` tables
  */
 
-import { and, desc, eq, isNull, or } from "drizzle-orm";
+import { and, desc, eq, isNull, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { plugins, pluginJobs, pluginJobRuns } from "@paperclipai/db";
 import type {
@@ -40,6 +40,7 @@ import type {
   PluginJobRecord,
 } from "@paperclipai/shared";
 import { notFound } from "../errors.js";
+import type { SpsWorkspaceExecutionDb } from "./sps-workspace-execution-control.js";
 
 /**
  * The statuses used for job *definitions* in the `plugin_jobs` table.
@@ -64,6 +65,7 @@ export interface CreateJobRunInput {
   trigger: PluginJobRunTrigger;
   /** Company/workspace scope. Host jobs must pass null. */
   companyId?: string | null;
+  workspaceExecutionEpoch?: string;
 }
 
 /**
@@ -359,13 +361,15 @@ export function pluginJobStore(db: Db) {
      */
     async createRun(
       input: CreateJobRunInput,
+      executor: SpsWorkspaceExecutionDb = db,
     ): Promise<typeof pluginJobRuns.$inferSelect> {
-      const rows = await db
+      const rows = await executor
         .insert(pluginJobRuns)
         .values({
           jobId: input.jobId,
           pluginId: input.pluginId,
           companyId: input.companyId ?? null,
+          workspaceExecutionEpoch: input.companyId ? input.workspaceExecutionEpoch ?? "0" : "0",
           trigger: input.trigger,
           status: "queued",
         })
@@ -379,17 +383,19 @@ export function pluginJobStore(db: Db) {
      *
      * @param runId - UUID of the run row
      */
-    async markRunning(runId: string): Promise<boolean> {
+    async markRunning(runId: string, options: { executor?: SpsWorkspaceExecutionDb; companyId?: string | null; epoch?: string } = {}): Promise<boolean> {
       // A cancellation is state-level/best-effort because worker RPC does not
       // expose cooperative cancellation. Conditional transitions ensure a
       // late worker completion can never resurrect a cancelled run.
-      const rows = await db
+      const rows = await (options.executor ?? db)
         .update(pluginJobRuns)
         .set({
           status: "running" as PluginJobRunStatus,
           startedAt: new Date(),
         })
-        .where(and(eq(pluginJobRuns.id, runId), eq(pluginJobRuns.status, "queued")))
+        .where(and(eq(pluginJobRuns.id, runId), eq(pluginJobRuns.status, "queued"),
+          options.companyId ? eq(pluginJobRuns.companyId, options.companyId) : undefined,
+          options.epoch !== undefined ? eq(pluginJobRuns.workspaceExecutionEpoch, options.epoch) : undefined))
         .returning({ id: pluginJobRuns.id });
       return rows.length > 0;
     },
@@ -421,34 +427,42 @@ export function pluginJobStore(db: Db) {
       return rows.length > 0;
     },
 
-    /** Cancel a queued/running run. This is idempotent and does not stop an
-     * already executing worker RPC; its later result is ignored. */
+    /** Requests cancellation; active work remains nonterminal until worker acknowledgement. */
     async cancelRun(runId: string, reason: string): Promise<boolean> {
-      const rows = await db
+      const now = new Date();
+      const queued = await db
         .update(pluginJobRuns)
-        .set({ status: "cancelled", error: reason, finishedAt: new Date() })
-        .where(and(
-          eq(pluginJobRuns.id, runId),
-          or(
-            eq(pluginJobRuns.status, "queued"),
-            eq(pluginJobRuns.status, "running"),
-          ),
-        ))
+        .set({ status: "cancelled", error: reason, cancellationRequestedAt: now, finishedAt: now })
+        .where(and(eq(pluginJobRuns.id, runId), or(eq(pluginJobRuns.status, "pending"), eq(pluginJobRuns.status, "queued"))))
         .returning({ id: pluginJobRuns.id });
+      if (queued.length) return true;
+      const active = await db.update(pluginJobRuns).set({ status: "cancelling", error: reason, cancellationRequestedAt: now })
+        .where(and(eq(pluginJobRuns.id, runId), eq(pluginJobRuns.status, "running"))).returning({ id: pluginJobRuns.id });
+      return active.length > 0;
+    },
+
+    async acknowledgeCancellation(runId: string): Promise<boolean> {
+      const now = new Date();
+      const rows = await db.update(pluginJobRuns).set({ status: "cancelled", finishedAt: now })
+        .where(and(eq(pluginJobRuns.id, runId), eq(pluginJobRuns.status, "cancelling"),
+          sql`${pluginJobRuns.cancellationRequestedAt} is not null`)).returning({ id: pluginJobRuns.id });
       return rows.length > 0;
     },
 
-    /** Cancel stale queued/running runs left by a process restart. */
+    /** Cancel queued stale rows; preserve running rows as cancelling until a worker-exit/response ACK. */
     async recoverStaleRuns(reason: string): Promise<number> {
-      const rows = await db
+      const queued = await db
         .update(pluginJobRuns)
-        .set({ status: "cancelled", error: reason, finishedAt: new Date() })
+        .set({ status: "cancelled", error: reason, cancellationRequestedAt: new Date(), finishedAt: new Date() })
         .where(or(
+          eq(pluginJobRuns.status, "pending"),
           eq(pluginJobRuns.status, "queued"),
-          eq(pluginJobRuns.status, "running"),
         ))
         .returning({ id: pluginJobRuns.id });
-      return rows.length;
+      const active = await db.update(pluginJobRuns)
+        .set({ status: "cancelling", error: reason, cancellationRequestedAt: new Date() })
+        .where(eq(pluginJobRuns.status, "running")).returning({ id: pluginJobRuns.id });
+      return queued.length + active.length;
     },
 
     async listRunsByJob(

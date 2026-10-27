@@ -52,8 +52,7 @@ describe("embedded Postgres test cleanup", () => {
     const stdout = { destroyed: false };
     const stderr = { destroyed: false };
     Object.assign(value.child, { exitCode: 0, stdio: [null, stdout, stderr] });
-    const pgCtlChild = new EventEmitter();
-    Object.assign(pgCtlChild, { stdout: new EventEmitter(), stderr: new EventEmitter() });
+    const pgCtlChild = Object.assign(new EventEmitter(), { stdout: new EventEmitter(), stderr: new EventEmitter() });
     const spawnPgCtl = vi.fn((command: string, args: readonly string[]) => {
       expect(command).toBe("pg_ctl-fixture");
       expect(args).toEqual(["-D", value.dataDir, "-m", "fast", "-w", "-t", "20", "stop"]);
@@ -82,8 +81,7 @@ describe("embedded Postgres test cleanup", () => {
 
   it("reports bounded pg_ctl diagnostics without raw output and preserves the owned fixture on failure", async () => {
     const value = fixture();
-    const pgCtlChild = new EventEmitter();
-    Object.assign(pgCtlChild, { stdout: new EventEmitter(), stderr: new EventEmitter() });
+    const pgCtlChild = Object.assign(new EventEmitter(), { stdout: new EventEmitter(), stderr: new EventEmitter() });
     const stdoutText = `${"private-hostname ".repeat(500)}could not connect to server`;
     const stderrText = `${"shutdown detail private-token ".repeat(500)}failure`;
     const spawnPgCtl = vi.fn(() => {

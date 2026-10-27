@@ -302,6 +302,7 @@ export const spsNodeCommands = pgTable(
     companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
     nodeId: uuid("node_id").notNull().references(() => spsNodes.id, { onDelete: "cascade" }),
     agentId: uuid("agent_id").notNull().references(() => agents.id, { onDelete: "cascade" }),
+    workspaceExecutionEpoch: text("workspace_execution_epoch").notNull().default("0"),
     runnerProfileId: uuid("runner_profile_id").references(() => spsNodeRunnerProfiles.id, { onDelete: "set null" }),
     heartbeatRunId: uuid("heartbeat_run_id").references(() => heartbeatRuns.id, { onDelete: "set null" }),
     projectId: uuid("project_id").references(() => projects.id, { onDelete: "set null" }),

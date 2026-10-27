@@ -1310,6 +1310,7 @@ export const PLUGIN_JOB_RUN_STATUSES = [
   "pending",
   "queued",
   "running",
+  "cancelling",
   "succeeded",
   "failed",
   "cancelled",

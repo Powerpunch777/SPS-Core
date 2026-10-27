@@ -1,6 +1,10 @@
 export type { Db } from "@paperclipai/db";
 export {
   companies,
+  activityLog,
+  agentWakeupRequests,
+  pluginJobRuns,
+  spsWorkspaceExecutionControl,
   companyMemberships,
   companySecretBindings,
   companySecretProviderConfigs,

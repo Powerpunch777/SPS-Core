@@ -170,6 +170,108 @@ describe("plugin-worker-manager stderr failure context", () => {
     }
   });
 
+  it("does not treat a local timeout as a handler terminal acknowledgement", async () => {
+    const onTerminal = vi.fn();
+    const handle = createPluginWorkerHandle("test.plugin", {
+      entrypointPath: DELAYED_WORKER_ENTRYPOINT,
+      manifest: TEST_MANIFEST,
+      config: {},
+      instanceInfo: { instanceId: "instance-1", hostVersion: "1.0.0" },
+      apiVersion: 1,
+      hostHandlers: {},
+      rpcTimeoutMs: 10,
+    });
+
+    try {
+      await handle.start();
+      await expect(handle.call("environmentExecute", {
+        driverKey: "e2b",
+        companyId: "company-1",
+        environmentId: "environment-1",
+        config: {},
+        lease: { providerLeaseId: "lease-1" },
+        command: "echo",
+        delayMs: 80,
+      } as HostToWorkerMethods["environmentExecute"][0], 10, {
+        assertCurrent: () => undefined,
+        onTerminal,
+      })).rejects.toMatchObject({ code: PLUGIN_RPC_ERROR_CODES.TIMEOUT });
+
+      expect(onTerminal).not.toHaveBeenCalled();
+      await new Promise((resolve) => setTimeout(resolve, 110));
+      expect(onTerminal).toHaveBeenCalledTimes(1);
+      expect(onTerminal).toHaveBeenCalledWith("response");
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
+  it("keeps a shared worker invocation for another Workspace alive after one invocation is cancelled", async () => {
+    const controller = new AbortController();
+    const aTerminal = vi.fn();
+    const bTerminal = vi.fn();
+    const handle = createPluginWorkerHandle("test.plugin", {
+      entrypointPath: DELAYED_WORKER_ENTRYPOINT,
+      manifest: TEST_MANIFEST,
+      config: {},
+      instanceInfo: { instanceId: "instance-1", hostVersion: "1.0.0" },
+      apiVersion: 1,
+      hostHandlers: {},
+      rpcTimeoutMs: 500,
+    });
+
+    try {
+      await handle.start();
+      const runA = handle.call("environmentExecute", {
+        driverKey: "e2b", companyId: "workspace-a", environmentId: "environment-a",
+        config: {}, lease: { providerLeaseId: "lease-a" }, command: "echo", delayMs: 60,
+      } as HostToWorkerMethods["environmentExecute"][0], 500, {
+        signal: controller.signal,
+        assertCurrent: () => undefined,
+      }, aTerminal);
+      const runB = handle.call("environmentExecute", {
+        driverKey: "e2b", companyId: "workspace-b", environmentId: "environment-b",
+        config: {}, lease: { providerLeaseId: "lease-b" }, command: "echo", delayMs: 20,
+      } as HostToWorkerMethods["environmentExecute"][0], 500, undefined, bTerminal);
+
+      await new Promise((resolve) => setImmediate(resolve));
+      controller.abort();
+
+      await expect(runA).rejects.toMatchObject({ code: PLUGIN_RPC_ERROR_CODES.INVOCATION_SCOPE_DENIED });
+      await expect(runB).resolves.toMatchObject({ exitCode: 0, stdout: "ok\n" });
+      expect(aTerminal).toHaveBeenCalledTimes(1);
+      expect(aTerminal).toHaveBeenCalledWith("response");
+      expect(bTerminal).toHaveBeenCalledTimes(1);
+      expect(bTerminal).toHaveBeenCalledWith("response");
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
+  it("accepts execution authority for an exact Host runJob invocation", async () => {
+    const onTerminal = vi.fn();
+    const handle = createPluginWorkerHandle("test.plugin", {
+      entrypointPath: DELAYED_WORKER_ENTRYPOINT,
+      manifest: TEST_MANIFEST,
+      config: {},
+      instanceInfo: { instanceId: "instance-1", hostVersion: "1.0.0" },
+      apiVersion: 1,
+      hostHandlers: {},
+    });
+
+    try {
+      await handle.start();
+      await expect(handle.call("runJob", {
+        job: { jobKey: "host-job", runId: "run-host-1", trigger: "manual", scheduledAt: new Date().toISOString() },
+      }, 500, { allowHostInvocation: true, assertCurrent: () => undefined }, onTerminal))
+        .rejects.toMatchObject({ message: expect.stringContaining("Unhandled method: runJob") });
+      expect(onTerminal).toHaveBeenCalledTimes(1);
+      expect(onTerminal).toHaveBeenCalledWith("response");
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
   it("does not emit an unhandled rejection when a plugin responds with terminated before callers attach handlers", async () => {
     const unhandledRejection = vi.fn();
     process.on("unhandledRejection", unhandledRejection);

@@ -3,6 +3,7 @@ import { agentTaskSessions, heartbeatRuns, spsNodeCommands, type Db } from "../c
 import type { AgentSessionRunState } from "../compat/paperclip/plugin-sdk.js";
 import { notFound } from "../errors.js";
 import { observeSpsAgentRun } from "./sps-execution-observation.js";
+import { lockSpsWorkspaceExecutionControl } from "./sps-workspace-execution-control.js";
 
 const terminal = new Set(["succeeded", "failed", "cancelled", "interrupted", "timed_out"]);
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -71,6 +72,7 @@ export function spsAgentSessionRunService(db: Db, pluginKey: string, cancelRun: 
     // Serialize the cancellation marker with remote dispatch. Neither a queued
     // command nor a late adapter may start after this durable request.
     await db.transaction(async tx => {
+      await lockSpsWorkspaceExecutionControl(tx, input.companyId);
       const run = await tx.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, original.id)).for("update").then(rows => rows[0]!);
       if (terminal.has(run.status) || hasSpsSessionCancellation(run)) return false;
       await tx.update(heartbeatRuns).set({ contextSnapshot: { ...run.contextSnapshot, spsSessionCancellationRequested: true, spsSessionCancellationTermination: "pending", spsSessionCancellationWasQueued: run.status === "queued" } }).where(eq(heartbeatRuns.id, run.id));

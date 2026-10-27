@@ -50,6 +50,7 @@ export const spsModelRuns = pgTable("sps_model_runs", {
   companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
   pluginId: uuid("plugin_id").notNull(),
   pluginKey: text("plugin_key").notNull(),
+  workspaceExecutionEpoch: text("workspace_execution_epoch").notNull().default("0"),
   connectionId: uuid("connection_id").notNull().references(() => spsModelConnections.id, { onDelete: "cascade" }),
   grantId: uuid("grant_id").references(() => spsModelGrants.id, { onDelete: "set null" }),
   grantRevision: integer("grant_revision").notNull(),

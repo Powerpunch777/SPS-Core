@@ -67,6 +67,7 @@ export const spsPluginNodeRuns = pgTable(
     companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
     pluginKey: text("plugin_key").notNull(),
     subjectKey: text("subject_key").notNull(),
+    workspaceExecutionEpoch: text("workspace_execution_epoch").notNull().default("0"),
     executionGrantId: uuid("execution_grant_id")
       .notNull()
       .references(() => spsPluginExecutionGrants.id, { onDelete: "cascade" }),

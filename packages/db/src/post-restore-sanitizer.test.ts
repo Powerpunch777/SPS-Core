@@ -150,6 +150,9 @@ describe("sanitizePostRestoreDatabaseWithExecutor", () => {
     expect(executor.calls.find((query) => query.startsWith('UPDATE "plugin_job_runs" SET'))).toContain(
       `"status" = 'cancelled'`,
     );
+    expect(executor.calls.find((query) => query.startsWith('UPDATE "plugin_job_runs" SET'))).toContain(
+      `WHERE "status" IN ('pending', 'queued', 'running', 'cancelling')`,
+    );
   });
 
   it("clears provider sessions, credentials, and machine-bound workspace routes", async () => {

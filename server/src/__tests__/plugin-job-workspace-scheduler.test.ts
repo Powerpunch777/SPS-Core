@@ -1,8 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { companies, createDb, pluginCompanySettings, pluginJobRuns, pluginJobs, plugins } from "@paperclipai/db";
+import { eq } from "drizzle-orm";
+import { activityLog, companies, createDb, pluginCompanySettings, pluginJobRuns, pluginJobs, plugins, spsWorkspaceExecutionControl } from "@paperclipai/db";
 import { createPluginJobScheduler } from "../services/plugin-job-scheduler.js";
 import { pluginJobStore } from "../services/plugin-job-store.js";
+import { spsWorkspaceExecutionControlService } from "../services/sps-workspace-execution-control.js";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 
 const support = await getEmbeddedPostgresTestSupport();
@@ -16,16 +18,18 @@ describeDb("workspace-scoped plugin jobs", () => {
   beforeAll(async () => {
     temp = await startEmbeddedPostgresTestDatabase("sps-workspace-plugin-jobs-");
     db = createDb(temp.connectionString);
-  }, 20_000);
+  }, 180_000);
   afterEach(async () => {
     worker.call.mockClear();
+    await db.delete(activityLog);
     await db.delete(pluginJobRuns);
     await db.delete(pluginJobs);
     await db.delete(pluginCompanySettings);
     await db.delete(plugins);
+    await db.delete(spsWorkspaceExecutionControl);
     await db.delete(companies);
   });
-  afterAll(async () => { await temp.cleanup(); });
+  afterAll(async () => { await db?.$client.end(); await temp?.cleanup(); }, 30_000);
 
   async function seed(dependencyBlocked = false) {
     const pluginId = randomUUID();
@@ -100,6 +104,8 @@ describeDb("workspace-scoped plugin jobs", () => {
     await store.markRunning(run.id);
     expect(await store.cancelRun(run.id, "operator cancelled")).toBe(true);
     expect(await store.completeRun(run.id, { status: "succeeded" })).toBe(false);
+    expect((await store.getRunById(run.id))?.status).toBe("cancelling");
+    expect(await store.acknowledgeCancellation(run.id)).toBe(true);
     expect((await store.getRunById(run.id))?.status).toBe("cancelled");
   });
 
@@ -112,6 +118,129 @@ describeDb("workspace-scoped plugin jobs", () => {
 
     expect(await store.recoverStaleRuns("Host restarted")).toBe(2);
     expect((await store.getRunById(queued.id))?.status).toBe("cancelled");
-    expect((await store.getRunById(running.id))?.status).toBe("cancelled");
+    expect((await store.getRunById(running.id))?.status).toBe("cancelling");
+  });
+
+  it("stops Workspace A jobs through terminal ACK while Workspace B completes on the shared worker", async () => {
+    const { companyA, companyB, workspaceJobId } = await seed();
+    await db.update(pluginCompanySettings).set({ enabled: true }).where(eq(pluginCompanySettings.companyId, companyB));
+    const store = pluginJobStore(db);
+    const calls: Array<{
+      companyId: string;
+      runId: string;
+      signal?: AbortSignal;
+      acknowledge?: (reason: "response" | "worker_exit" | "not_dispatched") => void;
+      resolve: (value: unknown) => void;
+    }> = [];
+    worker.call.mockImplementation((_pluginId: string, _method: string, input: { job: { companyId: string; runId: string } }, _timeout: number,
+      authority: { signal?: AbortSignal } | undefined,
+      acknowledge: (reason: "response" | "worker_exit" | "not_dispatched") => void) => new Promise((resolve) => {
+      calls.push({ companyId: input.job.companyId, runId: input.job.runId, signal: authority?.signal, acknowledge, resolve });
+    }));
+    const scheduler = createPluginJobScheduler({ db, jobStore: store, workerManager: worker, maxConcurrentJobs: 2 });
+
+    try {
+      const runA = await scheduler.triggerJob(workspaceJobId, "manual", companyA);
+      const runB = await scheduler.triggerJob(workspaceJobId, "manual", companyB);
+      await vi.waitFor(() => expect(calls).toHaveLength(2));
+      const callA = calls.find((call) => call.runId === runA.runId)!;
+      const callB = calls.find((call) => call.runId === runB.runId)!;
+      expect((await store.getRunById(runA.runId))?.status).toBe("running");
+      expect((await store.getRunById(runB.runId))?.status).toBe("running");
+
+      const stopped = await spsWorkspaceExecutionControlService(db).transition(companyA, "stop", "fixture-owner", 0);
+      expect(stopped.pending.jobs).toBe(1);
+      expect(callA.signal?.aborted).toBe(true);
+      expect(callB.signal?.aborted).toBe(false);
+      expect((await store.getRunById(runA.runId))?.status).toBe("cancelling");
+      expect((await store.getRunById(runB.runId))?.status).toBe("running");
+
+      callB.acknowledge?.("response");
+      callB.resolve(undefined);
+      await vi.waitFor(async () => expect((await store.getRunById(runB.runId))?.status).toBe("succeeded"));
+      expect((await store.getRunById(runA.runId))?.status).toBe("cancelling");
+
+      callA.acknowledge?.("response");
+      callA.resolve(undefined);
+      await vi.waitFor(async () => expect((await store.getRunById(runA.runId))?.status).toBe("cancelled"));
+    } finally {
+      for (const call of calls) {
+        call.acknowledge?.("response");
+        call.resolve(undefined);
+      }
+      await vi.waitFor(() => expect(scheduler.diagnostics().activeJobCount).toBe(0), { timeout: 2_000 }).catch(() => undefined);
+      scheduler.stop();
+    }
+  });
+
+  it("keeps a timed-out Workspace job cancelling until the worker later acknowledges its response", async () => {
+    const { companyA, workspaceJobId } = await seed();
+    const store = pluginJobStore(db);
+    let acknowledge: ((reason: "response" | "worker_exit" | "not_dispatched") => void) | undefined;
+    let lateResolve: ((value: unknown) => void) | undefined;
+    worker.call.mockImplementation((_pluginId: string, _method: string, _input: unknown, _timeout: number,
+      _authority: unknown,
+      onTerminal: (reason: "response" | "worker_exit" | "not_dispatched") => void) => {
+      acknowledge = onTerminal;
+      return new Promise((resolve, reject) => {
+        lateResolve = resolve;
+        setTimeout(() => reject(Object.assign(new Error("RPC timed out"), { code: -32003 })), 15);
+      });
+    });
+    const scheduler = createPluginJobScheduler({ db, jobStore: store, workerManager: worker, jobTimeoutMs: 10 });
+
+    try {
+      const run = await scheduler.triggerJob(workspaceJobId, "manual", companyA);
+      await vi.waitFor(async () => expect((await store.getRunById(run.runId))?.status).toBe("cancelling"));
+      await new Promise((resolve) => setTimeout(resolve, 35));
+      expect((await store.getRunById(run.runId))?.status).toBe("cancelling");
+
+      acknowledge?.("response");
+      lateResolve?.(undefined);
+      await vi.waitFor(async () => expect((await store.getRunById(run.runId))?.status).toBe("cancelled"));
+    } finally {
+      acknowledge?.("worker_exit");
+      lateResolve?.(undefined);
+      await vi.waitFor(() => expect(scheduler.diagnostics().activeJobCount).toBe(0), { timeout: 2_000 }).catch(() => undefined);
+      scheduler.stop();
+    }
+  });
+
+  it("fences a cancelled Host invocation and waits for its actual terminal ACK", async () => {
+    const { hostJobId } = await seed();
+    const store = pluginJobStore(db);
+    let signal: AbortSignal | undefined;
+    let allowHostInvocation = false;
+    let acknowledge: ((reason: "response" | "worker_exit" | "not_dispatched") => void) | undefined;
+    let resolveCall: ((value: unknown) => void) | undefined;
+    worker.call.mockImplementation((_pluginId: string, _method: string, _input: unknown, _timeout: number,
+      authority: { signal?: AbortSignal; allowHostInvocation?: boolean },
+      onTerminal: (reason: "response" | "worker_exit" | "not_dispatched") => void) => {
+      signal = authority.signal;
+      allowHostInvocation = authority.allowHostInvocation ?? false;
+      acknowledge = onTerminal;
+      return new Promise((resolve) => { resolveCall = resolve; });
+    });
+    const scheduler = createPluginJobScheduler({ db, jobStore: store, workerManager: worker });
+
+    try {
+      const run = await scheduler.triggerJob(hostJobId);
+      await vi.waitFor(() => expect(acknowledge).toBeTypeOf("function"));
+      expect(allowHostInvocation).toBe(true);
+      expect(signal?.aborted).toBe(false);
+
+      expect(await scheduler.cancelRun(run.runId)).toBe(true);
+      expect(signal?.aborted).toBe(true);
+      expect((await store.getRunById(run.runId))?.status).toBe("cancelling");
+
+      acknowledge?.("response");
+      resolveCall?.(undefined);
+      await vi.waitFor(async () => expect((await store.getRunById(run.runId))?.status).toBe("cancelled"));
+    } finally {
+      acknowledge?.("worker_exit");
+      resolveCall?.(undefined);
+      await vi.waitFor(() => expect(scheduler.diagnostics().activeJobCount).toBe(0), { timeout: 2_000 }).catch(() => undefined);
+      scheduler.stop();
+    }
   });
 });

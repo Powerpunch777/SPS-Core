@@ -135,7 +135,7 @@ const UPDATE_PLANS: UpdatePlan[] = [
       finished_at: "NOW()",
     },
     requiredWhereColumns: ["status"],
-    where: `"status" IN ('pending', 'queued', 'running')`,
+    where: `"status" IN ('pending', 'queued', 'running', 'cancelling')`,
   },
   {
     table: "environment_custom_image_setup_sessions",

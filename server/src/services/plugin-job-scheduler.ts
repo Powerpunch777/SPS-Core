@@ -34,7 +34,7 @@
  * @see ./cron.ts — Cron parsing utilities
  */
 
-import { and, eq, isNull, lte, or } from "drizzle-orm";
+import { and, eq, isNull, lte, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { companies, pluginCompanySettings, pluginJobs, pluginJobRuns, plugins } from "@paperclipai/db";
 import type { PluginJobStore } from "./plugin-job-store.js";
@@ -42,6 +42,7 @@ import type { PluginWorkerManager } from "./plugin-worker-manager.js";
 import { parseCron, nextCronTick, validateCron } from "./cron.js";
 import { logger } from "../middleware/logger.js";
 import { analyzePluginDependencies, isPluginDependencyAvailable } from "./plugin-dependencies.js";
+import { assertSpsWorkspaceExecutionActive, registerSpsWorkspaceExecutionStopHandler, withSpsWorkspaceExecutionAdmission } from "./sps-workspace-execution-control.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -232,6 +233,95 @@ export function createPluginJobScheduler(
   /** Live dispatch promises, used to honour the global bounded concurrency
    * limit without losing a workspace occurrence. */
   const activeExecutions = new Map<string, Promise<void>>();
+  type ActiveJobRun = {
+    runId: string;
+    pluginId: string;
+    companyId: string | null;
+    epoch: string | null;
+    controller: AbortController;
+    terminal: Promise<void>;
+    acknowledgeTerminal: () => void;
+    terminalAcknowledged: boolean;
+    cancellationRequested: boolean;
+    cancellationReason: string | null;
+  };
+  const activeJobRuns = new Map<string, ActiveJobRun>();
+
+  const workspaceStopHandler = async (companyId: string, reason: string, stoppedEpoch: string) => {
+    const olderEpoch = sql`(${pluginJobRuns.workspaceExecutionEpoch})::numeric < (${stoppedEpoch})::numeric`;
+    const queued = await db.update(pluginJobRuns)
+      .set({ status: "cancelled", error: reason, cancellationRequestedAt: new Date(), finishedAt: new Date() })
+      .where(and(eq(pluginJobRuns.companyId, companyId), olderEpoch,
+        or(eq(pluginJobRuns.status, "pending"), eq(pluginJobRuns.status, "queued"))))
+      .returning({ id: pluginJobRuns.id });
+    const active = await db.update(pluginJobRuns)
+      .set({ status: "cancelling", error: reason, cancellationRequestedAt: new Date() })
+      .where(and(eq(pluginJobRuns.companyId, companyId), olderEpoch, eq(pluginJobRuns.status, "running")))
+      .returning({ id: pluginJobRuns.id });
+    const alreadyCancelling = await db.select({ id: pluginJobRuns.id }).from(pluginJobRuns)
+      .where(and(eq(pluginJobRuns.companyId, companyId), olderEpoch, eq(pluginJobRuns.status, "cancelling")));
+    for (const row of [...active, ...alreadyCancelling]) {
+      const execution = activeJobRuns.get(row.id);
+      if (!execution) continue;
+      execution.cancellationRequested = true;
+      execution.cancellationReason = reason;
+      execution.controller.abort();
+    }
+    if (queued.length || active.length) {
+      log.info({ companyId, queued: queued.length, active: active.length }, "stopped older Workspace plugin job runs");
+    }
+  };
+  let unregisterStopHandler: (() => void) | null = registerSpsWorkspaceExecutionStopHandler(db, "plugin-jobs", workspaceStopHandler);
+
+  function newActiveJobRun(runId: string, pluginId: string, companyId: string | null, epoch: string | null): ActiveJobRun {
+    let acknowledgeTerminal!: () => void;
+    const terminal = new Promise<void>((resolve) => { acknowledgeTerminal = resolve; });
+    const execution: ActiveJobRun = { runId, pluginId, companyId, epoch, controller: new AbortController(), terminal,
+      acknowledgeTerminal, terminalAcknowledged: false, cancellationRequested: false, cancellationReason: null };
+    activeJobRuns.set(runId, execution);
+    return execution;
+  }
+
+  async function claimWorkspaceRun(runId: string, pluginId: string, companyId: string, expectedEpoch?: string): Promise<ActiveJobRun | null> {
+    try {
+      return await withSpsWorkspaceExecutionAdmission(db, companyId, async (tx, epoch) => {
+        if (expectedEpoch !== undefined && expectedEpoch !== epoch) return null;
+        if (!await jobStore.markRunning(runId, { executor: tx, companyId, epoch })) return null;
+        return newActiveJobRun(runId, pluginId, companyId, epoch);
+      });
+    } catch (error) {
+      activeJobRuns.delete(runId);
+      throw error;
+    }
+  }
+
+  async function claimHostRun(runId: string, pluginId: string): Promise<ActiveJobRun | null> {
+    let execution: ActiveJobRun | null = null;
+    try {
+      await db.transaction(async (tx) => {
+        if (!await jobStore.markRunning(runId, { executor: tx })) return;
+        execution = newActiveJobRun(runId, pluginId, null, null);
+      });
+      return execution;
+    } catch (error) {
+      activeJobRuns.delete(runId);
+      throw error;
+    }
+  }
+
+  async function finishCancellation(execution: ActiveJobRun): Promise<boolean> {
+    if (!execution.terminalAcknowledged) return false;
+    const acknowledged = await jobStore.acknowledgeCancellation(execution.runId);
+    if (acknowledged) activeJobRuns.delete(execution.runId);
+    return acknowledged;
+  }
+
+  function observeTerminal(execution: ActiveJobRun) {
+    return () => {
+      execution.terminalAcknowledged = true;
+      execution.acknowledgeTerminal();
+    };
+  }
 
   /** Total number of ticks since start. */
   let tickCount = 0;
@@ -440,18 +530,21 @@ export function createPluginJobScheduler(
 
     try {
       // 1. Create run record
-      const run = await jobStore.createRun({
-        jobId,
-        pluginId,
-        trigger: "schedule",
-        companyId,
-      });
+      const run = companyId
+        ? await withSpsWorkspaceExecutionAdmission(db, companyId, (tx, epoch) => jobStore.createRun({
+            jobId, pluginId, trigger: "schedule", companyId, workspaceExecutionEpoch: epoch,
+          }, tx))
+        : await jobStore.createRun({ jobId, pluginId, trigger: "schedule", companyId });
       runId = run.id;
 
       jobLog.trace({ runId }, "dispatching scheduled job");
 
       // 2. Mark run as running
-      if (!await jobStore.markRunning(runId)) return;
+      const execution = companyId
+        ? await claimWorkspaceRun(runId, pluginId, companyId, run.workspaceExecutionEpoch)
+        : await claimHostRun(runId, pluginId);
+      if (!execution) return;
+      const workspaceExecution = companyId ? execution : null;
 
       // 3. Call worker via RPC
       await workerManager.call(
@@ -467,19 +560,58 @@ export function createPluginJobScheduler(
           },
         },
         jobTimeoutMs,
+        {
+          signal: execution.controller.signal,
+          assertCurrent: workspaceExecution
+            ? () => assertSpsWorkspaceExecutionActive(db, companyId!, workspaceExecution.epoch!)
+            : () => undefined,
+          ...(!workspaceExecution ? { allowHostInvocation: true } : {}),
+        },
+        observeTerminal(execution),
       );
 
+      if (await finishCancellation(execution)) {
+        return;
+      }
+      if (execution.cancellationRequested) {
+        return;
+      }
       // 4. Mark run as succeeded
       const durationMs = Date.now() - startedAt;
-      await jobStore.completeRun(runId, {
+      const completed = await jobStore.completeRun(runId, {
         status: "succeeded",
         durationMs,
       });
+      if (!completed) await finishCancellation(execution);
+      activeJobRuns.delete(runId);
 
       jobLog.trace({ runId, durationMs }, "job completed successfully");
     } catch (err) {
       const durationMs = Date.now() - startedAt;
       const errorMessage = err instanceof Error ? err.message : String(err);
+
+      const execution = runId ? activeJobRuns.get(runId) : undefined;
+      const timedOut = typeof err === "object" && err !== null && "code" in err && err.code === -32003;
+      if (execution && (execution.cancellationRequested || (timedOut && !execution.terminalAcknowledged))) {
+        if (!execution.cancellationRequested) {
+          execution.cancellationRequested = true;
+          execution.cancellationReason = errorMessage;
+          await jobStore.cancelRun(runId!, errorMessage);
+          execution.controller.abort();
+        }
+        // A local RPC timeout is not evidence that the plugin handler ended.
+        // Keep the run cancelling and retain scheduler capacity until the
+        // actual response or worker exit acknowledges the invocation.
+        if (!execution.terminalAcknowledged) await execution.terminal;
+        await finishCancellation(execution);
+        jobLog.warn({ runId, durationMs }, "job cancellation acknowledged after RPC termination");
+        return;
+      }
+
+      // Workspace stop persists `cancelling` in its control-row transaction
+      // before the local stop handler runs. A worker response can race that
+      // handler, so terminal acknowledgement must always reconcile the row.
+      if (execution && await finishCancellation(execution)) return;
 
       jobLog.error(
         { runId, durationMs, err: errorMessage },
@@ -505,6 +637,7 @@ export function createPluginJobScheduler(
         }
       }
     } finally {
+      if (runId && activeJobRuns.get(runId)?.terminalAcknowledged) activeJobRuns.delete(runId);
       // Remove from active set
       activeJobs.delete(activeKey);
     }
@@ -577,18 +710,18 @@ export function createPluginJobScheduler(
       );
     }
 
-    // Create the run and dispatch (non-blocking)
-    const run = await jobStore.createRun({
-      jobId,
-      pluginId: job.pluginId,
-      trigger,
-      companyId: effectiveCompanyId,
-    });
+    // Admit Workspace runs while holding the execution-control row so a stop
+    // cannot race run creation with a newly accepted generation.
+    const run = effectiveCompanyId
+      ? await withSpsWorkspaceExecutionAdmission(db, effectiveCompanyId, (tx, epoch) => jobStore.createRun({
+          jobId, pluginId: job.pluginId, trigger, companyId: effectiveCompanyId, workspaceExecutionEpoch: epoch,
+        }, tx))
+      : await jobStore.createRun({ jobId, pluginId: job.pluginId, trigger, companyId: effectiveCompanyId });
 
     // Dispatch in background — don't block the caller
     void trackDispatch(
       executionKey(job.id, effectiveCompanyId),
-      dispatchManualRun(job, run.id, trigger, effectiveCompanyId),
+      dispatchManualRun(job, run.id, trigger, effectiveCompanyId, run.workspaceExecutionEpoch),
     );
 
     return { runId: run.id, jobId };
@@ -602,6 +735,7 @@ export function createPluginJobScheduler(
     runId: string,
     trigger: "manual" | "retry",
     companyId: string | null,
+    expectedEpoch?: string,
   ): Promise<void> {
     const { id: jobId, pluginId, jobKey } = job;
     const jobLog = log.child({ jobId, pluginId, jobKey, runId, trigger });
@@ -611,7 +745,11 @@ export function createPluginJobScheduler(
     const startedAt = Date.now();
 
     try {
-      if (!await jobStore.markRunning(runId)) return;
+      const execution = companyId
+        ? await claimWorkspaceRun(runId, pluginId, companyId, expectedEpoch)
+        : await claimHostRun(runId, pluginId);
+      if (!execution) return;
+      const workspaceExecution = companyId ? execution : null;
 
       await workerManager.call(
         pluginId,
@@ -626,18 +764,49 @@ export function createPluginJobScheduler(
           },
         },
         jobTimeoutMs,
+        {
+          signal: execution.controller.signal,
+          assertCurrent: workspaceExecution
+            ? () => assertSpsWorkspaceExecutionActive(db, companyId!, workspaceExecution.epoch!)
+            : () => undefined,
+          ...(!workspaceExecution ? { allowHostInvocation: true } : {}),
+        },
+        observeTerminal(execution),
       );
 
+      if (await finishCancellation(execution)) {
+        return;
+      }
+      if (execution.cancellationRequested) {
+        return;
+      }
       const durationMs = Date.now() - startedAt;
-      await jobStore.completeRun(runId, {
+      const completed = await jobStore.completeRun(runId, {
         status: "succeeded",
         durationMs,
       });
+      if (!completed) await finishCancellation(execution);
+      activeJobRuns.delete(runId);
 
       jobLog.info({ durationMs }, "manual job completed successfully");
     } catch (err) {
       const durationMs = Date.now() - startedAt;
       const errorMessage = err instanceof Error ? err.message : String(err);
+      const execution = activeJobRuns.get(runId);
+      const timedOut = typeof err === "object" && err !== null && "code" in err && err.code === -32003;
+      if (execution && (execution.cancellationRequested || (timedOut && !execution.terminalAcknowledged))) {
+        if (!execution.cancellationRequested) {
+          execution.cancellationRequested = true;
+          execution.cancellationReason = errorMessage;
+          await jobStore.cancelRun(runId, errorMessage);
+          execution.controller.abort();
+        }
+        if (!execution.terminalAcknowledged) await execution.terminal;
+        await finishCancellation(execution);
+        jobLog.warn({ durationMs }, "job cancellation acknowledged after RPC termination");
+        return;
+      }
+      if (execution?.terminalAcknowledged && await finishCancellation(execution)) return;
       jobLog.error({ durationMs, err: errorMessage }, "manual job failed");
 
       try {
@@ -655,12 +824,22 @@ export function createPluginJobScheduler(
         );
       }
     } finally {
+      if (activeJobRuns.get(runId)?.terminalAcknowledged) activeJobRuns.delete(runId);
       activeJobs.delete(activeKey);
     }
   }
 
   async function cancelRun(runId: string, reason = "Cancelled by operator"): Promise<boolean> {
-    return jobStore.cancelRun(runId, reason);
+    const run = await jobStore.getRunById(runId);
+    if (!run) return false;
+    const requested = await jobStore.cancelRun(runId, reason);
+    const execution = activeJobRuns.get(runId);
+    if (requested && execution) {
+      execution.cancellationRequested = true;
+      execution.cancellationReason = reason;
+      execution.controller.abort();
+    }
+    return requested;
   }
 
   async function retryRun(runId: string): Promise<TriggerJobResult> {
@@ -757,31 +936,29 @@ export function createPluginJobScheduler(
   async function unregisterPlugin(pluginId: string): Promise<void> {
     log.info({ pluginId }, "unregistering plugin from job scheduler");
 
-    // Cancel any in-flight run records for this plugin that are still
-    // queued or running. Active jobs in-memory will finish naturally.
+    // Queue rows can be cancelled immediately. Active handlers remain
+    // `cancelling` until their RPC response or worker exit is acknowledged.
     try {
-      const runningRuns = await db
-        .select()
-        .from(pluginJobRuns)
-        .where(
-          and(
-            eq(pluginJobRuns.pluginId, pluginId),
-            or(
-              eq(pluginJobRuns.status, "running"),
-              eq(pluginJobRuns.status, "queued"),
-            ),
-          ),
-        );
-
-      for (const run of runningRuns) {
-        await jobStore.completeRun(run.id, {
-          status: "cancelled",
-          error: "Plugin unregistered",
-          durationMs: run.startedAt
-            ? Date.now() - run.startedAt.getTime()
-            : null,
-        });
+      const reason = "Plugin unregistered";
+      const now = new Date();
+      const queued = await db.update(pluginJobRuns)
+        .set({ status: "cancelled", error: reason, cancellationRequestedAt: now, finishedAt: now })
+        .where(and(eq(pluginJobRuns.pluginId, pluginId), or(eq(pluginJobRuns.status, "pending"), eq(pluginJobRuns.status, "queued"))))
+        .returning({ id: pluginJobRuns.id });
+      const active = await db.update(pluginJobRuns)
+        .set({ status: "cancelling", error: reason, cancellationRequestedAt: now })
+        .where(and(eq(pluginJobRuns.pluginId, pluginId), eq(pluginJobRuns.status, "running")))
+        .returning({ id: pluginJobRuns.id });
+      const cancelling = await db.select({ id: pluginJobRuns.id }).from(pluginJobRuns)
+        .where(and(eq(pluginJobRuns.pluginId, pluginId), eq(pluginJobRuns.status, "cancelling")));
+      for (const run of [...active, ...cancelling]) {
+        const execution = activeJobRuns.get(run.id);
+        if (!execution) continue;
+        execution.cancellationRequested = true;
+        execution.cancellationReason = reason;
+        execution.controller.abort();
       }
+      if (queued.length || active.length) log.info({ pluginId, queued: queued.length, active: active.length }, "requested plugin job cancellation");
     } catch (err) {
       log.error(
         {
@@ -792,13 +969,9 @@ export function createPluginJobScheduler(
       );
     }
 
-    // Remove any active tracking for jobs owned by this plugin
-    const jobs = await jobStore.listJobs(pluginId);
-    for (const job of jobs) {
-      const prefix = `${job.id}:`;
-      for (const key of activeJobs) if (key.startsWith(prefix)) activeJobs.delete(key);
-      for (const key of activeExecutions.keys()) if (key.startsWith(prefix)) activeExecutions.delete(key);
-    }
+    // Keep active tracking until terminal acknowledgements arrive. The shared
+    // worker may still be executing this invocation while other plugin work
+    // continues.
   }
 
   // -----------------------------------------------------------------------
@@ -812,9 +985,9 @@ export function createPluginJobScheduler(
     }
 
     running = true;
-    // Restart recovery is intentionally state-level. Workers may have died
-    // with the prior process, and the worker RPC protocol has no cooperative
-    // cancel method; late completions are ignored by conditional transitions.
+    if (!unregisterStopHandler) unregisterStopHandler = registerSpsWorkspaceExecutionStopHandler(db, "plugin-jobs", workspaceStopHandler);
+    // Restart recovery closes queued work and retains active work as cancelling
+    // until actual termination can be acknowledged; it never replays old runs.
     void jobStore.recoverStaleRuns("Cancelled during SPS restart recovery")
       .then((count) => { if (count > 0) log.warn({ count }, "recovered stale plugin job runs"); })
       .catch((err) => log.error({ err: err instanceof Error ? err.message : String(err) }, "plugin job stale-run recovery failed"));
@@ -836,6 +1009,8 @@ export function createPluginJobScheduler(
       tickTimer = null;
     }
 
+    unregisterStopHandler?.();
+    unregisterStopHandler = null;
     if (!running) return;
     running = false;
 

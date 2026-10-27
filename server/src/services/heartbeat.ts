@@ -47,6 +47,7 @@ import {
   executionWorkspaces,
   heartbeatRunEvents,
   heartbeatRuns,
+  spsNodeCommands,
   issueApprovals,
   issueComments,
   issuePlanDecompositions,
@@ -67,6 +68,7 @@ import { logger } from "../middleware/logger.js";
 import { publishLiveEvent } from "./live-events.js";
 import { normalizeResponsibleUserDenialCode } from "./responsible-user-denial-run-outcomes.js";
 import { createSpsMarketplaceAssistantService } from "./sps-marketplace-assistant.js";
+import { assertSpsWorkspaceExecutionActive, getSpsWorkspaceExecutionControl, lockSpsWorkspaceExecutionControl, registerSpsWorkspaceExecutionStopHandler, withSpsWorkspaceExecutionAdmission } from "./sps-workspace-execution-control.js";
 import { getRunLogStore, type RunLogHandle } from "./run-log-store.js";
 import { getServerAdapter, listAdapterModelProfiles, runningProcesses } from "../adapters/index.js";
 import type {
@@ -315,6 +317,10 @@ const CANCELLABLE_HEARTBEAT_RUN_STATUSES = ["queued", "running", "scheduled_retr
 const HEARTBEAT_RUN_TERMINAL_STATUSES = ["succeeded", "interrupted", "failed", "cancelled", "timed_out"] as const;
 const UNSUCCESSFUL_HEARTBEAT_RUN_TERMINAL_STATUSES = ["failed", "cancelled", "timed_out"] as const;
 const TIMER_ACTIONABLE_ISSUE_STATUSES = ["todo", "in_progress"] as const;
+function isWorkspaceExecutionFenceError(error: unknown) {
+  return error instanceof HttpError && typeof error.details === "object" && error.details !== null
+    && ["workspace_execution_stopped", "workspace_execution_closed"].includes(String((error.details as { code?: unknown }).code));
+}
 export {
   ACTIVE_RUN_OUTPUT_CONTINUE_REARM_MS,
   ACTIVE_RUN_OUTPUT_CRITICAL_THRESHOLD_MS,
@@ -8108,7 +8114,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const responsibleUserId = await resolveResponsibleUserIdForRunContext(run, retryContextSnapshot);
     const now = new Date();
 
-    const retryRun = await db.transaction(async (tx) => {
+    const retryRun = await withSpsWorkspaceExecutionAdmission(db, run.companyId, async (tx, workspaceExecutionEpoch) => {
+      if (run.workspaceExecutionEpoch !== workspaceExecutionEpoch) return null;
       await tx.execute(
         sql`select id from issues where company_id = ${run.companyId} and execution_run_id = ${run.id} for update`,
       );
@@ -8145,6 +8152,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         .insert(heartbeatRuns)
         .values({
           companyId: run.companyId,
+          workspaceExecutionEpoch,
           agentId: run.agentId,
           invocationSource: "automation",
           triggerDetail: "system",
@@ -8391,7 +8399,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     }, "normal_model");
     const responsibleUserId = await resolveResponsibleUserIdForRunContext(run, retryContextSnapshot);
 
-    const queued = await db.transaction(async (tx) => {
+    const queued = await withSpsWorkspaceExecutionAdmission(db, run.companyId, async (tx, workspaceExecutionEpoch) => {
+      if (run.workspaceExecutionEpoch !== workspaceExecutionEpoch) return null;
       const wakeupRequest = await tx
         .insert(agentWakeupRequests)
         .values({
@@ -8416,6 +8425,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         .insert(heartbeatRuns)
         .values({
           companyId: run.companyId,
+          workspaceExecutionEpoch,
           agentId: run.agentId,
           invocationSource: "automation",
           triggerDetail: "system",
@@ -8454,6 +8464,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
       return retryRun;
     });
+    if (!queued) return null;
 
     publishLiveEvent({
       companyId: queued.companyId,
@@ -8909,21 +8920,25 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       }
     }
 
-    const promoted = await db
-      .update(heartbeatRuns)
-      .set({
-        status: "queued",
-        updatedAt: now,
-      })
-      .where(
-        and(
-          eq(heartbeatRuns.id, dueRun.id),
-          eq(heartbeatRuns.status, "scheduled_retry"),
-          lte(heartbeatRuns.scheduledRetryAt, now),
-        ),
-      )
-      .returning()
-      .then((rows) => rows[0] ?? null);
+    let staleEpoch = false;
+    let promoted: typeof heartbeatRuns.$inferSelect | null;
+    try {
+      promoted = await withSpsWorkspaceExecutionAdmission(db, dueRun.companyId, async (tx, epoch) => {
+        if (dueRun.workspaceExecutionEpoch !== epoch) { staleEpoch = true; return null; }
+        return tx.update(heartbeatRuns).set({ status: "queued", updatedAt: now })
+          .where(and(eq(heartbeatRuns.id, dueRun.id), eq(heartbeatRuns.status, "scheduled_retry"), lte(heartbeatRuns.scheduledRetryAt, now)))
+          .returning().then((rows) => rows[0] ?? null);
+      });
+    } catch (error) {
+      const control = await getSpsWorkspaceExecutionControl(db, dueRun.companyId);
+      if (control.state === "paused" || control.state === "stopped") return { outcome: "not_promoted", run: null };
+      if (!isWorkspaceExecutionFenceError(error)) throw error;
+      throw error;
+    }
+    if (staleEpoch) {
+      await cancelRunInternal(dueRun.id, "Cancelled because Workspace execution generation changed");
+      return { outcome: "not_promoted", run: null };
+    }
     if (!promoted) return { outcome: "not_promoted", run: null };
 
     await appendRunEvent(promoted, await nextRunEventSeq(promoted.id), {
@@ -9168,7 +9183,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           details: Record<string, unknown>;
         };
 
-    const scheduleResult = await db.transaction(async (tx): Promise<ScheduledRetryTransactionResult> => {
+    const scheduleResult = await withSpsWorkspaceExecutionAdmission(db, run.companyId, async (tx, workspaceExecutionEpoch): Promise<ScheduledRetryTransactionResult> => {
+      if (run.workspaceExecutionEpoch !== workspaceExecutionEpoch) {
+        return { outcome: "not_scheduled", reason: "Workspace execution generation changed",
+          errorCode: "issue_execution_lock_changed", issueId, details: {} };
+      }
       if (retryReason === INTERACTION_CONTINUATION_INFRA_RETRY_REASON) {
         if (issueId) {
           await tx.execute(
@@ -9386,6 +9405,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         .insert(heartbeatRuns)
         .values({
           companyId: run.companyId,
+          workspaceExecutionEpoch,
           agentId: run.agentId,
           invocationSource: "automation",
           triggerDetail: "system",
@@ -10081,6 +10101,13 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
 
   async function claimQueuedRun(run: typeof heartbeatRuns.$inferSelect, companyAgents?: AgentOrgRow[]) {
     if (run.status !== "queued") return run;
+    try {
+      await assertSpsWorkspaceExecutionActive(db, run.companyId, run.workspaceExecutionEpoch);
+    } catch (error) {
+      if (!isWorkspaceExecutionFenceError(error)) throw error;
+      await cancelRunInternal(run.id, "Cancelled because Workspace execution was stopped");
+      return null;
+    }
     const agent = await getAgent(run.agentId);
     if (!agent) {
       await cancelRunInternal(run.id, "Cancelled because the agent no longer exists");
@@ -10174,17 +10201,27 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       issueContext: issueId ? await getIssueExecutionContext(run.companyId, issueId) : null,
       routineEnvContext: { routineId: null, env: null, responsibleUserId: null },
     });
-    const claimed = await db
-      .update(heartbeatRuns)
-      .set({
-        status: "running",
-        responsibleUserId,
-        startedAt: run.startedAt ?? claimedAt,
-        updatedAt: claimedAt,
-      })
-      .where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.status, "queued")))
-      .returning()
-      .then((rows) => rows[0] ?? null);
+    let staleEpoch = false;
+    let claimed: typeof heartbeatRuns.$inferSelect | null;
+    try {
+      claimed = await withSpsWorkspaceExecutionAdmission(db, run.companyId, async (tx, epoch) => {
+        if (run.workspaceExecutionEpoch !== epoch) { staleEpoch = true; return null; }
+        return tx.update(heartbeatRuns)
+          .set({ status: "running", responsibleUserId, startedAt: run.startedAt ?? claimedAt, updatedAt: claimedAt })
+          .where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.status, "queued")))
+          .returning().then((rows) => rows[0] ?? null);
+      });
+    } catch (error) {
+      const control = await getSpsWorkspaceExecutionControl(db, run.companyId);
+      if (control.state === "paused") return null;
+      if (!isWorkspaceExecutionFenceError(error)) throw error;
+      if (control.state === "stopped") return null;
+      throw error;
+    }
+    if (staleEpoch) {
+      await cancelRunInternal(run.id, "Cancelled because Workspace execution generation changed");
+      return null;
+    }
     if (!claimed) return null;
 
     publishLiveEvent({
@@ -11154,6 +11191,13 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     let run = await getRun(runId);
     if (!run) return;
     if (run.status !== "queued" && run.status !== "running") return;
+    try {
+      await assertSpsWorkspaceExecutionActive(db, run.companyId, run.workspaceExecutionEpoch);
+    } catch (error) {
+      if (!isWorkspaceExecutionFenceError(error)) throw error;
+      await cancelRunInternal(run.id, "Cancelled because Workspace execution was stopped");
+      return;
+    }
 
     if (run.status === "queued") {
       const claimed = await claimQueuedRun(run);
@@ -13022,6 +13066,13 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           await db.update(heartbeatRuns).set({ contextSnapshot: sql`coalesce(${heartbeatRuns.contextSnapshot}, '{}'::jsonb) || '{"spsSessionCancellationTermination":"confirmed"}'::jsonb` }).where(eq(heartbeatRuns.id, run.id));
           return;
         }
+        try {
+          await assertSpsWorkspaceExecutionActive(db, run.companyId, run.workspaceExecutionEpoch);
+        } catch (error) {
+          if (!isWorkspaceExecutionFenceError(error)) throw error;
+          await cancelRunInternal(run.id, "Cancelled because Workspace execution was stopped");
+          return;
+        }
         preparePluginConversationContext(context);
         adapterResult = await adapter.execute({
           runId: run.id,
@@ -13963,7 +14014,8 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       : null;
     const recoveryAgentNameKey = normalizeAgentNameKey(recoveryAgent?.name);
 
-    const promotionResult = await db.transaction(async (tx) => {
+    const promotionResult = await withSpsWorkspaceExecutionAdmission(db, run.companyId, async (tx, workspaceExecutionEpoch) => {
+      if (run.workspaceExecutionEpoch !== workspaceExecutionEpoch) return { kind: "released" as const };
       // Lock the context issue (if any) AND every issue that still references this run.
       //
       // A single run can hold execution locks on multiple issues: the caller's context
@@ -14304,6 +14356,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           .insert(heartbeatRuns)
           .values({
             companyId: deferredAgent.companyId,
+            workspaceExecutionEpoch,
             agentId: deferredAgent.id,
             invocationSource: promotedSource,
             triggerDetail: promotedTriggerDetail,
@@ -14458,6 +14511,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           .insert(heartbeatRuns)
           .values({
             companyId: issue.companyId,
+            workspaceExecutionEpoch,
             agentId: recoveryAgent.id,
             invocationSource: "automation",
             triggerDetail: "system",
@@ -14626,6 +14680,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         .insert(heartbeatRuns)
         .values({
           companyId: issue.companyId,
+          workspaceExecutionEpoch,
           agentId: recoveryAgent.id,
           invocationSource: "automation",
           triggerDetail: "system",
@@ -15010,7 +15065,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       // same issue workspace while the assignee already has a live run.
       const agentNameKey = normalizeAgentNameKey(agent.name);
 
-      const outcome = await db.transaction(async (tx) => {
+      const outcome = await withSpsWorkspaceExecutionAdmission(db, agent.companyId, async (tx, workspaceExecutionEpoch) => {
         await tx.execute(
           sql`select id from issues where id = ${issueId} and company_id = ${agent.companyId} for update`,
         );
@@ -15743,6 +15798,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           .insert(heartbeatRuns)
           .values({
             companyId: agent.companyId,
+            workspaceExecutionEpoch,
             agentId,
             invocationSource: source,
             triggerDetail,
@@ -15828,35 +15884,35 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         coalescedTargetRun.contextSnapshot,
         enrichedContextSnapshot,
       );
-      const mergedRun = await db
-        .update(heartbeatRuns)
-        .set({
+      const mergedRun = await withSpsWorkspaceExecutionAdmission(db, agent.companyId, async (tx) => {
+        const updated = await tx.update(heartbeatRuns).set({
           contextSnapshot: mergedContextSnapshot,
           updatedAt: new Date(),
-        })
-        .where(eq(heartbeatRuns.id, coalescedTargetRun.id))
-        .returning()
-        .then((rows) => rows[0] ?? coalescedTargetRun);
-
-      await db.insert(agentWakeupRequests).values({
-        companyId: agent.companyId,
-        agentId,
-        source,
-        triggerDetail,
-        reason,
-        payload,
-        status: "coalesced",
-        coalescedCount: 1,
-        requestedByActorType: opts.requestedByActorType ?? null,
-        requestedByActorId: opts.requestedByActorId ?? null,
-        idempotencyKey: opts.idempotencyKey ?? null,
-        runId: mergedRun.id,
-        finishedAt: new Date(),
+        }).where(and(eq(heartbeatRuns.id, coalescedTargetRun.id), eq(heartbeatRuns.workspaceExecutionEpoch, coalescedTargetRun.workspaceExecutionEpoch)))
+          .returning().then((rows) => rows[0] ?? null);
+        if (!updated) return null;
+        await tx.insert(agentWakeupRequests).values({
+          companyId: agent.companyId,
+          agentId,
+          source,
+          triggerDetail,
+          reason,
+          payload,
+          status: "coalesced",
+          coalescedCount: 1,
+          requestedByActorType: opts.requestedByActorType ?? null,
+          requestedByActorId: opts.requestedByActorId ?? null,
+          idempotencyKey: opts.idempotencyKey ?? null,
+          runId: updated.id,
+          finishedAt: new Date(),
+        });
+        return updated;
       });
+      if (!mergedRun) return null;
       return mergedRun;
     }
 
-    const queueOutcome = await db.transaction(async (tx) => {
+    const queueOutcome = await withSpsWorkspaceExecutionAdmission(db, agent.companyId, async (tx, workspaceExecutionEpoch) => {
       await tx.execute(
         sql`select id from agents where id = ${agentId} and company_id = ${agent.companyId} for update`,
       );
@@ -15917,6 +15973,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         .insert(heartbeatRuns)
         .values({
           companyId: agent.companyId,
+          workspaceExecutionEpoch,
           agentId,
           invocationSource: source,
           triggerDetail,
@@ -16092,14 +16149,17 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           processGroupId: running.processGroupId ?? run.processGroupId,
           graceMs: Math.max(1, running.graceSec) * 1000,
         });
+        runningProcesses.delete(run.id);
       } else if (run.processPid || run.processGroupId) {
         await terminateHeartbeatRunProcess({
           pid: run.processPid,
           processGroupId: run.processGroupId,
         });
       }
-    } finally {
-      runningProcesses.delete(run.id);
+    } catch (error) {
+      // Keep the owned process handle tracked when termination is uncertain so
+      // a later cancellation attempt can retry and shutdown still sees it.
+      throw error;
     }
 
     const finishedAt = new Date();
@@ -16251,7 +16311,72 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     await cancelPendingWakeupsForBudgetScope(scope);
   }
 
+  const unregisterWorkspaceExecutionStopHandler = registerSpsWorkspaceExecutionStopHandler(
+    db,
+    "heartbeat-runs",
+    async (companyId, reason, stoppedEpoch) => {
+      const runs = await db.select().from(heartbeatRuns).where(and(
+        eq(heartbeatRuns.companyId, companyId),
+        inArray(heartbeatRuns.status, [...CANCELLABLE_HEARTBEAT_RUN_STATUSES]),
+      ));
+      const priorEpoch = BigInt(stoppedEpoch);
+      const staleRuns = runs.filter(run => BigInt(run.workspaceExecutionEpoch ?? "0") < priorEpoch);
+      const commands = await db.select({ id: spsNodeCommands.id, heartbeatRunId: spsNodeCommands.heartbeatRunId,
+        workspaceExecutionEpoch: spsNodeCommands.workspaceExecutionEpoch, status: spsNodeCommands.status })
+        .from(spsNodeCommands).where(and(
+          eq(spsNodeCommands.companyId, companyId),
+          inArray(spsNodeCommands.status, ["queued", "claimed", "running", "cancelling"]),
+        ));
+      const staleCommands = commands.filter(command => BigInt(command.workspaceExecutionEpoch ?? "0") < priorEpoch);
+      const remoteRunIds = new Set<string>();
+      const localRuns: typeof staleRuns = [];
+      for (const run of staleRuns) {
+        const activeCommands = staleCommands.filter(command => command.heartbeatRunId === run.id
+          && (command.status === "claimed" || command.status === "running" || command.status === "cancelling"));
+        if (!activeCommands.length) { localRuns.push(run); continue; }
+        remoteRunIds.add(run.id);
+        await db.transaction(async tx => {
+          await lockSpsWorkspaceExecutionControl(tx, companyId);
+          const [currentRun] = await tx.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, run.id)).for("update");
+          if (!currentRun || BigInt(currentRun.workspaceExecutionEpoch ?? "0") >= priorEpoch
+            || !CANCELLABLE_HEARTBEAT_RUN_STATUSES.includes(currentRun.status as (typeof CANCELLABLE_HEARTBEAT_RUN_STATUSES)[number])) return;
+          const contextSnapshot = {
+            ...currentRun.contextSnapshot,
+            spsSessionCancellationRequested: true,
+            spsSessionCancellationTermination: "pending",
+            spsSessionCancellationWasQueued: currentRun.status === "queued",
+          };
+          await tx.update(heartbeatRuns).set({ contextSnapshot, updatedAt: new Date() }).where(eq(heartbeatRuns.id, currentRun.id));
+          await tx.update(spsNodeCommands).set({ status: "cancelled", error: reason, finishedAt: new Date(), updatedAt: new Date() })
+            .where(and(eq(spsNodeCommands.heartbeatRunId, run.id), eq(spsNodeCommands.status, "queued")));
+          await tx.update(spsNodeCommands).set({ status: "cancelling", error: reason, updatedAt: new Date() })
+            .where(and(eq(spsNodeCommands.heartbeatRunId, run.id), eq(spsNodeCommands.workspaceExecutionEpoch, run.workspaceExecutionEpoch),
+              inArray(spsNodeCommands.status, ["claimed", "running", "cancelling"])));
+        });
+      }
+      const detachedCommands = staleCommands.filter(command => !command.heartbeatRunId || !remoteRunIds.has(command.heartbeatRunId));
+      if (detachedCommands.length) {
+        await db.transaction(async tx => {
+          await lockSpsWorkspaceExecutionControl(tx, companyId);
+          for (const command of detachedCommands) {
+            const now = new Date();
+            const queued = command.status === "queued";
+            await tx.update(spsNodeCommands).set({ status: queued ? "cancelled" : "cancelling", error: reason,
+              ...(queued ? { finishedAt: now } : {}), updatedAt: now })
+              .where(and(eq(spsNodeCommands.id, command.id), eq(spsNodeCommands.workspaceExecutionEpoch, command.workspaceExecutionEpoch),
+                inArray(spsNodeCommands.status, queued ? ["queued"] : ["claimed", "running", "cancelling"])));
+          }
+        });
+      }
+      const results = await Promise.allSettled(localRuns.map(run => cancelRunInternal(run.id, reason)));
+      if (results.some(result => result.status === "rejected")) {
+        throw new Error("Workspace heartbeat cancellation was incomplete.");
+      }
+    },
+  );
+
   return {
+    disposeWorkspaceExecutionStopHandler: unregisterWorkspaceExecutionStopHandler,
     waitForRunExecutionDrain: async (
       runId: string,
       options: { timeoutMs?: number; intervalMs?: number } = {},

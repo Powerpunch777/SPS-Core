@@ -2,6 +2,12 @@
 
 Status: current engineering contract
 
+Workspace-wide execution admission and cancellation are platform-owned. The
+durable pause/stop/resume contract, per-lane acknowledgement limits, Host-only
+mutation authority and compatibility requirements are specified in
+[Workspace execution control](SPS-WORKSPACE-EXECUTION-CONTROL.md). A returned stop
+request or a database cancellation status is not process/provider exit evidence.
+
 ## Goal
 
 SPS Core is the durable, workflow-neutral runtime embedded by SPS Desktop. A

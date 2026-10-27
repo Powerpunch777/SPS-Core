@@ -85,6 +85,8 @@ export const pluginJobRuns = pgTable(
       .references(() => plugins.id, { onDelete: "cascade" }),
     /** Company scope — NULL for instance-level jobs. */
     companyId: uuid("company_id").references(() => companies.id, { onDelete: "cascade" }),
+    workspaceExecutionEpoch: text("workspace_execution_epoch").notNull().default("0"),
+    cancellationRequestedAt: timestamp("cancellation_requested_at", { withTimezone: true }),
     /** What caused this run to start (`"scheduled"` or `"manual"`). */
     trigger: text("trigger").$type<PluginJobRunTrigger>().notNull(),
     /** Current lifecycle state of this run. */

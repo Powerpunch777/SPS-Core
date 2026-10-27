@@ -1133,7 +1133,7 @@ export interface PluginJobRunRecord {
   /** What triggered this run. */
   trigger: "schedule" | "manual" | "retry";
   /** Current run status. */
-  status: "pending" | "queued" | "running" | "succeeded" | "failed" | "cancelled";
+  status: "pending" | "queued" | "running" | "cancelling" | "succeeded" | "failed" | "cancelled";
   /** Run duration in milliseconds. */
   durationMs: number | null;
   /** Error message if the run failed. */

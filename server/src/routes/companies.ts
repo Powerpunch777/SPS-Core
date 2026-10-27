@@ -39,6 +39,7 @@ import {
   hasSpsCoreHostAuthority,
 } from "./authz.js";
 import { COMPANY_IMPORT_ROUTE_PATH } from "./company-import-paths.js";
+import { spsWorkspaceExecutionRoutes } from "./sps-workspace-execution.js";
 
 export function companyRoutes(db: Db, storage?: StorageService) {
   const router = Router();
@@ -51,6 +52,8 @@ export function companyRoutes(db: Db, storage?: StorageService) {
   const feedback = feedbackService(db);
   const importJobs = new Map<string, ImportJobRecord>();
   const importJobTerminalRetentionMs = 5 * 60 * 1000;
+
+  router.use("/:companyId/execution-control", spsWorkspaceExecutionRoutes(db));
 
   function parseBooleanQuery(value: unknown) {
     return value === true || value === "true" || value === "1";
