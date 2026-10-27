@@ -17,6 +17,7 @@ const CLIENT_AUTH_OID = "1.3.6.1.5.5.7.3.2";
 const SERVER_AUTH_OID = "1.3.6.1.5.5.7.3.1";
 const DISCOVERY_TARGET = "/sps-native/v1/workspaces";
 const PLUGIN_TARGET = "/sps-native/v1/plugin-runtime";
+const NODE_TARGET = "/sps-native/v1/node-runtime";
 
 export type SpsNativeWorkspaceProofActualRequest = Readonly<{
   method: string;
@@ -104,7 +105,7 @@ function proofArray(value: unknown): ProofArray {
     || !(fields[2] === null ? fields[3] === "GET" && fields[4] === DISCOVERY_TARGET : canonicalUuid(fields[2]))
     || (fields[4] === DISCOVERY_TARGET && fields[2] !== null)
     || typeof fields[3] !== "string" || !METHODS.has(fields[3])
-    || (fields[3] === "POST" && fields[4] !== PLUGIN_TARGET)
+    || (fields[3] === "POST" && fields[4] !== PLUGIN_TARGET && fields[4] !== NODE_TARGET)
     || !canonicalTarget(fields[4]) || typeof fields[5] !== "string" || !NONCE.test(fields[5])
     || Buffer.from(fields[5], "base64url").length !== 32 || Buffer.from(fields[5], "base64url").toString("base64url") !== fields[5]
     || typeof fields[6] !== "number" || !Number.isSafeInteger(fields[6])
@@ -171,8 +172,9 @@ export function createSpsNativeWorkspaceProofVerifier(optionsValue: VerifierOpti
       if (typeof header !== "string" || header.length === 0 || header.length > MAX_HEADER_LENGTH) throw unavailable();
       const actual = exactRecord(actualValue, ["method", "target", "body", "cookie", "contentType"]);
       if (typeof actual.method !== "string" || !METHODS.has(actual.method)
-        || (actual.method === "POST" && actual.target !== PLUGIN_TARGET)
-        || !canonicalTarget(actual.target) || !Buffer.isBuffer(actual.body) || actual.body.length > MAX_BODY_BYTES
+        || (actual.method === "POST" && actual.target !== PLUGIN_TARGET && actual.target !== NODE_TARGET)
+        || !canonicalTarget(actual.target) || !Buffer.isBuffer(actual.body)
+        || actual.body.length > (actual.target === NODE_TARGET ? 512 * 1024 : MAX_BODY_BYTES)
         || typeof actual.cookie !== "string" || !COOKIE.test(actual.cookie)
         || typeof actual.contentType !== "string" || !CONTENT_TYPES.has(actual.contentType)) throw unavailable();
 

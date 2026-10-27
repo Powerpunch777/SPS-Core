@@ -105,6 +105,7 @@ export { spsMemberDevices, spsMemberDeviceEvents } from "./sps_member_devices.js
 export { spsMemberDeviceRenewalCertificates } from "./sps_member_device_renewal_certificates.js";
 export { spsNativePairings, spsNativePairingEvents } from "./sps_native_pairings.js";
 export { spsNativeEnrollments } from "./sps_native_enrollments.js";
+export { spsNativeNodeBindings } from "./sps_native_node_bindings.js";
 export {
   spsWorkspaceSources,
   spsWorkspaceSourceNodeGrants,

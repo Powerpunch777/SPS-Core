@@ -52,6 +52,7 @@ describe("sanitizePostRestoreDatabaseWithExecutor", () => {
         "sps_node_command_events",
         "sps_node_commands",
         "sps_node_runner_profiles",
+        "sps_native_node_bindings",
         "sps_nodes",
         "sps_native_enrollments",
         "sps_native_pairings",
@@ -72,6 +73,12 @@ describe("sanitizePostRestoreDatabaseWithExecutor", () => {
     );
     expect(executor.calls.indexOf('DELETE FROM "sps_node_runner_profiles"')).toBeLessThan(
       executor.calls.indexOf('DELETE FROM "sps_nodes"'),
+    );
+    expect(executor.calls.indexOf('DELETE FROM "sps_native_node_bindings"')).toBeLessThan(
+      executor.calls.indexOf('DELETE FROM "sps_nodes"'),
+    );
+    expect(executor.calls.indexOf('DELETE FROM "sps_native_node_bindings"')).toBeLessThan(
+      executor.calls.indexOf('DELETE FROM "sps_member_devices"'),
     );
     expect(executor.calls.indexOf('DELETE FROM "sps_native_enrollments"')).toBeGreaterThanOrEqual(0);
     expect(executor.calls.indexOf('DELETE FROM "sps_native_enrollments"')).toBeLessThan(

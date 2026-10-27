@@ -304,6 +304,17 @@ after its transaction. Existing two-operation adapters remain compatible; the
 new HTTP path is unavailable unless its reconciliation method is explicitly
 provided. Product listener/startup and Main persistence/UI remain separate work.
 
+### Native Node development integration
+
+The private Workspace channel can now dispatch the closed Native Node operation
+set through the shared signed Node service. Actual Main TLS/session/device and
+Workspace authority remains mandatory, with an immutable Native device binding
+and separate Node proof of possession. Enrollment grants no execution authority.
+See [Native Node contract](SPS-NATIVE-NODE.md) for limits, compatibility, restore
+and rollback. This source implementation does not qualify full LAN/Source,
+arbitrary CLI isolation or an installed Windows release; SPS-Source records the
+actual integration evidence and incomplete gates.
+
 ### Optional Execution Backends
 
 Keep model requests, process/CLI execution, Agent sessions and privileged Agent

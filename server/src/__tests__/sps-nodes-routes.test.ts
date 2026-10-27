@@ -191,7 +191,7 @@ describeEmbeddedPostgres("SPS Node routes", () => {
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("sps-node-routes-");
     db = createDb(tempDb.connectionString);
-  }, 20_000);
+  }, 120_000);
 
   afterEach(async () => {
     await db.delete(activityLog);
@@ -1060,6 +1060,41 @@ describeEmbeddedPostgres("SPS Node routes", () => {
       .then((rows) => rows[0]!);
     expect(failed.status).toBe("failed");
     expect(failed.error).toContain("plugin execution access was revoked");
+  });
+
+  it("rechecks the Node Workspace Source grant on every plugin-run lease", async () => {
+    const fixture = await createCompanyFixture(db);
+    const app = await createApp(db, boardActor(fixture.company.id, fixture.ownerUserId, "owner"));
+    const node = createNodePayload();
+    const registered = await request(app).post(`/api/companies/${fixture.company.id}/sps-nodes`).send(node.payload).expect(201);
+    const nodeId = registered.body.id;
+    await request(app).post(`/api/sps-nodes/${nodeId}/heartbeat`).send(createSignedHeartbeat(nodeId, node.privateKey)).expect(200);
+    await request(app).post(`/api/sps-nodes/${nodeId}/approve`).send({}).expect(200);
+    const runner = await db.select().from(spsNodeRunnerProfiles).where(eq(spsNodeRunnerProfiles.nodeId, nodeId))
+      .then(rows => rows.find(row => row.kind === "codex_cli")!);
+    const source = await db.insert(spsWorkspaceSources).values({ companyId: fixture.company.id,
+      displayName: "Granted Source", sharePath: "\\\\host.example.ts.net\\SPS_source", createdByUserId: fixture.ownerUserId })
+      .returning().then(rows => rows[0]!);
+    const sourceGrant = await db.insert(spsWorkspaceSourceNodeGrants).values({ companyId: fixture.company.id,
+      sourceId: source.id, nodeId, credentialAlgorithm: "rsa-oaep-sha256", credentialEnvelope: Buffer.alloc(128, 8).toString("base64"),
+      grantedByUserId: fixture.ownerUserId }).returning().then(rows => rows[0]!);
+    const execution = spsPluginExecutionService(db, "sps.source-grant-test");
+    const grant = await execution.upsertExecutionGrant({ companyId: fixture.company.id, subjectKey: "source-worker",
+      nodeId, runnerProfileId: runner.id, workspaceSourceId: source.id });
+    const run = await execution.dispatchRun({ companyId: fixture.company.id, executionGrantId: grant.id, args: ["exec"] });
+    const claimPath = `/sps-nodes/${nodeId}/plugin-runs/claim-next`;
+    await request(app).post(`/api${claimPath}`).send(createSignedNodeRequest(nodeId, node.privateKey, claimPath, {})).expect(200);
+
+    await db.update(spsWorkspaceSourceNodeGrants).set({ revokedAt: new Date() })
+      .where(eq(spsWorkspaceSourceNodeGrants.id, sourceGrant.id));
+    const leasePath = `/sps-nodes/${nodeId}/plugin-runs/${run.id}/lease`;
+    const lease = await request(app).post(`/api${leasePath}`)
+      .send(createSignedNodeRequest(nodeId, node.privateKey, leasePath, {})).expect(200);
+    expect(lease.body).toMatchObject({ active: false, status: "failed" });
+    const eventPath = `/sps-nodes/${nodeId}/plugin-runs/${run.id}/events`;
+    await request(app).post(`/api${eventPath}`).send(createSignedNodeRequest(nodeId, node.privateKey, eventPath,
+      { sequence: 1, stream: "stdout", body: "must be rejected after grant revocation" })).expect(403);
+    expect(await execution.getRun({ companyId: fixture.company.id, runId: run.id })).toMatchObject({ status: "failed" });
   });
 
   it("lists only owned runs and cancels active runs only after signed Node completion", async () => {

@@ -38,6 +38,7 @@ import { createSpsNativeParentEnrollmentService, type SpsNativeParentEnrollment 
 import { createSpsNativeParentIngress } from "./services/sps-native-parent-ingress.js";
 import type { createSpsNativeWorkspaceChannel as CreateSpsNativeWorkspaceChannel } from "./services/sps-native-workspace-channel.js";
 import type { createSpsNativePluginRuntime } from "./services/sps-native-plugin-runtime.js";
+import type { createSpsNativeNodeRuntime } from "./services/sps-native-node-runtime.js";
 import { loadConfig } from "./config.js";
 import { logger } from "./middleware/logger.js";
 import { setupEnvironmentCustomImageTerminalWebSocketServer } from "./realtime/environment-custom-image-terminal-ws.js";
@@ -548,6 +549,7 @@ export async function startServer(): Promise<StartedServer> {
   let nativeParentIngress: ReturnType<typeof createSpsNativeParentIngress> | undefined;
   let nativeWorkspaceChannel: ReturnType<typeof CreateSpsNativeWorkspaceChannel> | undefined;
   let nativePluginRuntime: ReturnType<typeof createSpsNativePluginRuntime> | undefined;
+  let nativeNodeRuntime: ReturnType<typeof createSpsNativeNodeRuntime> | undefined;
   let resolveSession:
     | ((req: ExpressRequest) => Promise<BetterAuthSessionResult | null>)
     | undefined;
@@ -633,6 +635,7 @@ export async function startServer(): Promise<StartedServer> {
               serverSpkiSha256: binding.serverSpkiSha256,
               issuerSpkiSha256: binding.issuerSpkiSha256,
               getPluginRuntime: () => nativePluginRuntime,
+              getNodeRuntime: () => nativeNodeRuntime,
               assertCurrent: () => {
                 management.assertActive();
                 enrollment.assertActive();
@@ -780,6 +783,7 @@ export async function startServer(): Promise<StartedServer> {
   const pluginWorkerManager = createPluginWorkerManager();
   const app = await createApp(db as any, {
     onNativePluginRuntime: runtime => { nativePluginRuntime = runtime; },
+    onNativeNodeRuntime: runtime => { nativeNodeRuntime = runtime; },
     uiMode,
     serverPort: listenPort,
     storageService,

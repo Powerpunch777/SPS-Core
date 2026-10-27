@@ -92,12 +92,14 @@ export function createSpsNativeWorkspaceHttpServer(options: {
         || typeof request.url !== "string" || pending >= 4) throw new Error(FAILURE);
       const patchState = request.method === "PATCH" && INBOX_STATE_TARGET.test(request.url);
       const pluginRequest = request.method === "POST" && request.url === "/sps-native/v1/plugin-runtime";
-      if (request.method === "POST" && !pluginRequest) throw new Error(FAILURE);
+      const nodeRequest = request.method === "POST" && request.url === "/sps-native/v1/node-runtime";
+      if (request.method === "POST" && !pluginRequest && !nodeRequest) throw new Error(FAILURE);
       if (request.method === "PATCH" && !patchState) throw new Error(FAILURE);
       const transferEncoding = singleHeader(request, "transfer-encoding", false);
       const contentLengthText = singleHeader(request, "content-length", false);
       if (transferEncoding
-        || (pluginRequest ? !/^[1-9][0-9]{0,4}$/.test(contentLengthText) || Number(contentLengthText) > 64 * 1024 : patchState
+        || (nodeRequest ? !/^[1-9][0-9]{0,5}$/.test(contentLengthText) || Number(contentLengthText) > 512 * 1024
+          : pluginRequest ? !/^[1-9][0-9]{0,4}$/.test(contentLengthText) || Number(contentLengthText) > 64 * 1024 : patchState
           ? !/^(?:[1-9]|[1-9][0-9]|1[01][0-9]|12[0-8])$/.test(contentLengthText)
           : !["", "0"].includes(contentLengthText))
         || ["authorization", "x-sps-desktop-access", "x-sps-desktop-owner-bootstrap"]
@@ -105,18 +107,18 @@ export function createSpsNativeWorkspaceHttpServer(options: {
       const proof = singleHeader(request, "x-sps-native-workspace-proof");
       const cookie = singleHeader(request, "cookie");
       const contentType = singleHeader(request, "content-type", false);
-      if (patchState || pluginRequest ? contentType !== "application/json" : contentType !== "") throw new Error(FAILURE);
+      if (patchState || pluginRequest || nodeRequest ? contentType !== "application/json" : contentType !== "") throw new Error(FAILURE);
       pending++;
       admitted = true;
       timer = setTimeout(() => { controller.abort(); response.destroy(); }, 10_000);
       let body = Buffer.alloc(0);
-      if (patchState || pluginRequest) {
+      if (patchState || pluginRequest || nodeRequest) {
         const chunks: Buffer[] = [];
         let bytes = 0;
         for await (const chunk of request) {
           const part = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
           bytes += part.length;
-          if (bytes > (pluginRequest ? 64 * 1024 : 128)) throw new Error(FAILURE);
+          if (bytes > (nodeRequest ? 512 * 1024 : pluginRequest ? 64 * 1024 : 128)) throw new Error(FAILURE);
           chunks.push(part);
         }
         if (bytes !== Number(contentLengthText)) throw new Error(FAILURE);
@@ -125,12 +127,12 @@ export function createSpsNativeWorkspaceHttpServer(options: {
       const actual = {
         method: request.method, target: request.url, body, cookie, contentType,
       };
-      const result = await (pluginRequest ? reader.read(proof, actual, controller.signal) : reader.read(proof, actual));
+      const result = await (pluginRequest || nodeRequest ? reader.read(proof, actual, controller.signal) : reader.read(proof, actual));
       checkCurrent();
       if (request.aborted || response.destroyed) return;
       const json = JSON.stringify(result);
       const assetRequest = pluginRequest && JSON.parse(body.toString("utf8")).operation === "asset";
-      if (typeof json !== "string" || Buffer.byteLength(json) > (assetRequest ? 6 * 1024 * 1024 : 256 * 1024)) throw new Error(FAILURE);
+      if (typeof json !== "string" || Buffer.byteLength(json) > (nodeRequest ? 1024 * 1024 : assetRequest ? 6 * 1024 * 1024 : 256 * 1024)) throw new Error(FAILURE);
       response.writeHead(200, {
         "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store",
         "X-Content-Type-Options": "nosniff", "Connection": "close",

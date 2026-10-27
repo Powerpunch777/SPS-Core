@@ -26,6 +26,24 @@ function call(port: number, options: RequestOptions = {}) {
 }
 
 describe("private Native Workspace HTTP adapter", () => {
+  it("bounds Node POST independently of Plugin and ordinary response budgets", async () => {
+    let size = 300_000;
+    const read = vi.fn(async (_proof: string, _actual: { body: Buffer }, signal?: AbortSignal) => {
+      expect(signal?.aborted).toBe(false); return { data: "x".repeat(size) };
+    });
+    const server = createSpsNativeWorkspaceHttpServer({ reader: { read }, assertCurrent() {} }); owned.push(server);
+    const { port } = await server.start();
+    const body = JSON.stringify({ operation: "command-event", payload: "x".repeat(100_000) });
+    const post = (target: string, bytes = body) => call(port, { method: "POST", path: target, body: bytes,
+      headers: { "Content-Type": "application/json", "Content-Length": String(Buffer.byteLength(bytes)) } });
+    expect((await post("/sps-native/v1/node-runtime")).status).toBe(200);
+    expect((await post("/sps-native/v1/plugin-runtime")).status).toBe(403);
+    expect((await post("/sps-native/v1/node-runtime?scope=all")).status).toBe(403);
+    expect((await post("/sps-native/v1/node-runtime", "x".repeat(512 * 1024 + 1))).status).toBe(403);
+    expect(read).toHaveBeenCalledTimes(1);
+    size = 1024 * 1024;
+    expect((await post("/sps-native/v1/node-runtime")).status).toBe(403);
+  });
   it("allows larger bounded Plugin asset envelopes without widening ordinary data responses", async () => {
     const read = vi.fn(async () => ({ data: { bytes: "a".repeat(300_000) } }));
     const server = createSpsNativeWorkspaceHttpServer({ reader: { read }, assertCurrent() {} }); owned.push(server);

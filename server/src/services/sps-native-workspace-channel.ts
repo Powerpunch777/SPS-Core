@@ -5,6 +5,7 @@ import { createSpsNativeWorkspaceHttpServer } from "./sps-native-workspace-http.
 import { createSpsNativeWorkspaceProofVerifier } from "./sps-native-workspace-proof.js";
 import { createSpsNativeWorkspaceSurfaceReader } from "./sps-native-workspace-surfaces.js";
 import type { createSpsNativePluginRuntime } from "./sps-native-plugin-runtime.js";
+import type { createSpsNativeNodeRuntime } from "./sps-native-node-runtime.js";
 
 const REQUEST = "sps.native.workspace.bootstrap.request";
 const RESPONSE = "sps.native.workspace.bootstrap.response";
@@ -38,6 +39,7 @@ type WorkspaceOptions = Readonly<{
   issuerSpkiSha256: string;
   assertCurrent(): void;
   getPluginRuntime?: () => ReturnType<typeof createSpsNativePluginRuntime> | undefined;
+  getNodeRuntime?: () => ReturnType<typeof createSpsNativeNodeRuntime> | undefined;
 }>;
 
 function fail(): never { throw new Error(FAILURE); }
@@ -316,6 +318,7 @@ export function createSpsNativeWorkspaceChannel(options: WorkspaceOptions, chann
         verifier,
         assertCurrent,
         getPluginRuntime: options.getPluginRuntime,
+        getNodeRuntime: options.getNodeRuntime,
       });
       const server = createSpsNativeWorkspaceHttpServer({ reader, assertCurrent });
       try {

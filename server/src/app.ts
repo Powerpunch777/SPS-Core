@@ -71,6 +71,7 @@ import { logger } from "./middleware/logger.js";
 import { DEFAULT_LOCAL_PLUGIN_DIR, pluginLoader } from "./services/plugin-loader.js";
 import { createPluginWorkerManager, type PluginWorkerManager } from "./services/plugin-worker-manager.js";
 import { createSpsNativePluginRuntime } from "./services/sps-native-plugin-runtime.js";
+import { createSpsNativeNodeRuntime } from "./services/sps-native-node-runtime.js";
 import { createPluginJobScheduler } from "./services/plugin-job-scheduler.js";
 import { pluginJobStore } from "./services/plugin-job-store.js";
 import { createPluginToolDispatcher } from "./services/plugin-tool-dispatcher.js";
@@ -185,6 +186,7 @@ export async function createApp(
     pluginMigrationDb?: Db;
     pluginWorkerManager?: PluginWorkerManager;
     onNativePluginRuntime?: (runtime: ReturnType<typeof createSpsNativePluginRuntime>) => void;
+    onNativeNodeRuntime?: (runtime: ReturnType<typeof createSpsNativeNodeRuntime>) => void;
     betterAuthHandler?: express.RequestHandler;
     resolveSession?: (req: ExpressRequest) => Promise<BetterAuthSessionResult | null>;
     spsIdentityHandler?: express.RequestHandler;
@@ -252,6 +254,7 @@ export async function createApp(
   const nativePluginRuntime = createSpsNativePluginRuntime(db, workerManager, {
     localPluginDir: opts.localPluginDir ?? DEFAULT_LOCAL_PLUGIN_DIR,
   });
+  const nativeNodeRuntime = createSpsNativeNodeRuntime(db);
 
   // Mount API routes
   const api = Router();
@@ -712,6 +715,7 @@ export async function createApp(
     if (pluginRuntimeShutdown) return pluginRuntimeShutdown;
     pluginRuntimeStopping = true;
     nativePluginRuntime.dispose();
+    nativeNodeRuntime.dispose();
     stopPluginDiscovery();
     // Close admission synchronously, before a still-running startup can fork
     // another worker. Keep Host services alive until owned workers have stopped.
@@ -733,5 +737,6 @@ export async function createApp(
   });
 
   opts.onNativePluginRuntime?.(nativePluginRuntime);
+  opts.onNativeNodeRuntime?.(nativeNodeRuntime);
   return app;
 }

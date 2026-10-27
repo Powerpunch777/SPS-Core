@@ -32,6 +32,7 @@ export {
   spsNativePairings,
   spsNativePairingEvents,
   spsNativeEnrollments,
+  spsNativeNodeBindings,
   spsModelConnections,
   spsModelGrants,
   spsModelRuns,

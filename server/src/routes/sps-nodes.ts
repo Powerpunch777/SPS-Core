@@ -1,4 +1,3 @@
-import { createHash, createPublicKey, verify } from "node:crypto";
 import { Router, type Request } from "express";
 import { and, desc, eq, inArray, isNull, lt, sql } from "drizzle-orm";
 import type { Db } from "../compat/paperclip/db.js";
@@ -25,14 +24,6 @@ import {
 import {
   bindSpsAgentNodeSchema,
   createSpsNodeSchema,
-  reportSpsNodeRunnerAvailabilitySchema,
-  spsNodeHeartbeatMessage,
-  spsNodeHeartbeatSchema,
-  spsNodeCommandCompleteSchema,
-  spsPluginNodeRunCompleteSchema,
-  spsNodeCommandEventSchema,
-  spsNodeSignedRequestMessage,
-  spsNodeSignedRequestSchema,
   spsNodeCapabilityForAdapter,
   spsNodeExecutableRuntimeKindSchema,
   spsNodeSupportsAdapter,
@@ -50,36 +41,34 @@ import {
   assertCompanyAccess,
   hasSpsCoreHostAuthority,
   logActivity,
-  heartbeatService,
 } from "../compat/paperclip/control-plane.js";
 import { isSpsCoreBaselineModeEnabled } from "../ui-branding.js";
-import { hasSpsSessionCancellation } from "../services/sps-agent-session-runs.js";
-import { createSpsNodeUsageReceipt } from "../services/sps-node-usage.js";
-import { normalizeSpsPluginExecutionTimeout } from "../services/sps-execution-timeout.js";
+import { createSpsNodeOperations, type SpsNodeOperationContext } from "../services/sps-node-operations.js";
 
 function actorUserId(req: Request) {
   return req.actor.type === "board" ? req.actor.userId ?? "local-board" : null;
 }
 
-function canonicalJson(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map((item) => canonicalJson(item)).join(",")}]`;
-  if (value && typeof value === "object") {
-    const entries = Object.entries(value as Record<string, unknown>)
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([key, item]) => `${JSON.stringify(key)}:${canonicalJson(item)}`);
-    return `{${entries.join(",")}}`;
-  }
-  return JSON.stringify(value);
-}
-
-function signedRequestPayload(body: Record<string, unknown>) {
-  const { timestamp: _timestamp, nonce: _nonce, signature: _signature, ...payload } = body;
-  return payload;
-}
-
 export function spsNodeRoutes(db: Db) {
   const router = Router();
   const access = accessService(db);
+  const nodeOperations = createSpsNodeOperations(db);
+
+  function operationContext(req: Request): SpsNodeOperationContext {
+    return {
+      userId: actorUserId(req) ?? "",
+      authorizeWorkspace(companyId) { assertBoard(req); assertCompanyAccess(req, companyId); },
+      authorizeNode(node) { return assertSpsNodeOwner(req, node); },
+      async logMutation(input) { await logNodeMutation(req, input); },
+      signatureMethod: req.method,
+      signaturePath: req.path,
+    };
+  }
+
+  function sendOperationResult(res: import("express").Response, result: { status: number; data: unknown }) {
+    if (result.status === 204) return res.status(204).end();
+    return res.status(result.status).json(result.data);
+  }
 
   async function getNode(nodeId: string) {
     const node = await db
@@ -182,55 +171,6 @@ export function spsNodeRoutes(db: Db) {
       }
     }
     assertCompanyAccess(req, node.companyId);
-  }
-
-  async function assertSignedNodeRequest(req: Request, node: typeof spsNodes.$inferSelect) {
-    await assertSpsNodeOwner(req, node);
-
-    const signed = spsNodeSignedRequestSchema.parse(req.body ?? {});
-    const signedAt = new Date(signed.timestamp);
-    const now = new Date();
-    const maxClockSkewMs = 5 * 60 * 1000;
-    if (Math.abs(now.getTime() - signedAt.getTime()) > maxClockSkewMs) {
-      throw badRequest("SPS Node request timestamp is outside the allowed clock-skew window");
-    }
-
-    let key: ReturnType<typeof createPublicKey>;
-    try {
-      key = createPublicKey(node.publicKey);
-    } catch {
-      throw badRequest("SPS Node public key is not a supported public key format");
-    }
-    const bodySha256 = createHash("sha256")
-      .update(canonicalJson(signedRequestPayload(req.body ?? {})), "utf8")
-      .digest("hex");
-    const message = spsNodeSignedRequestMessage({
-      nodeId: node.id,
-      method: req.method,
-      path: req.path,
-      timestamp: signed.timestamp,
-      nonce: signed.nonce,
-      bodySha256,
-    });
-    if (!verify(null, Buffer.from(message, "utf8"), key, Buffer.from(signed.signature, "base64"))) {
-      throw forbidden("SPS Node request signature is invalid");
-    }
-
-    const nonceHash = createHash("sha256").update(`request:${node.id}:${signed.nonce}`).digest("hex");
-    const nonceExpiry = new Date(signedAt.getTime() + maxClockSkewMs + 60_000);
-    await db.delete(spsNodeHeartbeats).where(lt(spsNodeHeartbeats.expiresAt, now));
-    const replay = await db
-      .select({ id: spsNodeHeartbeats.id })
-      .from(spsNodeHeartbeats)
-      .where(eq(spsNodeHeartbeats.nonceHash, nonceHash))
-      .then((rows) => rows[0] ?? null);
-    if (replay) throw forbidden("SPS Node request nonce has already been used");
-    await db.insert(spsNodeHeartbeats).values({
-      nodeId: node.id,
-      nonceHash,
-      signedAt,
-      expiresAt: nonceExpiry,
-    });
   }
 
   async function logNodeMutation(
@@ -509,19 +449,18 @@ export function spsNodeRoutes(db: Db) {
     if ((grant.workspaceSourceId ?? null) !== (run.workspaceSourceId ?? null)) return false;
     if (!run.workspaceSourceId) return true;
 
-    const source = await db
-      .select({ id: spsWorkspaceSources.id })
-      .from(spsWorkspaceSources)
-      .where(and(
-        eq(spsWorkspaceSources.id, run.workspaceSourceId),
-        eq(spsWorkspaceSources.companyId, node.companyId),
-        eq(spsWorkspaceSources.status, "active"),
-      ))
-      .then((rows) => rows[0] ?? null);
+    const [source, sourceGrant] = await Promise.all([
+      db.select({ id: spsWorkspaceSources.id }).from(spsWorkspaceSources).where(and(
+        eq(spsWorkspaceSources.id, run.workspaceSourceId), eq(spsWorkspaceSources.companyId, node.companyId),
+        eq(spsWorkspaceSources.status, "active"))).then((rows) => rows[0] ?? null),
+      db.select({ id: spsWorkspaceSourceNodeGrants.id }).from(spsWorkspaceSourceNodeGrants).where(and(
+        eq(spsWorkspaceSourceNodeGrants.sourceId, run.workspaceSourceId), eq(spsWorkspaceSourceNodeGrants.companyId, node.companyId),
+        eq(spsWorkspaceSourceNodeGrants.nodeId, node.id), isNull(spsWorkspaceSourceNodeGrants.revokedAt))).then((rows) => rows[0] ?? null),
+    ]);
     // The physical Host resolves its own Source mapping locally. A Member
     // must also pass the encrypted route claim while preparing the command,
     // so the Hub never needs a Member-local filesystem path here.
-    return Boolean(source);
+    return Boolean(source && sourceGrant);
   }
 
   async function pluginRunRunnerCanStart(run: typeof spsPluginNodeRuns.$inferSelect) {
@@ -997,205 +936,21 @@ export function spsNodeRoutes(db: Db) {
     res.status(204).end();
   });
 
-  router.post(
-    "/companies/:companyId/sps-nodes",
-    validate(createSpsNodeSchema),
-    async (req, res) => {
-      const companyId = req.params.companyId as string;
-      assertBoard(req);
-      assertCompanyAccess(req, companyId);
-      const userId = actorUserId(req);
-      if (!userId) throw unauthorized("Board authentication required");
-      const registrationCapabilities = req.body.capabilities.length > 0
-        ? req.body.capabilities
-        : (req.body.runners ?? []).map((runner: SpsNodeRunnerProfile) => ({
-          kind: runner.kind,
-          label: runner.label,
-          version: runner.version ?? null,
-          ...(runner.models?.length ? { models: runner.models } : {}),
-        }));
+  router.post("/companies/:companyId/sps-nodes", async (req, res) => {
+    const result = await nodeOperations.register({ workspaceId: req.params.companyId as string, payload: req.body }, operationContext(req));
+    sendOperationResult(res, result);
+  });
 
-      const now = new Date();
-      const existing = await db
-        .select()
-        .from(spsNodes)
-        .where(and(eq(spsNodes.companyId, companyId), eq(spsNodes.publicKey, req.body.publicKey)))
-        .then((rows) => rows[0] ?? null);
-
-      if (existing && existing.ownerUserId !== userId) {
-        throw forbidden("This SPS Node belongs to another company member");
-      }
-
-      const node = existing
-        ? await db
-          .update(spsNodes)
-          .set({
-            displayName: req.body.displayName,
-            transportPublicKey: req.body.transportPublicKey ?? null,
-            platform: req.body.platform,
-            appVersion: req.body.appVersion ?? null,
-            capabilities: registrationCapabilities,
-            lastSeenAt: now,
-            updatedAt: now,
-          })
-          .where(eq(spsNodes.id, existing.id))
-          .returning()
-          .then((rows) => rows[0]!)
-        : await db
-          .insert(spsNodes)
-          .values({
-            companyId,
-            ownerUserId: userId,
-            displayName: req.body.displayName,
-            publicKey: req.body.publicKey,
-            transportPublicKey: req.body.transportPublicKey ?? null,
-            platform: req.body.platform,
-            appVersion: req.body.appVersion ?? null,
-            capabilities: registrationCapabilities,
-            lastSeenAt: now,
-          })
-          .returning()
-          .then((rows) => rows[0]!);
-
-      const runners = await reconcileNodeRunnerProfiles(
-        node,
-        req.body.runners ?? fallbackRunnerProfiles(registrationCapabilities),
-      );
-      await syncExistingNodeAgentRunnerGrants(node, userId);
-
-      await logNodeMutation(req, {
-        companyId,
-        action: existing ? "sps_node.updated" : "sps_node.registered",
-        nodeId: node.id,
-        details: {
-          status: node.status,
-          capabilityKinds: node.capabilities.map((item) => item.kind),
-          runnerCount: runners.length,
-        },
-      });
-      res.status(existing ? 200 : 201).json({ ...node, runners });
-    },
-  );
-
-  router.post(
-    "/sps-nodes/:nodeId/heartbeat",
-    validate(spsNodeHeartbeatSchema),
-    async (req, res) => {
-      const node = await getNode(req.params.nodeId as string);
-      await assertSpsNodeOwner(req, node);
-      if (node.status === "revoked") throw forbidden("This SPS Node has been revoked");
-
-      const signedAt = new Date(req.body.timestamp);
-      const now = new Date();
-      const maxClockSkewMs = 5 * 60 * 1000;
-      if (Math.abs(now.getTime() - signedAt.getTime()) > maxClockSkewMs) {
-        throw badRequest("SPS Node heartbeat timestamp is outside the allowed clock-skew window");
-      }
-
-      let key: ReturnType<typeof createPublicKey>;
-      try {
-        key = createPublicKey(node.publicKey);
-      } catch {
-        throw badRequest("SPS Node public key is not a supported public key format");
-      }
-      if (key.asymmetricKeyType !== "ed25519") {
-        throw badRequest("SPS Node public key must use Ed25519");
-      }
-
-      const message = spsNodeHeartbeatMessage({
-        nodeId: node.id,
-        timestamp: req.body.timestamp,
-        nonce: req.body.nonce,
-      });
-      const signatureValid = verify(
-        null,
-        Buffer.from(message, "utf8"),
-        key,
-        Buffer.from(req.body.signature, "base64"),
-      );
-      if (!signatureValid) throw forbidden("SPS Node heartbeat signature is invalid");
-
-      const nonceHash = createHash("sha256").update(req.body.nonce).digest("hex");
-      const nonceExpiry = new Date(signedAt.getTime() + maxClockSkewMs + 60_000);
-      await db.delete(spsNodeHeartbeats).where(lt(spsNodeHeartbeats.expiresAt, now));
-      const replay = await db
-        .select({ id: spsNodeHeartbeats.id })
-        .from(spsNodeHeartbeats)
-        .where(eq(spsNodeHeartbeats.nonceHash, nonceHash))
-        .then((rows) => rows[0] ?? null);
-      if (replay) throw forbidden("SPS Node heartbeat nonce has already been used");
-
-      await db.insert(spsNodeHeartbeats).values({
-        nodeId: node.id,
-        nonceHash,
-        signedAt,
-        expiresAt: nonceExpiry,
-      });
-      const verifiedAt = node.keyVerifiedAt ?? now;
-      const updated = await db
-        .update(spsNodes)
-        .set({ keyVerifiedAt: verifiedAt, lastSeenAt: now, updatedAt: now })
-        .where(eq(spsNodes.id, node.id))
-        .returning()
-        .then((rows) => rows[0]!);
-      res.json(updated);
-    },
-  );
+  router.post("/sps-nodes/:nodeId/heartbeat", async (req, res) => {
+    const result = await nodeOperations.invoke({ operation: "heartbeat", nodeId: req.params.nodeId as string,
+      resourceId: null, payload: req.body }, operationContext(req));
+    sendOperationResult(res, result);
+  });
 
   router.post("/sps-nodes/:nodeId/runners/availability", async (req, res) => {
-    const node = await getNode(req.params.nodeId as string);
-    const report = reportSpsNodeRunnerAvailabilitySchema.parse(req.body ?? {});
-    await assertSignedNodeRequest(req, node);
-    const runnerKeys = report.runners.map((runner) => runner.runnerKey);
-    const profiles = await db
-      .select()
-      .from(spsNodeRunnerProfiles)
-      .where(and(
-        eq(spsNodeRunnerProfiles.nodeId, node.id),
-        inArray(spsNodeRunnerProfiles.runnerKey, runnerKeys),
-      ));
-    const profileByKey = new Map(profiles.map((profile) => [profile.runnerKey, profile]));
-    const missingRunnerKey = runnerKeys.find((runnerKey) => !profileByKey.has(runnerKey));
-    if (missingRunnerKey) {
-      throw badRequest(`SPS Node runner \"${missingRunnerKey}\" is not registered on this Node.`);
-    }
-
-    const now = new Date();
-    const updated = await db.transaction(async (tx) => await Promise.all(report.runners.map(async (runner) => {
-      const profile = profileByKey.get(runner.runnerKey)!;
-      return await tx
-        .update(spsNodeRunnerProfiles)
-        .set({
-          credentialStatus: runner.credentialStatus ?? profile.credentialStatus,
-          availabilityStatus: runner.availability.status,
-          availabilityDetail: runner.availability.detail ?? null,
-          availabilitySource: runner.availability.source,
-          availabilityConfidence: runner.availability.confidence ?? null,
-          availabilityObservedAt: new Date(runner.availability.observedAt),
-          retryAfter: runner.availability.retryAfter ? new Date(runner.availability.retryAfter) : null,
-          updatedAt: now,
-        })
-        .where(eq(spsNodeRunnerProfiles.id, profile.id))
-        .returning()
-        .then((rows) => rows[0]!);
-    })));
-    await db
-      .update(spsNodes)
-      .set({ lastSeenAt: now, updatedAt: now })
-      .where(eq(spsNodes.id, node.id));
-    await logNodeMutation(req, {
-      companyId: node.companyId,
-      action: "sps_node.runner_availability_reported",
-      nodeId: node.id,
-      details: {
-        runners: updated.map((runner) => ({
-          runnerKey: runner.runnerKey,
-          status: runner.availabilityStatus,
-          source: runner.availabilitySource,
-        })),
-      },
-    });
-    res.json(updated);
+    const result = await nodeOperations.invoke({ operation: "availability", nodeId: req.params.nodeId as string,
+      resourceId: null, payload: req.body }, operationContext(req));
+    sendOperationResult(res, result);
   });
 
   router.post("/sps-nodes/:nodeId/approve", async (req, res) => {
@@ -1560,480 +1315,51 @@ export function spsNodeRoutes(db: Db) {
    * UNC path or encrypted credential envelope.
    */
   router.post("/sps-nodes/:nodeId/workspace-sources/:sourceId/claim-route", async (req, res) => {
-    const node = await getNode(req.params.nodeId as string);
-    if (node.status !== "active" || !node.keyVerifiedAt || !node.transportPublicKey) {
-      throw forbidden("This SPS Node is not approved for Workspace Source access");
-    }
-    await assertSignedNodeRequest(req, node);
-
-    const sourceId = req.params.sourceId as string;
-    const [source, grant] = await Promise.all([
-      db
-        .select()
-        .from(spsWorkspaceSources)
-        .where(and(
-          eq(spsWorkspaceSources.id, sourceId),
-          eq(spsWorkspaceSources.companyId, node.companyId),
-        ))
-        .then((rows) => rows[0] ?? null),
-      db
-        .select()
-        .from(spsWorkspaceSourceNodeGrants)
-        .where(and(
-          eq(spsWorkspaceSourceNodeGrants.sourceId, sourceId),
-          eq(spsWorkspaceSourceNodeGrants.companyId, node.companyId),
-          eq(spsWorkspaceSourceNodeGrants.nodeId, node.id),
-          isNull(spsWorkspaceSourceNodeGrants.revokedAt),
-        ))
-        .then((rows) => rows[0] ?? null),
-    ]);
-    if (!source || source.status !== "active" || !source.sharePath) {
-      throw notFound("This SPS Workspace Source has no active transport route");
-    }
-    if (!grant) {
-      throw forbidden("This SPS Node has not been granted this Workspace Source");
-    }
-    if (grant.credentialAlgorithm !== "rsa-oaep-sha256" && grant.credentialAlgorithm !== "rsa-oaep-sha256+a256gcm") {
-      throw badRequest("This SPS Workspace Source uses an unsupported Node credential envelope");
-    }
-
-    await logNodeMutation(req, {
-      companyId: node.companyId,
-      action: "sps_workspace_source.node_route_claimed",
-      nodeId: node.id,
-      details: { sourceId },
-    });
-    res.json({
-      kind: "sps_workspace_source",
-      sourceId,
-      sharePath: source.sharePath,
-      credentialAlgorithm: grant.credentialAlgorithm,
-      credentialEnvelope: grant.credentialEnvelope,
-    });
+    const result = await nodeOperations.invoke({ operation: "source-route", nodeId: req.params.nodeId as string,
+      resourceId: req.params.sourceId as string, payload: req.body }, operationContext(req));
+    sendOperationResult(res, result);
   });
 
   router.post("/sps-nodes/:nodeId/commands/claim-next", async (req, res) => {
-    const node = await getNode(req.params.nodeId as string);
-    if (node.status !== "active" || !node.keyVerifiedAt) {
-      throw forbidden("This SPS Node is not approved for command execution");
-    }
-    await assertSignedNodeRequest(req, node);
-
-    // A Node can be restarted mid-command. Re-queue only an old, unreported
-    // claim; active CLI process ownership remains local to the Desktop Node.
-    const now = new Date();
-    const staleBefore = new Date(now.getTime() - 10 * 60 * 1000);
-    await db
-      .update(spsNodeCommands)
-      .set({ status: "queued", claimedAt: null, startedAt: null, updatedAt: now })
-      .where(and(
-        eq(spsNodeCommands.nodeId, node.id),
-        eq(spsNodeCommands.status, "claimed"),
-        lt(spsNodeCommands.updatedAt, staleBefore),
-      ));
-
-    // Re-check authority at claim time. A queued command must not survive an
-    // owner revoking the Node grant or changing the Agent's primary Node.
-    // This is intentionally checked by the Node-facing boundary as well as
-    // when the Hub originally creates the command.
-    while (true) {
-      const candidate = await db
-        .select()
-        .from(spsNodeCommands)
-        .where(and(eq(spsNodeCommands.nodeId, node.id), eq(spsNodeCommands.status, "queued")))
-        .orderBy(spsNodeCommands.createdAt)
-        .limit(1)
-        .then((rows) => rows[0] ?? null);
-      if (!candidate) return res.status(204).end();
-
-      if (!await commandHasCurrentAuthority(node, candidate)) {
-        await db
-          .update(spsNodeCommands)
-          .set({
-            status: "failed",
-            error: "SPS Node access was revoked or reassigned before this command was claimed.",
-            finishedAt: now,
-            updatedAt: now,
-          })
-          .where(and(eq(spsNodeCommands.id, candidate.id), eq(spsNodeCommands.status, "queued")));
-        continue;
-      }
-
-      if (!await commandRunnerCanStart(candidate)) {
-        await db
-          .update(spsNodeCommands)
-          .set({
-            status: "failed",
-            error: "The selected SPS Node Runner Profile is unavailable, requires a local sign-in, or no longer exists.",
-            finishedAt: now,
-            updatedAt: now,
-          })
-          .where(and(eq(spsNodeCommands.id, candidate.id), eq(spsNodeCommands.status, "queued")));
-        continue;
-      }
-
-      const agent = await getAgent(candidate.agentId);
-      const runtimeKind = agent ? spsNodeCapabilityForAdapter(agent.adapterType) : null;
-      if (!agent || agent.companyId !== node.companyId || !runtimeKind) {
-        await db
-          .update(spsNodeCommands)
-          .set({
-            status: "failed",
-            error: "SPS Node command could not be matched to an approved Agent runtime.",
-            finishedAt: now,
-            updatedAt: now,
-          })
-          .where(and(eq(spsNodeCommands.id, candidate.id), eq(spsNodeCommands.status, "queued")));
-        continue;
-      }
-
-      const claimed = await db
-        .update(spsNodeCommands)
-        .set({ status: "claimed", claimedAt: now, startedAt: now, updatedAt: now })
-        .where(and(eq(spsNodeCommands.id, candidate.id), eq(spsNodeCommands.status, "queued")))
-        .returning()
-        .then((rows) => rows[0] ?? null);
-      if (claimed) return res.json({ ...claimed, runtimeKind });
-    }
+    const result = await nodeOperations.invoke({ operation: "claim-command", nodeId: req.params.nodeId as string,
+      resourceId: null, payload: req.body }, operationContext(req));
+    sendOperationResult(res, result);
   });
-
   router.post("/sps-nodes/:nodeId/commands/:commandId/lease", async (req, res) => {
-    const node = await getNode(req.params.nodeId as string);
-    await assertSignedNodeRequest(req, node);
-    const command = await db
-      .select()
-      .from(spsNodeCommands)
-      .where(and(eq(spsNodeCommands.id, req.params.commandId as string), eq(spsNodeCommands.nodeId, node.id)))
-      .then((rows) => rows[0] ?? null);
-    if (!command) throw notFound("SPS Node command not found");
-    if (command.status !== "claimed" && command.status !== "running") {
-      return res.json({ active: false, status: command.status, error: command.error ?? null });
-    }
-    const parent = command.heartbeatRunId ? await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, command.heartbeatRunId)).then(rows => rows[0] ?? null) : null;
-    if (command.heartbeatRunId && (!parent || !["queued", "running"].includes(parent.status) || hasSpsSessionCancellation(parent))) {
-      return res.json({ active: false, status: "cancelling", error: "Agent session cancellation requested" });
-    }
-    if (!await commandHasCurrentAuthority(node, command)) {
-      await failActiveNodeCommands({
-        nodeId: node.id,
-        agentId: command.agentId,
-        reason: "SPS Node access was revoked or reassigned while this command was running.",
-      });
-      return res.json({
-        active: false,
-        status: "failed",
-        error: "SPS Node access was revoked or reassigned while this command was running.",
-      });
-    }
-    res.json({ active: true, status: command.status, error: null });
+    const result = await nodeOperations.invoke({ operation: "command-lease", nodeId: req.params.nodeId as string,
+      resourceId: req.params.commandId as string, payload: req.body }, operationContext(req));
+    sendOperationResult(res, result);
   });
-
   router.post("/sps-nodes/:nodeId/commands/:commandId/events", async (req, res) => {
-    const node = await getNode(req.params.nodeId as string);
-    await assertSignedNodeRequest(req, node);
-    const event = spsNodeCommandEventSchema.parse(req.body ?? {});
-    const command = await db
-      .select()
-      .from(spsNodeCommands)
-      .where(and(eq(spsNodeCommands.id, req.params.commandId as string), eq(spsNodeCommands.nodeId, node.id)))
-      .then((rows) => rows[0] ?? null);
-    if (!command) throw notFound("SPS Node command not found");
-    if (command.status !== "claimed" && command.status !== "running") {
-      throw forbidden("SPS Node command is not accepting output");
-    }
-    if (!await commandHasCurrentAuthority(node, command)) {
-      await failActiveNodeCommands({
-        nodeId: node.id,
-        agentId: command.agentId,
-        reason: "SPS Node access was revoked or reassigned while this command was running.",
-      });
-      throw forbidden("SPS Node command access was revoked while it was running");
-    }
-    if (event.sequence !== command.lastEventSeq + 1) {
-      throw badRequest("SPS Node command output sequence is out of order");
-    }
-    const now = new Date();
-    await db.transaction(async (tx) => {
-      const accepted = await tx.update(spsNodeCommands).set({ status: "running", lastEventSeq: event.sequence, updatedAt: now })
-        .where(and(eq(spsNodeCommands.id, command.id), inArray(spsNodeCommands.status, ["claimed", "running"]), eq(spsNodeCommands.lastEventSeq, event.sequence - 1)))
-        .returning({ id: spsNodeCommands.id });
-      if (!accepted.length) throw forbidden("SPS Node command stopped accepting output");
-      await tx.insert(spsNodeCommandEvents).values({
-        commandId: command.id,
-        sequence: event.sequence,
-        stream: event.stream,
-        body: event.body,
-      });
-    });
-    res.status(204).end();
+    const result = await nodeOperations.invoke({ operation: "command-event", nodeId: req.params.nodeId as string,
+      resourceId: req.params.commandId as string, payload: req.body }, operationContext(req));
+    sendOperationResult(res, result);
   });
-
   router.post("/sps-nodes/:nodeId/commands/:commandId/complete", async (req, res) => {
-    const node = await getNode(req.params.nodeId as string);
-    await assertSignedNodeRequest(req, node);
-    const completion = spsNodeCommandCompleteSchema.parse(req.body ?? {});
-    const command = await db
-      .select()
-      .from(spsNodeCommands)
-      .where(and(eq(spsNodeCommands.id, req.params.commandId as string), eq(spsNodeCommands.nodeId, node.id)))
-      .then((rows) => rows[0] ?? null);
-    if (!command) throw notFound("SPS Node command not found");
-    if (command.status === "succeeded" || command.status === "failed") return res.json(command);
-    if (command.status !== "claimed" && command.status !== "running") {
-      throw forbidden("SPS Node command is not active");
-    }
-    if (!await commandHasCurrentAuthority(node, command)) {
-      await failActiveNodeCommands({
-        nodeId: node.id,
-        agentId: command.agentId,
-        reason: "SPS Node access was revoked or reassigned while this command was running.",
-      });
-      const failed = await db
-        .select()
-        .from(spsNodeCommands)
-        .where(eq(spsNodeCommands.id, command.id))
-        .then((rows) => rows[0]!);
-      return res.json(failed);
-    }
-    const { updated, cancelled } = await db.transaction(async tx => {
-      const parent = command.heartbeatRunId ? await tx.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, command.heartbeatRunId)).for("update").then(rows => rows[0]) : null;
-      const updated = await tx.update(spsNodeCommands).set({
-          status: completion.status, exitCode: completion.exitCode, signal: completion.signal ?? null,
-          timedOut: completion.timedOut ? 1 : 0, error: completion.error ?? null, finishedAt: new Date(), updatedAt: new Date(),
-        }).where(and(eq(spsNodeCommands.id, command.id), inArray(spsNodeCommands.status, ["claimed", "running"])))
-        .returning().then(rows => rows[0] ?? null);
-      if (!updated) return { updated: command, cancelled: false };
-      if (parent) {
-        const receipts = { ...(parent.contextSnapshot?.spsNodeCompletionReceipts as Record<string, unknown> | undefined), [command.id]: true };
-        await tx.update(heartbeatRuns).set({ contextSnapshot: { ...parent.contextSnapshot, spsNodeCompletionReceipts: receipts } }).where(eq(heartbeatRuns.id, parent.id));
-        if (!hasSpsSessionCancellation(parent)) return { updated, cancelled: false };
-        const others = await tx.select({ id: spsNodeCommands.id }).from(spsNodeCommands).where(and(
-          eq(spsNodeCommands.heartbeatRunId, parent.id), inArray(spsNodeCommands.status, ["claimed", "running"]),
-        )).limit(1);
-        if (others.length) return { updated, cancelled: false };
-        await tx.update(heartbeatRuns).set({ contextSnapshot: sql`coalesce(${heartbeatRuns.contextSnapshot}, '{}'::jsonb) || '{"spsSessionCancellationTermination":"confirmed"}'::jsonb` }).where(eq(heartbeatRuns.id, parent.id));
-        return { updated, cancelled: true };
-      }
-      return { updated, cancelled: false };
-    });
-    if (cancelled && command.heartbeatRunId) await heartbeatService(db).cancelRun(command.heartbeatRunId);
-    res.json(updated);
+    const result = await nodeOperations.invoke({ operation: "command-complete", nodeId: req.params.nodeId as string,
+      resourceId: req.params.commandId as string, payload: req.body }, operationContext(req));
+    sendOperationResult(res, result);
   });
 
-  /**
-   * Plugin runs use a separate queue from the legacy Paperclip Agent command
-   * lane. The Node receives only a technical descriptor and never needs to
-   * understand a plugin's workflow, role model, or subject semantics.
-   */
   router.post("/sps-nodes/:nodeId/plugin-runs/claim-next", async (req, res) => {
-    const node = await getNode(req.params.nodeId as string);
-    if (node.status !== "active" || !node.keyVerifiedAt) {
-      throw forbidden("This SPS Node is not approved for plugin execution");
-    }
-    await assertSignedNodeRequest(req, node);
-
-    const now = new Date();
-    // Silence is not proof that a claimed process stopped. Never requeue an
-    // uncertain execution: its Node must acknowledge completion/cancellation.
-
-    while (true) {
-      const candidate = await db
-        .select()
-        .from(spsPluginNodeRuns)
-        .where(and(eq(spsPluginNodeRuns.nodeId, node.id), eq(spsPluginNodeRuns.status, "queued")))
-        .orderBy(spsPluginNodeRuns.createdAt)
-        .limit(1)
-        .then((rows) => rows[0] ?? null);
-      if (!candidate) return res.status(204).end();
-
-      let timeoutMs: number | null;
-      try {
-        timeoutMs = normalizeSpsPluginExecutionTimeout(candidate.timeoutMs);
-      } catch {
-        await db.update(spsPluginNodeRuns).set({ status: "failed", error: "Invalid SPS plugin execution timeout.", finishedAt: now, updatedAt: now })
-          .where(and(eq(spsPluginNodeRuns.id, candidate.id), eq(spsPluginNodeRuns.status, "queued")));
-        continue;
-      }
-
-      if (!await pluginRunHasCurrentAuthority(node, candidate)) {
-        await db
-          .update(spsPluginNodeRuns)
-          .set({
-            status: "failed",
-            error: "SPS plugin execution access was revoked or changed before this run was claimed.",
-            finishedAt: now,
-            updatedAt: now,
-          })
-          .where(and(eq(spsPluginNodeRuns.id, candidate.id), eq(spsPluginNodeRuns.status, "queued")));
-        continue;
-      }
-      if (!await pluginRunRunnerCanStart(candidate)) {
-        await db
-          .update(spsPluginNodeRuns)
-          .set({
-            status: "failed",
-            error: "The selected SPS Node Runner Profile is unavailable, requires a local sign-in, or no longer supports direct execution.",
-            finishedAt: now,
-            updatedAt: now,
-          })
-          .where(and(eq(spsPluginNodeRuns.id, candidate.id), eq(spsPluginNodeRuns.status, "queued")));
-        continue;
-      }
-      const runner = await db
-        .select({ kind: spsNodeRunnerProfiles.kind })
-        .from(spsNodeRunnerProfiles)
-        .where(eq(spsNodeRunnerProfiles.id, candidate.runnerProfileId))
-        .then((rows) => rows[0] ?? null);
-      const runtime = spsNodeExecutableRuntimeKindSchema.safeParse(runner?.kind);
-      if (!runtime.success) {
-        await db
-          .update(spsPluginNodeRuns)
-          .set({
-            status: "failed",
-            error: "The selected SPS Node Runner Profile does not support direct SPS CLI execution.",
-            finishedAt: now,
-            updatedAt: now,
-          })
-          .where(and(eq(spsPluginNodeRuns.id, candidate.id), eq(spsPluginNodeRuns.status, "queued")));
-        continue;
-      }
-      const claimed = await db
-        .update(spsPluginNodeRuns)
-        .set({ status: "claimed", claimedAt: now, startedAt: now, updatedAt: now, timeoutMs })
-        .where(and(eq(spsPluginNodeRuns.id, candidate.id), eq(spsPluginNodeRuns.status, "queued")))
-        .returning()
-        .then((rows) => rows[0] ?? null);
-      if (claimed) return res.json({ ...claimed, runtimeKind: runtime.data });
-    }
+    const result = await nodeOperations.invoke({ operation: "claim-plugin-run", nodeId: req.params.nodeId as string,
+      resourceId: null, payload: req.body }, operationContext(req));
+    sendOperationResult(res, result);
   });
-
   router.post("/sps-nodes/:nodeId/plugin-runs/:runId/lease", async (req, res) => {
-    const node = await getNode(req.params.nodeId as string);
-    await assertSignedNodeRequest(req, node);
-    const run = await db
-      .select()
-      .from(spsPluginNodeRuns)
-      .where(and(eq(spsPluginNodeRuns.id, req.params.runId as string), eq(spsPluginNodeRuns.nodeId, node.id)))
-      .then((rows) => rows[0] ?? null);
-    if (!run) throw notFound("SPS plugin run not found");
-    if (run.status !== "claimed" && run.status !== "running") {
-      return res.json({ active: false, status: run.status, error: run.error ?? null });
-    }
-    if (!await pluginRunHasCurrentAuthority(node, run)) {
-      const error = "SPS plugin execution access was revoked or changed while this run was active.";
-      await failActivePluginNodeRuns({
-        nodeId: node.id,
-        pluginKey: run.pluginKey,
-        subjectKey: run.subjectKey,
-        reason: error,
-      });
-      return res.json({ active: false, status: "failed", error });
-    }
-    res.json({ active: true, status: run.status, error: null });
+    const result = await nodeOperations.invoke({ operation: "plugin-lease", nodeId: req.params.nodeId as string,
+      resourceId: req.params.runId as string, payload: req.body }, operationContext(req));
+    sendOperationResult(res, result);
   });
-
   router.post("/sps-nodes/:nodeId/plugin-runs/:runId/events", async (req, res) => {
-    const node = await getNode(req.params.nodeId as string);
-    await assertSignedNodeRequest(req, node);
-    const event = spsNodeCommandEventSchema.parse(req.body ?? {});
-    const run = await db
-      .select()
-      .from(spsPluginNodeRuns)
-      .where(and(eq(spsPluginNodeRuns.id, req.params.runId as string), eq(spsPluginNodeRuns.nodeId, node.id)))
-      .then((rows) => rows[0] ?? null);
-    if (!run) throw notFound("SPS plugin run not found");
-    if (run.status !== "claimed" && run.status !== "running") {
-      throw forbidden("SPS plugin run is not accepting output");
-    }
-    if (!await pluginRunHasCurrentAuthority(node, run)) {
-      const error = "SPS plugin execution access was revoked or changed while this run was active.";
-      await failActivePluginNodeRuns({
-        nodeId: node.id,
-        pluginKey: run.pluginKey,
-        subjectKey: run.subjectKey,
-        reason: error,
-      });
-      throw forbidden(error);
-    }
-    if (event.sequence !== run.lastEventSeq + 1) {
-      throw badRequest("SPS plugin run output sequence is out of order");
-    }
-    const now = new Date();
-    await db.transaction(async (tx) => {
-      const accepted = await tx.update(spsPluginNodeRuns)
-        .set({ status: "running", lastEventSeq: event.sequence, updatedAt: now })
-        .where(and(eq(spsPluginNodeRuns.id, run.id),
-          inArray(spsPluginNodeRuns.status, ["claimed", "running"]),
-          eq(spsPluginNodeRuns.lastEventSeq, event.sequence - 1)))
-        .returning({ id: spsPluginNodeRuns.id });
-      if (!accepted.length) throw forbidden("SPS plugin run no longer accepts this output");
-      await tx.insert(spsPluginNodeRunEvents).values({
-        runId: run.id,
-        sequence: event.sequence,
-        stream: event.stream,
-        body: event.body,
-      });
-    });
-    res.status(204).end();
+    const result = await nodeOperations.invoke({ operation: "plugin-event", nodeId: req.params.nodeId as string,
+      resourceId: req.params.runId as string, payload: req.body }, operationContext(req));
+    sendOperationResult(res, result);
   });
-
   router.post("/sps-nodes/:nodeId/plugin-runs/:runId/complete", async (req, res) => {
-    const node = await getNode(req.params.nodeId as string);
-    await assertSignedNodeRequest(req, node);
-    const parsedCompletion = spsPluginNodeRunCompleteSchema.safeParse(req.body ?? {});
-    if (!parsedCompletion.success) throw badRequest("Invalid SPS plugin completion report");
-    const completion = parsedCompletion.data;
-    const run = await db
-      .select()
-      .from(spsPluginNodeRuns)
-      .where(and(eq(spsPluginNodeRuns.id, req.params.runId as string), eq(spsPluginNodeRuns.nodeId, node.id)))
-      .then((rows) => rows[0] ?? null);
-    if (!run) throw notFound("SPS plugin run not found");
-    if (["succeeded", "failed", "cancelled"].includes(run.status)) return res.json(run);
-    if (!["claimed", "running", "cancelling"].includes(run.status)) {
-      throw forbidden("SPS plugin run is not active");
-    }
-    if (run.status !== "cancelling" && !await pluginRunHasCurrentAuthority(node, run)) {
-      const error = "SPS plugin execution access was revoked or changed while this run was active.";
-      await failActivePluginNodeRuns({
-        nodeId: node.id,
-        pluginKey: run.pluginKey,
-        subjectKey: run.subjectKey,
-        reason: error,
-      });
-      const failed = await db
-        .select()
-        .from(spsPluginNodeRuns)
-        .where(eq(spsPluginNodeRuns.id, run.id))
-        .then((rows) => rows[0]!);
-      return res.json(failed);
-    }
-    let usageJson: Record<string, unknown> | null = null;
-    if (completion.usageReport !== undefined) {
-      try {
-        usageJson = createSpsNodeUsageReceipt(run, completion.usageReport);
-      } catch {
-        throw badRequest("SPS usage report does not match this execution");
-      }
-    }
-    const updated = await db
-      .update(spsPluginNodeRuns)
-      .set({
-        // A cancellation accepted before completion wins, even when this request
-        // originally read a running row. Keep the signed Node's exit details.
-        status: sql`case when ${spsPluginNodeRuns.status} = 'cancelling' then 'cancelled' else ${completion.status} end`,
-        exitCode: completion.exitCode,
-        signal: completion.signal ?? null,
-        timedOut: completion.timedOut ? 1 : 0,
-        error: sql`case when ${spsPluginNodeRuns.status} = 'cancelling' then ${spsPluginNodeRuns.error} else ${completion.error ?? null} end`,
-        usageJson,
-        finishedAt: new Date(),
-        updatedAt: new Date(),
-      })
-      .where(and(eq(spsPluginNodeRuns.id, run.id), inArray(spsPluginNodeRuns.status, ["claimed", "running", "cancelling"])))
-      .returning()
-      .then((rows) => rows[0] ?? null);
-    res.json(updated ?? await db.select().from(spsPluginNodeRuns).where(eq(spsPluginNodeRuns.id, run.id)).then(rows => rows[0]));
+    const result = await nodeOperations.invoke({ operation: "plugin-complete", nodeId: req.params.nodeId as string,
+      resourceId: req.params.runId as string, payload: req.body }, operationContext(req));
+    sendOperationResult(res, result);
   });
 
   return router;

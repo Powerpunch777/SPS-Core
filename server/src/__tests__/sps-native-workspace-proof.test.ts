@@ -61,6 +61,17 @@ afterAll(async () => {
 });
 
 describe("SPS Native Workspace request proof codec", () => {
+  it("binds Node POST bytes and its larger body budget to only the fixed Node target", () => {
+    const key = randomBytes(32), target = "/sps-native/v1/node-runtime", body = Buffer.alloc(100_000, "x");
+    const input = fields({ 3: "POST", 4: target, 7: createHash("sha256").update(body).digest("hex"), 9: "application/json" });
+    const request = actual({ method: "POST", target, body, contentType: "application/json" });
+    expect(verifier({ key }).verify(encode(input, key), request)).toMatchObject({ method: "POST", workspaceId: WORKSPACE_ID });
+    expect(() => verifier({ key }).verify(encode(input, key), { ...request, body: Buffer.alloc(body.length, "y") })).toThrow();
+    expect(() => verifier({ key }).verify(encode(replaceField(input, 4, "/sps-native/v1/plugin-runtime"), key),
+      { ...request, target: "/sps-native/v1/plugin-runtime" })).toThrow();
+    expect(() => verifier({ key }).verify(encode(input, key), { ...request, body: Buffer.alloc(512 * 1024 + 1) })).toThrow();
+    expect(() => verifier({ key }).verify(encode(replaceField(input, 2, null), key), request)).toThrow();
+  });
   it("binds Plugin POST proof to its sole target, actual JSON bytes and active Workspace", () => {
     const key = randomBytes(32), target = "/sps-native/v1/plugin-runtime", body = Buffer.from('{"key":"read"}');
     const input = fields({ 3: "POST", 4: target, 7: createHash("sha256").update(body).digest("hex"), 9: "application/json" });
