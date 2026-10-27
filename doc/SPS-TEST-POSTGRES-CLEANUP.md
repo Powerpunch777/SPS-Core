@@ -20,6 +20,16 @@ and timeouts, and an early observer rejection remains handled until propagated.
 Only the exact pg_ctl helper created here may be terminated on its own timeout;
 that is failed cleanup, never a passed test.
 
+Failed `pg_ctl` exits now classify both stdout and stderr using independent
+4096-byte copied tails. Failure messages expose only the category, exit code,
+bounded byte counts, verified owned PID-file state and child terminal phase;
+they never include the output text, paths or credentials. The `shutdown_timeout`
+category recognizes known shutdown messages without extending the deadline or
+ignoring failures. An earlier `other` result cannot retrospectively be called
+a timeout. Nonzero shutdown still preserves the fixture. The focused cleanup
+file passed 12 tests after these changes; no new database harness or full suite
+was run for this diagnostic increment.
+
 This changes the test helper, not installed Host database shutdown or customer
 data. Focused tests cover orderly close, already closed children, mismatched
 ports and rewritten postmaster IDs. A real Windows support probe completed

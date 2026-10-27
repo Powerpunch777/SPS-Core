@@ -222,11 +222,19 @@ async function captureOwnedPostmasterIdentity(dataDir: string, port: number, fix
   fixture.postmaster = { pid, startedAt };
 }
 
-function observeOwnedProcessClose(child: ChildProcess | undefined): { promise: Promise<void>; dispose(): void } {
-  if (!child || childFullyClosed(child)) return { promise: Promise.resolve(), dispose() {} };
+type OwnedChildTerminalPhase = "already_closed" | "close_observed" | "error_observed" | "not_observed";
+
+function observeOwnedProcessClose(child: ChildProcess | undefined): {
+  promise: Promise<void>;
+  dispose(): void;
+  terminalPhase(): OwnedChildTerminalPhase;
+} {
+  if (!child || childFullyClosed(child)) return { promise: Promise.resolve(), dispose() {}, terminalPhase: () => "already_closed" };
+  let phase: OwnedChildTerminalPhase = "not_observed";
   let cleanup = () => {};
   const promise = new Promise<void>((resolve, reject) => {
     const finish = (error?: Error) => {
+      phase = error ? "error_observed" : "close_observed";
       cleanup();
       if (error) reject(error);
       else resolve();
@@ -243,7 +251,7 @@ function observeOwnedProcessClose(child: ChildProcess | undefined): { promise: P
   // Mark the observer rejection handled immediately while shutdown setup is
   // still running; the original promise is awaited below to propagate failure.
   void promise.catch(() => {});
-  return { promise, dispose: () => cleanup() };
+  return { promise, dispose: () => cleanup(), terminalPhase: () => phase };
 }
 
 function childFullyClosed(child: ChildProcess): boolean {
@@ -279,17 +287,34 @@ export async function stopEmbeddedPostgresTestInstance(
     if (owned) {
       const pgCtl = await (dependencies.resolvePgCtl ?? resolvePgCtlPath)();
       await new Promise<void>((resolve, reject) => {
-        let stderr = "";
+        const outputTailLimit = 4096;
+        let stdoutTail = Buffer.alloc(0), stderrTail = Buffer.alloc(0);
+        let stdoutBytes = 0, stderrBytes = 0;
         const process = (dependencies.spawnPgCtl ?? spawn)(pgCtl, ["-D", dataDir, "-m", "fast", "-w", "-t", "20", "stop"], {
-          stdio: ["ignore", "ignore", "pipe"],
+          stdio: ["ignore", "pipe", "pipe"],
           windowsHide: true,
         });
-        const onStderr = (chunk: Buffer | string) => {
-          stderr = `${stderr}${String(chunk)}`.slice(-4096);
+        const appendTail = (current: Buffer, chunk: Buffer | string) => {
+          const value = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
+          if (value.length >= outputTailLimit) return Buffer.from(value.subarray(value.length - outputTailLimit));
+          const retainedCurrent = current.subarray(Math.max(0, current.length - (outputTailLimit - value.length)));
+          return retainedCurrent.length ? Buffer.concat([retainedCurrent, value]) : Buffer.from(value);
         };
+        const onStdout = (chunk: Buffer | string) => {
+          const value = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
+          stdoutBytes = Math.min(Number.MAX_SAFE_INTEGER, stdoutBytes + value.length);
+          stdoutTail = appendTail(stdoutTail, value);
+        };
+        const onStderr = (chunk: Buffer | string) => {
+          const value = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
+          stderrBytes = Math.min(Number.MAX_SAFE_INTEGER, stderrBytes + value.length);
+          stderrTail = appendTail(stderrTail, value);
+        };
+        process.stdout?.on("data", onStdout);
         process.stderr?.on("data", onStderr);
         const cleanup = () => {
           clearTimeout(timer);
+          process.stdout?.removeListener("data", onStdout);
           process.stderr?.removeListener("data", onStderr);
           process.removeListener("error", onError);
           process.removeListener("close", onClose);
@@ -298,7 +323,18 @@ export async function stopEmbeddedPostgresTestInstance(
         const onClose = (code: number | null) => {
           cleanup();
           if (code === 0) resolve();
-          else reject(new Error(`Embedded PostgreSQL test pg_ctl shutdown failed with exit code ${code} (category: ${classifyPgCtlFailure(stderr)}).`));
+          else {
+            const diagnostic = `${stdoutTail.toString("utf8")}\n${stderrTail.toString("utf8")}`;
+            void (async () => {
+              let ownedPidFileState: "present" | "absent" | "changed_or_unverified";
+              try {
+                ownedPidFileState = await readOwnedPostmasterPidFile(dataDir, port, fixture) ? "present" : "absent";
+              } catch {
+                ownedPidFileState = "changed_or_unverified";
+              }
+              reject(new Error(`Embedded PostgreSQL test pg_ctl shutdown failed (exitCode=${code}; category=${classifyPgCtlFailure(diagnostic)}; stdoutBytes=${stdoutBytes}; stderrBytes=${stderrBytes}; ownedPidFileState=${ownedPidFileState}; childTerminalPhase=${childClose.terminalPhase()}); fixture preserved.`));
+            })();
+          }
         };
         const timer = setTimeout(() => {
           cleanup();
@@ -330,12 +366,13 @@ function formatEmbeddedPostgresError(error: unknown): string {
   return "embedded Postgres startup failed";
 }
 
-export function classifyPgCtlFailure(output: string): "access_denied" | "pid_file" | "server_unavailable" | "signal_failure" | "other" {
+export function classifyPgCtlFailure(output: string): "access_denied" | "pid_file" | "server_unavailable" | "signal_failure" | "shutdown_timeout" | "other" {
   const message = output.toLowerCase();
   if (/access is denied|permission denied|operation not permitted/.test(message)) return "access_denied";
   if (/postmaster\.pid|pid file|lock file/.test(message)) return "pid_file";
   if (/no server running|could not connect|connection refused/.test(message)) return "server_unavailable";
   if (/could not send.*signal|failed to send.*signal|kill\(\).*failed/.test(message)) return "signal_failure";
+  if (/server does not shut down|timed out waiting for server to shut down|still shutting down|waiting for server to shut down\.{3,}\s*failed/.test(message)) return "shutdown_timeout";
   return "other";
 }
 

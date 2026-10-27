@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { lstatSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -40,6 +40,8 @@ describe("embedded Postgres test cleanup", () => {
     ["could not open postmaster.pid", "pid_file"],
     ["no server running", "server_unavailable"],
     ["could not send signal to process", "signal_failure"],
+    ["waiting for server to shut down.... failed\npg_ctl: server does not shut down", "shutdown_timeout"],
+    ["timed out waiting for server to shut down", "shutdown_timeout"],
     ["unexpected detail with a private path", "other"],
   ] as const)("classifies pg_ctl diagnostics without retaining raw output", (output, expected) => {
     expect(classifyPgCtlFailure(output)).toBe(expected);
@@ -51,6 +53,7 @@ describe("embedded Postgres test cleanup", () => {
     const stderr = { destroyed: false };
     Object.assign(value.child, { exitCode: 0, stdio: [null, stdout, stderr] });
     const pgCtlChild = new EventEmitter();
+    Object.assign(pgCtlChild, { stdout: new EventEmitter(), stderr: new EventEmitter() });
     const spawnPgCtl = vi.fn((command: string, args: readonly string[]) => {
       expect(command).toBe("pg_ctl-fixture");
       expect(args).toEqual(["-D", value.dataDir, "-m", "fast", "-w", "-t", "20", "stop"]);
@@ -75,6 +78,48 @@ describe("embedded Postgres test cleanup", () => {
     expect(spawnPgCtl).toHaveBeenCalledTimes(1);
     expect(value.instance.stop).not.toHaveBeenCalled();
     expect(value.instance.process).toBeUndefined();
+  });
+
+  it("reports bounded pg_ctl diagnostics without raw output and preserves the owned fixture on failure", async () => {
+    const value = fixture();
+    const pgCtlChild = new EventEmitter();
+    Object.assign(pgCtlChild, { stdout: new EventEmitter(), stderr: new EventEmitter() });
+    const stdoutText = `${"private-hostname ".repeat(500)}could not connect to server`;
+    const stderrText = `${"shutdown detail private-token ".repeat(500)}failure`;
+    const spawnPgCtl = vi.fn(() => {
+      setImmediate(() => {
+        pgCtlChild.stdout.emit("data", stdoutText);
+        pgCtlChild.stderr.emit("data", stderrText);
+        pgCtlChild.emit("close", 1, null);
+      });
+      return pgCtlChild as never;
+    });
+
+    let failure: unknown;
+    try {
+      await stopEmbeddedPostgresTestInstance(value.dataDir, value.port, value.instance, value.dataDirIdentity, {
+        resolvePgCtl: async () => "pg_ctl-fixture",
+        spawnPgCtl: spawnPgCtl as never,
+      });
+    } catch (error) { failure = error; }
+
+    expect(failure).toBeInstanceOf(Error);
+    const message = (failure as Error).message;
+    expect(message).toContain("exitCode=1");
+    expect(message).toContain("category=server_unavailable");
+    expect(message).toContain(`stdoutBytes=${Buffer.byteLength(stdoutText)}`);
+    expect(message).toContain(`stderrBytes=${Buffer.byteLength(stderrText)}`);
+    expect(message).toContain("ownedPidFileState=present");
+    expect(message).toContain("childTerminalPhase=not_observed");
+    expect(message).not.toContain("private-hostname");
+    expect(message).not.toContain("private-token");
+    expect(message).not.toContain("shutdown detail");
+    expect(message).not.toContain(value.dataDir);
+    expect(spawnPgCtl).toHaveBeenCalledTimes(1);
+    expect(value.instance.process).toBe(value.child);
+    expect(existsSync(value.pidFile)).toBe(true);
+    expect(value.child.listenerCount("close")).toBe(0);
+    expect(value.child.listenerCount("error")).toBe(0);
   });
 
   it("accepts a child that was already fully closed before cleanup", async () => {
