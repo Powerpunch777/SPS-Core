@@ -55,10 +55,13 @@ const mocks = vi.hoisted(() => {
   };
 });
 
-vi.mock("../services/plugin-loader.js", () => ({
-  DEFAULT_LOCAL_PLUGIN_DIR: "C:/sps/plugins",
-  pluginLoader: vi.fn(() => mocks.loader),
-}));
+vi.mock("../services/plugin-loader.js", async () => {
+  const nativePath = await import("node:path");
+  return {
+    DEFAULT_LOCAL_PLUGIN_DIR: nativePath.resolve("fixture-plugin-roots", "local"),
+    pluginLoader: vi.fn(() => mocks.loader),
+  };
+});
 
 vi.mock("../services/plugin-registry.js", () => ({
   pluginRegistryService: vi.fn(() => mocks.registry),
@@ -129,6 +132,11 @@ const envKeys = [
 const originalEnv = new Map(envKeys.map((key) => [key, process.env[key]]));
 const bundledPaths = ["workflow", "optional"].map(name => path.resolve("fixture-bundle", name));
 const bundledRefreshPath = path.resolve("fixture-bundle", "refresh");
+const pluginFixturePaths = {
+  kubernetes: path.resolve("fixture-plugin-roots", "kubernetes"),
+  loaded: path.resolve("fixture-plugin-roots", "loaded"),
+  late: path.resolve("fixture-plugin-roots", "late"),
+};
 
 function setRecoveryEnvironment(mode: string | undefined) {
   if (mode === undefined) delete process.env.SPS_PLUGIN_RECOVERY_MODE;
@@ -160,7 +168,7 @@ beforeEach(() => {
     id: "kubernetes-plugin-id",
     pluginKey: "paperclip.kubernetes-sandbox-provider",
     status: "ready",
-    packagePath: "C:/plugins/kubernetes",
+    packagePath: pluginFixturePaths.kubernetes,
     version: "1.0.0",
   });
   mocks.loader.loadAll.mockImplementation(async () => {
@@ -168,7 +176,7 @@ beforeEach(() => {
     return {
       results: [{
         success: true,
-        plugin: { id: "loaded-plugin-id", packagePath: "C:/plugins/loaded" },
+        plugin: { id: "loaded-plugin-id", packagePath: pluginFixturePaths.loaded },
       }],
     };
   });
@@ -237,7 +245,7 @@ describe("createApp plugin recovery startup contract", () => {
       expect.objectContaining({ loader: mocks.loader, lifecycle: mocks.lifecycle, pluginRegistry: mocks.registry }),
       expect.objectContaining({ loader: mocks.loader, lifecycle: mocks.lifecycle, pluginRegistry: mocks.registry }),
     ]);
-    expect(mocks.watcher.watch).toHaveBeenCalledWith("loaded-plugin-id", "C:/plugins/loaded");
+    expect(mocks.watcher.watch).toHaveBeenCalledWith("loaded-plugin-id", pluginFixturePaths.loaded);
 
     await app.locals.paperclipShutdown();
     expect(mocks.watcher.close).toHaveBeenCalledOnce();
@@ -252,7 +260,7 @@ describe("createApp plugin recovery startup contract", () => {
     const startup = new Promise<void>(resolve => { releaseStartup = resolve; });
     mocks.loader.loadAll.mockImplementationOnce(async () => {
       await startup;
-      return { results: [{ success: true, plugin: { id: "late-plugin", packagePath: "C:/fixture/late" } }] };
+      return { results: [{ success: true, plugin: { id: "late-plugin", packagePath: pluginFixturePaths.late } }] };
     });
     const app = await createTestApp();
     await vi.waitFor(() => expect(mocks.loader.loadAll).toHaveBeenCalledOnce());
