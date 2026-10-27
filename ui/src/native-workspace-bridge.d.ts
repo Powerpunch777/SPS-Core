@@ -18,6 +18,7 @@ export interface SpsNativeWorkspaceBridge {
   getBootstrap(): Promise<unknown>;
   readSurface(input: Readonly<{ surface: NativeWorkspaceSurface; archived?: boolean }>): Promise<unknown>;
   updateInboxState(input: Readonly<{ itemId: string; read?: boolean; archived?: boolean }>): Promise<NativeWorkspaceInboxState>;
+  openPlugin(input: Readonly<{ pluginId: string; surface: "shell" | "widget"; surfaceId: string }>): Promise<Readonly<{ opened: true }>>;
 }
 
 declare global {

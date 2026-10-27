@@ -129,10 +129,12 @@ export function createSpsNativeWorkspaceHttpServer(options: {
       checkCurrent();
       if (request.aborted || response.destroyed) return;
       const json = JSON.stringify(result);
-      if (typeof json !== "string" || Buffer.byteLength(json) > 256 * 1024) throw new Error(FAILURE);
+      const assetRequest = pluginRequest && JSON.parse(body.toString("utf8")).operation === "asset";
+      if (typeof json !== "string" || Buffer.byteLength(json) > (assetRequest ? 6 * 1024 * 1024 : 256 * 1024)) throw new Error(FAILURE);
       response.writeHead(200, {
         "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store",
         "X-Content-Type-Options": "nosniff", "Connection": "close",
+        "Content-Length": String(Buffer.byteLength(json)),
       });
       response.end(json);
     } catch {

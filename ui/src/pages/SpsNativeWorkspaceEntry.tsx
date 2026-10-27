@@ -9,7 +9,7 @@ import type {
 } from "../native-workspace-bridge";
 
 type View = "workspace" | "dashboard" | "inbox";
-type DashboardRow = Readonly<{ title: string; description: string }>;
+type DashboardRow = Readonly<{ pluginId: string; widgetId: string; title: string; description: string }>;
 type InboxRow = Readonly<{
   id: string;
   title: string;
@@ -20,7 +20,7 @@ type InboxRow = Readonly<{
 }>;
 type SurfaceModel =
   | Readonly<{ kind: "shell-neutral"; selectionUnavailable: boolean }>
-  | Readonly<{ kind: "shell-plugin-unavailable" }>
+  | Readonly<{ kind: "shell-plugin-unavailable"; pluginId: string | null; shellId: string | null }>
   | Readonly<{ kind: "dashboard"; rows: readonly DashboardRow[] }>
   | Readonly<{ kind: "inbox"; rows: readonly InboxRow[] }>;
 
@@ -113,7 +113,12 @@ function parseSurface(view: View, value: unknown, workspaceId: string): SurfaceM
     if (shell.mode === "neutral") {
       return Object.freeze({ kind: "shell-neutral", selectionUnavailable: nonemptyString(shell.fallbackReason) });
     }
-    if (shell.mode === "plugin") return Object.freeze({ kind: "shell-plugin-unavailable" });
+    if (shell.mode === "plugin") {
+      const declaration = shell.shell && typeof shell.shell === "object" ? plainDataRecord(shell.shell) : null;
+      return Object.freeze({ kind: "shell-plugin-unavailable",
+        pluginId: typeof shell.providerPluginId === "string" ? shell.providerPluginId : null,
+        shellId: declaration && typeof declaration.id === "string" ? declaration.id : null });
+    }
     throw new Error(UNAVAILABLE);
   }
 
@@ -125,7 +130,9 @@ function parseSurface(view: View, value: unknown, workspaceId: string): SurfaceM
       const widget = plainDataRecord(widgetRecord.widget);
       if (!nonemptyString(widget.displayName)
         || (widget.description !== undefined && typeof widget.description !== "string")) throw new Error(UNAVAILABLE);
-      return Object.freeze({ title: widget.displayName, description: typeof widget.description === "string" ? widget.description : "" });
+      if (!nonemptyString(widgetRecord.pluginId) || !nonemptyString(widget.id)) throw new Error(UNAVAILABLE);
+      return Object.freeze({ pluginId: widgetRecord.pluginId, widgetId: widget.id, title: widget.displayName,
+        description: typeof widget.description === "string" ? widget.description : "" });
     });
     return Object.freeze({ kind: "dashboard", rows: Object.freeze(rows) });
   }
@@ -147,13 +154,15 @@ function parseSurface(view: View, value: unknown, workspaceId: string): SurfaceM
   return Object.freeze({ kind: "inbox", rows: Object.freeze(rows) });
 }
 
-function SurfaceContent({ model, workspaceName, canWriteInbox = false, updatingItemId = null, onUpdateInbox, onToggleArchived, archived = false }: {
+function SurfaceContent({ model, workspaceName, canWriteInbox = false, updatingItemId = null, onUpdateInbox, onToggleArchived, onOpenPlugin, openingSurfaceId, archived = false }: {
   model: SurfaceModel;
   workspaceName: string;
   canWriteInbox?: boolean;
   updatingItemId?: string | null;
   onUpdateInbox?: (item: InboxRow, change: "read" | "archived") => void;
   onToggleArchived?: () => void;
+  onOpenPlugin?: (pluginId: string, surface: "shell" | "widget", surfaceId: string) => void;
+  openingSurfaceId?: string | null;
   archived?: boolean;
 }) {
   if (model.kind === "shell-neutral") {
@@ -165,8 +174,12 @@ function SurfaceContent({ model, workspaceName, canWriteInbox = false, updatingI
         <section className="mx-auto w-full max-w-2xl space-y-3">
           <h1 className="text-2xl font-semibold">{workspaceName}</h1>
           <p role="status" className="text-sm text-muted-foreground">
-            This Workspace has a selected Plugin Shell, but its UI is not available in this Native connection.
+            This Workspace has a selected Plugin Shell. Its declared Plugin view runs in an isolated Native window.
           </p>
+          {model.pluginId && model.shellId ? <Button type="button" disabled={!onOpenPlugin || openingSurfaceId !== null}
+            onClick={() => onOpenPlugin?.(model.pluginId!, "shell", model.shellId!)}>
+            {openingSurfaceId === model.shellId ? "Opening..." : "Open Plugin view"}
+          </Button> : null}
         </section>
       </main>
     );
@@ -178,13 +191,17 @@ function SurfaceContent({ model, workspaceName, canWriteInbox = false, updatingI
         {model.rows.length === 0 ? <p className="text-sm text-muted-foreground">No dashboard content is available.</p> : (
           <>
             <p className="text-sm text-muted-foreground">
-              These widgets are configured for this Workspace. Their Plugin views are not available on this Native connection yet.
+              These widgets are configured for this Workspace and open in isolated Native Plugin windows.
             </p>
             <div className="grid gap-4 md:grid-cols-2">
-              {model.rows.map((row, index) => (
-                <Card key={`${index}:${row.title}`}>
+              {model.rows.map((row) => (
+                <Card key={`${row.pluginId}:${row.widgetId}`}>
                   <CardHeader><CardTitle>{row.title}</CardTitle></CardHeader>
                   {row.description ? <CardContent>{row.description}</CardContent> : null}
+                  <CardContent><Button type="button" variant="outline" disabled={!onOpenPlugin || openingSurfaceId !== null}
+                    onClick={() => onOpenPlugin?.(row.pluginId, "widget", row.widgetId)}>
+                    {openingSurfaceId === row.widgetId ? "Opening..." : "Open Plugin view"}
+                  </Button></CardContent>
                 </Card>
               ))}
             </div>
@@ -238,6 +255,8 @@ export function SpsNativeWorkspaceEntry({ bridge }: { bridge: SpsNativeWorkspace
   const [failed, setFailed] = useState(false);
   const [archived, setArchived] = useState(false);
   const [updatingItemId, setUpdatingItemId] = useState<string | null>(null);
+  const [openingSurfaceId, setOpeningSurfaceId] = useState<string | null>(null);
+  const [openFailed, setOpenFailed] = useState(false);
 
   const load = useCallback(async (nextView: View, nextArchived = false) => {
     const current = ++generation.current;
@@ -325,6 +344,13 @@ export function SpsNativeWorkspaceEntry({ bridge }: { bridge: SpsNativeWorkspace
 
   const workspaceName = bootstrap?.workspace.name;
   const retry = () => void load(view, archived);
+  const openPlugin = useCallback(async (pluginId: string, surface: "shell" | "widget", surfaceId: string) => {
+    setOpeningSurfaceId(surfaceId);
+    setOpenFailed(false);
+    try { await bridge.openPlugin({ pluginId, surface, surfaceId }); }
+    catch { setOpenFailed(true); }
+    finally { setOpeningSurfaceId(null); }
+  }, [bridge]);
 
   return (
     <div className="min-h-dvh w-full bg-background px-5 py-6 text-foreground md:px-8">
@@ -366,15 +392,16 @@ export function SpsNativeWorkspaceEntry({ bridge }: { bridge: SpsNativeWorkspace
             <Button type="button" variant="outline" onClick={retry}>Retry</Button>
           </main>
         ) : null}
+        {openFailed ? <p role="alert" className="text-sm text-destructive">The Plugin window could not be opened.</p> : null}
         {!loading && !failed && surface && workspaceName ? (
           surface.kind === "shell-neutral" || surface.kind === "shell-plugin-unavailable"
-            ? <SurfaceContent model={surface} workspaceName={workspaceName} />
+            ? <SurfaceContent model={surface} workspaceName={workspaceName} onOpenPlugin={openPlugin} openingSurfaceId={openingSurfaceId} />
             : <main><SurfaceContent model={surface} workspaceName={workspaceName}
               canWriteInbox={view === "inbox" && bootstrap.capabilities.some(capability => capability === INBOX_WRITE)}
               updatingItemId={updatingItemId}
               onUpdateInbox={view === "inbox" ? (row, change) => void updateInbox(row, change) : undefined}
               onToggleArchived={view === "inbox" && updatingItemId === null ? toggleArchived : undefined}
-              archived={archived} /></main>
+              archived={archived} onOpenPlugin={openPlugin} openingSurfaceId={openingSurfaceId} /></main>
         ) : null}
       </div>
     </div>

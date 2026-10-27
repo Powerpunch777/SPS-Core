@@ -6,6 +6,7 @@
 export type PluginModuleLoader = Readonly<{
   rewriteBareSpecifiers(source: string): string;
   importModule(url: string): Promise<Record<string, unknown>>;
+  installImportMap(): void;
   dispose(): void;
 }>;
 
@@ -14,6 +15,10 @@ export type PluginModuleLoaderOptions = Readonly<{
   reactModule: object;
   /** Existing per-realm bridge global. Defaults to the Core Plugin bridge name. */
   runtimeGlobalName?: string;
+  /** Direct same-origin module import with import-map shims for an isolated Native realm. */
+  nativeImportMap?: boolean;
+  /** Per-window CSP nonce issued by the Native Plugin asset origin. */
+  importMapNonce?: string;
 }>;
 
 type ShimSpecifier = "react" | "react-dom" | "react-dom/client" | "react/jsx-runtime" | "sdk-ui";
@@ -63,6 +68,9 @@ function createSdkUiShimSource(runtimeGlobalName: string): string {
         const SDK = ${registry}?.sdkUi ?? {};
         function missing(name) {
           return function MissingPaperclipSdkUiComponent() {
+            if (SDK.nativeUnsupportedSdkUi === true) {
+              throw new Error('The Native Plugin renderer does not provide SDK UI component "' + name + '".');
+            }
             throw new Error('SPS plugin UI runtime is not initialized for "' + name + '". Ensure the host loaded the plugin bridge before rendering this UI module.');
           };
         }
@@ -96,6 +104,7 @@ export function createPluginModuleLoader(options: PluginModuleLoaderOptions): Pl
   const shimBlobUrls = new Map<ShimSpecifier, string>();
   const ownedBlobUrls = new Set<string>();
   let disposed = false;
+  let importMapInstalled = false;
 
   function assertActive(): void {
     if (disposed) throw new Error("SPS plugin module loader has been disposed.");
@@ -180,8 +189,37 @@ export function createPluginModuleLoader(options: PluginModuleLoaderOptions): Pl
     return result;
   }
 
+  function installImportMap(): void {
+    assertActive();
+    if (!options.nativeImportMap) return;
+    if (importMapInstalled) return;
+    if (typeof options.importMapNonce !== "string" || !/^[A-Za-z0-9_-]{16,128}$/.test(options.importMapNonce)) {
+      throw new Error("Native Plugin import map nonce is unavailable.");
+    }
+    const imports: Record<string, string> = {};
+    for (const [specifier, shim] of [
+      ["react", "react"], ["react-dom", "react-dom"], ["react-dom/client", "react-dom/client"],
+      ["react/jsx-runtime", "react/jsx-runtime"],
+      ["@sonparkserver/plugin-sdk/ui/bridge", "sdk-ui"],
+      ["@paperclipai/plugin-sdk/ui", "sdk-ui"],
+      ["@paperclipai/plugin-sdk/ui/hooks", "sdk-ui"],
+    ] as const) imports[specifier] = shimBlobUrl(shim);
+    const script = document.createElement("script");
+    script.type = "importmap";
+    script.nonce = options.importMapNonce;
+    script.textContent = JSON.stringify({ imports });
+    (document.head ?? document.documentElement).appendChild(script);
+    importMapInstalled = true;
+  }
+
   async function importModule(url: string): Promise<Record<string, unknown>> {
     assertActive();
+    if (options.nativeImportMap) {
+      if (!importMapInstalled) throw new Error("Native Plugin import map is not installed.");
+      const mod = await import(/* @vite-ignore */ url);
+      assertActive();
+      return mod;
+    }
     const runtime = (globalThis as unknown as Record<string, unknown>)[runtimeGlobalName];
     if (!runtime) {
       console.warn("[plugin-loader] Bridge registry not initialized, falling back to direct import");
@@ -212,5 +250,5 @@ export function createPluginModuleLoader(options: PluginModuleLoaderOptions): Pl
     shimBlobUrls.clear();
   }
 
-  return Object.freeze({ rewriteBareSpecifiers, importModule, dispose });
+  return Object.freeze({ rewriteBareSpecifiers, importModule, installImportMap, dispose });
 }

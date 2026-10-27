@@ -1,4 +1,8 @@
 import { randomUUID } from "node:crypto";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   companies,
@@ -11,7 +15,7 @@ import {
 import type { PaperclipPluginManifestV1 } from "@paperclipai/shared";
 import type { PluginWorkerManager, WorkerInvocationAuthority } from "../services/plugin-worker-manager.js";
 import { createSpsNativePluginRuntime, snapshotSpsNativePluginJson,
-  type SpsNativePluginPrincipal, type SpsNativePluginRequest } from "../services/sps-native-plugin-runtime.js";
+  SpsNativePluginUnsupportedError, type SpsNativePluginPrincipal, type SpsNativePluginRequest } from "../services/sps-native-plugin-runtime.js";
 import { spsWorkspaceSurfaceService } from "../services/sps-workspace-surfaces.js";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 
@@ -20,6 +24,7 @@ const describeDatabase = support.supported ? describe : describe.skip;
 const principal: SpsNativePluginPrincipal = Object.freeze({ hostId: randomUUID(), userId: "native-user",
   deviceId: randomUUID(), deviceRevision: 1, certificateSha256: "a".repeat(64),
   certificateNotAfter: Date.now() + 60 * 60_000 });
+let localPluginDir = "";
 
 function manifest(): PaperclipPluginManifestV1 {
   return {
@@ -31,9 +36,13 @@ function manifest(): PaperclipPluginManifestV1 {
     author: "SPS",
     categories: ["automation"],
     capabilities: ["ui.dashboard.contribute", "ui.workspaceShell.provide"],
-    entrypoints: { worker: "./worker.js" },
+    entrypoints: { worker: "./worker.js", ui: "./dist/ui/" },
     ui: {
-      workspaceShell: { id: "fixture-shell", displayName: "Fixture shell", navigation: [] },
+      slots: [
+        { type: "page", id: "first-page", displayName: "First page", exportName: "FirstPage", routePath: "start" },
+        { type: "page", id: "fixture-page", displayName: "Fixture page", exportName: "HomePage", routePath: "home" },
+      ],
+      workspaceShell: { id: "fixture-shell", displayName: "Fixture shell", defaultRoute: "/home", navigation: [] },
       dashboardWidgets: [{ id: "fixture-widget", displayName: "Fixture widget", exportName: "Widget",
         defaultSize: "medium", sizes: ["small", "medium", "large"], defaultOrder: 1, dataAction: "widget.data" }],
     },
@@ -51,6 +60,7 @@ describeDatabase("SPS Native Plugin runtime adapter", () => {
   beforeAll(async () => {
     database = await startEmbeddedPostgresTestDatabase("sps-native-plugin-runtime-");
     db = createDb(database.connectionString);
+    localPluginDir = await mkdtemp(path.join(os.tmpdir(), "sps-native-plugin-runtime-files-"));
   }, 120_000);
 
   afterEach(async () => {
@@ -62,30 +72,38 @@ describeDatabase("SPS Native Plugin runtime adapter", () => {
     await db.delete(pluginCompanySettings);
     await db.delete(plugins);
     await db.delete(companies);
+    if (localPluginDir && pluginId) await rm(path.join(localPluginDir, pluginId), { recursive: true, force: true });
   }, 30_000);
 
   afterAll(async () => {
     // Bound the owned client drain before the helper's bounded pg_ctl shutdown.
     await db?.$client.end({ timeout: 5 });
     await database?.cleanup();
+    if (localPluginDir) await rm(localPluginDir, { recursive: true, force: true });
   }, 60_000);
 
   async function seed() {
     companyId = randomUUID();
     pluginId = randomUUID();
     const pluginManifest = manifest();
+    const packagePath = path.join(localPluginDir, pluginId);
+    const uiRoot = path.join(packagePath, "dist", "ui");
+    await mkdir(path.join(uiRoot, "assets"), { recursive: true });
+    await writeFile(path.join(uiRoot, "index.js"), "export const HomePage = () => null;\n");
+    await writeFile(path.join(uiRoot, "fixture.css"), "body { color: black; }\n");
+    await writeFile(path.join(uiRoot, "assets", "chunk.js"), "export const chunk = true;\n");
     await db.insert(companies).values({ id: companyId, name: "Native runtime Workspace",
       issuePrefix: `N${companyId.replaceAll("-", "").slice(0, 8).toUpperCase()}` });
     await db.insert(plugins).values({ id: pluginId, pluginKey: pluginManifest.id,
       packageName: "@sps/native-runtime-fixture", version: pluginManifest.version,
       apiVersion: pluginManifest.apiVersion, categories: pluginManifest.categories,
-      manifestJson: pluginManifest, status: "ready" });
+      packagePath, manifestJson: pluginManifest, status: "ready" });
     worker = { call: vi.fn(async (_id: string, _method: string, _params: unknown, _timeout: number,
       authority?: WorkerInvocationAuthority) => {
       await authority?.assertCurrent();
       return { ok: true };
     }) };
-    runtime = createSpsNativePluginRuntime(db, worker as unknown as PluginWorkerManager);
+    runtime = createSpsNativePluginRuntime(db, worker as unknown as PluginWorkerManager, { localPluginDir });
   }
 
   const request = (overrides: Partial<SpsNativePluginRequest> = {}): SpsNativePluginRequest => ({
@@ -125,6 +143,58 @@ describeDatabase("SPS Native Plugin runtime adapter", () => {
     await expect(runtime!.invoke(request({ operation: "data" }), authorize)).rejects.toThrow("unavailable");
     expect(worker.call).not.toHaveBeenCalled();
   });
+
+  it("describes only the selected declared surface and serves revision-bound bounded assets", async () => {
+    await seed();
+    await spsWorkspaceSurfaceService(db).selectShell({ companyId, userId: principal.userId, pluginId });
+
+    const shell = await runtime!.invoke(request({ surface: "shell", surfaceId: "fixture-shell", operation: "describe",
+      revision: null, key: "surface", params: {} }), authorize) as Record<string, unknown>;
+    expect(shell).toEqual({
+      v: 1,
+      kind: "sps.native.plugin.surface",
+      workspaceId: companyId,
+      pluginId,
+      pluginKey: expect.stringMatching(/^sps\.native-runtime-/),
+      displayName: "Native runtime fixture",
+      revision: expect.stringMatching(/^[a-f0-9]{64}$/),
+      surface: "shell",
+      surfaceId: "fixture-shell",
+      entryFile: "index.js",
+      exportName: "HomePage",
+      widget: null,
+      slot: { type: "page", id: "fixture-page", displayName: "Fixture page", exportName: "HomePage", routePath: "home" },
+      cssFiles: ["fixture.css"],
+    });
+
+    const widgetValue = await runtime!.invoke(request({ operation: "describe", revision: null, key: "surface", params: {} }), authorize);
+    const widget = widgetValue as Record<string, unknown>;
+    expect(widget).toMatchObject({
+      kind: "sps.native.plugin.surface", surface: "widget", surfaceId: "fixture-widget",
+      exportName: "Widget", slot: null, widget: { id: "fixture-widget", dataAction: "widget.data" },
+    });
+    const revision = widget.revision as string;
+    const assetValue = await runtime!.invoke(request({ operation: "asset", revision, key: "assets/chunk.js", params: {} }), authorize);
+    const asset = assetValue as Record<string, unknown>;
+    expect(asset).toMatchObject({ path: "assets/chunk.js", contentType: "text/javascript; charset=utf-8",
+      bytes: Buffer.from("export const chunk = true;\n").toString("base64url"),
+      sha256: expect.stringMatching(/^[a-f0-9]{64}$/) });
+    expect(worker.call).not.toHaveBeenCalled();
+    await expect(runtime!.invoke(request({ operation: "asset", revision: "f".repeat(64), key: "assets/chunk.js", params: {} }), authorize))
+      .rejects.toThrow("unavailable");
+  }, 60_000);
+
+  it("reports an explicit unsupported error when the selected Shell has no renderable page", async () => {
+    await seed();
+    await spsWorkspaceSurfaceService(db).selectShell({ companyId, userId: principal.userId, pluginId });
+    const current = manifest();
+    current.ui!.slots = [];
+    await db.update(plugins).set({ manifestJson: current }).where(eq(plugins.id, pluginId));
+
+    await expect(runtime!.invoke(request({ surface: "shell", surfaceId: "fixture-shell", operation: "describe",
+      revision: null, key: "surface", params: {} }), authorize)).rejects.toBeInstanceOf(SpsNativePluginUnsupportedError);
+    expect(worker.call).not.toHaveBeenCalled();
+  }, 60_000);
 
   it("provides only current Native request evidence and rejects reads after invocation cancellation", async () => {
     await seed();

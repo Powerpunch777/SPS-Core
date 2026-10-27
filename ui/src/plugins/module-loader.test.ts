@@ -1,3 +1,5 @@
+// @vitest-environment jsdom
+
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { applyJsxRuntimeKey, createPluginModuleLoader, createReactShimSource } from "./module-loader";
 
@@ -60,5 +62,34 @@ describe("Plugin UI module loader", () => {
       if (previous) Object.defineProperty(globalThis, globalName, previous);
       else Reflect.deleteProperty(globalThis, globalName);
     }
+  });
+
+  it("installs a Native import map for direct relative-module imports without changing rewrite behavior", async () => {
+    const created: string[] = [];
+    vi.spyOn(URL, "createObjectURL").mockImplementation(() => {
+      const url = `blob:native-loader-${created.length}`;
+      created.push(url);
+      return url;
+    });
+    const revoked: string[] = [];
+    vi.spyOn(URL, "revokeObjectURL").mockImplementation(url => { revoked.push(url); });
+    const loader = createPluginModuleLoader({
+      reactModule: { createElement() {}, useState() {} },
+      runtimeGlobalName: "__spsNativePluginBridge__",
+      nativeImportMap: true,
+      importMapNonce: "nonce-value-1234567890",
+    });
+    await expect(loader.importModule("/plugin/index.js")).rejects.toThrow("import map is not installed");
+    loader.installImportMap();
+    const map = document.querySelector('script[type="importmap"]');
+    expect(map).not.toBeNull();
+    expect((map as HTMLScriptElement).nonce).toBe("nonce-value-1234567890");
+    const imports = JSON.parse(map!.textContent ?? "{}").imports;
+    expect(imports.react).toMatch(/^blob:/);
+    expect(imports["@sonparkserver/plugin-sdk/ui/bridge"]).toBe(imports["@paperclipai/plugin-sdk/ui"]);
+    expect(loader.rewriteBareSpecifiers('import "./chunk.js";')).toBe('import "./chunk.js";');
+    loader.dispose();
+    expect(revoked).toEqual(created);
+    map?.remove();
   });
 });

@@ -26,6 +26,20 @@ function call(port: number, options: RequestOptions = {}) {
 }
 
 describe("private Native Workspace HTTP adapter", () => {
+  it("allows larger bounded Plugin asset envelopes without widening ordinary data responses", async () => {
+    const read = vi.fn(async () => ({ data: { bytes: "a".repeat(300_000) } }));
+    const server = createSpsNativeWorkspaceHttpServer({ reader: { read }, assertCurrent() {} }); owned.push(server);
+    const { port } = await server.start();
+    const post = (operation: string) => {
+      const body = JSON.stringify({ operation });
+      return call(port, { method: "POST", path: "/sps-native/v1/plugin-runtime", body,
+        headers: { "Content-Type": "application/json", "Content-Length": String(Buffer.byteLength(body)) } });
+    };
+    const asset = await post("asset");
+    expect(asset.status).toBe(200);
+    expect(asset.headers["content-length"]).toBe(String(Buffer.byteLength(JSON.stringify(asset.body))));
+    expect((await post("data")).status).toBe(403);
+  });
   it("admits only the fixed bounded Plugin POST and cancels its runtime authority after delivery", async () => {
     let signal: AbortSignal | undefined;
     const read = vi.fn(async (_proof: string, actual: { body: Buffer }, inputSignal?: AbortSignal) => {

@@ -104,6 +104,7 @@ describe("SpsNativeWorkspaceEntry", () => {
         return [];
       }),
       updateInboxState: vi.fn().mockResolvedValue({ readAt: null, archivedAt: null }),
+      openPlugin: vi.fn().mockResolvedValue({ opened: true }),
     };
   });
 
@@ -143,9 +144,11 @@ describe("SpsNativeWorkspaceEntry", () => {
     await click(container, "Dashboard");
     expect(container.textContent).toContain("Member dashboard");
     expect(container.textContent).toContain("Current workspace status");
-    expect(container.textContent).toContain("These widgets are configured for this Workspace.");
-    expect(container.textContent).toContain("Their Plugin views are not available on this Native connection yet.");
+    expect(container.textContent).toContain("These widgets are configured for this Workspace and open in isolated Native Plugin windows.");
+    expect(container.textContent).toContain("open in isolated Native Plugin windows.");
     expect(container.textContent).not.toContain("dataAction");
+    await click(container, "Open Plugin view");
+    expect(bridge.openPlugin).toHaveBeenCalledWith({ pluginId: "plugin-1", surface: "widget", surfaceId: "widget-1" });
 
     await click(container, "Inbox");
     expect(container.textContent).toContain("Member inbox item");
@@ -158,7 +161,7 @@ describe("SpsNativeWorkspaceEntry", () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
-  it("reports a selected Plugin Shell as unavailable rather than showing the neutral empty state", async () => {
+  it("opens the selected Plugin Shell in its isolated Native window", async () => {
     bridge.readSurface = vi.fn().mockResolvedValue({
       mode: "plugin", providerPluginId: "plugin-1", providerPluginKey: "workflow-kit",
       shell: { id: "workflow", displayName: "Workflow", defaultRoute: "/plugins/workflow" }, fallbackReason: null,
@@ -167,9 +170,11 @@ describe("SpsNativeWorkspaceEntry", () => {
     await settle();
 
     expect(container.textContent).toContain("selected Plugin Shell");
-    expect(container.textContent).toContain("not available in this Native connection");
+    expect(container.textContent).toContain("isolated Native window");
     expect(container.textContent).not.toContain("No default plugin selected.");
     expect(container.textContent).not.toContain("/plugins/workflow");
+    await click(container, "Open Plugin view");
+    expect(bridge.openPlugin).toHaveBeenCalledWith({ pluginId: "plugin-1", surface: "shell", surfaceId: "workflow" });
   });
 
   it("disables view navigation during reads and ignores a late response after unmount", async () => {

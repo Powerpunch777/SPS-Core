@@ -249,7 +249,9 @@ export async function createApp(
 
   const hostServicesDisposers = new Map<string, () => void>();
   const workerManager = opts.pluginWorkerManager ?? createPluginWorkerManager();
-  const nativePluginRuntime = createSpsNativePluginRuntime(db, workerManager);
+  const nativePluginRuntime = createSpsNativePluginRuntime(db, workerManager, {
+    localPluginDir: opts.localPluginDir ?? DEFAULT_LOCAL_PLUGIN_DIR,
+  });
 
   // Mount API routes
   const api = Router();

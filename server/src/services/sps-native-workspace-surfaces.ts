@@ -133,7 +133,8 @@ export function createSpsNativeWorkspaceSurfaceReader({ db, identity, hostId, ve
           const text = new TextDecoder("utf-8", { fatal: true }).decode(actual.body);
           const parsed: unknown = JSON.parse(text);
           if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)
-            || JSON.stringify(parsed) !== text || Object.keys(parsed).sort().join(",") !== "key,operation,params,pluginId,surface,surfaceId") fail();
+            || JSON.stringify(parsed) !== text || !["key,operation,params,pluginId,surface,surfaceId",
+              "key,operation,params,pluginId,revision,surface,surfaceId"].includes(Object.keys(parsed).sort().join(","))) fail();
           const input = { ...parsed, workspaceId: proof.workspaceId } as SpsNativePluginRequest;
           const session = await identity.resolveNativeEnrollmentSessionFromHeaders(new Headers({ cookie: proof.cookie }));
           if (!session || typeof session.authorizeInTransaction !== "function" || !session.userId) fail();
