@@ -5,7 +5,8 @@ import { createSpsNativeWorkspaceHttpServer } from "../services/sps-native-works
 const owned: Array<ReturnType<typeof createSpsNativeWorkspaceHttpServer>> = [];
 afterEach(async () => { await Promise.all(owned.splice(0).map(server => server.dispose())); });
 
-function call(port: number, options: { method?: string; path?: string; headers?: Record<string, string>; body?: string } = {}) {
+type RequestOptions = { method?: string; path?: string; headers?: Record<string, string>; body?: string };
+function call(port: number, options: RequestOptions = {}) {
   return new Promise<{ status: number; body: unknown; headers: Record<string, unknown> }>((resolve, reject) => {
     const req = request({ host: "127.0.0.1", port, method: options.method ?? "GET",
       path: options.path ?? "/api/companies/22222222-2222-4222-8222-222222222222/workspace-shell", agent: false,
@@ -25,6 +26,29 @@ function call(port: number, options: { method?: string; path?: string; headers?:
 }
 
 describe("private Native Workspace HTTP adapter", () => {
+  it("admits only the fixed bounded Plugin POST and cancels its runtime authority after delivery", async () => {
+    let signal: AbortSignal | undefined;
+    const read = vi.fn(async (_proof: string, actual: { body: Buffer }, inputSignal?: AbortSignal) => {
+      signal = inputSignal;
+      expect(signal?.aborted).toBe(false);
+      return { data: JSON.parse(actual.body.toString()) };
+    });
+    const server = createSpsNativeWorkspaceHttpServer({ reader: { read }, assertCurrent() {} }); owned.push(server);
+    const { port } = await server.start();
+    const body = '{"key":"read"}';
+    const result = await call(port, { method: "POST", path: "/sps-native/v1/plugin-runtime", body,
+      headers: { "Content-Type": "application/json", "Content-Length": String(Buffer.byteLength(body)) } });
+    expect(result).toMatchObject({ status: 200, body: { data: { key: "read" } } });
+    expect(signal?.aborted).toBe(true);
+    for (const path of ["/sps-native/v1/plugin-runtime?all=true", "/api/plugins/other/actions/write"]) {
+      expect((await call(port, { method: "POST", path, body,
+        headers: { "Content-Type": "application/json", "Content-Length": String(body.length) } })).status).toBe(403);
+    }
+    expect((await call(port, { method: "POST", path: "/sps-native/v1/plugin-runtime", body: "x".repeat(65_537),
+      headers: { "Content-Type": "application/json", "Content-Length": "65537" } })).status).toBe(403);
+    expect(read).toHaveBeenCalledTimes(1);
+  });
+
   it("binds only ephemeral IPv4 loopback and delegates exact bytes without Owner credentials", async () => {
     const read = vi.fn(async () => ({ mode: "neutral" }));
     const server = createSpsNativeWorkspaceHttpServer({ reader: { read }, assertCurrent() {} });
@@ -51,14 +75,15 @@ describe("private Native Workspace HTTP adapter", () => {
     const server = createSpsNativeWorkspaceHttpServer({ reader: { read }, assertCurrent() {} });
     owned.push(server);
     const { port } = await server.start();
-    for (const options of [
+    const rejectedRequests: RequestOptions[] = [
       { method: "POST" },
       { headers: { Authorization: "" } },
       { headers: { "X-SPS-Desktop-Access": "local-owner-secret" } },
       { headers: { "X-SPS-Desktop-Owner-Bootstrap": "local-owner-secret" } },
       { headers: { "Content-Type": "application/json" } },
       { headers: { "Content-Length": "2" }, body: "{}" },
-    ]) {
+    ];
+    for (const options of rejectedRequests) {
       const response = await call(port, options);
       expect(response.status).toBe(403);
       expect(response.body).toEqual({ error: "Native Workspace access is unavailable." });

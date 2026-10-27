@@ -42,10 +42,7 @@ import type {
   PluginBridgeErrorCode,
   PluginLauncherRenderContextSnapshot,
 } from "@paperclipai/shared";
-import {
-  PLUGIN_STATUSES,
-  PERMISSION_KEYS,
-} from "@paperclipai/shared";
+import { PLUGIN_STATUSES } from "@paperclipai/shared";
 import { pluginRegistryService } from "../services/plugin-registry.js";
 import { registryStagingService, type RegistryStagedPluginRecord } from "../services/registry-staging.js";
 import { pluginDatabaseService } from "../services/plugin-database.js";
@@ -79,13 +76,14 @@ import { logActivity } from "../services/activity-log.js";
 import { publishGlobalLiveEvent } from "../services/live-events.js";
 import { issueService } from "../services/issues.js";
 import { accessService } from "../services/access.js";
+import { createPluginUiActionAuthority, type PluginUiActionActor } from "../services/plugin-ui-action-authority.js";
 import type { PluginJobScheduler } from "../services/plugin-job-scheduler.js";
 import type { PluginJobStore } from "../services/plugin-job-store.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
 import type { PluginStreamBus } from "../services/plugin-stream-bus.js";
 import type { PluginToolDispatcher } from "../services/plugin-tool-dispatcher.js";
 import type { PluginCanonicalDiagnostics } from "../services/plugin-canonical-diagnostics.js";
-import type { PluginPerformActionActorContext, ToolRunContext } from "@paperclipai/plugin-sdk";
+import type { ToolRunContext } from "@paperclipai/plugin-sdk";
 import { JsonRpcCallError, PLUGIN_RPC_ERROR_CODES } from "@paperclipai/plugin-sdk";
 import {
   assertAuthenticated,
@@ -591,6 +589,7 @@ export function pluginRoutes(
   const workspaceSurfaces = spsWorkspaceSurfaceService(db);
   const issuesSvc = issueService(db);
   const accessSvc = accessService(db);
+  const pluginUiActionAuthority = createPluginUiActionAuthority(accessSvc);
   const toolAccess = createPluginToolAccessService(db);
   const registryStages = registryStagingDeps
     ? registryStagingService(registryStagingDeps.stagingRoot)
@@ -790,86 +789,15 @@ export function pluginRoutes(
     return companyId;
   }
 
-  const PLUGIN_ACTION_PERMISSION_REQUEST_PARAM = "__paperclipRequestedPermissions";
-
-  function requestedPluginActionPermissions(params: Record<string, unknown> | undefined) {
-    const rawPermissions = params?.[PLUGIN_ACTION_PERMISSION_REQUEST_PARAM];
-    if (!Array.isArray(rawPermissions)) return [];
-    return [...new Set(rawPermissions.filter((permission): permission is (typeof PERMISSION_KEYS)[number] => (
-      typeof permission === "string" && (PERMISSION_KEYS as readonly string[]).includes(permission)
-    )))];
-  }
-
-  async function effectivePluginActionPermissions(
-    req: Request,
-    companyId: string | undefined,
-    requestedPermissions: readonly (typeof PERMISSION_KEYS)[number][],
-  ) {
-    if (!companyId || requestedPermissions.length === 0) return [];
-    if (hasSpsCoreHostAuthority(req)) {
-      return [...requestedPermissions];
-    }
-    if (req.actor.type === "board" && req.actor.userId) {
-      const decisions = await Promise.all(requestedPermissions.map(async (permissionKey) => ({
-        permissionKey,
-        allowed: await accessSvc.canUser(companyId, req.actor.userId, permissionKey),
-      })));
-      return decisions.filter((decision) => decision.allowed).map((decision) => decision.permissionKey);
-    }
-    if (req.actor.type === "agent" && req.actor.agentId) {
-      const decisions = await Promise.all(requestedPermissions.map(async (permissionKey) => ({
-        permissionKey,
-        allowed: await accessSvc.hasPermission(companyId, "agent", req.actor.agentId!, permissionKey),
-      })));
-      return decisions.filter((decision) => decision.allowed).map((decision) => decision.permissionKey);
-    }
-    return [];
-  }
-
-  async function performActionActorContext(
-    req: Request,
-    companyId: string | undefined,
-    requestedPermissions: readonly (typeof PERMISSION_KEYS)[number][],
-  ): Promise<PluginPerformActionActorContext> {
-    const scopedCompanyId = companyId ?? null;
-    const permissions = await effectivePluginActionPermissions(req, companyId, requestedPermissions);
-    const permissionContext = permissions.length ? { permissions } : {};
-    if (req.actor.type === "agent") {
-      return {
-        type: "agent",
-        userId: null,
-        agentId: req.actor.agentId ?? null,
-        runId: req.actor.runId ?? null,
-        companyId: scopedCompanyId,
-        ...permissionContext,
-      };
-    }
-    if (req.actor.type === "board") {
-      return {
-        type: "user",
-        userId: req.actor.userId ?? null,
-        agentId: null,
-        runId: req.actor.runId ?? null,
-        companyId: scopedCompanyId,
-        ...permissionContext,
-      };
-    }
+  function trustedPluginActionActor(req: Request, companyId: string | undefined): PluginUiActionActor {
     return {
-      type: "system",
-      userId: null,
-      agentId: null,
+      type: req.actor.type === "agent" ? "agent" : req.actor.type === "board" ? "user" : "system",
+      userId: req.actor.userId ?? null,
+      agentId: req.actor.agentId ?? null,
       runId: req.actor.runId ?? null,
-      companyId: scopedCompanyId,
-      ...permissionContext,
+      companyId: companyId ?? null,
+      hostAuthority: hasSpsCoreHostAuthority(req),
     };
-  }
-
-  function actionParamsWithAuthorizedCompanyScope(
-    params: Record<string, unknown> | undefined,
-    companyId: string | undefined,
-  ): Record<string, unknown> {
-    const { [PLUGIN_ACTION_PERMISSION_REQUEST_PARAM]: _permissionRequest, ...base } = params ?? {};
-    return companyId === undefined ? base : { ...base, companyId };
   }
 
   async function validateToolRunContextScope(runContext: ToolRunContext): Promise<string | null> {
@@ -2101,7 +2029,7 @@ export function pluginRoutes(
     }
     const companyId = assertPluginBridgeScope(req, body.companyId);
     if (companyId) await assertCompanyPluginEnabled(plugin, companyId);
-    const requestedPermissions = requestedPluginActionPermissions(body.params);
+    const requestedPermissions = pluginUiActionAuthority.requestedPermissions(body.params);
 
     try {
       const result = await bridgeDeps.workerManager.call(
@@ -2109,8 +2037,8 @@ export function pluginRoutes(
         "performAction",
         {
           key: body.key,
-          params: actionParamsWithAuthorizedCompanyScope(body.params, companyId),
-          actorContext: await performActionActorContext(req, companyId, requestedPermissions),
+          params: pluginUiActionAuthority.actionParams(body.params, companyId),
+          actorContext: await pluginUiActionAuthority.actorContext(trustedPluginActionActor(req, companyId), requestedPermissions),
           renderEnvironment: body.renderEnvironment ?? null,
         },
       );
@@ -2288,7 +2216,7 @@ export function pluginRoutes(
 
     const companyId = assertPluginBridgeScope(req, body?.companyId);
     if (companyId) await assertCompanyPluginEnabled(plugin, companyId);
-    const requestedPermissions = requestedPluginActionPermissions(body?.params);
+    const requestedPermissions = pluginUiActionAuthority.requestedPermissions(body?.params);
 
     try {
       const result = await bridgeDeps.workerManager.call(
@@ -2296,8 +2224,8 @@ export function pluginRoutes(
         "performAction",
         {
           key,
-          params: actionParamsWithAuthorizedCompanyScope(body?.params, companyId),
-          actorContext: await performActionActorContext(req, companyId, requestedPermissions),
+          params: pluginUiActionAuthority.actionParams(body?.params, companyId),
+          actorContext: await pluginUiActionAuthority.actorContext(trustedPluginActionActor(req, companyId), requestedPermissions),
           renderEnvironment: body?.renderEnvironment ?? null,
         },
       );

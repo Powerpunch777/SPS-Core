@@ -30,6 +30,7 @@ import {
   type ComponentType,
 } from "react";
 import * as ReactModule from "react";
+import { applyJsxRuntimeKey, createPluginModuleLoader, createReactShimSource } from "./module-loader";
 import { useQuery } from "@tanstack/react-query";
 import type {
   PluginDashboardWidgetDeclaration,
@@ -270,6 +271,15 @@ function setPluginLoadState(moduleKey: string, state: PluginLoadState): void {
  * Promise cache to prevent concurrent duplicate imports for the same plugin.
  */
 const inflightImports = new Map<string, Promise<void>>();
+let pluginModuleLoader = createPluginModuleLoader({ reactModule: ReactModule });
+
+function rewriteBareSpecifiers(source: string): string {
+  return pluginModuleLoader.rewriteBareSpecifiers(source);
+}
+
+async function importPluginModule(url: string): Promise<Record<string, unknown>> {
+  return pluginModuleLoader.importModule(url);
+}
 
 /**
  * Build the full URL for a plugin's UI entry module.
@@ -288,217 +298,7 @@ function buildPluginUiUrl(contribution: PluginUiContribution): string {
   return `/_plugins/${encodeURIComponent(contribution.pluginId)}/ui/${contribution.uiEntryFile}?v=${cacheHint}`;
 }
 
-/**
- * Import a plugin's UI entry module with bare-specifier rewriting.
- *
- * SPS plugin bundles externalize the public SPS UI bridge, React, and React
- * DOM, so their ESM output contains bare specifier imports like:
- *
- * ```js
- * import { usePluginData } from "@sonparkserver/plugin-sdk/ui/bridge";
- * import React from "react";
- * ```
- *
- * Browsers cannot resolve bare specifiers without an import map. Rather than
- * fighting import map timing constraints, we:
- * 1. Fetch the module source text
- * 2. Rewrite bare specifier imports to use blob URLs that re-export from the
- *    host's global SPS bridge registry
- * 3. Import the rewritten module via a blob URL
- *
- * This approach is compatible with all modern browsers and avoids import map
- * ordering issues.
- */
-const shimBlobUrls: Record<string, string> = {};
-
-function applyJsxRuntimeKey(
-  props: Record<string, unknown> | null | undefined,
-  key: string | number | undefined,
-): Record<string, unknown> {
-  if (key === undefined) return props ?? {};
-  return { ...(props ?? {}), key };
-}
-
-function createReactShimSource(reactModule: object): string {
-  const exportNames = Object.keys(reactModule)
-    .filter((name) => name !== "default" && /^[A-Za-z_$][\w$]*$/.test(name))
-    .sort();
-  const namedExports = exportNames
-    .map((name) => `        export const ${name} = R.${name};`)
-    .join("\n");
-
-  return `
-        const R = globalThis.__paperclipPluginBridge__?.react;
-        if (!R) {
-          throw new Error("SPS plugin React runtime is not initialized.");
-        }
-        export default R;
-${namedExports}
-      `;
-}
-
-function getShimBlobUrl(specifier: "react" | "react-dom" | "react-dom/client" | "react/jsx-runtime" | "sdk-ui"): string {
-  if (shimBlobUrls[specifier]) return shimBlobUrls[specifier];
-
-  let source: string;
-  switch (specifier) {
-    case "react":
-      source = createReactShimSource(ReactModule);
-      break;
-    case "react/jsx-runtime":
-      source = `
-        const R = globalThis.__paperclipPluginBridge__?.react;
-        const withKey = ${applyJsxRuntimeKey.toString()};
-        export const jsx = (type, props, key) => R.createElement(type, withKey(props, key));
-        export const jsxs = (type, props, key) => R.createElement(type, withKey(props, key));
-        export const Fragment = R.Fragment;
-      `;
-      break;
-    case "react-dom":
-    case "react-dom/client":
-      source = `
-        const RD = globalThis.__paperclipPluginBridge__?.reactDom;
-        export default RD;
-        const { createRoot, hydrateRoot, createPortal, flushSync } = RD ?? {};
-        export { createRoot, hydrateRoot, createPortal, flushSync };
-      `;
-      break;
-    case "sdk-ui":
-      source = `
-        const SDK = globalThis.__paperclipPluginBridge__?.sdkUi ?? {};
-        function missing(name) {
-          return function MissingPaperclipSdkUiComponent() {
-            throw new Error('SPS plugin UI runtime is not initialized for "' + name + '". Ensure the host loaded the plugin bridge before rendering this UI module.');
-          };
-        }
-        const { usePluginData, usePluginAction, useHostContext, useHostLocation, useHostNavigation, usePluginStream, usePluginToast } = SDK;
-        const MetricCard = SDK.MetricCard ?? missing("MetricCard");
-        const StatusBadge = SDK.StatusBadge ?? missing("StatusBadge");
-        const DataTable = SDK.DataTable ?? missing("DataTable");
-        const TimeseriesChart = SDK.TimeseriesChart ?? missing("TimeseriesChart");
-        const MarkdownBlock = SDK.MarkdownBlock ?? missing("MarkdownBlock");
-        const MarkdownEditor = SDK.MarkdownEditor ?? missing("MarkdownEditor");
-        const KeyValueList = SDK.KeyValueList ?? missing("KeyValueList");
-        const ActionBar = SDK.ActionBar ?? missing("ActionBar");
-        const LogView = SDK.LogView ?? missing("LogView");
-        const JsonTree = SDK.JsonTree ?? missing("JsonTree");
-        const Spinner = SDK.Spinner ?? missing("Spinner");
-        const ErrorBoundary = SDK.ErrorBoundary ?? missing("ErrorBoundary");
-        const FileTree = SDK.FileTree ?? missing("FileTree");
-        const IssuesList = SDK.IssuesList ?? missing("IssuesList");
-        const AssigneePicker = SDK.AssigneePicker ?? missing("AssigneePicker");
-        const ProjectPicker = SDK.ProjectPicker ?? missing("ProjectPicker");
-        const ManagedRoutinesList = SDK.ManagedRoutinesList ?? missing("ManagedRoutinesList");
-        export { usePluginData, usePluginAction, useHostContext, useHostLocation, useHostNavigation, usePluginStream, usePluginToast, MetricCard, StatusBadge, DataTable, TimeseriesChart, MarkdownBlock, MarkdownEditor, KeyValueList, ActionBar, LogView, JsonTree, Spinner, ErrorBoundary, FileTree, IssuesList, AssigneePicker, ProjectPicker, ManagedRoutinesList };
-      `;
-      break;
-  }
-
-  const blob = new Blob([source], { type: "application/javascript" });
-  const url = URL.createObjectURL(blob);
-  shimBlobUrls[specifier] = url;
-  return url;
-}
-
-/**
- * Rewrite bare specifier imports in an ESM source string to use blob URLs.
- *
- * This handles the standard import patterns emitted by esbuild/rollup:
- * - `import { ... } from "react";`
- * - `import React from "react";`
- * - `import * as React from "react";`
- * - `import { ... } from "@sonparkserver/plugin-sdk/ui/bridge";`
- *
- * Also handles re-exports:
- * - `export { ... } from "react";`
- */
-function rewriteBareSpecifiers(source: string): string {
-  // Build a mapping of bare specifiers to blob URLs.
-  const rewrites: Record<string, string> = {
-    '"@sonparkserver/plugin-sdk/ui/bridge"': `"${getShimBlobUrl("sdk-ui")}"`,
-    "'@sonparkserver/plugin-sdk/ui/bridge'": `'${getShimBlobUrl("sdk-ui")}'`,
-    '"@paperclipai/plugin-sdk/ui"': `"${getShimBlobUrl("sdk-ui")}"`,
-    "'@paperclipai/plugin-sdk/ui'": `'${getShimBlobUrl("sdk-ui")}'`,
-    '"@paperclipai/plugin-sdk/ui/hooks"': `"${getShimBlobUrl("sdk-ui")}"`,
-    "'@paperclipai/plugin-sdk/ui/hooks'": `'${getShimBlobUrl("sdk-ui")}'`,
-    '"react/jsx-runtime"': `"${getShimBlobUrl("react/jsx-runtime")}"`,
-    "'react/jsx-runtime'": `'${getShimBlobUrl("react/jsx-runtime")}'`,
-    '"react-dom/client"': `"${getShimBlobUrl("react-dom/client")}"`,
-    "'react-dom/client'": `'${getShimBlobUrl("react-dom/client")}'`,
-    '"react-dom"': `"${getShimBlobUrl("react-dom")}"`,
-    "'react-dom'": `'${getShimBlobUrl("react-dom")}'`,
-    '"react"': `"${getShimBlobUrl("react")}"`,
-    "'react'": `'${getShimBlobUrl("react")}'`,
-  };
-
-  let result = source;
-  for (const [from, to] of Object.entries(rewrites)) {
-    // Only rewrite in import/export from contexts, not in arbitrary strings.
-    // The regex matches `from "..."` or `from '...'` patterns.
-    result = result.replaceAll(` from ${from}`, ` from ${to}`);
-    // Also handle `import "..."` (side-effect imports)
-    result = result.replaceAll(`import ${from}`, `import ${to}`);
-  }
-
-  return result;
-}
-
-/**
- * Fetch, rewrite, and import a plugin UI module.
- *
- * @param url - The URL to the plugin's UI entry module
- * @returns The module's exports
- */
-async function importPluginModule(url: string): Promise<Record<string, unknown>> {
-  // Check if the bridge registry is available. If not, fall back to direct
-  // import (which will fail on bare specifiers but won't crash the loader).
-  if (!globalThis.__paperclipPluginBridge__) {
-    console.warn("[plugin-loader] Bridge registry not initialized, falling back to direct import");
-    return import(/* @vite-ignore */ url);
-  }
-
-  // Fetch the module source text
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error(`Failed to fetch plugin module: ${response.status} ${response.statusText}`);
-  }
-
-  const source = await response.text();
-
-  // Rewrite bare specifier imports to blob URLs
-  const rewritten = rewriteBareSpecifiers(source);
-
-  // Create a blob URL from the rewritten source and import it
-  const blob = new Blob([rewritten], { type: "application/javascript" });
-  const blobUrl = URL.createObjectURL(blob);
-
-  try {
-    const mod = await import(/* @vite-ignore */ blobUrl);
-    return mod;
-  } finally {
-    // Clean up the blob URL after import (the module is already loaded)
-    URL.revokeObjectURL(blobUrl);
-  }
-}
-
-/**
- * Dynamically import a plugin's UI entry module and register all named
- * exports that look like React components (functions or classes) into the
- * component registry.
- *
- * This replaces the previous approach where plugin bundles had to
- * self-register via `window.paperclipPlugins.registerReactComponent()`.
- * Now the host is responsible for importing the module and binding
- * exports to the correct `pluginKey:exportName` registry keys.
- *
- * Plugin modules are loaded with bare-specifier rewriting so that imports
- * of the SPS UI bridge, its legacy compatibility aliases, React, and React
- * DOM resolve to the host-provided implementations via the bridge registry.
- *
- * Web-component registrations still work: if the module has a named export
- * that matches an `exportName` declared in a slot AND that export is a
- * string (the custom element tag name), it's registered as a web component.
- */
+/** Import the module and register only exports declared by its contributions. */
 async function loadPluginModule(contribution: PluginUiContribution): Promise<void> {
   const { pluginId, pluginKey, slots, launchers } = contribution;
   const moduleKey = buildPluginModuleKey(contribution);
@@ -1142,14 +942,8 @@ export function _resetPluginModuleLoader(): void {
   inflightImports.clear();
   registry.clear();
   pluginLoadListeners.clear();
-  if (typeof URL.revokeObjectURL === "function") {
-    for (const url of Object.values(shimBlobUrls)) {
-      URL.revokeObjectURL(url);
-    }
-  }
-  for (const key of Object.keys(shimBlobUrls)) {
-    delete shimBlobUrls[key];
-  }
+  pluginModuleLoader.dispose();
+  pluginModuleLoader = createPluginModuleLoader({ reactModule: ReactModule });
 }
 
 export const _applyJsxRuntimeKeyForTests = applyJsxRuntimeKey;

@@ -92,6 +92,9 @@ const CRASH_WINDOW_MS = 10 * 60 * 1_000;
 /** Maximum number of stderr characters retained for worker failure context. */
 const MAX_STDERR_EXCERPT_CHARS = 8_000;
 
+/** Reserved namespace lets late guarded IDs fail closed without retaining history. */
+const GUARDED_INVOCATION_PREFIX = "sps-guarded:";
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -207,10 +210,22 @@ interface PendingRequest {
   sentAt: number;
   /** Active host-owned invocation id attached to this host→worker call. */
   invocationId?: string;
+  /** Caller cancellation suppresses the result; the wire request remains accounted for. */
+  deliveryCancelled?: boolean;
+  /** Removes the abort listener after the RPC actually settles. */
+  removeAbortListener?: () => void;
+}
+
+/** Host-only authority for one Native invocation; never included in RPC payloads. */
+export interface WorkerInvocationAuthority {
+  assertCurrent: () => void | Promise<void>;
+  signal?: AbortSignal;
 }
 
 interface ActiveInvocation {
   scope: PluginInvocationScope;
+  authority?: WorkerInvocationAuthority;
+  invalidated?: boolean;
   timer?: ReturnType<typeof setTimeout>;
 }
 
@@ -262,6 +277,7 @@ export interface PluginWorkerHandle {
     method: M,
     params: HostToWorkerMethods[M][0],
     timeoutMs?: number,
+    authority?: WorkerInvocationAuthority,
   ): Promise<HostToWorkerMethods[M][1]>;
 
   /**
@@ -364,6 +380,7 @@ export interface PluginWorkerManager {
     method: M,
     params: HostToWorkerMethods[M][0],
     timeoutMs?: number,
+    authority?: WorkerInvocationAuthority,
   ): Promise<HostToWorkerMethods[M][1]>;
 }
 
@@ -401,7 +418,6 @@ export function createPluginWorkerHandle(
   const pendingRequests = new Map<string | number, PendingRequest>();
   let nextRequestId = 1;
   const activeInvocations = new Map<string, ActiveInvocation>();
-
   // Optional methods reported by the worker during initialization
   let supportedMethods: string[] = [];
 
@@ -475,11 +491,11 @@ export function createPluginWorkerHandle(
     }
 
     if (isJsonRpcResponse(message)) {
-      handleResponse(message);
+      void handleResponse(message);
     } else if (isJsonRpcRequest(message)) {
       handleWorkerRequest(message as JsonRpcRequest);
     } else if (isJsonRpcNotification(message)) {
-      handleWorkerNotification(message as JsonRpcNotification);
+      void handleWorkerNotification(message as JsonRpcNotification);
     } else {
       log.warn("unknown message type from worker");
     }
@@ -488,7 +504,7 @@ export function createPluginWorkerHandle(
   /**
    * Handle a JSON-RPC response from the worker (matching a pending request).
    */
-  function handleResponse(response: JsonRpcResponse): void {
+  async function handleResponse(response: JsonRpcResponse): Promise<void> {
     const id = response.id;
     if (id === null || id === undefined) {
       log.warn("received response with null/undefined id");
@@ -501,8 +517,30 @@ export function createPluginWorkerHandle(
       return;
     }
 
+    const invocation = pending.invocationId ? activeInvocations.get(pending.invocationId) : undefined;
+    if (pending.deliveryCancelled) {
+      pending.resolve(createErrorResponse(
+        response.id,
+        PLUGIN_RPC_ERROR_CODES.INVOCATION_SCOPE_DENIED,
+        "Plugin invocation authority is no longer current",
+      ) as JsonRpcResponse);
+      return;
+    }
+    if (invocation?.authority) {
+      try {
+        await assertInvocationCurrent(invocation);
+      } catch {
+        pending.resolve(createErrorResponse(
+          response.id,
+          PLUGIN_RPC_ERROR_CODES.INVOCATION_SCOPE_DENIED,
+          "Plugin invocation authority is no longer current",
+        ) as JsonRpcResponse);
+        return;
+      }
+    }
     clearTimeout(pending.timer);
     pendingRequests.delete(id);
+    pending.removeAbortListener?.();
     pending.resolve(response);
   }
 
@@ -548,15 +586,68 @@ export function createPluginWorkerHandle(
     return null;
   }
 
-  function registerInvocation(scope: PluginInvocationScope, ttlMs?: number): PluginInvocationContext {
+  function invocationDenied(): JsonRpcCallError {
+    return new JsonRpcCallError({
+      code: PLUGIN_RPC_ERROR_CODES.INVOCATION_SCOPE_DENIED,
+      message: "Plugin invocation authority is no longer current",
+    });
+  }
+
+  async function assertAuthorityCurrent(authority: WorkerInvocationAuthority): Promise<void> {
+    const signal = authority.signal;
+    if (signal?.aborted) throw invocationDenied();
+    let abortListener: (() => void) | undefined;
+    const aborted = signal
+      ? new Promise<never>((_resolve, reject) => {
+        abortListener = () => reject(invocationDenied());
+        signal.addEventListener("abort", abortListener, { once: true });
+      })
+      : null;
+    try {
+      const check = Promise.resolve().then(() => authority.assertCurrent());
+      if (aborted) await Promise.race([check, aborted]);
+      else await check;
+    } catch {
+      throw invocationDenied();
+    } finally {
+      if (abortListener) signal?.removeEventListener("abort", abortListener);
+    }
+    if (signal?.aborted) throw invocationDenied();
+  }
+
+  async function assertInvocationCurrent(invocation: ActiveInvocation): Promise<void> {
+    if (invocation.invalidated || invocation.authority?.signal?.aborted) {
+      throw invocationDenied();
+    }
+    if (invocation.authority) {
+      try {
+        await assertAuthorityCurrent(invocation.authority);
+      } catch {
+        invocation.invalidated = true;
+        throw invocationDenied();
+      }
+      if (invocation.invalidated || invocation.authority.signal?.aborted) {
+        throw invocationDenied();
+      }
+    }
+  }
+
+  function registerInvocation(
+    scope: PluginInvocationScope,
+    ttlMs?: number,
+    authority?: WorkerInvocationAuthority,
+  ): PluginInvocationContext {
     const invocation: PluginInvocationContext = {
-      id: randomUUID(),
+      id: authority ? `${GUARDED_INVOCATION_PREFIX}${randomUUID()}` : randomUUID(),
       scope,
     };
-    const entry: ActiveInvocation = { scope };
+    const entry: ActiveInvocation = { scope, authority };
     if (ttlMs !== undefined) {
       entry.timer = setTimeout(() => {
-        activeInvocations.delete(invocation.id);
+        const current = activeInvocations.get(invocation.id);
+        if (!current) return;
+        if (current.authority) current.invalidated = true;
+        else activeInvocations.delete(invocation.id);
       }, ttlMs);
       if (entry.timer.unref) entry.timer.unref();
     }
@@ -571,10 +662,13 @@ export function createPluginWorkerHandle(
     activeInvocations.delete(invocation.id);
   }
 
-  function contextForWorkerMessage(message: JsonRpcRequest | JsonRpcNotification): WorkerHostCallContext {
+  async function contextForWorkerMessage(message: JsonRpcRequest | JsonRpcNotification): Promise<WorkerHostCallContext> {
     const invocationId = readNonEmptyString(
       (message as { paperclipInvocationId?: unknown }).paperclipInvocationId,
     );
+    if (invocationId?.startsWith(GUARDED_INVOCATION_PREFIX) && !activeInvocations.get(invocationId)?.authority) {
+      return { invalidInvocationScope: true };
+    }
     if (!invocationId) {
       const hasActiveInvocation = activeInvocations.size > 0 ||
         Array.from(pendingRequests.values()).some((pending) => pending.invocationId);
@@ -582,6 +676,13 @@ export function createPluginWorkerHandle(
     }
     const entry = activeInvocations.get(invocationId);
     if (!entry) return { invalidInvocationScope: true };
+    if (entry.authority) {
+      try {
+        await assertInvocationCurrent(entry);
+      } catch {
+        return { invalidInvocationScope: true };
+      }
+    }
     return { invocationScope: entry.scope };
   }
 
@@ -590,6 +691,24 @@ export function createPluginWorkerHandle(
    */
   async function handleWorkerRequest(request: JsonRpcRequest): Promise<void> {
     const method = request.method as WorkerToHostMethodName;
+    const invocationId = readNonEmptyString(
+      (request as { paperclipInvocationId?: unknown }).paperclipInvocationId,
+    );
+    const hasGuardedInvocation = Array.from(activeInvocations.values()).some((entry) => entry.authority);
+    const context = await contextForWorkerMessage(request);
+    if (context.invalidInvocationScope && (hasGuardedInvocation || invocationId?.startsWith(GUARDED_INVOCATION_PREFIX))) {
+      try {
+        sendMessage(createErrorResponse(
+          request.id,
+          PLUGIN_RPC_ERROR_CODES.INVOCATION_SCOPE_DENIED,
+          "Plugin invocation authority is no longer current",
+        ));
+      } catch {
+        // Worker may have exited, ignore send error
+      }
+      return;
+    }
+    const invocation = invocationId ? activeInvocations.get(invocationId) : undefined;
     const handler = options.hostHandlers[method] as
       | ((params: unknown, context?: WorkerHostCallContext) => Promise<unknown>)
       | undefined;
@@ -611,14 +730,26 @@ export function createPluginWorkerHandle(
     }
 
     try {
-      const result = await handler(request.params, contextForWorkerMessage(request));
+      const result = await handler(request.params, context);
+      if (invocation?.authority) await assertInvocationCurrent(invocation);
       sendMessage({
         jsonrpc: JSONRPC_VERSION,
         id: request.id,
         result: result ?? null,
       });
     } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : String(err);
+      const denied = invocation?.authority && (invocation.invalidated || invocation.authority.signal?.aborted);
+      const errorMessage = denied
+        ? "Plugin invocation authority is no longer current"
+        : (err instanceof Error ? err.message : String(err));
+      if (denied) {
+        try {
+          sendMessage(createErrorResponse(request.id, PLUGIN_RPC_ERROR_CODES.INVOCATION_SCOPE_DENIED, errorMessage));
+        } catch {
+          // Worker may have exited, ignore send error
+        }
+        return;
+      }
       log.error({ method, err: errorMessage }, "host handler error");
       try {
         sendMessage(
@@ -641,7 +772,7 @@ export function createPluginWorkerHandle(
    * arrive here. We append structured plugin context (pluginId, timestamp,
    * level) so that every log entry is queryable per the spec (§26.1).
    */
-  function handleWorkerNotification(notification: JsonRpcNotification): void {
+  async function handleWorkerNotification(notification: JsonRpcNotification): Promise<void> {
     if (notification.method === "log") {
       const params = notification.params as {
         level?: string;
@@ -683,14 +814,15 @@ export function createPluginWorkerHandle(
     ) {
       const params = (notification.params ?? {}) as Record<string, unknown>;
       const companyId = String(params.companyId ?? "");
-      const context = contextForWorkerMessage(notification);
+      const invocationId = readNonEmptyString(
+        (notification as { paperclipInvocationId?: unknown }).paperclipInvocationId,
+      );
+      const context = await contextForWorkerMessage(notification);
       if (context.invalidInvocationScope) {
-        log.warn(
-          { method: notification.method, companyId },
-          "dropping plugin stream notification with invalid invocation scope",
-        );
+        // Do not log worker-controlled payload values for denied notifications.
         return;
       }
+      const invocation = invocationId ? activeInvocations.get(invocationId) : undefined;
       const allowedCompanyId = context.invocationScope?.companyId;
       if (allowedCompanyId && companyId !== allowedCompanyId) {
         log.warn(
@@ -711,14 +843,17 @@ export function createPluginWorkerHandle(
       if (options.onStreamNotification) {
         try {
           options.onStreamNotification(notification.method, params);
+          if (invocation?.authority) await assertInvocationCurrent(invocation);
         } catch (err) {
-          log.error(
-            {
-              method: notification.method,
-              err: err instanceof Error ? err.message : String(err),
-            },
-            "stream notification handler failed",
-          );
+          if (!invocation?.authority) {
+            log.error(
+              {
+                method: notification.method,
+                err: err instanceof Error ? err.message : String(err),
+              },
+              "stream notification handler failed",
+            );
+          }
         }
       }
       return;
@@ -1176,6 +1311,34 @@ export function createPluginWorkerHandle(
     method: M,
     params: HostToWorkerMethods[M][0],
     timeoutMs?: number,
+    authority?: WorkerInvocationAuthority,
+  ): Promise<HostToWorkerMethods[M][1]> {
+    const invocationScope = deriveInvocationScope(method, params);
+    if (authority) {
+      if (!invocationScope?.companyId) return Promise.reject(invocationDenied());
+      if (authority.signal?.aborted) return Promise.reject(invocationDenied());
+      return (async () => {
+        try {
+          await assertAuthorityCurrent(authority);
+        } catch {
+          throw invocationDenied();
+        }
+        if (authority.signal?.aborted || !childProcess?.stdin?.writable ||
+          (status !== "running" && status !== "starting")) {
+          throw invocationDenied();
+        }
+        return dispatchCall(method, params, timeoutMs, authority, invocationScope);
+      })();
+    }
+    return dispatchCall(method, params, timeoutMs, undefined, invocationScope);
+  }
+
+  function dispatchCall<M extends HostToWorkerMethodName>(
+    method: M,
+    params: HostToWorkerMethods[M][0],
+    timeoutMs: number | undefined,
+    authority: WorkerInvocationAuthority | undefined,
+    invocationScope: PluginInvocationScope | null,
   ): Promise<HostToWorkerMethods[M][1]> {
     const rpcPromise = new Promise<HostToWorkerMethods[M][1]>((resolve, reject) => {
       if (!childProcess?.stdin?.writable) {
@@ -1186,11 +1349,11 @@ export function createPluginWorkerHandle(
         );
         return;
       }
-
       const id = nextRequestId++;
       const timeout = Math.min(timeoutMs ?? rpcTimeoutMs, MAX_RPC_TIMEOUT_MS);
-      const invocationScope = deriveInvocationScope(method, params);
-      const invocation = invocationScope ? registerInvocation(invocationScope) : null;
+      const invocation = invocationScope
+        ? registerInvocation(invocationScope, undefined, authority)
+        : null;
 
       // Guard against double-settlement. When a process exits all pending
       // requests are rejected via rejectAllPending(), but the timeout timer
@@ -1203,6 +1366,7 @@ export function createPluginWorkerHandle(
         settled = true;
         clearTimeout(timer);
         pendingRequests.delete(id);
+        pending.removeAbortListener?.();
         clearInvocation(invocation);
         fn(value);
       };
@@ -1234,6 +1398,27 @@ export function createPluginWorkerHandle(
         invocationId: invocation?.id,
       };
 
+      if (authority?.signal) {
+        const abort = () => {
+          const active = invocation ? activeInvocations.get(invocation.id) : undefined;
+          if (active) active.invalidated = true;
+          if (pending.deliveryCancelled) return;
+          pending.deliveryCancelled = true;
+        };
+        pending.removeAbortListener = () => authority.signal?.removeEventListener("abort", abort);
+        authority.signal.addEventListener("abort", abort, { once: true });
+        if (authority.signal.aborted) {
+          const active = invocation ? activeInvocations.get(invocation.id) : undefined;
+          if (active) active.invalidated = true;
+          pending.removeAbortListener?.();
+          clearTimeout(timer);
+          clearInvocation(invocation);
+          pendingRequests.delete(id);
+          reject(invocationDenied());
+          return;
+        }
+      }
+
       pendingRequests.set(id, pending);
 
       try {
@@ -1245,6 +1430,7 @@ export function createPluginWorkerHandle(
       } catch (err) {
         clearTimeout(timer);
         pendingRequests.delete(id);
+        pending.removeAbortListener?.();
         clearInvocation(invocation);
         reject(
           new Error(
@@ -1300,6 +1486,7 @@ export function createPluginWorkerHandle(
       method: M,
       params: HostToWorkerMethods[M][0],
       timeoutMs?: number,
+      authority?: WorkerInvocationAuthority,
     ): Promise<HostToWorkerMethods[M][1]> {
       if (status !== "running" && status !== "starting") {
         return Promise.reject(
@@ -1308,7 +1495,7 @@ export function createPluginWorkerHandle(
           ),
         );
       }
-      return callInternal(method, params, timeoutMs);
+      return callInternal(method, params, timeoutMs, authority);
     },
 
     notify(method: string, params: unknown) {
@@ -1587,6 +1774,7 @@ export function createPluginWorkerManager(
       method: M,
       params: HostToWorkerMethods[M][0],
       timeoutMs?: number,
+      authority?: WorkerInvocationAuthority,
     ): Promise<HostToWorkerMethods[M][1]> {
       const handle = workers.get(pluginId);
       if (!handle) {
@@ -1594,7 +1782,7 @@ export function createPluginWorkerManager(
           new Error(`No worker registered for plugin "${pluginId}"`),
         );
       }
-      return handle.call(method, params, timeoutMs);
+      return handle.call(method, params, timeoutMs, authority);
     },
   };
 }

@@ -18,6 +18,7 @@ import { createSpsIdentityAuth } from "../auth/sps-identity.js";
 import { spsMemberDeviceService } from "../services/sps-member-devices.js";
 import { createSpsNativeWorkspaceProofVerifier } from "../services/sps-native-workspace-proof.js";
 import { createSpsNativeWorkspaceSurfaceReader } from "../services/sps-native-workspace-surfaces.js";
+import type { SpsNativePluginPrincipal, SpsNativePluginRequest } from "../services/sps-native-plugin-runtime.js";
 import { createSpsNativeWorkspaceHttpServer } from "../services/sps-native-workspace-http.js";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { createMemberTlsFixture, type MemberTlsFixture } from "./helpers/member-tls.js";
@@ -164,6 +165,33 @@ describeDatabase("Native read-only Workspace surface consumer", () => {
     const request = signedHeader({ key, workspaceId, target: path, certificate: cert, method, cookie, body, contentType });
     return service.read(request.header, request.actual);
   };
+
+  it("authorizes the private Plugin runtime outside DB locks and rejects revoked-device late results", async () => {
+    const target = "/sps-native/v1/plugin-runtime";
+    const body = Buffer.from(JSON.stringify({ pluginId: randomUUID(), surface: "widget", surfaceId: "summary",
+      operation: "action", key: "save", params: {} }));
+    let available = false, revoke = false, calls = 0;
+    const runtime = { dispose() {}, async invoke(input: SpsNativePluginRequest,
+      authorize: () => Promise<SpsNativePluginPrincipal>) {
+      calls++;
+      expect(input.workspaceId).toBe(companyId);
+      expect(await authorize()).toMatchObject({ userId: USER_ID, deviceId: registeredDeviceId });
+      if (revoke) await deviceService.revoke(registeredDeviceId, USER_ID);
+      return { saved: true };
+    } };
+    const consumer = createSpsNativeWorkspaceSurfaceReader({ db, identity: currentIdentity, hostId: HOST_ID,
+      verifier, assertCurrent() {}, getPluginRuntime: () => available ? runtime : undefined });
+    const request = () => signedHeader({ key, target, workspaceId: companyId, certificate: certificate.certificate,
+      method: "POST", contentType: "application/json", body });
+    let signed = request(); await expect(consumer.read(signed.header, signed.actual)).rejects.toThrow();
+    expect(calls).toBe(0); available = true;
+    signed = request(); await expect(consumer.read(signed.header, signed.actual)).resolves.toEqual({ data: { saved: true } });
+    revoke = true;
+    signed = request(); await expect(consumer.read(signed.header, signed.actual)).rejects.toThrow();
+    expect(calls).toBe(2);
+    signed = request(); await expect(consumer.read(signed.header, signed.actual)).rejects.toThrow();
+    expect(calls).toBe(2);
+  });
 
   function overPrivateHttp(path: string, options: { cookie?: string; header?: string; cert?: string; workspaceId?: string | null;
     method?: string; body?: Buffer; contentType?: string } = {}) {

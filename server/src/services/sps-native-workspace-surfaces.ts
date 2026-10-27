@@ -4,6 +4,7 @@ import { companies, companyMemberships, type Db } from "../compat/paperclip/db.j
 import type { createSpsIdentityAuth } from "../auth/sps-identity.js";
 import { spsMemberDeviceService } from "./sps-member-devices.js";
 import { spsWorkspaceSurfaceService } from "./sps-workspace-surfaces.js";
+import type { createSpsNativePluginRuntime, SpsNativePluginPrincipal, SpsNativePluginRequest } from "./sps-native-plugin-runtime.js";
 import type {
   SpsNativeWorkspaceProof,
   SpsNativeWorkspaceProofActualRequest,
@@ -23,7 +24,8 @@ type ReadResult =
   | Awaited<ReturnType<ReturnType<typeof spsWorkspaceSurfaceService>["getShell"]>>
   | { widgets: Awaited<ReturnType<ReturnType<typeof spsWorkspaceSurfaceService>["listDashboard"]>> }
   | { items: Awaited<ReturnType<ReturnType<typeof spsWorkspaceSurfaceService>["listInbox"]>> }
-  | Readonly<{ readAt: string | null; archivedAt: string | null }>;
+  | Readonly<{ readAt: string | null; archivedAt: string | null }>
+  | Readonly<{ data: unknown }>;
 
 type SpsNativeWorkspaceBootstrap = Readonly<{
   v: 1;
@@ -40,6 +42,7 @@ type Options = {
   hostId: string;
   verifier: Verifier;
   assertCurrent: () => void;
+  getPluginRuntime?: () => ReturnType<typeof createSpsNativePluginRuntime> | undefined;
 };
 
 type SurfaceOperation =
@@ -111,17 +114,61 @@ function matchTarget(target: string): SurfaceOperation {
  * Core-side allowlisted Native Workspace surface reader. It has no listener or
  * Express integration; the private HTTP composition owns request framing.
  */
-export function createSpsNativeWorkspaceSurfaceReader({ db, identity, hostId, verifier, assertCurrent: assertCurrentInput }: Options) {
+export function createSpsNativeWorkspaceSurfaceReader({ db, identity, hostId, verifier,
+  assertCurrent: assertCurrentInput, getPluginRuntime }: Options) {
   if (!db || !identity || typeof identity.resolveNativeEnrollmentSessionFromHeaders !== "function"
     || !UUID.test(hostId) || !verifier || typeof verifier.verify !== "function"
     || typeof assertCurrentInput !== "function") throw new TypeError("Invalid Native Workspace surface reader configuration.");
   const devices = spsMemberDeviceService(db, hostId);
 
   return Object.freeze({
-    async read(header: string, actual: SpsNativeWorkspaceProofActualRequest): Promise<ReadResult> {
+    async read(header: string, actual: SpsNativeWorkspaceProofActualRequest, signal?: AbortSignal): Promise<ReadResult> {
       try {
         assertCurrent(assertCurrentInput);
         const proof = verifier.verify(header, actual);
+        if (actual.target === "/sps-native/v1/plugin-runtime") {
+          if (actual.method !== "POST" || proof.method !== "POST" || actual.contentType !== "application/json"
+            || proof.workspaceId === null || proof.hostId !== hostId || !getPluginRuntime
+            || actual.body.length < 2 || actual.body.length > 64 * 1024 || signal?.aborted) fail();
+          const text = new TextDecoder("utf-8", { fatal: true }).decode(actual.body);
+          const parsed: unknown = JSON.parse(text);
+          if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)
+            || JSON.stringify(parsed) !== text || Object.keys(parsed).sort().join(",") !== "key,operation,params,pluginId,surface,surfaceId") fail();
+          const input = { ...parsed, workspaceId: proof.workspaceId } as SpsNativePluginRequest;
+          const session = await identity.resolveNativeEnrollmentSessionFromHeaders(new Headers({ cookie: proof.cookie }));
+          if (!session || typeof session.authorizeInTransaction !== "function" || !session.userId) fail();
+          const userId = session.userId;
+          const workspaceId = proof.workspaceId;
+          const certificateSha256 = createHash("sha256").update(proof.peerCertificateDer).digest("hex");
+          const authorizeNative = async (): Promise<SpsNativePluginPrincipal> => {
+            assertCurrent(assertCurrentInput);
+            if (signal?.aborted) fail();
+            const authorized = await db.transaction(async tx => {
+              await tx.execute(sql`SET LOCAL statement_timeout = '5s'`);
+              await tx.execute(sql`SET LOCAL lock_timeout = '1s'`);
+              await session.authorizeInTransaction(tx, userId);
+              const grant = await devices.authorizeInTransaction(tx, { companyId: workspaceId, userId, certificateSha256 });
+              if (grant.hostId !== hostId || grant.companyId !== workspaceId || grant.userId !== userId
+                || grant.certificateSha256 !== certificateSha256 || grant.certificateNotAfter.getTime() <= Date.now()) fail();
+              assertCurrent(assertCurrentInput);
+              if (signal?.aborted) fail();
+              await session.authorizeInTransaction(tx, userId);
+              return Object.freeze({ userId, deviceId: grant.deviceId, deviceRevision: grant.revision,
+                certificateSha256, certificateNotAfter: grant.certificateNotAfter.getTime() });
+            });
+            assertCurrent(assertCurrentInput);
+            if (signal?.aborted) fail();
+            return authorized;
+          };
+          const runtime = getPluginRuntime();
+          if (!runtime) fail();
+          await authorizeNative();
+          const data = await runtime.invoke(input, authorizeNative, signal);
+          await authorizeNative();
+          assertCurrent(assertCurrentInput);
+          if (signal?.aborted || getPluginRuntime() !== runtime) fail();
+          return Object.freeze({ data });
+        }
         const operation = matchTarget(proof.target);
         const isInboxState = operation.kind === "inbox-state";
         if (proof.hostId !== hostId || proof.method !== actual.method

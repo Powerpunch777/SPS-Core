@@ -1,6 +1,6 @@
 import express from "express";
 import request from "supertest";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { resolvePluginRecoveryState, type PluginRecoveryState } from "../services/sps-plugin-recovery.js";
 
 const mockRegistry = vi.hoisted(() => ({
@@ -169,13 +169,34 @@ function agentActor(overrides: Record<string, unknown> = {}) {
 }
 
 function readyPlugin() {
-  mockRegistry.getById.mockResolvedValue({
+  const plugin = {
     id: pluginId,
     pluginKey: "paperclip.example",
+    packageName: "@example/paperclip-plugin",
     version: "1.0.0",
+    apiVersion: 1,
+    categories: [],
     status: "ready",
-    manifestJson: {},
-  });
+    installOrder: 1,
+    packagePath: null,
+    lastError: null,
+    installedAt: new Date("2026-01-01T00:00:00.000Z"),
+    updatedAt: new Date("2026-01-02T00:00:00.000Z"),
+    manifestJson: {
+      id: "paperclip.example",
+      apiVersion: 1,
+      version: "1.0.0",
+      displayName: "Example Plugin",
+      description: "Route authorization fixture.",
+      author: "Tests",
+      categories: [],
+      capabilities: [],
+      entrypoints: { worker: "./worker.js" },
+      companyActivation: { defaultEnabled: true },
+    },
+  };
+  mockRegistry.getById.mockResolvedValue(plugin);
+  mockRegistry.listInstalled.mockResolvedValue([plugin]);
 }
 
 describe.sequential("plugin install and upgrade authz", () => {
@@ -760,12 +781,21 @@ describe.sequential("plugin local folder routes", () => {
 });
 
 describe.sequential("plugin tool and bridge authz", () => {
+  beforeAll(async () => {
+    await Promise.all([
+      import("../routes/plugins.js"),
+      import("../middleware/index.js"),
+    ]);
+  }, 60_000);
+
   beforeEach(() => {
     vi.clearAllMocks();
     mockRegistry.getById.mockReset();
     mockRegistry.getByKey.mockReset();
     mockRegistry.getCompanySettings.mockReset();
+    mockRegistry.getCompanySettings.mockResolvedValue(null);
     mockRegistry.upsertCompanySettings.mockReset();
+    mockRegistry.listInstalled.mockResolvedValue([]);
     mockAccess.canUser.mockReset();
     mockAccess.hasPermission.mockReset();
     mockAccess.canUser.mockResolvedValue(false);

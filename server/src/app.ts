@@ -70,6 +70,7 @@ import { applyUiBranding } from "./ui-branding.js";
 import { logger } from "./middleware/logger.js";
 import { DEFAULT_LOCAL_PLUGIN_DIR, pluginLoader } from "./services/plugin-loader.js";
 import { createPluginWorkerManager, type PluginWorkerManager } from "./services/plugin-worker-manager.js";
+import { createSpsNativePluginRuntime } from "./services/sps-native-plugin-runtime.js";
 import { createPluginJobScheduler } from "./services/plugin-job-scheduler.js";
 import { pluginJobStore } from "./services/plugin-job-store.js";
 import { createPluginToolDispatcher } from "./services/plugin-tool-dispatcher.js";
@@ -183,6 +184,7 @@ export async function createApp(
     registryStagingDir?: string;
     pluginMigrationDb?: Db;
     pluginWorkerManager?: PluginWorkerManager;
+    onNativePluginRuntime?: (runtime: ReturnType<typeof createSpsNativePluginRuntime>) => void;
     betterAuthHandler?: express.RequestHandler;
     resolveSession?: (req: ExpressRequest) => Promise<BetterAuthSessionResult | null>;
     spsIdentityHandler?: express.RequestHandler;
@@ -247,6 +249,7 @@ export async function createApp(
 
   const hostServicesDisposers = new Map<string, () => void>();
   const workerManager = opts.pluginWorkerManager ?? createPluginWorkerManager();
+  const nativePluginRuntime = createSpsNativePluginRuntime(db, workerManager);
 
   // Mount API routes
   const api = Router();
@@ -706,6 +709,7 @@ export async function createApp(
   const shutdownPluginRuntime = () => {
     if (pluginRuntimeShutdown) return pluginRuntimeShutdown;
     pluginRuntimeStopping = true;
+    nativePluginRuntime.dispose();
     stopPluginDiscovery();
     // Close admission synchronously, before a still-running startup can fork
     // another worker. Keep Host services alive until owned workers have stopped.
@@ -726,5 +730,6 @@ export async function createApp(
     void flushPluginLogBuffer();
   });
 
+  opts.onNativePluginRuntime?.(nativePluginRuntime);
   return app;
 }

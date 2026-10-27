@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import type { Socket } from "node:net";
 
 type ActualRequest = { method: string; target: string; body: Buffer; cookie: string; contentType: string };
-type Reader = { read(proof: string, actual: ActualRequest): Promise<unknown> };
+type Reader = { read(proof: string, actual: ActualRequest, signal?: AbortSignal): Promise<unknown> };
 const FAILURE = "Native Workspace access is unavailable.";
 const INBOX_STATE_TARGET = /^\/api\/companies\/[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}\/workspace-inbox\/[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/;
 
@@ -80,19 +80,24 @@ export function createSpsNativeWorkspaceHttpServer(options: {
   });
 
   async function handle(request: IncomingMessage, response: ServerResponse) {
+    const controller = new AbortController();
+    const onClose = () => { if (!response.writableFinished) controller.abort(); };
+    response.once("close", onClose);
     let admitted = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       checkCurrent();
       if (request.socket.remoteAddress !== "127.0.0.1"
-        || (request.method !== "GET" && request.method !== "PATCH")
+        || (request.method !== "GET" && request.method !== "PATCH" && request.method !== "POST")
         || typeof request.url !== "string" || pending >= 4) throw new Error(FAILURE);
       const patchState = request.method === "PATCH" && INBOX_STATE_TARGET.test(request.url);
+      const pluginRequest = request.method === "POST" && request.url === "/sps-native/v1/plugin-runtime";
+      if (request.method === "POST" && !pluginRequest) throw new Error(FAILURE);
       if (request.method === "PATCH" && !patchState) throw new Error(FAILURE);
       const transferEncoding = singleHeader(request, "transfer-encoding", false);
       const contentLengthText = singleHeader(request, "content-length", false);
       if (transferEncoding
-        || (patchState
+        || (pluginRequest ? !/^[1-9][0-9]{0,4}$/.test(contentLengthText) || Number(contentLengthText) > 64 * 1024 : patchState
           ? !/^(?:[1-9]|[1-9][0-9]|1[01][0-9]|12[0-8])$/.test(contentLengthText)
           : !["", "0"].includes(contentLengthText))
         || ["authorization", "x-sps-desktop-access", "x-sps-desktop-owner-bootstrap"]
@@ -100,26 +105,27 @@ export function createSpsNativeWorkspaceHttpServer(options: {
       const proof = singleHeader(request, "x-sps-native-workspace-proof");
       const cookie = singleHeader(request, "cookie");
       const contentType = singleHeader(request, "content-type", false);
-      if (patchState ? contentType !== "application/json" : contentType !== "") throw new Error(FAILURE);
+      if (patchState || pluginRequest ? contentType !== "application/json" : contentType !== "") throw new Error(FAILURE);
       pending++;
       admitted = true;
-      timer = setTimeout(() => response.destroy(), 10_000);
+      timer = setTimeout(() => { controller.abort(); response.destroy(); }, 10_000);
       let body = Buffer.alloc(0);
-      if (patchState) {
+      if (patchState || pluginRequest) {
         const chunks: Buffer[] = [];
         let bytes = 0;
         for await (const chunk of request) {
           const part = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
           bytes += part.length;
-          if (bytes > 128) throw new Error(FAILURE);
+          if (bytes > (pluginRequest ? 64 * 1024 : 128)) throw new Error(FAILURE);
           chunks.push(part);
         }
         if (bytes !== Number(contentLengthText)) throw new Error(FAILURE);
         body = Buffer.concat(chunks, bytes);
       }
-      const result = await reader.read(proof, {
+      const actual = {
         method: request.method, target: request.url, body, cookie, contentType,
-      });
+      };
+      const result = await (pluginRequest ? reader.read(proof, actual, controller.signal) : reader.read(proof, actual));
       checkCurrent();
       if (request.aborted || response.destroyed) return;
       const json = JSON.stringify(result);
@@ -135,6 +141,7 @@ export function createSpsNativeWorkspaceHttpServer(options: {
         response.end(JSON.stringify({ error: FAILURE }));
       } else response.destroy();
     } finally {
+      controller.abort(); response.removeListener("close", onClose);
       if (timer) clearTimeout(timer);
       if (admitted) pending--;
     }

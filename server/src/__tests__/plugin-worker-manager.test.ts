@@ -1,7 +1,7 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
-import type { PaperclipPluginManifestV1 } from "@paperclipai/shared";
+import type { Company, PaperclipPluginManifestV1 } from "@paperclipai/shared";
 import {
   createHostClientHandlers,
   JsonRpcCallError,
@@ -34,6 +34,34 @@ const TEST_MANIFEST: PaperclipPluginManifestV1 = {
   capabilities: [],
   entrypoints: { worker: "dist/worker.js" },
 };
+
+function createTestCompany(id: string): Company {
+  const now = new Date("2025-01-01T00:00:00.000Z");
+  return {
+    id,
+    name: "Test company",
+    description: null,
+    status: "active",
+    pauseReason: null,
+    pausedAt: null,
+    issuePrefix: "TST",
+    issueCounter: 0,
+    budgetMonthlyCents: 0,
+    spentMonthlyCents: 0,
+    attachmentMaxBytes: 10 * 1024 * 1024,
+    defaultResponsibleUserId: null,
+    requireBoardApprovalForNewAgents: false,
+    feedbackDataSharingEnabled: false,
+    feedbackDataSharingConsentAt: null,
+    feedbackDataSharingConsentByUserId: null,
+    feedbackDataSharingTermsVersion: null,
+    brandColor: null,
+    logoAssetId: null,
+    logoUrl: null,
+    createdAt: now,
+    updatedAt: now,
+  };
+}
 
 describe("plugin-worker-manager stderr failure context", () => {
   it("appends worker stderr context to failure messages", () => {
@@ -239,7 +267,7 @@ describe("plugin-worker-manager stderr failure context", () => {
   });
 
   it("passes echoed invocation scope to worker-to-host handlers", async () => {
-    const companiesGet = vi.fn(async () => ({ id: "company-1" }));
+    const companiesGet = vi.fn(async () => createTestCompany("company-1"));
     const handle = createPluginWorkerHandle("test.plugin", {
       entrypointPath: INVOCATION_SCOPE_WORKER_ENTRYPOINT,
       manifest: TEST_MANIFEST,
@@ -264,7 +292,7 @@ describe("plugin-worker-manager stderr failure context", () => {
           mode: "echo",
           requestedCompanyId: "company-1",
         },
-      } as HostToWorkerMethods["getData"][0])).resolves.toEqual({ id: "company-1" });
+      } as HostToWorkerMethods["getData"][0])).resolves.toMatchObject({ id: "company-1" });
 
       expect(companiesGet).toHaveBeenCalledWith(
         { companyId: "company-1" },
@@ -276,7 +304,7 @@ describe("plugin-worker-manager stderr failure context", () => {
   });
 
   it("gives scheduled Jobs an instance invocation scope for nested host calls", async () => {
-    const companiesGet = vi.fn(async (params: { companyId: string }) => ({ id: params.companyId }));
+    const companiesGet = vi.fn(async (params: { companyId: string }) => createTestCompany(params.companyId));
     const scopedCompaniesGet = vi.fn();
     const hostHandlers = createHostClientHandlers({
       pluginId: "test.plugin",
@@ -388,6 +416,7 @@ describe("plugin-worker-manager stderr failure context", () => {
       });
 
       expect(companiesGet).toHaveBeenCalledTimes(1);
+
       expect(scopedCompaniesGet).toHaveBeenNthCalledWith(
         1,
         { companyId: "company-a" },
@@ -541,6 +570,189 @@ describe("plugin-worker-manager stderr failure context", () => {
       }
 
       expect(companiesGet).not.toHaveBeenCalled();
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
+  it("checks host-only invocation authority before dispatch and for nested worker calls", async () => {
+    const companiesGet = vi.fn(async (params: { companyId: string }) => createTestCompany(params.companyId));
+    const streamNotification = vi.fn();
+    const handle = createPluginWorkerHandle("test.plugin", {
+      entrypointPath: INVOCATION_SCOPE_WORKER_ENTRYPOINT,
+      manifest: TEST_MANIFEST,
+      config: {},
+      instanceInfo: { instanceId: "instance-1", hostVersion: "1.0.0" },
+      apiVersion: 1,
+      hostHandlers: { "companies.get": companiesGet },
+      onStreamNotification: streamNotification,
+    });
+    const authority = { assertCurrent: vi.fn() };
+
+    try {
+      await handle.start();
+      await expect(handle.call("getData", {
+        key: "probe",
+        companyId: "company-1",
+        params: { mode: "echo", requestedCompanyId: "company-1" },
+      } as HostToWorkerMethods["getData"][0], undefined, authority)).resolves.toMatchObject({ id: "company-1" });
+      expect(authority.assertCurrent).toHaveBeenCalledTimes(4);
+      expect(companiesGet).toHaveBeenCalledWith(
+        { companyId: "company-1" },
+        { invocationScope: { companyId: "company-1" } },
+      );
+      await expect(handle.call("getData", {
+        key: "probe",
+        companyId: "company-1",
+        params: { mode: "stream" },
+      } as HostToWorkerMethods["getData"][0], undefined, authority)).resolves.toEqual({ ok: true });
+      expect(streamNotification).toHaveBeenCalledWith("streams.emit", expect.objectContaining({ companyId: "company-1" }));
+      const opaqueInvocation = await handle.call("getData", {
+        key: "probe",
+        companyId: "company-1",
+        params: { mode: "returnInvocation" },
+      } as HostToWorkerMethods["getData"][0], undefined, authority);
+      expect(opaqueInvocation).toEqual({
+        invocationId: expect.stringMatching(/^sps-guarded:[0-9a-f-]{36}$/),
+      });
+      expect(authority.assertCurrent).toHaveBeenCalledTimes(10);
+
+      const denied = { assertCurrent: vi.fn(() => { throw new Error("private authority details"); }) };
+      await expect(handle.call("getData", {
+        key: "probe",
+        companyId: "company-1",
+        params: { mode: "echo", requestedCompanyId: "company-1" },
+      } as HostToWorkerMethods["getData"][0], undefined, denied)).rejects.toMatchObject({
+        code: PLUGIN_RPC_ERROR_CODES.INVOCATION_SCOPE_DENIED,
+        message: "Plugin invocation authority is no longer current",
+      });
+      expect(denied.assertCurrent).toHaveBeenCalledTimes(1);
+      expect(companiesGet).toHaveBeenCalledTimes(1);
+
+      const missingScopeAuthority = { assertCurrent: vi.fn() };
+      await expect(handle.call("getData", {
+        key: "probe",
+        params: { mode: "echo", requestedCompanyId: "company-1" },
+      } as HostToWorkerMethods["getData"][0], undefined, missingScopeAuthority)).rejects.toMatchObject({
+        code: PLUGIN_RPC_ERROR_CODES.INVOCATION_SCOPE_DENIED,
+      });
+      expect(missingScopeAuthority.assertCurrent).not.toHaveBeenCalled();
+      expect(companiesGet).toHaveBeenCalledTimes(1);
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
+  it("suppresses an aborted guarded result while retaining call accounting until settlement", async () => {
+    const companiesGet = vi.fn(async (params: { companyId: string }) => createTestCompany(params.companyId));
+    const handle = createPluginWorkerHandle("test.plugin", {
+      entrypointPath: INVOCATION_SCOPE_WORKER_ENTRYPOINT,
+      manifest: TEST_MANIFEST,
+      config: {},
+      instanceInfo: { instanceId: "instance-1", hostVersion: "1.0.0" },
+      apiVersion: 1,
+      hostHandlers: { "companies.get": companiesGet },
+    });
+    const controller = new AbortController();
+
+    try {
+      await handle.start();
+      const call = handle.call("getData", {
+        key: "probe",
+        companyId: "company-1",
+        params: { mode: "waitThenCall", requestedCompanyId: "company-1", delayMs: 250 },
+      } as HostToWorkerMethods["getData"][0], undefined, {
+        assertCurrent: () => undefined,
+        signal: controller.signal,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      let settled = false;
+      void call.then(() => { settled = true; }, () => { settled = true; });
+      controller.abort();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(settled).toBe(false);
+      expect(handle.diagnostics().pendingRequests).toBe(1);
+      await expect(call).rejects.toMatchObject({ code: PLUGIN_RPC_ERROR_CODES.INVOCATION_SCOPE_DENIED });
+      expect(settled).toBe(true);
+      expect(companiesGet).not.toHaveBeenCalled();
+      expect(handle.diagnostics().pendingRequests).toBe(0);
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
+  it("rechecks changed authority and denies missing, mismatched, and stale guarded IDs", async () => {
+    const companiesGet = vi.fn(async (params: { companyId: string }) => createTestCompany(params.companyId));
+    const handle = createPluginWorkerHandle("test.plugin", {
+      entrypointPath: INVOCATION_SCOPE_WORKER_ENTRYPOINT,
+      manifest: TEST_MANIFEST,
+      config: {},
+      instanceInfo: { instanceId: "instance-1", hostVersion: "1.0.0" },
+      apiVersion: 1,
+      hostHandlers: { "companies.get": companiesGet },
+    });
+
+    try {
+      await handle.start();
+      let checks = 0;
+      await expect(handle.call("getData", {
+        key: "probe",
+        companyId: "company-1",
+        params: { mode: "echo", requestedCompanyId: "company-1" },
+      } as HostToWorkerMethods["getData"][0], undefined, {
+        assertCurrent: () => { checks++; if (checks === 2) throw new Error("authority changed"); },
+      })).rejects.toMatchObject({ code: PLUGIN_RPC_ERROR_CODES.INVOCATION_SCOPE_DENIED });
+      expect(companiesGet).not.toHaveBeenCalled();
+
+      for (const mode of ["omit", "unknown"]) {
+        await expect(handle.call("getData", {
+          key: "probe",
+          companyId: "company-1",
+          params: { mode, requestedCompanyId: "company-1" },
+        } as HostToWorkerMethods["getData"][0], undefined, { assertCurrent: () => undefined })).rejects.toMatchObject({
+          code: PLUGIN_RPC_ERROR_CODES.INVOCATION_SCOPE_DENIED,
+        });
+      }
+      expect(companiesGet).not.toHaveBeenCalled();
+
+      await expect(handle.call("getData", {
+        key: "probe",
+        companyId: "company-1",
+        params: { mode: "late", requestedCompanyId: "company-1" },
+      } as HostToWorkerMethods["getData"][0], undefined, { assertCurrent: () => undefined })).resolves.toMatchObject({ id: "company-1" });
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      expect(companiesGet).toHaveBeenCalledTimes(1);
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
+  it("keeps explicit legacy worker invocations functional while a guarded call is active", async () => {
+    const companiesGet = vi.fn(async (params: { companyId: string }) => createTestCompany(params.companyId));
+    const handle = createPluginWorkerHandle("test.plugin", {
+      entrypointPath: INVOCATION_SCOPE_WORKER_ENTRYPOINT,
+      manifest: TEST_MANIFEST,
+      config: {},
+      instanceInfo: { instanceId: "instance-1", hostVersion: "1.0.0" },
+      apiVersion: 1,
+      hostHandlers: { "companies.get": companiesGet },
+    });
+
+    try {
+      await handle.start();
+      const guarded = handle.call("getData", {
+        key: "probe",
+        companyId: "company-1",
+        params: { mode: "waitEcho", requestedCompanyId: "company-1", delayMs: 80 },
+      } as HostToWorkerMethods["getData"][0], undefined, { assertCurrent: () => undefined });
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      await expect(handle.call("getData", {
+        key: "probe",
+        companyId: "company-2",
+        params: { mode: "echo", requestedCompanyId: "company-2" },
+      } as HostToWorkerMethods["getData"][0])).resolves.toMatchObject({ id: "company-2" });
+      await expect(guarded).resolves.toMatchObject({ id: "company-1" });
+      expect(companiesGet).toHaveBeenCalledTimes(2);
     } finally {
       await handle.stop().catch(() => undefined);
     }

@@ -4,6 +4,7 @@ import type { Db } from "../compat/paperclip/db.js";
 import { createSpsNativeWorkspaceHttpServer } from "./sps-native-workspace-http.js";
 import { createSpsNativeWorkspaceProofVerifier } from "./sps-native-workspace-proof.js";
 import { createSpsNativeWorkspaceSurfaceReader } from "./sps-native-workspace-surfaces.js";
+import type { createSpsNativePluginRuntime } from "./sps-native-plugin-runtime.js";
 
 const REQUEST = "sps.native.workspace.bootstrap.request";
 const RESPONSE = "sps.native.workspace.bootstrap.response";
@@ -36,6 +37,7 @@ type WorkspaceOptions = Readonly<{
   serverSpkiSha256: string;
   issuerSpkiSha256: string;
   assertCurrent(): void;
+  getPluginRuntime?: () => ReturnType<typeof createSpsNativePluginRuntime> | undefined;
 }>;
 
 function fail(): never { throw new Error(FAILURE); }
@@ -313,6 +315,7 @@ export function createSpsNativeWorkspaceChannel(options: WorkspaceOptions, chann
         hostId: options.hostId,
         verifier,
         assertCurrent,
+        getPluginRuntime: options.getPluginRuntime,
       });
       const server = createSpsNativeWorkspaceHttpServer({ reader, assertCurrent });
       try {

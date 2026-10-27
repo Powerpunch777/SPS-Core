@@ -21,13 +21,15 @@ function sendNestedHostRequest(originalRequest, invocationId) {
     },
   };
 
-  if (mode === "echo") {
+  if (mode === "echo" || mode === "waitEcho") {
     nestedRequest.paperclipInvocationId = invocationId;
   } else if (mode === "unknown") {
     nestedRequest.paperclipInvocationId = "unknown-invocation";
+  } else if (mode === "late") {
+    nestedRequest.paperclipInvocationId = invocationId;
   }
 
-  pendingNested.set(nestedId, originalRequest.id);
+  pendingNested.set(nestedId, { originalId: originalRequest.id, originalRequest });
   send(nestedRequest);
 }
 
@@ -41,12 +43,12 @@ rl.on("line", (line) => {
   const message = JSON.parse(line);
 
   if (message.id && pendingNested.has(message.id)) {
-    const originalId = pendingNested.get(message.id);
+    const pending = pendingNested.get(message.id);
     pendingNested.delete(message.id);
     if (message.error) {
       send({
         jsonrpc: "2.0",
-        id: originalId,
+        id: pending.originalId,
         error: message.error,
       });
       return;
@@ -54,9 +56,13 @@ rl.on("line", (line) => {
 
     send({
       jsonrpc: "2.0",
-      id: originalId,
+      id: pending.originalId,
       result: message.result,
     });
+    const originalRequest = pending.originalRequest;
+    if (originalRequest?.params?.params?.mode === "late") {
+      setTimeout(() => sendNestedHostRequest(originalRequest, originalRequest.paperclipInvocation?.id), 10);
+    }
     return;
   }
 
@@ -75,6 +81,33 @@ rl.on("line", (line) => {
   }
 
   if (method === "getData" || method === "performAction" || method === "runJob") {
+    const mode = message.params?.params?.mode ?? message.params?.job?.mode;
+    if (mode === "returnInvocation") {
+      send({
+        jsonrpc: "2.0",
+        id: message.id,
+        result: { invocationId: message.paperclipInvocation?.id },
+      });
+      return;
+    }
+    if (mode === "waitThenCall" || mode === "waitEcho") {
+      setTimeout(() => sendNestedHostRequest(message, message.paperclipInvocation?.id), Number(message.params?.params?.delayMs ?? 50));
+      return;
+    }
+    if (mode === "stream") {
+      send({
+        jsonrpc: "2.0",
+        method: "streams.emit",
+        params: {
+          channel: "guard-test",
+          companyId: message.params?.companyId,
+          event: { type: "guard-test" },
+        },
+        paperclipInvocationId: message.paperclipInvocation?.id,
+      });
+      setTimeout(() => send({ jsonrpc: "2.0", id: message.id, result: { ok: true } }), 10);
+      return;
+    }
     sendNestedHostRequest(message, message.paperclipInvocation?.id);
     return;
   }

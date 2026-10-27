@@ -13,9 +13,9 @@ let serverCertificate: MemberTlsFixture;
 
 type ProofFields = [1, string, string | null, string, string, string, number, string, string, string, string];
 
-function fields(overrides: Partial<ProofFields> = {}, now = Date.now(), certificate = clientCertificate.certificate): ProofFields {
+function fields(overrides: Partial<Record<number, unknown>> = {}, now = Date.now(), certificate = clientCertificate.certificate): ProofFields {
   return [1, HOST_ID, WORKSPACE_ID, "GET", DEFAULT_TARGET, randomBytes(32).toString("base64url"), now,
-    EMPTY_HASH, COOKIE, "", certificate].map((value, index) => Object.hasOwn(overrides, index) ? overrides[index as keyof ProofFields] : value) as ProofFields;
+    EMPTY_HASH, COOKIE, "", certificate].map((value, index) => Object.hasOwn(overrides, index) ? overrides[index] : value) as ProofFields;
 }
 
 function encode(values: unknown, key: Buffer): string {
@@ -61,6 +61,17 @@ afterAll(async () => {
 });
 
 describe("SPS Native Workspace request proof codec", () => {
+  it("binds Plugin POST proof to its sole target, actual JSON bytes and active Workspace", () => {
+    const key = randomBytes(32), target = "/sps-native/v1/plugin-runtime", body = Buffer.from('{"key":"read"}');
+    const input = fields({ 3: "POST", 4: target, 7: createHash("sha256").update(body).digest("hex"), 9: "application/json" });
+    const request = actual({ method: "POST", target, body, contentType: "application/json" });
+    expect(verifier({ key }).verify(encode(input, key), request)).toMatchObject({ method: "POST", workspaceId: WORKSPACE_ID });
+    expect(() => verifier({ key }).verify(encode(input, key), { ...request, body: Buffer.from('{"key":"write"}') })).toThrow();
+    expect(() => verifier({ key }).verify(encode(replaceField(input, 4, "/api/plugins/arbitrary"), key),
+      { ...request, target: "/api/plugins/arbitrary" })).toThrow();
+    expect(() => verifier({ key }).verify(encode(replaceField(input, 2, null), key), request)).toThrow();
+  });
+
   it("verifies a signed canonical request and returns an isolated frozen proof", () => {
     const key = randomBytes(32);
     const suppliedKey = Buffer.from(key);
