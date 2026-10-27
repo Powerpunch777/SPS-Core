@@ -29,6 +29,12 @@ includes the last observed revision; a stale screen receives409 and refreshes.
 An independent company budget/archive policy remains enforced by its existing
 path and by admission; resume does not change those policies.
 
+Finalizing a run always releases its own issue/checkout references, including
+after pause, stop, archive or an epoch change. Cleanup takes the control lock
+first but does not require new admission. Recovery, deferred promotion and new
+wakeups remain gated by active Workspace status, running control and the
+originating epoch; releasing an old lock never revives execution.
+
 ## Execution lanes
 
 Heartbeat enqueue/retry/recovery and claim gates, Node command creation, neutral
@@ -84,6 +90,10 @@ is displayed as waiting for termination confirmation. Read-only users have no
 mutation controls. The initial integration targets the embedded Core settings;
 it does not add general Native SDK administration or a new remote management
 trust boundary.
+
+The default SPS Host settings route mounts these controls. Native Member
+Workspace entry uses its private, authenticated read surface to display a closed
+snapshot with `canControl: false`; this grants no remote mutation authority.
 
 ## Compatibility, recovery and evidence
 

@@ -4,6 +4,7 @@ import { Link } from "@/lib/router";
 import { useCompany } from "@/context/CompanyContext";
 import { useBreadcrumbs } from "@/context/BreadcrumbContext";
 import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { WorkspaceExecutionControl } from "@/components/WorkspaceExecutionControl";
 
 const settings = [
   {
@@ -95,6 +96,7 @@ export function SpsCoreHostSettings() {
           );
         })}
       </div>
+      {selectedCompany?.id && <WorkspaceExecutionControl key={selectedCompany.id} companyId={selectedCompany.id} />}
     </div>
   );
 }

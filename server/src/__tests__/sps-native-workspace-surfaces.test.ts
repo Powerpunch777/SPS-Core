@@ -3,6 +3,7 @@ import { request as httpRequest } from "node:http";
 import { eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
+  activityLog,
   authSessions,
   authUsers,
   companies,
@@ -16,6 +17,7 @@ import {
 import type { Config } from "../config.js";
 import { createSpsIdentityAuth } from "../auth/sps-identity.js";
 import { spsMemberDeviceService } from "../services/sps-member-devices.js";
+import { spsWorkspaceExecutionControlService } from "../services/sps-workspace-execution-control.js";
 import { createSpsNativeWorkspaceProofVerifier } from "../services/sps-native-workspace-proof.js";
 import { createSpsNativeWorkspaceSurfaceReader } from "../services/sps-native-workspace-surfaces.js";
 import type { SpsNativePluginPrincipal, SpsNativePluginRequest } from "../services/sps-native-plugin-runtime.js";
@@ -132,11 +134,12 @@ describeDatabase("Native read-only Workspace surface consumer", () => {
       verifier, assertCurrent: () => {} });
     privateHttp = createSpsNativeWorkspaceHttpServer({ reader: service, assertCurrent: () => {} });
     privateAddress = await privateHttp.start();
-  }, process.platform === "win32" ? 120_000 : 45_000);
+  }, process.platform === "win32" ? 180_000 : 60_000);
 
   afterAll(async () => {
     await privateHttp?.dispose();
     verifier?.dispose();
+    if (companyId) await db?.delete(activityLog).where(eq(activityLog.companyId, companyId));
     await db?.delete(spsMemberDeviceEvents);
     await db?.delete(spsMemberDevices);
     await db?.delete(spsPluginInboxUserStates);
@@ -148,7 +151,7 @@ describeDatabase("Native read-only Workspace surface consumer", () => {
     await certificate?.cleanup();
     await db?.$client.end();
     await database?.cleanup();
-  }, 30_000);
+  }, process.platform === "win32" ? 60_000 : 30_000);
 
   afterEach(async () => {
     if (inboxItemId) {
@@ -219,13 +222,40 @@ describeDatabase("Native read-only Workspace surface consumer", () => {
     });
   }
 
-  it("serves only the four bounded existing read surfaces through Core services", async () => {
+  it("serves the bounded existing read surfaces through Core services", async () => {
     expect(await read(`/api/companies/${companyId}/workspace-shell/providers`)).toEqual([]);
     expect(await read(`/api/companies/${companyId}/workspace-shell`)).toMatchObject({ mode: "neutral" });
     expect(await read(`/api/companies/${companyId}/workspace-dashboard`)).toEqual({ widgets: [] });
     expect(await read(`/api/companies/${companyId}/workspace-inbox`)).toEqual({ items: [] });
     expect(await read(`/api/companies/${companyId}/workspace-inbox?archived=true`)).toEqual({ items: [] });
     expect(await read(`/api/companies/${companyId}/workspace-inbox?archived=false`)).toEqual({ items: [] });
+  });
+
+  it("returns a closed Member-readable Workspace execution DTO with no Host control authority", async () => {
+    const target = `/api/companies/${companyId}/execution-control`;
+    const result = await read(target);
+    expect(result).toEqual({ state: "running", epoch: "0", revision: 0, updatedAt: null,
+      pending: { agents: 0, jobs: 0, models: 0, commands: 0, plugins: 0 }, canControl: false });
+    expect(Object.keys(result as object).sort()).toEqual(["canControl", "epoch", "pending", "revision", "state", "updatedAt"]);
+    expect(await overPrivateHttp(target)).toEqual({ status: 200, body: result });
+    await expect(read(target, secondCompanyId, "GET", UNMEMBERED_SECRET)).rejects.toMatchObject({ code: "native_workspace_unavailable" });
+    await expect(read(`/api/companies/${companyId}/execution-control?extra=true`)).rejects.toMatchObject({ code: "native_workspace_unavailable" });
+
+    const stopped = await spsWorkspaceExecutionControlService(db).transition(companyId, "stop", USER_ID, 0);
+    expect(stopped).toMatchObject({ state: "stopped", epoch: "1", revision: 1 });
+    const stoppedResult = await read(target);
+    expect(stoppedResult).toMatchObject({ state: "stopped", epoch: "1", revision: 1, canControl: false,
+      pending: { agents: 0, jobs: 0, models: 0, commands: 0, plugins: 0 } });
+    const post = signedHeader({ key, workspaceId: companyId, target, certificate: certificate.certificate,
+      method: "POST", body: Buffer.from('{"action":"resume","expectedRevision":1}'), contentType: "application/json" });
+    await expect(service.read(post.header, post.actual)).rejects.toMatchObject({ code: "native_workspace_unavailable" });
+
+    await db.update(companyMemberships).set({ status: "revoked" }).where(eq(companyMemberships.companyId, companyId));
+    await expect(read(target)).rejects.toMatchObject({ code: "native_workspace_unavailable" });
+    await db.update(companyMemberships).set({ status: "active" }).where(eq(companyMemberships.companyId, companyId));
+    await db.update(spsMemberDevices).set({ status: "revoked", revokedAt: new Date() })
+      .where(eq(spsMemberDevices.id, registeredDeviceId));
+    await expect(read(target)).rejects.toMatchObject({ code: "native_workspace_unavailable" });
   });
 
   it("updates only the authenticated Member's inbox state on the exact PATCH contract", async () => {

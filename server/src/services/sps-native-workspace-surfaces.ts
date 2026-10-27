@@ -4,6 +4,7 @@ import { companies, companyMemberships, type Db } from "../compat/paperclip/db.j
 import type { createSpsIdentityAuth } from "../auth/sps-identity.js";
 import { spsMemberDeviceService } from "./sps-member-devices.js";
 import { spsWorkspaceSurfaceService } from "./sps-workspace-surfaces.js";
+import { getSpsWorkspaceExecutionControl, getSpsWorkspaceExecutionPending } from "./sps-workspace-execution-control.js";
 import type { createSpsNativePluginRuntime, SpsNativePluginPrincipal, SpsNativePluginRequest } from "./sps-native-plugin-runtime.js";
 import type { createSpsNativeNodeRuntime, SpsNativeNodeAuthority, SpsNativeNodeRuntimeInput } from "./sps-native-node-runtime.js";
 import type {
@@ -26,7 +27,17 @@ type ReadResult =
   | { widgets: Awaited<ReturnType<ReturnType<typeof spsWorkspaceSurfaceService>["listDashboard"]>> }
   | { items: Awaited<ReturnType<ReturnType<typeof spsWorkspaceSurfaceService>["listInbox"]>> }
   | Readonly<{ readAt: string | null; archivedAt: string | null }>
+  | SpsNativeWorkspaceExecutionControl
   | Readonly<{ data: unknown }>;
+
+type SpsNativeWorkspaceExecutionControl = Readonly<{
+  state: "running" | "paused" | "stopped";
+  epoch: string;
+  revision: number;
+  updatedAt: string | null;
+  pending: Readonly<{ agents: number; jobs: number; models: number; commands: number; plugins: number }>;
+  canControl: false;
+}>;
 
 type SpsNativeWorkspaceBootstrap = Readonly<{
   v: 1;
@@ -50,6 +61,7 @@ type Options = {
 type SurfaceOperation =
   | { workspaceId: null; kind: "workspace-discovery" }
   | { workspaceId: string; kind: "workspace-bootstrap" }
+  | { workspaceId: string; kind: "execution-control" }
   | { workspaceId: string; kind: "shell-providers" }
   | { workspaceId: string; kind: "shell" }
   | { workspaceId: string; kind: "dashboard" }
@@ -99,6 +111,8 @@ function matchTarget(target: string): SurfaceOperation {
   if (target === "/sps-native/v1/workspaces") return { workspaceId: null, kind: "workspace-discovery" };
   const bootstrap = /^\/api\/companies\/([0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12})\/workspace-bootstrap$/.exec(target);
   if (bootstrap) return { workspaceId: bootstrap[1]!, kind: "workspace-bootstrap" };
+  const executionControl = /^\/api\/companies\/([0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12})\/execution-control$/.exec(target);
+  if (executionControl) return { workspaceId: executionControl[1]!, kind: "execution-control" };
   const shellProviders = /^\/api\/companies\/([0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12})\/workspace-shell\/providers$/.exec(target);
   if (shellProviders) return { workspaceId: shellProviders[1]!, kind: "shell-providers" };
   const shell = /^\/api\/companies\/([0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12})\/workspace-shell$/.exec(target);
@@ -282,6 +296,7 @@ export function createSpsNativeWorkspaceSurfaceReader({ db, identity, hostId, ve
           if (!operation.workspaceId) fail();
           const workspaceId = operation.workspaceId;
           const initialGrant = await authorizeDevice();
+          let value: ReadResult;
           const membershipRole = async () => {
             const rows = await tx.select({ membershipRole: companyMemberships.membershipRole })
               .from(companyMemberships)
@@ -328,37 +343,49 @@ export function createSpsNativeWorkspaceSurfaceReader({ db, identity, hostId, ve
               capabilities,
             });
           }
-          const surfaces = spsWorkspaceSurfaceService(tx as unknown as Db);
-          let value: ReadResult;
-          if (operation.kind === "inbox-state") {
+          if (operation.kind === "execution-control") {
             const role = await membershipRole();
-            if (role !== "member" && role !== "admin") fail();
-            const state = await surfaces.setInboxUserState({
-              companyId: operation.workspaceId,
-              userId,
-              itemId: operation.itemId,
-              read: inboxState!.read,
-              archived: inboxState!.archived,
-            });
-            const isoOrNull = (date: Date | null) => {
-              if (date === null) return null;
-              if (!(date instanceof Date) || !Number.isFinite(date.getTime())) fail();
-              return date.toISOString();
-            };
-            value = Object.freeze({
-              readAt: isoOrNull(state.readAt),
-              archivedAt: isoOrNull(state.archivedAt),
-            });
-          } else if (operation.kind === "shell-providers") value = await surfaces.listShellProviders(operation.workspaceId);
-          else if (operation.kind === "shell") value = await surfaces.getShell(operation.workspaceId);
-          else if (operation.kind === "dashboard") {
-            value = { widgets: await surfaces.listDashboard(operation.workspaceId, userId) };
+            if (role !== "member" && role !== "admin" && role !== "viewer") fail();
+            const control = await getSpsWorkspaceExecutionControl(tx, operation.workspaceId);
+            const pending = await getSpsWorkspaceExecutionPending(tx, operation.workspaceId);
+            if (!/^(?:0|[1-9][0-9]*)$/.test(control.epoch) || !Number.isSafeInteger(control.revision) || control.revision < 0
+              || !["running", "paused", "stopped"].includes(control.state)
+              || control.updatedAt !== null && (typeof control.updatedAt !== "string" || !Number.isFinite(Date.parse(control.updatedAt)))
+              || Object.values(pending).some(value => !Number.isSafeInteger(value) || value < 0)) fail();
+            value = Object.freeze({ state: control.state, epoch: control.epoch, revision: control.revision,
+              updatedAt: control.updatedAt, pending: Object.freeze({ ...pending }), canControl: false });
           } else {
-            value = { items: await surfaces.listInbox({
-              companyId: operation.workspaceId,
-              userId,
-              includeArchived: operation.archived,
-            }) };
+            const surfaces = spsWorkspaceSurfaceService(tx as unknown as Db);
+            if (operation.kind === "inbox-state") {
+              const role = await membershipRole();
+              if (role !== "member" && role !== "admin") fail();
+              const state = await surfaces.setInboxUserState({
+                companyId: operation.workspaceId,
+                userId,
+                itemId: operation.itemId,
+                read: inboxState!.read,
+                archived: inboxState!.archived,
+              });
+              const isoOrNull = (date: Date | null) => {
+                if (date === null) return null;
+                if (!(date instanceof Date) || !Number.isFinite(date.getTime())) fail();
+                return date.toISOString();
+              };
+              value = Object.freeze({
+                readAt: isoOrNull(state.readAt),
+                archivedAt: isoOrNull(state.archivedAt),
+              });
+            } else if (operation.kind === "shell-providers") value = await surfaces.listShellProviders(operation.workspaceId);
+            else if (operation.kind === "shell") value = await surfaces.getShell(operation.workspaceId);
+            else if (operation.kind === "dashboard") {
+              value = { widgets: await surfaces.listDashboard(operation.workspaceId, userId) };
+            } else {
+              value = { items: await surfaces.listInbox({
+                companyId: operation.workspaceId,
+                userId,
+                includeArchived: operation.archived,
+              }) };
+            }
           }
           assertCurrent(assertCurrentInput);
           await assertSession();

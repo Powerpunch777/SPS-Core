@@ -5,13 +5,16 @@ import { createRoot } from "react-dom/client";
 import { describe, expect, it, vi } from "vitest";
 
 vi.mock("@/context/CompanyContext", () => ({
-  useCompany: () => ({ selectedCompany: { name: "Test Workspace" } }),
+  useCompany: () => ({ selectedCompany: { id: "workspace-a", name: "Test Workspace" } }),
 }));
 vi.mock("@/context/BreadcrumbContext", () => ({
   useBreadcrumbs: () => ({ setBreadcrumbs: vi.fn() }),
 }));
 vi.mock("@/lib/router", () => ({
   Link: ({ to, children, ...props }: { to: string; children: ReactNode }) => <a href={to} {...props}>{children}</a>,
+}));
+vi.mock("@/components/WorkspaceExecutionControl", () => ({
+  WorkspaceExecutionControl: ({ companyId }: { companyId: string }) => <section data-execution-workspace={companyId}>Workspace execution</section>,
 }));
 
 import { SpsCoreHostSettings } from "./SpsCoreHostSettings";
@@ -34,6 +37,7 @@ describe("SpsCoreHostSettings", () => {
       expect(container.querySelector('a[href="/company/settings/instance/model-connections"]')?.textContent).toContain("Model connections");
       expect(container.querySelector('a[href="/company/settings/secrets"]')?.textContent).toContain("Credentials");
       expect(container.querySelector('a[href="/company/settings/instance/plugins"]')).not.toBeNull();
+      expect(container.querySelector('[data-execution-workspace="workspace-a"]')).not.toBeNull();
     } finally {
       act(() => root.unmount());
     }

@@ -14,6 +14,7 @@ import {
   createDb,
   heartbeatRunEvents,
   heartbeatRuns,
+  issues,
   principalPermissionGrants,
   routines,
   routineTriggers,
@@ -38,19 +39,23 @@ if (!embeddedPostgresSupport.supported) {
 describeEmbeddedPostgres("companyService", () => {
   let db!: ReturnType<typeof createDb>;
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
+  let tempDbStartup: Promise<Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>> | null = null;
 
   beforeAll(async () => {
-    tempDb = await startEmbeddedPostgresTestDatabase("paperclip-company-service-");
+    tempDbStartup = startEmbeddedPostgresTestDatabase("paperclip-company-service-");
+    tempDb = await tempDbStartup;
     db = createDb(tempDb.connectionString);
-  }, 20_000);
+  }, process.platform === "win32" ? 180_000 : 45_000);
 
   afterEach(async () => {
+    if (!db) return;
     await db.delete(routineTriggers);
     await db.delete(routines);
     await db.delete(builtInManagedResources);
     await db.delete(companySkillVersions);
     await db.delete(companySkills);
     await db.delete(heartbeatRunEvents);
+    await db.delete(issues);
     await db.delete(heartbeatRuns);
     await db.delete(agentWakeupRequests);
     await db.delete(agentConfigRevisions);
@@ -59,11 +64,17 @@ describeEmbeddedPostgres("companyService", () => {
     await db.delete(principalPermissionGrants);
     await db.delete(companyMemberships);
     await db.delete(companies);
-  });
+  }, process.platform === "win32" ? 45_000 : 10_000);
 
   afterAll(async () => {
-    await tempDb?.cleanup();
-  });
+    // If Vitest times out the setup hook, the embedded server may still be
+    // starting. Join that exact startup so its eventual handle is cleaned up.
+    if (tempDbStartup && !tempDb) {
+      try { tempDb = await tempDbStartup; } catch { /* the failed setup already reports this error */ }
+    }
+    try { await db?.$client.end(); }
+    finally { await tempDb?.cleanup(); }
+  }, 180_000);
 
   it("retries generated issue prefixes when Drizzle wraps the unique constraint error", async () => {
     await db.insert(companies).values({
@@ -440,6 +451,7 @@ describeEmbeddedPostgres("companyService", () => {
     const pendingAgentId = randomUUID();
     const wakeupRequestId = randomUUID();
     const runId = randomUUID();
+    const issueId = randomUUID();
 
     await db.insert(companies).values({
       id: companyId,
@@ -500,6 +512,15 @@ describeEmbeddedPostgres("companyService", () => {
       status: "running",
       wakeupRequestId,
     });
+    await db.insert(issues).values({
+      id: issueId,
+      companyId,
+      title: "Cancelled execution issue",
+      status: "in_progress",
+      assigneeAgentId: runningAgentId,
+      executionRunId: runId,
+      checkoutRunId: runId,
+    });
 
     const archived = await companyService(db).update(
       companyId,
@@ -525,6 +546,12 @@ describeEmbeddedPostgres("companyService", () => {
       status: "cancelled",
       error: "Cancelled because the company was archived",
     });
+
+    const issue = await db.select({ executionRunId: issues.executionRunId, checkoutRunId: issues.checkoutRunId })
+      .from(issues).where(eq(issues.id, issueId)).then((rows) => rows[0] ?? null);
+    expect(issue).toEqual({ executionRunId: null, checkoutRunId: null });
+    expect(await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId)))
+      .toHaveLength(1);
 
     const archiveActivity = await db
       .select({

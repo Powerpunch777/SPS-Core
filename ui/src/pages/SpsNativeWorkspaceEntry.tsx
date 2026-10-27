@@ -4,6 +4,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { SpsEmptyWorkspace } from "./SpsEmptyWorkspace";
 import type {
   NativeWorkspaceBootstrap,
+  NativeWorkspaceExecutionControl,
   NativeWorkspaceSurface,
   SpsNativeWorkspaceBridge,
 } from "../native-workspace-bridge";
@@ -98,6 +99,35 @@ export function parseNativeWorkspaceBootstrap(value: unknown): NativeWorkspaceBo
     }),
     member: Object.freeze({ userId: member.userId }),
     capabilities,
+  });
+}
+
+export function parseNativeWorkspaceExecutionControl(value: unknown): NativeWorkspaceExecutionControl {
+  const root = plainDataRecord(value, ["state", "epoch", "revision", "updatedAt", "pending", "canControl"]);
+  const pending = plainDataRecord(root.pending, ["agents", "jobs", "models", "commands", "plugins"]);
+  if (typeof root.state !== "string" || !["running", "paused", "stopped"].includes(root.state)
+    || typeof root.epoch !== "string" || !/^(?:0|[1-9][0-9]*)$/.test(root.epoch)
+    || !Number.isSafeInteger(root.revision) || (root.revision as number) < 0
+    || root.updatedAt !== null && (typeof root.updatedAt !== "string" || root.updatedAt.length !== 24
+      || !Number.isFinite(Date.parse(root.updatedAt)) || new Date(root.updatedAt).toISOString() !== root.updatedAt)
+    || root.canControl !== false
+    || Object.keys(pending).length !== 5
+    || Object.values(pending).some(count => !Number.isSafeInteger(count) || (count as number) < 0)) {
+    throw new Error(UNAVAILABLE);
+  }
+  return Object.freeze({
+    state: root.state as NativeWorkspaceExecutionControl["state"],
+    epoch: root.epoch,
+    revision: root.revision as number,
+    updatedAt: root.updatedAt as string | null,
+    pending: Object.freeze({
+      agents: pending.agents as number,
+      jobs: pending.jobs as number,
+      models: pending.models as number,
+      commands: pending.commands as number,
+      plugins: pending.plugins as number,
+    }),
+    canControl: false,
   });
 }
 
@@ -249,6 +279,7 @@ function SurfaceContent({ model, workspaceName, canWriteInbox = false, updatingI
 export function SpsNativeWorkspaceEntry({ bridge }: { bridge: SpsNativeWorkspaceBridge }) {
   const generation = useRef(0);
   const [bootstrap, setBootstrap] = useState<NativeWorkspaceBootstrap | null>(null);
+  const [executionControl, setExecutionControl] = useState<NativeWorkspaceExecutionControl | null>(null);
   const [view, setView] = useState<View>("workspace");
   const [surface, setSurface] = useState<SurfaceModel | null>(null);
   const [loading, setLoading] = useState(true);
@@ -261,6 +292,7 @@ export function SpsNativeWorkspaceEntry({ bridge }: { bridge: SpsNativeWorkspace
   const load = useCallback(async (nextView: View, nextArchived = false) => {
     const current = ++generation.current;
     setBootstrap(null);
+    setExecutionControl(null);
     setSurface(null);
     setView(nextView);
     setFailed(false);
@@ -271,12 +303,17 @@ export function SpsNativeWorkspaceEntry({ bridge }: { bridge: SpsNativeWorkspace
       const nextBootstrap = parseNativeWorkspaceBootstrap(await bridge.getBootstrap());
       if (current !== generation.current) return;
       setBootstrap(nextBootstrap);
+      const executionControlRequest = bridge.readSurface({ surface: "executionControl" })
+        .then(parseNativeWorkspaceExecutionControl).catch(() => null);
       const nextSurface = parseSurface(nextView, await bridge.readSurface(readSurfaceRequest(nextView, nextArchived)), nextBootstrap.workspace.id);
+      const nextExecutionControl = await executionControlRequest;
       if (current !== generation.current) return;
       setSurface(nextSurface);
+      setExecutionControl(nextExecutionControl);
     } catch {
       if (current === generation.current) {
         setBootstrap(null);
+        setExecutionControl(null);
         setSurface(null);
         setFailed(true);
       }
@@ -385,6 +422,22 @@ export function SpsNativeWorkspaceEntry({ bridge }: { bridge: SpsNativeWorkspace
             </Button>
           </div>
         </header>
+        {executionControl ? (
+          <Card aria-label="Workspace execution status" className="mx-auto w-full max-w-6xl">
+            <CardHeader><CardTitle>Workspace execution</CardTitle></CardHeader>
+            <CardContent className="space-y-2 text-sm">
+              <p>State: <span className="font-medium">{executionControl.state}</span></p>
+              <dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-muted-foreground sm:grid-cols-5">
+                <div><dt>Agents</dt><dd>{executionControl.pending.agents}</dd></div>
+                <div><dt>Jobs</dt><dd>{executionControl.pending.jobs}</dd></div>
+                <div><dt>Models</dt><dd>{executionControl.pending.models}</dd></div>
+                <div><dt>Commands</dt><dd>{executionControl.pending.commands}</dd></div>
+                <div><dt>Plugins</dt><dd>{executionControl.pending.plugins}</dd></div>
+              </dl>
+              <p className="text-xs text-muted-foreground">Native Member view is read-only. Execution changes are managed in Host Core settings.</p>
+            </CardContent>
+          </Card>
+        ) : !loading && !failed ? <p role="status" className="mx-auto w-full max-w-6xl text-sm text-muted-foreground">Workspace execution status is unavailable.</p> : null}
         {loading ? <main role="status" className="py-8 text-sm text-muted-foreground">Loading Workspace...</main> : null}
         {failed ? (
           <main className="space-y-3" role="alert">

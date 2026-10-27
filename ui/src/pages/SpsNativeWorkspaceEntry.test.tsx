@@ -4,7 +4,7 @@ import { act, StrictMode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { NativeWorkspaceBootstrap, SpsNativeWorkspaceBridge } from "../native-workspace-bridge";
-import { parseNativeWorkspaceBootstrap, SpsNativeWorkspaceEntry } from "./SpsNativeWorkspaceEntry";
+import { parseNativeWorkspaceBootstrap, parseNativeWorkspaceExecutionControl, SpsNativeWorkspaceEntry } from "./SpsNativeWorkspaceEntry";
 
 const bootstrap: NativeWorkspaceBootstrap = {
   v: 1,
@@ -125,10 +125,34 @@ describe("SpsNativeWorkspaceEntry", () => {
 
     expect(bridge.getBootstrap).toHaveBeenCalledOnce();
     expect(bridge.readSurface).toHaveBeenCalledWith({ surface: "shell" });
+    expect(bridge.readSurface).toHaveBeenCalledWith({ surface: "executionControl" });
     expect(container.textContent).toContain("München Workspace");
     expect(container.textContent).toContain("No default plugin selected.");
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(container.querySelector("a")).toBeNull();
+  });
+
+  it("renders the closed read-only execution state and rejects malformed authority fields", async () => {
+    const status = { state: "paused", epoch: "12", revision: 3, updatedAt: "2026-10-27T10:00:00.000Z",
+      pending: { agents: 1, jobs: 2, models: 0, commands: 3, plugins: 4 }, canControl: false };
+    bridge.readSurface = vi.fn(async ({ surface }) => surface === "executionControl" ? status : neutralShell());
+    render();
+    await settle();
+    expect(container.textContent).toContain("Workspace execution");
+    expect(container.textContent).toContain("State: paused");
+    expect(container.textContent).toContain("Native Member view is read-only.");
+    expect(container.textContent).toContain("Agents1");
+    expect(container.querySelector("button[aria-label*=execution]")).toBeNull();
+    for (const invalid of [
+      { ...status, state: "stopping" },
+      { ...status, state: { toString: () => { throw new Error("must not coerce untrusted state"); } } },
+      { ...status, canControl: true },
+      { ...status, epoch: "012" },
+      { ...status, revision: Number.MAX_SAFE_INTEGER + 1 },
+      { ...status, pending: { ...status.pending, jobs: -1 } },
+      { ...status, pending: { ...status.pending, unexpected: 0 } },
+      { ...status, unexpected: true },
+    ]) expect(() => parseNativeWorkspaceExecutionControl(invalid)).toThrow("Workspace could not be loaded.");
   });
 
   it("renders real dashboard and inbox public text without following plugin actions or navigation targets", async () => {
@@ -346,7 +370,9 @@ describe("SpsNativeWorkspaceEntry", () => {
     await act(async () => { resolveSecond(bootstrap); await Promise.resolve(); });
     await settle();
 
-    expect(bridge.readSurface).toHaveBeenCalledOnce();
+    expect(bridge.readSurface).toHaveBeenCalledTimes(2);
+    expect(bridge.readSurface).toHaveBeenCalledWith({ surface: "shell" });
+    expect(bridge.readSurface).toHaveBeenCalledWith({ surface: "executionControl" });
     expect(container.textContent).toContain("No default plugin selected.");
     expect(container.textContent).not.toContain("Workspace could not be loaded.");
   });

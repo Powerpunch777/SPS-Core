@@ -31,9 +31,9 @@ export function WorkspaceExecutionControl({ companyId }: { companyId: string }) 
       종료가 확인되지 않은 작업이 있습니다. 연결이 끊긴 장치나 응답하지 않는 작업은 종료 확인이 늦어질 수 있습니다.
     </p>}
     {data?.canControl && <div className="flex flex-wrap gap-2">
-      <Button variant="outline" disabled={mutation.isPending || data.state !== "running"} onClick={() => mutation.mutate("pause")}>일시정지</Button>
-      <Button variant="destructive" disabled={mutation.isPending} onClick={() => mutation.mutate("stop")}>{data.state === "stopped" ? "종료 확인 재시도" : "중지"}</Button>
-      <Button variant="outline" disabled={mutation.isPending || data.state === "running"} onClick={() => mutation.mutate("resume")}>재개</Button>
+      <Button data-sps-execution-action="pause" variant="outline" disabled={mutation.isPending || data.state !== "running"} onClick={() => mutation.mutate("pause")}>일시정지</Button>
+      <Button data-sps-execution-action="stop" variant="destructive" disabled={mutation.isPending} onClick={() => mutation.mutate("stop")}>{data.state === "stopped" ? "종료 확인 재시도" : "중지"}</Button>
+      <Button data-sps-execution-action="resume" variant="outline" disabled={mutation.isPending || data.state === "running"} onClick={() => mutation.mutate("resume")}>재개</Button>
     </div>}
     <p className="text-sm text-muted-foreground">재개하면 새 작업을 실행할 수 있습니다. 취소되거나 중단된 작업은 자동으로 다시 실행되지 않습니다.</p>
     {(mutation.isError || (data?.cancellationFailures?.length ?? 0) > 0) && <p role="alert" className="text-sm text-destructive">

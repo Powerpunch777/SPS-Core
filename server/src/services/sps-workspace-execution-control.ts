@@ -76,6 +76,11 @@ export async function assertSpsWorkspaceExecutionActive(
 
 /** Only the latest owner of a lane may unregister its callback. */
 export function registerSpsWorkspaceExecutionStopHandler(db: SpsWorkspaceExecutionDb, lane: string, handler: StopHandler) {
+  // A few compatibility route tests construct the heartbeat service without a
+  // database because they exercise only public routing/auth behavior. There is
+  // no durable stop fanout to register for that fixture; production callers
+  // always provide the actual Db object.
+  if (db == null) return () => {};
   let handlers = stopHandlers.get(db);
   if (!handlers) { handlers = new Map(); stopHandlers.set(db, handlers); }
   handlers.set(lane, handler);

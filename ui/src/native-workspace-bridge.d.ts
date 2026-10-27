@@ -1,4 +1,12 @@
-export type NativeWorkspaceSurface = "shell" | "providers" | "dashboard" | "inbox";
+export type NativeWorkspaceSurface = "shell" | "providers" | "dashboard" | "inbox" | "executionControl";
+export type NativeWorkspaceExecutionControl = Readonly<{
+  state: "running" | "paused" | "stopped";
+  epoch: string;
+  revision: number;
+  updatedAt: string | null;
+  pending: Readonly<{ agents: number; jobs: number; models: number; commands: number; plugins: number }>;
+  canControl: false;
+}>;
 export type NativeWorkspaceInboxState = Readonly<{
   readAt: string | null;
   archivedAt: string | null;

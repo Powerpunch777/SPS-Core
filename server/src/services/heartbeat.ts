@@ -14014,8 +14014,18 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       : null;
     const recoveryAgentNameKey = normalizeAgentNameKey(recoveryAgent?.name);
 
-    const promotionResult = await withSpsWorkspaceExecutionAdmission(db, run.companyId, async (tx, workspaceExecutionEpoch) => {
-      if (run.workspaceExecutionEpoch !== workspaceExecutionEpoch) return { kind: "released" as const };
+    const promotionResult = await db.transaction(async (tx) => {
+      // Finalization must always release issue/checkout locks, including when a
+      // Workspace was stopped or archived after this run was admitted. Take the
+      // execution-control row before issue rows (the global lock order), then
+      // use its state only to decide whether follow-up work may be created.
+      const workspaceControl = await lockSpsWorkspaceExecutionControl(tx, run.companyId);
+      const [workspace] = await tx.select({ status: companies.status }).from(companies)
+        .where(eq(companies.id, run.companyId));
+      const mayPromote = workspaceControl.state === "running" &&
+        workspaceControl.epoch === run.workspaceExecutionEpoch &&
+        workspace?.status === "active";
+      const workspaceExecutionEpoch = workspaceControl.epoch;
       // Lock the context issue (if any) AND every issue that still references this run.
       //
       // A single run can hold execution locks on multiple issues: the caller's context
@@ -14103,6 +14113,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         .where(
           and(eq(issues.companyId, run.companyId), eq(issues.checkoutRunId, run.id)),
         );
+
+      // Cleanup above is unconditional. Promotions, automatic recovery and
+      // deferred wakeups are new execution and remain fenced while the
+      // Workspace is paused/stopped/archived or this run belongs to an old epoch.
+      if (!mayPromote) return { kind: "released" as const };
 
       // Deferred-wake promotion is bound to a single primary issue: the run's context
       // issue when present, otherwise the first candidate we found (preserves the
