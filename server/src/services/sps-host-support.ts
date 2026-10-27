@@ -2,6 +2,7 @@ import type { InitializeParams, WorkerToHostMethodName } from "../compat/papercl
 
 // Only the neutral public Runtime and Agent-session facade, never legacy secrets.
 const PUBLIC_HOST_OPERATIONS = [
+  "sps.connectivity.current",
   "sps.executions.list", "sps.executions.get", "sps.executions.summarize",
   "sps.workspaceSources.list", "sps.runtimes.list", "sps.executionGrants.list",
   "sps.models.list", "sps.models.submit", "sps.models.get", "sps.models.cancel",

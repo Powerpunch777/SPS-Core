@@ -267,6 +267,7 @@ export type {
   PluginSpsRun,
   PluginSpsRunEvent,
   PluginSpsClient,
+  PluginSpsConnectivity,
   PluginSpsModelConnection,
   PluginSpsModelRun,
   PluginSpsModelTextResult,

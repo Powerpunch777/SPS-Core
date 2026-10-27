@@ -852,6 +852,9 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
       },
     },
     sps: {
+      connectivity: {
+        async current() { throw new Error("The in-memory plugin test harness does not provide authenticated Native connectivity"); },
+      },
       models: {
         async list() { throw new Error("The in-memory plugin test harness does not provide model requests"); },
         async submit() { throw new Error("The in-memory plugin test harness does not provide model requests"); },

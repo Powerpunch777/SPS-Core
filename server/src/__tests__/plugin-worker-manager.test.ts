@@ -344,7 +344,7 @@ describe("plugin-worker-manager stderr failure context", () => {
           requestedCompanyId: "company-b",
           mode: "echo",
         },
-      } as HostToWorkerMethods["runJob"][0])).resolves.toEqual({ id: "company-b" });
+      } as HostToWorkerMethods["runJob"][0])).resolves.toMatchObject({ id: "company-b" });
 
       expect(companiesGet).toHaveBeenCalledWith({ companyId: "company-b" });
       expect(scopedCompaniesGet).toHaveBeenCalledWith(

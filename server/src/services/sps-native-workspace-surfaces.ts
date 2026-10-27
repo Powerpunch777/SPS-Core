@@ -153,7 +153,7 @@ export function createSpsNativeWorkspaceSurfaceReader({ db, identity, hostId, ve
               assertCurrent(assertCurrentInput);
               if (signal?.aborted) fail();
               await session.authorizeInTransaction(tx, userId);
-              return Object.freeze({ userId, deviceId: grant.deviceId, deviceRevision: grant.revision,
+              return Object.freeze({ hostId, userId, deviceId: grant.deviceId, deviceRevision: grant.revision,
                 certificateSha256, certificateNotAfter: grant.certificateNotAfter.getTime() });
             });
             assertCurrent(assertCurrentInput);

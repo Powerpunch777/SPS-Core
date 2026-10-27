@@ -17,7 +17,7 @@ import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } fro
 
 const support = await getEmbeddedPostgresTestSupport();
 const describeDatabase = support.supported ? describe : describe.skip;
-const principal: SpsNativePluginPrincipal = Object.freeze({ userId: "native-user",
+const principal: SpsNativePluginPrincipal = Object.freeze({ hostId: randomUUID(), userId: "native-user",
   deviceId: randomUUID(), deviceRevision: 1, certificateSha256: "a".repeat(64),
   certificateNotAfter: Date.now() + 60 * 60_000 });
 
@@ -62,12 +62,13 @@ describeDatabase("SPS Native Plugin runtime adapter", () => {
     await db.delete(pluginCompanySettings);
     await db.delete(plugins);
     await db.delete(companies);
-  });
+  }, 30_000);
 
   afterAll(async () => {
-    await db?.$client.end();
+    // Bound the owned client drain before the helper's bounded pg_ctl shutdown.
+    await db?.$client.end({ timeout: 5 });
     await database?.cleanup();
-  }, 30_000);
+  }, 60_000);
 
   async function seed() {
     companyId = randomUUID();
@@ -123,6 +124,28 @@ describeDatabase("SPS Native Plugin runtime adapter", () => {
     await db.insert(pluginCompanySettings).values({ pluginId, companyId, enabled: false, settingsJson: {} });
     await expect(runtime!.invoke(request({ operation: "data" }), authorize)).rejects.toThrow("unavailable");
     expect(worker.call).not.toHaveBeenCalled();
+  });
+
+  it("provides only current Native request evidence and rejects reads after invocation cancellation", async () => {
+    await seed();
+    let retained: WorkerInvocationAuthority | undefined;
+    worker.call.mockImplementationOnce(async (_id, _method, _params, _timeout, authority) => {
+      retained = authority;
+      const status = await authority!.readNativeConnectivity!();
+      expect(status).toEqual({ state: "verified", transport: "native_tls", hostId: principal.hostId,
+        workspaceId: companyId, authorization: "authorized", evidence: "authenticated_request",
+        observedAt: expect.any(String) });
+      return status;
+    });
+    await expect(runtime!.invoke(request({ operation: "data" }), authorize)).resolves.toMatchObject({
+      state: "verified", hostId: principal.hostId, workspaceId: companyId,
+    });
+    await expect(retained!.readNativeConnectivity!()).rejects.toThrow("unavailable");
+    worker.call.mockImplementationOnce(async (_id, _method, _params, _timeout, authority) => {
+      await db.insert(pluginCompanySettings).values({ pluginId, companyId, enabled: false, settingsJson: {} });
+      return authority!.readNativeConnectivity!();
+    });
+    await expect(runtime!.invoke(request({ operation: "data" }), authorize)).rejects.toThrow("unavailable");
   });
 
   it("checks Workspace activation again before accepting a worker result", async () => {

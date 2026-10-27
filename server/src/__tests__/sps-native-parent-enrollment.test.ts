@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 const { constructService } = vi.hoisted(() => ({ constructService: vi.fn() }));
 vi.mock("../services/sps-native-enrollments.js", () => ({
@@ -8,13 +8,23 @@ vi.mock("../services/sps-native-enrollments.js", () => ({
 }));
 
 import { createSpsNativeParentEnrollmentService } from "../services/sps-native-parent-enrollment.js";
+import { createNativeEnrollmentTlsFixture } from "./helpers/native-enrollment-tls.js";
 
 const HOST_ID = "11111111-1111-4111-8111-111111111111";
 const DEVICE_KEY_ID = "22222222-2222-4222-8222-222222222222";
 const SERVER_PIN = "a".repeat(64);
 const ISSUER_PIN = "b".repeat(64);
-const CERTIFICATE = Buffer.from([0x30, 0x00]).toString("base64url");
+let CERTIFICATE = "";
 const REQUEST_PEM = `-----BEGIN CERTIFICATE REQUEST-----\n${Buffer.from("request").toString("base64")}\n-----END CERTIFICATE REQUEST-----\n`;
+
+let certificateFixture: Awaited<ReturnType<typeof createNativeEnrollmentTlsFixture>>;
+beforeAll(async () => {
+  certificateFixture = await createNativeEnrollmentTlsFixture({ hostId: HOST_ID, deviceKeyId: DEVICE_KEY_ID });
+  CERTIFICATE = certificateFixture.issuerCertificate;
+});
+afterAll(async () => {
+  await certificateFixture?.cleanup();
+});
 
 class FakeIpcChannel extends EventEmitter {
   connected = true;

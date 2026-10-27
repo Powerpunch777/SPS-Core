@@ -220,6 +220,7 @@ interface PendingRequest {
 export interface WorkerInvocationAuthority {
   assertCurrent: () => void | Promise<void>;
   signal?: AbortSignal;
+  readNativeConnectivity?: NonNullable<WorkerHostCallContext["readNativeConnectivity"]>;
 }
 
 interface ActiveInvocation {
@@ -683,7 +684,16 @@ export function createPluginWorkerHandle(
         return { invalidInvocationScope: true };
       }
     }
-    return { invocationScope: entry.scope };
+    return { invocationScope: entry.scope,
+      ...(entry.authority?.readNativeConnectivity ? { readNativeConnectivity: async () => {
+        if (activeInvocations.get(invocationId) !== entry) throw invocationDenied();
+        await assertInvocationCurrent(entry);
+        const result = await entry.authority!.readNativeConnectivity!();
+        await assertInvocationCurrent(entry);
+        if (activeInvocations.get(invocationId) !== entry) throw invocationDenied();
+        return result;
+      } } : {}),
+    };
   }
 
   /**

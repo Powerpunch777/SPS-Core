@@ -16,6 +16,7 @@ const MAX_NODES = 8192;
 const unavailable = () => new Error("Native Plugin access is unavailable.");
 
 export type SpsNativePluginPrincipal = Readonly<{
+  hostId: string;
   userId: string;
   deviceId: string;
   deviceRevision: number;
@@ -89,8 +90,9 @@ export function snapshotSpsNativePluginJson(value: unknown, maximum: number): un
 }
 
 function principal(value: unknown): SpsNativePluginPrincipal {
-  const input = record(value, ["userId", "deviceId", "deviceRevision", "certificateSha256", "certificateNotAfter"]);
+  const input = record(value, ["hostId", "userId", "deviceId", "deviceRevision", "certificateSha256", "certificateNotAfter"]);
   if (typeof input.userId !== "string" || !input.userId || input.userId.length > 200 || /[\u0000-\u001f\u007f]/.test(input.userId)
+    || typeof input.hostId !== "string" || !UUID.test(input.hostId)
     || typeof input.deviceId !== "string" || !UUID.test(input.deviceId)
     || !Number.isSafeInteger(input.deviceRevision) || (input.deviceRevision as number) < 1
     || typeof input.certificateSha256 !== "string" || !SHA.test(input.certificateSha256)
@@ -161,7 +163,14 @@ export function createSpsNativePluginRuntime(db: Db, workerManager: PluginWorker
           check();
         };
         await authorize();
-        const authority: WorkerInvocationAuthority = { assertCurrent: authorize, signal: controller.signal };
+        const authority: WorkerInvocationAuthority = { assertCurrent: authorize, signal: controller.signal,
+          readNativeConnectivity: async () => {
+            await authorize();
+            return Object.freeze({ state: "verified" as const, transport: "native_tls" as const,
+              hostId: expected.hostId, workspaceId: selected.workspaceId, authorization: "authorized" as const,
+              evidence: "authenticated_request" as const, observedAt: new Date().toISOString() });
+          },
+        };
         const params = actions.actionParams(selected.params, selected.workspaceId);
         let result: unknown;
         if (selected.operation === "data") {

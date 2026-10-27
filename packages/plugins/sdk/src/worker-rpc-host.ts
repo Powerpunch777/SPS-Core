@@ -427,6 +427,7 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
     const spsTransport: PluginSpsRuntimeTransport = Object.freeze({
       request(operation: PluginSpsRuntimeOperation, input: Record<string, unknown>): Promise<unknown> {
         switch (operation) {
+          case "sps.connectivity.current":
           case "sps.executions.list":
           case "sps.executions.get":
           case "sps.executions.summarize":
@@ -454,6 +455,12 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
     });
 
     const sps: PluginSpsClient = {
+      connectivity: {
+        async current(...args: never[]) {
+          if (args.length) throw new TypeError("Connectivity current accepts no arguments");
+          return callHost("sps.connectivity.current", {});
+        },
+      },
       models: {
         async list(companyId) { return callHost("sps.models.list", { companyId }); },
         async submit(input) { return callHost("sps.models.submit", input); },
