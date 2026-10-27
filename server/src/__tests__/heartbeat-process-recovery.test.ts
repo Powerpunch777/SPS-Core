@@ -2653,16 +2653,25 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       body: reportBody,
     });
 
+    // The report comment and issue status commit atomically. Audit rows follow
+    // that transaction, so wait for both writes before checking the final log.
+    const activity = (await waitForValue(async () => {
+      const rows = await db
+        .select()
+        .from(activityLog)
+        .where(eq(activityLog.entityId, issueId));
+      return rows.some((event) => event.action === "issue.comment_added") &&
+        rows.some((event) => event.action === "issue.updated")
+        ? rows
+        : null;
+    }, 5_000)) ?? [];
+
     const recoveryWakeups = await db
       .select()
       .from(agentWakeupRequests)
       .where(eq(agentWakeupRequests.reason, "finish_successful_run_handoff"));
     expect(recoveryWakeups).toHaveLength(0);
 
-    const activity = await db
-      .select()
-      .from(activityLog)
-      .where(eq(activityLog.entityId, issueId));
     expect(activity.some((event) => event.action === "issue.comment_added")).toBe(true);
     expect(activity.some((event) => event.action === "issue.updated")).toBe(true);
     expect(activity.some((event) => event.action === "issue.successful_run_handoff_required")).toBe(false);

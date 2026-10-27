@@ -53,8 +53,11 @@ these grant no Workspace/Node/Source access.
 The directly owned Core process also has a bounded stop-only control path,
 independently of Native signing. An explicitly marked inherited pipe is mounted
 only with an existing direct parent IPC connection; its exact fixed command is
-accepted once, at EOF. Desktop revokes signing authority and disconnects Native
-IPC before requesting the existing Core drain and embedded-database shutdown.
+accepted once, at EOF. Desktop revokes signing authority before requesting the
+existing Core drain and embedded-database shutdown. A Windows job-owned Host
+keeps the IPC transport open until Core EOF so Node can confirm the actual child
+close; disposed signing and request handlers cannot accept new or late results.
+Other compositions retain their existing physical IPC-disconnect behavior.
 The separate pipe remains usable after that revocation, but never reconnects
 Native authority. Ordinary invalidation does not stop the Host. No HTTP, Plugin
 or SDK shutdown endpoint is added. A sent request is not process-exit or
