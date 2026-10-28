@@ -93,7 +93,7 @@ export function spawnWindowsJobSupervisor(invocation, internal = {}) {
   const helper = internal.helperPath;
   const pipeName = `${PIPE_PREFIX}${process.pid}-${randomBytes(24).toString("hex")}`;
   const nonce = randomBytes(32).toString("hex");
-  if (!pathApi.isAbsolute(helper)) throw new Error("Windows command supervision helper is unavailable.");
+  if (typeof helper !== "string" || !pathApi.isAbsolute(helper)) throw new Error("Windows command supervision helper is unavailable.");
   const helperChild = (internal.spawn ?? nodeSpawn)(helper, ["--supervise", pipeName, String(process.pid), nonce], {
     cwd: pathApi.dirname(helper), env: { SYSTEMROOT: process.env.SYSTEMROOT ?? "C:\\Windows", WINDIR: process.env.WINDIR ?? "C:\\Windows", PATH: process.env.PATH ?? "" },
     shell: false, windowsHide: true, stdio: ["pipe", "pipe", "pipe"],
@@ -325,7 +325,10 @@ export function spawnWindowsJobSupervisor(invocation, internal = {}) {
 export async function assertWindowsJobSupervisorAvailable(internal = {}) {
   const platform = internal.platform ?? process.platform;
   if (platform !== "win32") throw new Error("Windows Job Object command supervision is unavailable on this platform.");
-  const executable = internal.helperPath ?? bundledHelperPath();
+  const executable = internal.helperPath;
+  if (typeof executable !== "string" || !path.win32.isAbsolute(executable)) {
+    throw new Error("Windows command supervision helper is unavailable.");
+  }
   try { await (internal.access ?? access)(executable); }
   catch { throw new Error("Windows command supervision helper is unavailable; command execution is disabled."); }
   return executable;

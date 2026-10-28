@@ -10,6 +10,7 @@ import type {
   WindowsJobSupervisorInvocation,
   WindowsSupervisedProcess,
 } from "../native-runtime/windows-job-supervisor/supervisor.mjs";
+import { assertWindowsJobSupervisorAvailable } from "../native-runtime/windows-job-supervisor/supervisor.mjs";
 
 function fakeChild(extra: Record<string, unknown> = {}): ChildProcess {
   return Object.assign(new EventEmitter(), {
@@ -27,6 +28,14 @@ const options: PluginWorkerProcessOptions = {
 };
 
 describe("plugin worker process adapter", () => {
+  it("requires an explicit Core-owned helper path for transport availability", async () => {
+    await expect(assertWindowsJobSupervisorAvailable({ platform: "win32" })).rejects.toThrow(/helper is unavailable/);
+    await expect(assertWindowsJobSupervisorAvailable({ platform: "win32", helperPath: "relative.exe" })).rejects.toThrow(/helper is unavailable/);
+    const access = vi.fn(async () => {});
+    await expect(assertWindowsJobSupervisorAvailable({ platform: "win32", helperPath: "C:\\private\\helper.exe", access })).resolves.toBe("C:\\private\\helper.exe");
+    expect(access).toHaveBeenCalledExactlyOnceWith("C:\\private\\helper.exe");
+  });
+
   it("preserves case-sensitive POSIX environment names", () => {
     const child = fakeChild();
     const fork = vi.fn(() => child);
