@@ -3,6 +3,7 @@ import { PassThrough, Writable } from "node:stream";
 import type { ChildProcess } from "node:child_process";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PaperclipPluginManifestV1 } from "@paperclipai/shared";
+import { createHostClientHandlers, PLUGIN_RPC_ERROR_CODES, type HostServices } from "@paperclipai/plugin-sdk";
 import { createPluginWorkerManager, type WorkerStartOptions } from "../services/plugin-worker-manager.js";
 
 const childProcessMock = vi.hoisted(() => ({ fork: vi.fn() }));
@@ -134,6 +135,50 @@ describe("PluginWorkerManager child close lifecycle", () => {
 
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  it("denies no-selector Host calls carrying an unknown invocation through the actual RPC adapter", async () => {
+    const configGet = vi.fn(async () => ({ mode: "host" }));
+    const resolveSecret = vi.fn(async () => "fixture-secret");
+    const replaceDynamic = vi.fn(async () => ({ registered: 0 }));
+    const workerOptions = options();
+    workerOptions.hostHandlers = createHostClientHandlers({
+      pluginId: "test.plugin",
+      capabilities: ["secrets.read-ref", "agent.tools.dynamic.register"],
+      services: {
+        config: { get: configGet },
+        secrets: { resolve: resolveSecret },
+        agentTools: { replaceDynamic },
+      } as unknown as HostServices,
+    });
+    const manager = createPluginWorkerManager();
+    await manager.startWorker("test.plugin", workerOptions);
+    const child = children[0]!;
+    closeOnShutdown(child);
+    try {
+      for (const [id, method, params] of [
+        ["bad-config", "config.get", {}],
+        ["bad-secret", "secrets.resolve", { secretRef: "fixture-key" }],
+        ["bad-tools", "agentTools.replaceDynamic", { tools: [] }],
+      ] as const) {
+        child.request(id, method, params, "unknown-legacy-invocation");
+        await waitFor(() => child.receivedMessages.some(message => message.id === id));
+        const response = child.receivedMessages.find(message => message.id === id)!;
+        expect(response.error).toMatchObject({ code: PLUGIN_RPC_ERROR_CODES.INVOCATION_SCOPE_DENIED });
+        expect(response).not.toHaveProperty("result");
+      }
+      expect(configGet).not.toHaveBeenCalled();
+      expect(resolveSecret).not.toHaveBeenCalled();
+      expect(replaceDynamic).not.toHaveBeenCalled();
+
+      child.request("host-config", "config.get", {});
+      await waitFor(() => child.receivedMessages.some(message => message.id === "host-config"));
+      expect(child.receivedMessages.find(message => message.id === "host-config"))
+        .toMatchObject({ result: { mode: "host" } });
+      expect(configGet).toHaveBeenCalledOnce();
+    } finally {
+      await manager.shutdown();
+    }
   });
 
   it("keeps an exited child retained and rejects stop until close is confirmed", async () => {
