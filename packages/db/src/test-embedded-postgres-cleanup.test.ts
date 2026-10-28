@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ChildProcess } from "node:child_process";
-import { classifyEmbeddedPostgresFailure, embeddedPostgresSupportResult, classifyPgCtlFailure, stopEmbeddedPostgresTestInstance,
+import { classifyEmbeddedPostgresFailure, createEmbeddedPostgresShutdownPhaseObserver, embeddedPostgresStartupTermination, embeddedPostgresSupportResult, classifyPgCtlFailure, stopEmbeddedPostgresTestInstance,
   type EmbeddedPostgresInstance, type FixtureIdentity } from "./test-embedded-postgres.js";
 
 const tempDirs: string[] = [];
@@ -59,6 +59,44 @@ describe("embedded Postgres test cleanup", () => {
     expect(classifyEmbeddedPostgresFailure(error, logCategory, stage)).toBe(expected);
   });
 
+  it.each([
+    [{ kind: "exit", code: 0 }, "process_exited_before_ready"],
+    [{ kind: "exit", code: 1 }, "process_exited_before_ready"],
+    [{ kind: "exit", code: 0xc0000135 }, "binary_unavailable"],
+    [{ kind: "exit", code: -0x3ffffecb }, "binary_unavailable"],
+    [{ kind: "exit", code: 0xc0000139 }, "binary_unavailable"],
+    [{ kind: "exit", code: 0xc000007b }, "binary_unavailable"],
+    [{ kind: "signal" }, "process_signaled_before_ready"],
+  ] as const)("classifies fixed postgres child termination metadata", (termination, expected) => {
+    expect(classifyEmbeddedPostgresFailure(undefined, null, "postgres_start", termination)).toBe(expected);
+  });
+
+  it("snapshots only bounded exit metadata and never copies arbitrary child strings", () => {
+    expect(embeddedPostgresStartupTermination({ exitCode: 1, signalCode: null } as never)).toEqual({ kind: "exit", code: 1 });
+    expect(embeddedPostgresStartupTermination({ exitCode: null, signalCode: "SIGTERM", error: "private path" } as never)).toEqual({ kind: "signal" });
+    expect(embeddedPostgresStartupTermination({ exitCode: 0x1_0000_0000, signalCode: null } as never)).toBeUndefined();
+    expect(embeddedPostgresStartupTermination({ exitCode: null, signalCode: null, error: "private path" } as never)).toBeUndefined();
+    expect(embeddedPostgresSupportResult(true, undefined, null, "postgres_start", { kind: "signal" })).toEqual({
+      supported: false,
+      reason: "embedded Postgres postgres_start failed (process_signaled_before_ready)",
+      startupTermination: { kind: "signal" },
+    });
+  });
+
+  it("recognizes fixed PostgreSQL shutdown phases across split log chunks without exposing the log", () => {
+    const observer = createEmbeddedPostgresShutdownPhaseObserver();
+    observer.observe("checkpoint complete: ordinary checkpoint before shutdown");
+    expect(observer.phase()).toBe("none");
+    observer.observe("received fast shutdown req");
+    observer.observe("uest\naborting any active transactions\ncheckpoint starting: shu");
+    expect(observer.phase()).toBe("transactions_aborting");
+    observer.observe("tdown");
+    expect(observer.phase()).toBe("shutdown_checkpoint_starting");
+    observer.observe("tdown\ncheckpoint complete\ndatabase system is shut down\nprivate-path private-token");
+    expect(observer.phase()).toBe("database_shutdown_complete");
+    expect(Object.keys(observer)).toEqual(["observe", "phase"]);
+  });
+
   it("keeps a valueless vendor start rejection unsupported with a safe phase and category", () => {
     expect(embeddedPostgresSupportResult(true, undefined, null, "postgres_start")).toEqual({
       supported: false,
@@ -104,6 +142,7 @@ describe("embedded Postgres test cleanup", () => {
 
   it("reports bounded pg_ctl diagnostics without raw output and preserves the owned fixture on failure", async () => {
     const value = fixture();
+    Object.assign(value.child, { exitCode: 1 });
     const pgCtlChild = Object.assign(new EventEmitter(), { stdout: new EventEmitter(), stderr: new EventEmitter() });
     const stdoutText = `${"private-hostname ".repeat(500)}could not connect to server`;
     const stderrText = `${"shutdown detail private-token ".repeat(500)}failure`;
@@ -121,6 +160,7 @@ describe("embedded Postgres test cleanup", () => {
       await stopEmbeddedPostgresTestInstance(value.dataDir, value.port, value.instance, value.dataDirIdentity, {
         resolvePgCtl: async () => "pg_ctl-fixture",
         spawnPgCtl: spawnPgCtl as never,
+        shutdownPhase: () => "transactions_aborting",
       });
     } catch (error) { failure = error; }
 
@@ -132,6 +172,8 @@ describe("embedded Postgres test cleanup", () => {
     expect(message).toContain(`stderrBytes=${Buffer.byteLength(stderrText)}`);
     expect(message).toContain("ownedPidFileState=present");
     expect(message).toContain("childTerminalPhase=not_observed");
+    expect(message).toContain("postgresShutdownPhase=transactions_aborting");
+    expect(message).toContain("postgresTermination=exit:1");
     expect(message).not.toContain("private-hostname");
     expect(message).not.toContain("private-token");
     expect(message).not.toContain("shutdown detail");

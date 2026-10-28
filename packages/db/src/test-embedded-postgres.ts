@@ -29,7 +29,12 @@ type EmbeddedPostgresCtor = new (opts: {
 export type EmbeddedPostgresTestSupport = {
   supported: boolean;
   reason?: string;
+  startupTermination?: EmbeddedPostgresStartupTermination;
 };
+
+export type EmbeddedPostgresStartupTermination = { kind: "exit"; code: number } | { kind: "signal" };
+export type EmbeddedPostgresShutdownPhase = "none" | "fast_shutdown_received" | "transactions_aborting"
+  | "shutdown_checkpoint_starting" | "shutdown_checkpoint_complete" | "database_shutdown_complete";
 
 export type EmbeddedPostgresTestDatabase = {
   connectionString: string;
@@ -37,7 +42,7 @@ export type EmbeddedPostgresTestDatabase = {
 };
 
 export type EmbeddedPostgresStartupStage = "prepare" | "initdb" | "postgres_start" | "create_database" | "migrations";
-export type EmbeddedPostgresFailureCategory = "process_exited_before_ready" | "initdb_failed" | "permission_denied"
+export type EmbeddedPostgresFailureCategory = "process_exited_before_ready" | "process_signaled_before_ready" | "initdb_failed" | "permission_denied"
   | "port_in_use" | "binary_unavailable" | "root_user_unsupported" | "database_unavailable" | "other";
 
 export type FixtureIdentity = { canonicalPath: string; dev: bigint; ino: bigint; birthtimeNs: bigint;
@@ -100,9 +105,14 @@ async function createEmbeddedPostgresTestInstance(tempDirPrefix: string) {
   const dataDirIdentity = await captureFixtureIdentity(dataDir);
   const port = await getAvailablePort();
   const EmbeddedPostgres = await getEmbeddedPostgresCtor();
-  const startupDiagnostics: { logCategory: EmbeddedPostgresFailureCategory | null } = { logCategory: null };
+  const shutdownObserver = createEmbeddedPostgresShutdownPhaseObserver();
+  const startupDiagnostics: { logCategory: EmbeddedPostgresFailureCategory | null; shutdownPhase: () => EmbeddedPostgresShutdownPhase } = {
+    logCategory: null,
+    shutdownPhase: shutdownObserver.phase,
+  };
   const observe = (value: unknown) => {
     startupDiagnostics.logCategory = embeddedPostgresLogCategory(value) ?? startupDiagnostics.logCategory;
+    shutdownObserver.observe(value);
   };
   const instance = new EmbeddedPostgres({
     databaseDir: dataDir,
@@ -116,6 +126,49 @@ async function createEmbeddedPostgresTestInstance(tempDirPrefix: string) {
   });
 
   return { dataDir, dataDirIdentity, port, instance, startupDiagnostics };
+}
+
+const POSTGRES_LOG_TAIL_LIMIT = 16_384;
+
+/** Retains only a bounded private tail to recognize fixed PostgreSQL shutdown markers. */
+export function createEmbeddedPostgresShutdownPhaseObserver(): {
+  observe(value: unknown): void;
+  phase(): EmbeddedPostgresShutdownPhase;
+} {
+  let tail = "";
+  let tailStartOffset = 0;
+  let totalLength = 0;
+  let shutdownCheckpointStartOffset = -1;
+  let phase: EmbeddedPostgresShutdownPhase = "none";
+  const matchOffsets = (value: string, pattern: RegExp): number[] =>
+    [...value.matchAll(pattern)].map(match => tailStartOffset + (match.index ?? 0));
+  const advance = (next: EmbeddedPostgresShutdownPhase) => {
+    const order: EmbeddedPostgresShutdownPhase[] = ["none", "fast_shutdown_received", "transactions_aborting",
+      "shutdown_checkpoint_starting", "shutdown_checkpoint_complete", "database_shutdown_complete"];
+    if (order.indexOf(next) > order.indexOf(phase)) phase = next;
+  };
+  return {
+    observe(value) {
+      if (typeof value !== "string") return;
+      const boundedChunk = value.slice(-POSTGRES_LOG_TAIL_LIMIT);
+      totalLength += value.length;
+      const combined = `${tail}${boundedChunk}`;
+      tail = combined.slice(-POSTGRES_LOG_TAIL_LIMIT);
+      tailStartOffset = totalLength - tail.length;
+      const diagnostic = tail.toLowerCase();
+      if (/received fast shutdown request/.test(diagnostic)) advance("fast_shutdown_received");
+      if (/aborting any active transactions/.test(diagnostic)) advance("transactions_aborting");
+      const shutdownStarts = matchOffsets(diagnostic, /checkpoint starting:\s*shutdown/g);
+      if (shutdownStarts.length) shutdownCheckpointStartOffset = shutdownStarts[shutdownStarts.length - 1]!;
+      if (shutdownCheckpointStartOffset >= 0) advance("shutdown_checkpoint_starting");
+      const checkpointCompletes = matchOffsets(diagnostic, /checkpoint complete/g);
+      if (shutdownCheckpointStartOffset >= 0 && checkpointCompletes.some(offset => offset > shutdownCheckpointStartOffset)) {
+        advance("shutdown_checkpoint_complete");
+      }
+      if (/database system is shut down/.test(diagnostic)) advance("database_shutdown_complete");
+    },
+    phase: () => phase,
+  };
 }
 
 async function captureFixtureIdentity(dataDir: string): Promise<FixtureIdentity> {
@@ -286,7 +339,7 @@ export async function stopEmbeddedPostgresTestInstance(
   port: number,
   instance: EmbeddedPostgresInstance,
   fixture: FixtureIdentity,
-  dependencies: { resolvePgCtl?: () => Promise<string>; spawnPgCtl?: typeof spawn } = {},
+  dependencies: { resolvePgCtl?: () => Promise<string>; spawnPgCtl?: typeof spawn; shutdownPhase?: () => EmbeddedPostgresShutdownPhase } = {},
 ) {
   const child = (instance as unknown as { process?: ChildProcess }).process;
   const childClose = observeOwnedProcessClose(child);
@@ -340,14 +393,21 @@ export async function stopEmbeddedPostgresTestInstance(
               } catch {
                 ownedPidFileState = "changed_or_unverified";
               }
-              reject(new Error(`Embedded PostgreSQL test pg_ctl shutdown failed (exitCode=${code}; category=${classifyPgCtlFailure(diagnostic)}; stdoutBytes=${stdoutBytes}; stderrBytes=${stderrBytes}; ownedPidFileState=${ownedPidFileState}; childTerminalPhase=${childClose.terminalPhase()}); fixture preserved.`));
+              const postgresTermination = embeddedPostgresStartupTermination(child);
+              const terminationSummary = postgresTermination?.kind === "exit" ? `exit:${postgresTermination.code}`
+                : postgresTermination?.kind === "signal" ? "signal" : "running_or_unobserved";
+              const shutdownPhase = dependencies.shutdownPhase?.() ?? "none";
+              reject(new Error(`Embedded PostgreSQL test pg_ctl shutdown failed (exitCode=${code}; category=${classifyPgCtlFailure(diagnostic)}; stdoutBytes=${stdoutBytes}; stderrBytes=${stderrBytes}; ownedPidFileState=${ownedPidFileState}; childTerminalPhase=${childClose.terminalPhase()}; postgresShutdownPhase=${shutdownPhase}; postgresTermination=${terminationSummary}); fixture preserved.`));
             })();
           }
         };
         const timer = setTimeout(() => {
           cleanup();
           try { process.kill(); } catch { /* This is only the pg_ctl child created above. */ }
-          reject(new Error("Embedded PostgreSQL test pg_ctl shutdown timed out; preserving fixture data."));
+          const postgresTermination = embeddedPostgresStartupTermination(child);
+          const terminationSummary = postgresTermination?.kind === "exit" ? `exit:${postgresTermination.code}`
+            : postgresTermination?.kind === "signal" ? "signal" : "running_or_unobserved";
+          reject(new Error(`Embedded PostgreSQL test pg_ctl shutdown timed out (postgresShutdownPhase=${dependencies.shutdownPhase?.() ?? "none"}; postgresTermination=${terminationSummary}); preserving fixture data.`));
         }, 25_000);
         process.once("error", onError);
         process.once("close", onClose);
@@ -373,6 +433,7 @@ export function classifyEmbeddedPostgresFailure(
   error: unknown,
   observedLogCategory: EmbeddedPostgresFailureCategory | null,
   stage: EmbeddedPostgresStartupStage,
+  startupTermination?: EmbeddedPostgresStartupTermination,
 ): EmbeddedPostgresFailureCategory {
   const code = error && typeof error === "object" && "code" in error && typeof error.code === "string"
     ? error.code.slice(0, 32) : "";
@@ -386,8 +447,32 @@ export function classifyEmbeddedPostgresFailure(
   if (/init script exited with code|initdb.*exited/.test(diagnostic)) return "initdb_failed";
   if (/connection refused|could not connect to server|database system is not accepting/.test(diagnostic)) return "database_unavailable";
   if (observedLogCategory && observedLogCategory !== "other") return observedLogCategory;
-  if (stage === "postgres_start" && error === undefined) return "process_exited_before_ready";
+  if (stage === "postgres_start" && error === undefined) {
+    if (startupTermination?.kind === "signal") return "process_signaled_before_ready";
+    if (startupTermination?.kind === "exit" && isWindowsLoaderFailureCode(startupTermination.code)) return "binary_unavailable";
+    return "process_exited_before_ready";
+  }
   return "other";
+}
+
+const WINDOWS_LOADER_FAILURE_CODES = new Set([0xc0000135, 0xc0000139, 0xc000007b]);
+
+function isWindowsLoaderFailureCode(code: number): boolean {
+  return Number.isSafeInteger(code) && code >= -0x80000000 && code <= 0xffffffff
+    && WINDOWS_LOADER_FAILURE_CODES.has(code >>> 0);
+}
+
+/** Snapshots only fixed child termination data; never retains process output or arbitrary error fields. */
+export function embeddedPostgresStartupTermination(
+  child: Pick<ChildProcess, "exitCode" | "signalCode"> | undefined,
+): EmbeddedPostgresStartupTermination | undefined {
+  if (!child) return undefined;
+  if (child.signalCode !== null && child.signalCode !== undefined) return { kind: "signal" };
+  const code = child.exitCode;
+  if (typeof code === "number" && Number.isSafeInteger(code) && code >= -0x80000000 && code <= 0xffffffff) {
+    return { kind: "exit", code };
+  }
+  return undefined;
 }
 
 export function embeddedPostgresSupportResult(
@@ -395,10 +480,15 @@ export function embeddedPostgresSupportResult(
   error: unknown,
   observedLogCategory: EmbeddedPostgresFailureCategory | null,
   stage: EmbeddedPostgresStartupStage,
+  startupTermination?: EmbeddedPostgresStartupTermination,
 ): EmbeddedPostgresTestSupport {
   if (!startupFailed) return { supported: true };
-  const category = classifyEmbeddedPostgresFailure(error, observedLogCategory, stage);
-  return { supported: false, reason: `embedded Postgres ${stage} failed (${category})` };
+  const category = classifyEmbeddedPostgresFailure(error, observedLogCategory, stage, startupTermination);
+  return {
+    supported: false,
+    reason: `embedded Postgres ${stage} failed (${category})`,
+    ...(stage === "postgres_start" && startupTermination ? { startupTermination } : {}),
+  };
 }
 
 function embeddedPostgresLogCategory(value: unknown): EmbeddedPostgresFailureCategory | null {
@@ -429,7 +519,8 @@ async function probeEmbeddedPostgresSupport(): Promise<EmbeddedPostgresTestSuppo
   let startupFailed = false;
   let startupError: unknown;
   let startupStage: EmbeddedPostgresStartupStage = "prepare";
-  let startupDiagnostics: { logCategory: EmbeddedPostgresFailureCategory | null } | null = null;
+  let startupDiagnostics: { logCategory: EmbeddedPostgresFailureCategory | null; shutdownPhase: () => EmbeddedPostgresShutdownPhase } | null = null;
+  let startupTermination: EmbeddedPostgresStartupTermination | undefined;
 
   try {
     const created = await createEmbeddedPostgresTestInstance(
@@ -448,20 +539,23 @@ async function probeEmbeddedPostgresSupport(): Promise<EmbeddedPostgresTestSuppo
   } catch (error) {
     startupFailed = true;
     startupError = error;
+    if (startupStage === "postgres_start") startupTermination = embeddedPostgresStartupTermination(instance?.process);
   }
   try {
     if (dataDir && dataDirIdentity && port !== null && instance) {
-      await stopEmbeddedPostgresTestInstance(dataDir, port, instance, dataDirIdentity);
+      await stopEmbeddedPostgresTestInstance(dataDir, port, instance, dataDirIdentity, {
+        shutdownPhase: startupDiagnostics?.shutdownPhase,
+      });
       await cleanupEmbeddedPostgresTestDirs(dataDir, dataDirIdentity);
     }
   } catch (cleanupError) {
     if (startupFailed) {
-      const diagnostic = embeddedPostgresSupportResult(true, startupError, startupDiagnostics?.logCategory ?? null, startupStage);
+      const diagnostic = embeddedPostgresSupportResult(true, startupError, startupDiagnostics?.logCategory ?? null, startupStage, startupTermination);
       throw new AggregateError([new Error(diagnostic.reason), cleanupError], `Embedded PostgreSQL support probe failed (${diagnostic.reason}); cleanup also failed.`);
     }
     throw cleanupError;
   }
-  return embeddedPostgresSupportResult(startupFailed, startupError, startupDiagnostics?.logCategory ?? null, startupStage);
+  return embeddedPostgresSupportResult(startupFailed, startupError, startupDiagnostics?.logCategory ?? null, startupStage, startupTermination);
 }
 
 export async function getEmbeddedPostgresTestSupport(): Promise<EmbeddedPostgresTestSupport> {
@@ -479,7 +573,7 @@ export async function startEmbeddedPostgresTestDatabase(
   let port: number | null = null;
   let instance: EmbeddedPostgresInstance | null = null;
   let stage: EmbeddedPostgresStartupStage = "prepare";
-  let startupDiagnostics: { logCategory: EmbeddedPostgresFailureCategory | null } | null = null;
+  let startupDiagnostics: { logCategory: EmbeddedPostgresFailureCategory | null; shutdownPhase: () => EmbeddedPostgresShutdownPhase } | null = null;
 
   try {
     const created = await createEmbeddedPostgresTestInstance(tempDirPrefix);
@@ -505,7 +599,9 @@ export async function startEmbeddedPostgresTestDatabase(
       connectionString,
       cleanup: async () => {
         if (!dataDir || !dataDirIdentity || port === null || !instance) throw new Error("Embedded PostgreSQL test fixture ownership is unavailable.");
-        await stopEmbeddedPostgresTestInstance(dataDir, port, instance, dataDirIdentity);
+        await stopEmbeddedPostgresTestInstance(dataDir, port, instance, dataDirIdentity, {
+          shutdownPhase: startupDiagnostics?.shutdownPhase,
+        });
         await cleanupEmbeddedPostgresTestDirs(dataDir, dataDirIdentity);
       },
     };
@@ -513,10 +609,13 @@ export async function startEmbeddedPostgresTestDatabase(
     // The vendor's start() rejects without an error value when its child closes
     // before emitting the ready line. Keep only a fixed category from that
     // lifecycle and from recognized log patterns; never retain raw output.
-    const category = classifyEmbeddedPostgresFailure(error, startupDiagnostics?.logCategory ?? null, stage);
+    const startupTermination = stage === "postgres_start" ? embeddedPostgresStartupTermination(instance?.process) : undefined;
+    const category = classifyEmbeddedPostgresFailure(error, startupDiagnostics?.logCategory ?? null, stage, startupTermination);
     try {
       if (dataDir && dataDirIdentity && port !== null && instance) {
-        await stopEmbeddedPostgresTestInstance(dataDir, port, instance, dataDirIdentity);
+        await stopEmbeddedPostgresTestInstance(dataDir, port, instance, dataDirIdentity, {
+          shutdownPhase: startupDiagnostics?.shutdownPhase,
+        });
         await cleanupEmbeddedPostgresTestDirs(dataDir, dataDirIdentity);
       }
     } catch (cleanupError) {
