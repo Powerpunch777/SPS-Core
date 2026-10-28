@@ -72,7 +72,14 @@ termination before disposing Host services or stopping the embedded database.
 The terminal worker-manager shutdown is shared by concurrent callers and rejects
 new starts, including starts through previously returned managed handles; the
 existing reusable `stopAll` operation is not redefined as terminal shutdown.
-A shutdown RPC acknowledgement alone is not process-exit evidence. A child still
+A shutdown RPC acknowledgement alone is not process-exit evidence. Worker
+ownership and PID remain retained after process exit until the exact child's
+stdio `close` confirms resource closure. Buffered final RPC responses may drain
+between exit and close; new worker requests and notifications cannot admit Host
+work after exit. Unresolved calls and crash/restart cleanup finalize at close.
+An unconfirmed close fails stop and blocks replacement. Asynchronous Host calls
+and stream authorization continuations remain bound to their originating child
+and cannot write or register channels in a replacement generation. A child still
 alive after the bounded termination sequence makes shutdown fail, and Core exits
 nonzero rather than recording a clean shutdown. This is local lifecycle control,
 not physical two-PC, distributed cancellation, or arbitrary descendant proof.

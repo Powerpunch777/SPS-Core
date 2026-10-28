@@ -212,9 +212,12 @@ interface PendingRequest {
   invocationId?: string;
   /** Caller cancellation suppresses the result; the wire request remains accounted for. */
   deliveryCancelled?: boolean;
+  /** A matching response was buffered before process close; still checking its authority. */
+  responseReceived?: boolean;
   /** Removes the abort listener after the RPC actually settles. */
   removeAbortListener?: () => void;
   onTerminal?: (reason: "response" | "worker_exit" | "not_dispatched") => void;
+  terminalNotified?: boolean;
   timedOut?: boolean;
 }
 
@@ -419,6 +422,10 @@ export function createPluginWorkerHandle(
 
   // Worker process state
   let childProcess: ChildProcess | null = null;
+  let processExited = false;
+  let processClosePromise: Promise<void> | null = null;
+  let resolveProcessClose: (() => void) | null = null;
+  let pendingCrash: { code: number | null; signal: NodeJS.Signals | null; willRestart: boolean } | null = null;
   let readline: ReadlineInterface | null = null;
   let stderrReadline: ReadlineInterface | null = null;
   let status: WorkerStatus = "stopped";
@@ -468,7 +475,7 @@ export function createPluginWorkerHandle(
   // -----------------------------------------------------------------------
 
   function sendMessage(message: unknown): void {
-    if (!childProcess?.stdin?.writable) {
+    if (processExited || !childProcess?.stdin?.writable) {
       throw new Error(`Worker process for plugin "${pluginId}" is not writable`);
     }
     const serialized = serializeMessage(message as any);
@@ -505,8 +512,10 @@ export function createPluginWorkerHandle(
     if (isJsonRpcResponse(message)) {
       void handleResponse(message);
     } else if (isJsonRpcRequest(message)) {
+      if (processExited) return;
       handleWorkerRequest(message as JsonRpcRequest);
     } else if (isJsonRpcNotification(message)) {
+      if (processExited) return;
       void handleWorkerNotification(message as JsonRpcNotification);
     } else {
       log.warn("unknown message type from worker");
@@ -538,7 +547,8 @@ export function createPluginWorkerHandle(
       return;
     }
 
-    if (pending.onTerminal) void Promise.resolve(pending.onTerminal("response")).catch(() => undefined);
+    pending.responseReceived = true;
+    notifyTerminal(pending, "response");
 
     const invocation = pending.invocationId ? activeInvocations.get(pending.invocationId) : undefined;
     if (pending.deliveryCancelled) {
@@ -614,6 +624,15 @@ export function createPluginWorkerHandle(
       code: PLUGIN_RPC_ERROR_CODES.INVOCATION_SCOPE_DENIED,
       message: "Plugin invocation authority is no longer current",
     });
+  }
+
+  function notifyTerminal(
+    pending: PendingRequest,
+    reason: "response" | "worker_exit" | "not_dispatched",
+  ): void {
+    if (!pending.onTerminal || pending.terminalNotified) return;
+    pending.terminalNotified = true;
+    void Promise.resolve(pending.onTerminal(reason)).catch(() => undefined);
   }
 
   function matchesBoundWorkspace(scope: PluginInvocationScope | null, authority: WorkerInvocationAuthority): boolean {
@@ -744,12 +763,15 @@ export function createPluginWorkerHandle(
    * Handle a JSON-RPC request from the worker (worker→host call).
    */
   async function handleWorkerRequest(request: JsonRpcRequest): Promise<void> {
+    const requestChild = childProcess;
+    if (!requestChild || processExited) return;
     const method = request.method as WorkerToHostMethodName;
     const invocationId = readNonEmptyString(
       (request as { paperclipInvocationId?: unknown }).paperclipInvocationId,
     );
     const hasGuardedInvocation = Array.from(activeInvocations.values()).some((entry) => entry.authority);
     const context = await contextForWorkerMessage(request);
+    if (childProcess !== requestChild || processExited) return;
     if (context.invalidInvocationScope && (hasGuardedInvocation || invocationId?.startsWith(GUARDED_INVOCATION_PREFIX))) {
       try {
         sendMessage(createErrorResponse(
@@ -786,12 +808,14 @@ export function createPluginWorkerHandle(
     try {
       const result = await handler(request.params, context);
       if (invocation?.authority) await assertInvocationCurrent(invocation);
+      if (childProcess !== requestChild || processExited) return;
       sendMessage({
         jsonrpc: JSONRPC_VERSION,
         id: request.id,
         result: result ?? null,
       });
     } catch (err) {
+      if (childProcess !== requestChild || processExited) return;
       const denied = invocation?.authority && (invocation.invalidated || invocation.authority.signal?.aborted);
       const errorMessage = denied
         ? "Plugin invocation authority is no longer current"
@@ -827,6 +851,8 @@ export function createPluginWorkerHandle(
    * level) so that every log entry is queryable per the spec (§26.1).
    */
   async function handleWorkerNotification(notification: JsonRpcNotification): Promise<void> {
+    const notificationChild = childProcess;
+    if (!notificationChild || processExited) return;
     if (notification.method === "log") {
       const params = notification.params as {
         level?: string;
@@ -872,6 +898,7 @@ export function createPluginWorkerHandle(
         (notification as { paperclipInvocationId?: unknown }).paperclipInvocationId,
       );
       const context = await contextForWorkerMessage(notification);
+      if (childProcess !== notificationChild || processExited) return;
       if (context.invalidInvocationScope) {
         // Do not log worker-controlled payload values for denied notifications.
         return;
@@ -961,13 +988,20 @@ export function createPluginWorkerHandle(
       });
     }
 
-    // Handle process exit
+    // `exit` means the process has terminated; stdio may still be open.
     child.on("exit", (code, signal) => {
-      handleProcessExit(code, signal);
+      handleProcessExit(child, code, signal);
+    });
+
+    // ChildProcess `close` follows exit and all stdio closure. Do not release
+    // the generation, report a completed stop, or restart before this event.
+    child.on("close", (code, signal) => {
+      handleProcessClose(child, code, signal);
     });
 
     // Handle process errors (e.g. spawn failure)
     child.on("error", (err) => {
+      if (childProcess !== child) return;
       log.error({ err: err.message }, "worker process error");
       if (emitter.listenerCount("error") > 0) {
         emitter.emit("error", { pluginId, error: err });
@@ -985,52 +1019,21 @@ export function createPluginWorkerHandle(
   }
 
   function handleProcessExit(
+    child: ChildProcess,
     code: number | null,
     signal: NodeJS.Signals | null,
+    emitPublicExit = true,
   ): void {
+    if (childProcess !== child || processExited) return;
+    processExited = true;
     const wasIntentional = intentionalStop;
-
-    // Clean up readline interfaces
-    if (readline) {
-      readline.close();
-      readline = null;
-    }
-    if (stderrReadline) {
-      stderrReadline.close();
-      stderrReadline = null;
-    }
-    childProcess = null;
     startedAt = null;
+    // Keep response readers alive: data written before exit may still be
+    // buffered in stdout. New worker requests/notifications are dropped by
+    // handleLine while processExited is true.
+    if (emitPublicExit) emitter.emit("exit", { pluginId, code, signal });
 
-    // Reject all pending requests
-    rejectAllPending(
-      new Error(formatWorkerFailureMessage(
-        `Worker process exited (code=${code}, signal=${signal})`,
-        stderrExcerpt,
-      )),
-    );
-
-    // Emit synthetic close for any orphaned stream channels so SSE clients
-    // are notified instead of hanging indefinitely.
-    if (openStreamChannels.size > 0 && options.onStreamNotification) {
-      for (const { channel, companyId } of openStreamChannels.values()) {
-        try {
-          options.onStreamNotification("streams.close", { channel, companyId });
-        } catch {
-          // Best-effort cleanup — don't let it interfere with exit handling
-        }
-      }
-      openStreamChannels.clear();
-    }
-
-    emitter.emit("exit", { pluginId, code, signal });
-
-    if (wasIntentional) {
-      // Graceful stop — status is already "stopping" or will be set to "stopped"
-      setStatus("stopped");
-      log.info({ code, signal }, "worker process stopped");
-      return;
-    }
+    if (wasIntentional) return;
 
     // Unexpected exit — crash recovery
     totalCrashes++;
@@ -1048,13 +1051,71 @@ export function createPluginWorkerHandle(
       "worker process crashed",
     );
 
-    const willRestart =
-      autoRestart && consecutiveCrashes <= MAX_CONSECUTIVE_CRASHES;
-
+    const willRestart = autoRestart && consecutiveCrashes <= MAX_CONSECUTIVE_CRASHES;
+    pendingCrash = { code, signal, willRestart };
     setStatus("crashed");
-    emitter.emit("crash", { pluginId, code, signal, willRestart });
+  }
 
-    if (willRestart) {
+  function handleProcessClose(
+    child: ChildProcess,
+    code: number | null,
+    signal: NodeJS.Signals | null,
+  ): void {
+    if (childProcess !== child) return;
+    if (!processExited) handleProcessExit(child, code, signal, false);
+
+    // At close, all stdio is drained. Any RPC without a buffered final
+    // response is now terminal and may receive worker_exit acknowledgement.
+    rejectAllPending(
+      new Error(formatWorkerFailureMessage(
+        `Worker process exited (code=${code}, signal=${signal})`,
+        stderrExcerpt,
+      )),
+    );
+
+    if (openStreamChannels.size > 0 && options.onStreamNotification) {
+      for (const { channel, companyId } of openStreamChannels.values()) {
+        try {
+          options.onStreamNotification("streams.close", { channel, companyId });
+        } catch {
+          // Best-effort cleanup — don't let it interfere with close handling
+        }
+      }
+      openStreamChannels.clear();
+    }
+
+    if (readline) {
+      readline.close();
+      readline = null;
+    }
+    if (stderrReadline) {
+      stderrReadline.close();
+      stderrReadline = null;
+    }
+    childProcess = null;
+    processExited = false;
+    resolveProcessClose?.();
+    resolveProcessClose = null;
+    processClosePromise = null;
+
+    if (intentionalStop) {
+      pendingCrash = null;
+      setStatus("stopped");
+      log.info({ code, signal }, "worker process stopped and stdio closed");
+      return;
+    }
+
+    const crash = pendingCrash;
+    pendingCrash = null;
+    if (!crash) return;
+    emitter.emit("crash", {
+      pluginId,
+      code: crash.code,
+      signal: crash.signal,
+      willRestart: crash.willRestart,
+    });
+
+    if (crash.willRestart) {
       scheduleRestart();
     } else {
       log.error(
@@ -1066,8 +1127,9 @@ export function createPluginWorkerHandle(
 
   function rejectAllPending(error: Error): void {
     for (const [id, pending] of pendingRequests) {
+      if (pending.responseReceived) continue;
       clearTimeout(pending.timer);
-      if (pending.onTerminal) void Promise.resolve(pending.onTerminal("worker_exit")).catch(() => undefined);
+      notifyTerminal(pending, "worker_exit");
       pending.resolve(
         createErrorResponse(
           pending.id,
@@ -1076,7 +1138,6 @@ export function createPluginWorkerHandle(
         ) as JsonRpcResponse,
       );
     }
-    pendingRequests.clear();
     for (const [id, late] of lateTerminalAcks) {
       const entry = activeInvocations.get(late.invocationId);
       if (entry?.timer) clearTimeout(entry.timer);
@@ -1162,6 +1223,9 @@ export function createPluginWorkerHandle(
     if (status === "running" || status === "starting") {
       throw new Error(`Worker for plugin "${pluginId}" is already ${status}`);
     }
+    if (childProcess) {
+      throw new Error(`Cannot start worker for plugin "${pluginId}" before its previous process and stdio close`);
+    }
 
     intentionalStop = false;
     setStatus("starting");
@@ -1169,6 +1233,9 @@ export function createPluginWorkerHandle(
 
     const child = spawnProcess();
     childProcess = child;
+    processExited = false;
+    pendingCrash = null;
+    processClosePromise = new Promise<void>((resolve) => { resolveProcessClose = resolve; });
     attachStdioHandlers(child);
     startedAt = Date.now();
 
@@ -1230,6 +1297,15 @@ export function createPluginWorkerHandle(
       return;
     }
 
+    if (processExited) {
+      const closed = await waitForClose(2_000);
+      if (!closed || childProcess) {
+        throw new Error(`Worker for plugin "${pluginId}" exited but did not confirm stdio closure`);
+      }
+      setStatus("stopped");
+      return;
+    }
+
     // Step 1: Send shutdown RPC and wait for the worker to exit gracefully.
     // We race the shutdown call against a timeout. The worker should process
     // the shutdown and exit on its own within the drain period.
@@ -1253,6 +1329,14 @@ export function createPluginWorkerHandle(
       setStatus("stopped");
       return;
     }
+    if (processExited) {
+      const closed = await waitForClose(2_000);
+      if (!closed || childProcess) {
+        throw new Error(`Worker for plugin "${pluginId}" exited but did not confirm stdio closure`);
+      }
+      setStatus("stopped");
+      return;
+    }
 
     // Step 2: Send SIGTERM and wait
     log.info("worker did not exit after shutdown RPC, sending SIGTERM");
@@ -1262,16 +1346,28 @@ export function createPluginWorkerHandle(
       setStatus("stopped");
       return;
     }
+    if (processExited) {
+      const closed = await waitForClose(2_000);
+      if (!closed || childProcess) {
+        throw new Error(`Worker for plugin "${pluginId}" exited but did not confirm stdio closure`);
+      }
+      setStatus("stopped");
+      return;
+    }
 
     // Step 3: Forcefully kill with SIGKILL
     log.warn("worker did not exit after SIGTERM, sending SIGKILL");
-    await killWithSignal("SIGKILL", 2_000);
+    const closedAfterKill = await killWithSignalAndWaitForClose("SIGKILL", 2_000);
 
-    if (childProcess) {
+    if (!closedAfterKill && childProcess && !processExited) {
       log.error("worker process still alive after SIGKILL — this should not happen");
       throw new Error(
         `Worker for plugin "${pluginId}" remained alive after SIGKILL`,
       );
+    }
+
+    if (!closedAfterKill || childProcess) {
+      throw new Error(`Worker for plugin "${pluginId}" exited but did not confirm stdio closure`);
     }
 
     setStatus("stopped");
@@ -1293,7 +1389,8 @@ export function createPluginWorkerHandle(
    */
   function waitForExit(timeoutMs: number): Promise<void> {
     return new Promise<void>((resolve) => {
-      if (!childProcess) {
+      const child = childProcess;
+      if (!child || processExited) {
         resolve();
         return;
       }
@@ -1305,7 +1402,7 @@ export function createPluginWorkerHandle(
         resolve();
       }, timeoutMs);
 
-      childProcess.once("exit", () => {
+      child.once("exit", () => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
@@ -1314,12 +1411,50 @@ export function createPluginWorkerHandle(
     });
   }
 
+  /** Wait for the current exact generation to emit ChildProcess `close`. */
+  function waitForClose(timeoutMs: number): Promise<boolean> {
+    const child = childProcess;
+    const close = processClosePromise;
+    if (!child) return Promise.resolve(true);
+    if (!close) return Promise.resolve(false);
+    return new Promise<boolean>((resolve) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        resolve(false);
+      }, timeoutMs);
+      void close.then(() => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(childProcess !== child);
+      });
+    });
+  }
+
+  /** Send the final signal and spend the existing final-drain budget awaiting close. */
+  async function killWithSignalAndWaitForClose(
+    signal: NodeJS.Signals,
+    waitMs: number,
+  ): Promise<boolean> {
+    const child = childProcess;
+    if (!child) return true;
+    try {
+      if (childProcess === child && !processExited) child.kill(signal);
+    } catch {
+      // The exact child may have exited while the signal was being sent.
+    }
+    return waitForClose(waitMs);
+  }
+
   function killWithSignal(
     signal: NodeJS.Signals,
     waitMs: number,
   ): Promise<void> {
     return new Promise<void>((resolve) => {
-      if (!childProcess) {
+      const child = childProcess;
+      if (!child || processExited) {
         resolve();
         return;
       }
@@ -1328,13 +1463,13 @@ export function createPluginWorkerHandle(
         resolve();
       }, waitMs);
 
-      childProcess.once("exit", () => {
+      child.once("exit", () => {
         clearTimeout(timer);
         resolve();
       });
 
       try {
-        childProcess.kill(signal);
+        if (childProcess === child && !processExited) child.kill(signal);
       } catch {
         clearTimeout(timer);
         resolve();
@@ -1344,26 +1479,16 @@ export function createPluginWorkerHandle(
 
   async function killProcess(): Promise<void> {
     intentionalStop = true;
-    if (!childProcess) return;
+    const child = childProcess;
+    if (!child) return;
     try {
-      childProcess.kill("SIGKILL");
+      if (childProcess === child && !processExited) child.kill("SIGKILL");
     } catch {
       // Process may already be dead
     }
-    // Wait briefly for exit event
-    await new Promise<void>((resolve) => {
-      if (!childProcess) {
-        resolve();
-        return;
-      }
-      const timer = setTimeout(() => {
-        resolve();
-      }, 1_000);
-      childProcess.once("exit", () => {
-        clearTimeout(timer);
-        resolve();
-      });
-    });
+    // Reuse the existing startup-failure wait budget; an unconfirmed close
+    // leaves this exact child retained, so a later start remains blocked.
+    if (childProcess === child) await waitForClose(1_000);
   }
 
   // -----------------------------------------------------------------------
@@ -1422,7 +1547,7 @@ export function createPluginWorkerHandle(
     terminalObserver?: (reason: "response" | "worker_exit" | "not_dispatched") => void,
   ): Promise<HostToWorkerMethods[M][1]> {
     const rpcPromise = new Promise<HostToWorkerMethods[M][1]>((resolve, reject) => {
-      if (!childProcess?.stdin?.writable) {
+      if (processExited || !childProcess?.stdin?.writable) {
         void Promise.resolve((authority?.onTerminal ?? terminalObserver)?.("not_dispatched")).catch(() => undefined);
         reject(
           new Error(
@@ -1449,7 +1574,7 @@ export function createPluginWorkerHandle(
         clearTimeout(timer);
         pendingRequests.delete(id);
         pending.removeAbortListener?.();
-        if (pending.timedOut && pending.onTerminal && invocation?.id) {
+        if (pending.timedOut && pending.onTerminal && invocation?.id && !pending.terminalNotified) {
           const active = activeInvocations.get(invocation.id);
           if (active) active.invalidated = true;
           lateTerminalAcks.set(id, { invocationId: invocation.id, onTerminal: pending.onTerminal });
@@ -1582,7 +1707,7 @@ export function createPluginWorkerHandle(
       terminalObserver?: (reason: "response" | "worker_exit" | "not_dispatched") => void,
     ): Promise<HostToWorkerMethods[M][1]> {
       if (status !== "running" && status !== "starting") {
-        void Promise.resolve(authority?.onTerminal?.("not_dispatched")).catch(() => undefined);
+        void Promise.resolve((authority?.onTerminal ?? terminalObserver)?.("not_dispatched")).catch(() => undefined);
         return Promise.reject(
           new Error(
             `Cannot call "${method}" — worker for "${pluginId}" is ${status}`,
