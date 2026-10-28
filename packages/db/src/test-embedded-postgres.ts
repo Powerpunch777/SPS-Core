@@ -22,6 +22,7 @@ type EmbeddedPostgresCtor = new (opts: {
   port: number;
   persistent: boolean;
   initdbFlags?: string[];
+  postgresFlags?: string[];
   onLog?: (message: unknown) => void;
   onError?: (message: unknown) => void;
 }) => EmbeddedPostgresInstance;
@@ -30,9 +31,13 @@ export type EmbeddedPostgresTestSupport = {
   supported: boolean;
   reason?: string;
   startupTermination?: EmbeddedPostgresStartupTermination;
+  startupSqlState?: EmbeddedPostgresStartupSqlState;
 };
 
 export type EmbeddedPostgresStartupTermination = { kind: "exit"; code: number } | { kind: "signal" };
+export type EmbeddedPostgresStartupSqlState = "22023" | "28P01" | "3D000" | "42501" | "53100" | "53200" | "53300"
+  | "53400" | "55000" | "55P03" | "57P03" | "58030" | "58P01" | "58P02" | "F0000" | "F0001"
+  | "XX000" | "XX001" | "XX002";
 export type EmbeddedPostgresShutdownPhase = "none" | "fast_shutdown_received" | "transactions_aborting"
   | "shutdown_checkpoint_starting" | "shutdown_checkpoint_complete" | "database_shutdown_complete";
 
@@ -106,13 +111,18 @@ async function createEmbeddedPostgresTestInstance(tempDirPrefix: string) {
   const port = await getAvailablePort();
   const EmbeddedPostgres = await getEmbeddedPostgresCtor();
   const shutdownObserver = createEmbeddedPostgresShutdownPhaseObserver();
-  const startupDiagnostics: { logCategory: EmbeddedPostgresFailureCategory | null; shutdownPhase: () => EmbeddedPostgresShutdownPhase } = {
+  const sqlStateObserver = createEmbeddedPostgresStartupSqlStateObserver();
+  const startupDiagnostics: { logCategory: EmbeddedPostgresFailureCategory | null; shutdownPhase: () => EmbeddedPostgresShutdownPhase;
+    sqlState: () => EmbeddedPostgresStartupSqlState | undefined; resetSqlState: () => void } = {
     logCategory: null,
     shutdownPhase: shutdownObserver.phase,
+    sqlState: sqlStateObserver.sqlState,
+    resetSqlState: sqlStateObserver.reset,
   };
   const observe = (value: unknown) => {
     startupDiagnostics.logCategory = embeddedPostgresLogCategory(value) ?? startupDiagnostics.logCategory;
     shutdownObserver.observe(value);
+    sqlStateObserver.observe(value);
   };
   const instance = new EmbeddedPostgres({
     databaseDir: dataDir,
@@ -121,6 +131,7 @@ async function createEmbeddedPostgresTestInstance(tempDirPrefix: string) {
     port,
     persistent: true,
     initdbFlags: ["--encoding=UTF8", "--locale=C", "--lc-messages=C"],
+    postgresFlags: ["-c", "log_error_verbosity=verbose"],
     onLog: observe,
     onError: observe,
   });
@@ -129,6 +140,28 @@ async function createEmbeddedPostgresTestInstance(tempDirPrefix: string) {
 }
 
 const POSTGRES_LOG_TAIL_LIMIT = 16_384;
+const POSTGRES_SQLSTATE_CARRY_LIMIT = 512;
+const EMBEDDED_POSTGRES_STARTUP_SQLSTATES = new Set<EmbeddedPostgresStartupSqlState>([
+  "22023", // invalid_parameter_value
+  "28P01", // invalid_password
+  "3D000", // invalid_catalog_name
+  "42501", // insufficient_privilege
+  "53100", // disk_full
+  "53200", // out_of_memory
+  "53300", // too_many_connections
+  "53400", // configuration_limit_exceeded
+  "55000", // object_not_in_prerequisite_state
+  "55P03", // lock_not_available
+  "57P03", // cannot_connect_now
+  "58030", // io_error
+  "58P01", // undefined_file
+  "58P02", // duplicate_file
+  "F0000", // config_file_error
+  "F0001", // lock_file_exists
+  "XX000", // internal_error
+  "XX001", // data_corrupted
+  "XX002", // index_corrupted
+]);
 
 /** Retains only a bounded private tail to recognize fixed PostgreSQL shutdown markers. */
 export function createEmbeddedPostgresShutdownPhaseObserver(): {
@@ -168,6 +201,35 @@ export function createEmbeddedPostgresShutdownPhaseObserver(): {
       if (/database system is shut down/.test(diagnostic)) advance("database_shutdown_complete");
     },
     phase: () => phase,
+  };
+}
+
+/** Retains only a bounded suffix and a fixed allowlisted SQLSTATE from verbose startup errors. */
+export function createEmbeddedPostgresStartupSqlStateObserver(): {
+  observe(value: unknown): void;
+  reset(): void;
+  sqlState(): EmbeddedPostgresStartupSqlState | undefined;
+  bufferedLength(): number;
+} {
+  let carry = "";
+  let state: EmbeddedPostgresStartupSqlState | undefined;
+  return {
+    observe(value) {
+      if (typeof value !== "string") return;
+      const diagnostic = carry + value.slice(-POSTGRES_LOG_TAIL_LIMIT);
+      const matches = diagnostic.matchAll(/(?:^|\r?\n)[^\r\n]{0,256}\b(?:FATAL|PANIC):\s*([A-Z0-9]{5}):/g);
+      for (const match of matches) {
+        const candidate = match[1] as EmbeddedPostgresStartupSqlState;
+        if (EMBEDDED_POSTGRES_STARTUP_SQLSTATES.has(candidate)) state = candidate;
+      }
+      carry = diagnostic.slice(-POSTGRES_SQLSTATE_CARRY_LIMIT);
+    },
+    reset() {
+      carry = "";
+      state = undefined;
+    },
+    sqlState: () => state,
+    bufferedLength: () => carry.length,
   };
 }
 
@@ -481,6 +543,7 @@ export function embeddedPostgresSupportResult(
   observedLogCategory: EmbeddedPostgresFailureCategory | null,
   stage: EmbeddedPostgresStartupStage,
   startupTermination?: EmbeddedPostgresStartupTermination,
+  startupSqlState?: EmbeddedPostgresStartupSqlState,
 ): EmbeddedPostgresTestSupport {
   if (!startupFailed) return { supported: true };
   const category = classifyEmbeddedPostgresFailure(error, observedLogCategory, stage, startupTermination);
@@ -488,7 +551,36 @@ export function embeddedPostgresSupportResult(
     supported: false,
     reason: `embedded Postgres ${stage} failed (${category})`,
     ...(stage === "postgres_start" && startupTermination ? { startupTermination } : {}),
+    ...(stage === "postgres_start" && isEmbeddedPostgresStartupSqlState(startupSqlState) ? { startupSqlState } : {}),
   };
+}
+
+/** Formats only the fixed failure fields accepted from a test-support result. */
+export function formatEmbeddedPostgresTestSupportFailure(support: EmbeddedPostgresTestSupport): string {
+  if (support.supported) return "embedded Postgres test support is available";
+  const match = typeof support.reason === "string"
+    ? /^embedded Postgres (prepare|initdb|postgres_start|create_database|migrations) failed \((process_exited_before_ready|process_signaled_before_ready|initdb_failed|permission_denied|port_in_use|binary_unavailable|root_user_unsupported|database_unavailable|other)\)$/.exec(support.reason)
+    : null;
+  if (!match) return "embedded Postgres support probe unavailable";
+  const [, stage, category] = match;
+  let message = `embedded Postgres ${stage} failed (${category})`;
+  if (stage === "postgres_start") {
+    const termination = support.startupTermination;
+    if (termination?.kind === "exit" && Number.isSafeInteger(termination.code)
+      && termination.code >= -0x80000000 && termination.code <= 0xffffffff) {
+      message += `; child_exit=${termination.code}`;
+    } else if (termination?.kind === "signal") {
+      message += "; child_signaled";
+    }
+    if (isEmbeddedPostgresStartupSqlState(support.startupSqlState)) {
+      message += `; sqlstate=${support.startupSqlState}`;
+    }
+  }
+  return message;
+}
+
+function isEmbeddedPostgresStartupSqlState(value: unknown): value is EmbeddedPostgresStartupSqlState {
+  return typeof value === "string" && EMBEDDED_POSTGRES_STARTUP_SQLSTATES.has(value as EmbeddedPostgresStartupSqlState);
 }
 
 function embeddedPostgresLogCategory(value: unknown): EmbeddedPostgresFailureCategory | null {
@@ -519,8 +611,10 @@ async function probeEmbeddedPostgresSupport(): Promise<EmbeddedPostgresTestSuppo
   let startupFailed = false;
   let startupError: unknown;
   let startupStage: EmbeddedPostgresStartupStage = "prepare";
-  let startupDiagnostics: { logCategory: EmbeddedPostgresFailureCategory | null; shutdownPhase: () => EmbeddedPostgresShutdownPhase } | null = null;
+  let startupDiagnostics: { logCategory: EmbeddedPostgresFailureCategory | null; shutdownPhase: () => EmbeddedPostgresShutdownPhase;
+    sqlState: () => EmbeddedPostgresStartupSqlState | undefined; resetSqlState: () => void } | null = null;
   let startupTermination: EmbeddedPostgresStartupTermination | undefined;
+  let startupSqlState: EmbeddedPostgresStartupSqlState | undefined;
 
   try {
     const created = await createEmbeddedPostgresTestInstance(
@@ -534,12 +628,16 @@ async function probeEmbeddedPostgresSupport(): Promise<EmbeddedPostgresTestSuppo
     startupStage = "initdb";
     await instance.initialise();
     startupStage = "postgres_start";
+    startupDiagnostics.resetSqlState();
     await instance.start();
     await captureOwnedPostmasterIdentity(dataDir, port, dataDirIdentity);
   } catch (error) {
     startupFailed = true;
     startupError = error;
-    if (startupStage === "postgres_start") startupTermination = embeddedPostgresStartupTermination(instance?.process);
+    if (startupStage === "postgres_start") {
+      startupTermination = embeddedPostgresStartupTermination(instance?.process);
+      startupSqlState = startupDiagnostics?.sqlState();
+    }
   }
   try {
     if (dataDir && dataDirIdentity && port !== null && instance) {
@@ -550,12 +648,14 @@ async function probeEmbeddedPostgresSupport(): Promise<EmbeddedPostgresTestSuppo
     }
   } catch (cleanupError) {
     if (startupFailed) {
-      const diagnostic = embeddedPostgresSupportResult(true, startupError, startupDiagnostics?.logCategory ?? null, startupStage, startupTermination);
+      const diagnostic = embeddedPostgresSupportResult(true, startupError, startupDiagnostics?.logCategory ?? null, startupStage,
+        startupTermination, startupSqlState);
       throw new AggregateError([new Error(diagnostic.reason), cleanupError], `Embedded PostgreSQL support probe failed (${diagnostic.reason}); cleanup also failed.`);
     }
     throw cleanupError;
   }
-  return embeddedPostgresSupportResult(startupFailed, startupError, startupDiagnostics?.logCategory ?? null, startupStage, startupTermination);
+  return embeddedPostgresSupportResult(startupFailed, startupError, startupDiagnostics?.logCategory ?? null, startupStage,
+    startupTermination, startupSqlState);
 }
 
 export async function getEmbeddedPostgresTestSupport(): Promise<EmbeddedPostgresTestSupport> {
@@ -573,7 +673,8 @@ export async function startEmbeddedPostgresTestDatabase(
   let port: number | null = null;
   let instance: EmbeddedPostgresInstance | null = null;
   let stage: EmbeddedPostgresStartupStage = "prepare";
-  let startupDiagnostics: { logCategory: EmbeddedPostgresFailureCategory | null; shutdownPhase: () => EmbeddedPostgresShutdownPhase } | null = null;
+  let startupDiagnostics: { logCategory: EmbeddedPostgresFailureCategory | null; shutdownPhase: () => EmbeddedPostgresShutdownPhase;
+    sqlState: () => EmbeddedPostgresStartupSqlState | undefined; resetSqlState: () => void } | null = null;
 
   try {
     const created = await createEmbeddedPostgresTestInstance(tempDirPrefix);
@@ -585,6 +686,7 @@ export async function startEmbeddedPostgresTestDatabase(
     stage = "initdb";
     await instance.initialise();
     stage = "postgres_start";
+    startupDiagnostics.resetSqlState();
     await instance.start();
     await captureOwnedPostmasterIdentity(dataDir, port, dataDirIdentity);
 
@@ -610,7 +712,9 @@ export async function startEmbeddedPostgresTestDatabase(
     // before emitting the ready line. Keep only a fixed category from that
     // lifecycle and from recognized log patterns; never retain raw output.
     const startupTermination = stage === "postgres_start" ? embeddedPostgresStartupTermination(instance?.process) : undefined;
+    const startupSqlState = stage === "postgres_start" ? startupDiagnostics?.sqlState() : undefined;
     const category = classifyEmbeddedPostgresFailure(error, startupDiagnostics?.logCategory ?? null, stage, startupTermination);
+    const sqlStateSuffix = isEmbeddedPostgresStartupSqlState(startupSqlState) ? `; sqlstate=${startupSqlState}` : "";
     try {
       if (dataDir && dataDirIdentity && port !== null && instance) {
         await stopEmbeddedPostgresTestInstance(dataDir, port, instance, dataDirIdentity, {
@@ -619,11 +723,9 @@ export async function startEmbeddedPostgresTestDatabase(
         await cleanupEmbeddedPostgresTestDirs(dataDir, dataDirIdentity);
       }
     } catch (cleanupError) {
-      throw new AggregateError([new Error(`Embedded PostgreSQL ${stage} failed (${category}).`), cleanupError],
-        `Failed to start embedded PostgreSQL test database (stage=${stage}; category=${category}); fixture cleanup also failed.`);
+      throw new AggregateError([new Error(`Embedded PostgreSQL ${stage} failed (${category})${sqlStateSuffix}.`), cleanupError],
+        `Failed to start embedded PostgreSQL test database (stage=${stage}; category=${category}${sqlStateSuffix}); fixture cleanup also failed.`);
     }
-    throw new Error(
-      `Failed to start embedded PostgreSQL test database (stage=${stage}; category=${category}).`,
-    );
+    throw new Error(`Failed to start embedded PostgreSQL test database (stage=${stage}; category=${category}${sqlStateSuffix}).`);
   }
 }

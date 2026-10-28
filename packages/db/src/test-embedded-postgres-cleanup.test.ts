@@ -4,7 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ChildProcess } from "node:child_process";
-import { classifyEmbeddedPostgresFailure, createEmbeddedPostgresShutdownPhaseObserver, embeddedPostgresStartupTermination, embeddedPostgresSupportResult, classifyPgCtlFailure, stopEmbeddedPostgresTestInstance,
+import { classifyEmbeddedPostgresFailure, createEmbeddedPostgresShutdownPhaseObserver, createEmbeddedPostgresStartupSqlStateObserver,
+  embeddedPostgresStartupTermination, embeddedPostgresSupportResult, formatEmbeddedPostgresTestSupportFailure, classifyPgCtlFailure, stopEmbeddedPostgresTestInstance,
   type EmbeddedPostgresInstance, type FixtureIdentity } from "./test-embedded-postgres.js";
 
 const tempDirs: string[] = [];
@@ -106,6 +107,66 @@ describe("embedded Postgres test cleanup", () => {
     for (const error of [undefined, null, "", 0, false]) {
       expect(embeddedPostgresSupportResult(true, error, null, "postgres_start")).toMatchObject({ supported: false });
     }
+  });
+
+  it("recognizes only allowlisted verbose startup SQLSTATEs across split chunks", () => {
+    const observer = createEmbeddedPostgresStartupSqlStateObserver();
+    observer.observe("2026-10-28 03:00:00 UTC [123] FATAL:  28P");
+    observer.observe("01: password authentication failed for user private-user\n");
+    expect(observer.sqlState()).toBe("28P01");
+    expect(observer.bufferedLength()).toBeLessThanOrEqual(512);
+    expect(Object.keys(observer)).toEqual(["observe", "reset", "sqlState", "bufferedLength"]);
+
+    observer.reset();
+    observer.observe("2026-10-28 03:00:00 UTC [123] PANIC:  57P03: server starting\n");
+    expect(observer.sqlState()).toBe("57P03");
+    observer.reset();
+    expect(observer.sqlState()).toBeUndefined();
+  });
+
+  it("bounds SQLSTATE carry and ignores unknown or malformed startup records", () => {
+    const observer = createEmbeddedPostgresStartupSqlStateObserver();
+    observer.observe(`${"private-log-fragment".repeat(1000)}\n2026-10-28 FATAL:  57014: private query`);
+    expect(observer.bufferedLength()).toBeLessThanOrEqual(512);
+    expect(observer.sqlState()).toBeUndefined();
+    observer.observe("\n2026-10-28 LOG:  28P01: not an error severity\n2026-10-28 FATAL: xx001: malformed\n");
+    expect(observer.sqlState()).toBeUndefined();
+  });
+
+  it("formats only fixed startup category, bounded exit metadata, and allowlisted startup SQLSTATE", () => {
+    const support = embeddedPostgresSupportResult(true, undefined, null, "postgres_start", { kind: "exit", code: 1 }, "28P01");
+    expect(support).toEqual({
+      supported: false,
+      reason: "embedded Postgres postgres_start failed (process_exited_before_ready)",
+      startupTermination: { kind: "exit", code: 1 },
+      startupSqlState: "28P01",
+    });
+    expect(formatEmbeddedPostgresTestSupportFailure(support))
+      .toBe("embedded Postgres postgres_start failed (process_exited_before_ready); child_exit=1; sqlstate=28P01");
+    expect(formatEmbeddedPostgresTestSupportFailure({
+      supported: false,
+      reason: "embedded Postgres migrations failed (other)",
+      startupTermination: { kind: "exit", code: 1 },
+      startupSqlState: "28P01",
+    })).toBe("embedded Postgres migrations failed (other)");
+    expect(formatEmbeddedPostgresTestSupportFailure({
+      supported: false,
+      reason: "private path private token",
+      startupSqlState: "28P01",
+    })).toBe("embedded Postgres support probe unavailable");
+    expect(formatEmbeddedPostgresTestSupportFailure({
+      supported: false,
+      reason: "embedded Postgres postgres_start failed (process_exited_before_ready)",
+      startupSqlState: "private-secret" as never,
+    })).toBe("embedded Postgres postgres_start failed (process_exited_before_ready)");
+    expect(formatEmbeddedPostgresTestSupportFailure(embeddedPostgresSupportResult(false, undefined, null, "postgres_start")))
+      .toBe("embedded Postgres test support is available");
+    expect(formatEmbeddedPostgresTestSupportFailure({
+      supported: true,
+      reason: "embedded Postgres postgres_start failed (other)",
+      startupTermination: { kind: "exit", code: 1 },
+      startupSqlState: "28P01",
+    })).toBe("embedded Postgres test support is available");
   });
 
   it("uses pg_ctl for the exact owned pid-file and waits for child close before clearing its hook handle", async () => {
