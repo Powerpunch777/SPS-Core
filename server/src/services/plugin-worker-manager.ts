@@ -221,6 +221,8 @@ interface PendingRequest {
 /** Host-only authority for one Native invocation; never included in RPC payloads. */
 export interface WorkerInvocationAuthority {
   assertCurrent: () => void | Promise<void>;
+  /** Trusted Workspace selected by the Host, independently of RPC parameters. Never serialized. */
+  readonly boundWorkspaceId?: string;
   signal?: AbortSignal;
   /** Allows an exact Host runJob invocation (scope `{}`) to use host authority fencing. */
   allowHostInvocation?: boolean;
@@ -438,9 +440,9 @@ export function createPluginWorkerHandle(
   let backoffTimer: ReturnType<typeof setTimeout> | null = null;
   let nextRestartAt: number | null = null;
 
-  // Track open stream channels so we can emit synthetic close on crash.
-  // Maps channel → companyId.
-  const openStreamChannels = new Map<string, string>();
+  // Track stream subscriptions by the complete tenant/channel tuple so two
+  // Workspaces using the same plugin channel cannot overwrite each other.
+  const openStreamChannels = new Map<string, { channel: string; companyId: string }>();
 
   // Shutdown coordination
   let intentionalStop = false;
@@ -614,6 +616,25 @@ export function createPluginWorkerHandle(
     });
   }
 
+  function matchesBoundWorkspace(scope: PluginInvocationScope | null, authority: WorkerInvocationAuthority): boolean {
+    const bound = authority.boundWorkspaceId;
+    return bound === undefined || (typeof bound === "string"
+      && /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(bound)
+      && scope?.companyId === bound);
+  }
+
+  function matchesBoundCall(method: HostToWorkerMethodName, params: unknown, authority: WorkerInvocationAuthority): boolean {
+    if (!matchesBoundWorkspace(deriveInvocationScope(method, params), authority)) return false;
+    if (authority.boundWorkspaceId === undefined || !isRecord(params)) return true;
+    // A direct companyId must not conceal a contradictory authenticated
+    // actor/tool/job/event envelope used by the receiving worker.
+    const envelope = method === "performAction" ? params.actorContext
+      : method === "executeTool" ? params.runContext
+      : method === "runJob" ? params.job
+      : method === "onEvent" ? params.event : undefined;
+    return envelope === undefined || (isRecord(envelope) && envelope.companyId === authority.boundWorkspaceId);
+  }
+
   async function assertAuthorityCurrent(authority: WorkerInvocationAuthority): Promise<void> {
     const signal = authority.signal;
     if (signal?.aborted) throw invocationDenied();
@@ -642,7 +663,9 @@ export function createPluginWorkerHandle(
     }
     if (invocation.authority) {
       try {
+        if (!matchesBoundWorkspace(invocation.scope, invocation.authority)) throw invocationDenied();
         await assertAuthorityCurrent(invocation.authority);
+        if (!matchesBoundWorkspace(invocation.scope, invocation.authority)) throw invocationDenied();
       } catch {
         invocation.invalidated = true;
         throw invocationDenied();
@@ -658,11 +681,12 @@ export function createPluginWorkerHandle(
     ttlMs?: number,
     authority?: WorkerInvocationAuthority,
   ): PluginInvocationContext {
+    const registeredScope = authority?.boundWorkspaceId !== undefined ? Object.freeze({ ...scope }) : scope;
     const invocation: PluginInvocationContext = {
       id: authority ? `${GUARDED_INVOCATION_PREFIX}${randomUUID()}` : randomUUID(),
-      scope,
+      scope: registeredScope,
     };
-    const entry: ActiveInvocation = { scope, authority };
+    const entry: ActiveInvocation = { scope: registeredScope, authority };
     if (ttlMs !== undefined) {
       entry.timer = setTimeout(() => {
         const current = activeInvocations.get(invocation.id);
@@ -865,9 +889,10 @@ export function createPluginWorkerHandle(
       // Track open channels so we can emit synthetic close on crash
       if (notification.method === "streams.open") {
         const ch = String(params.channel ?? "");
-        if (ch) openStreamChannels.set(ch, companyId);
+        if (ch) openStreamChannels.set(JSON.stringify([companyId, ch]), { channel: ch, companyId });
       } else if (notification.method === "streams.close") {
-        openStreamChannels.delete(String(params.channel ?? ""));
+        const ch = String(params.channel ?? "");
+        if (ch) openStreamChannels.delete(JSON.stringify([companyId, ch]));
       }
 
       if (options.onStreamNotification) {
@@ -988,7 +1013,7 @@ export function createPluginWorkerHandle(
     // Emit synthetic close for any orphaned stream channels so SSE clients
     // are notified instead of hanging indefinitely.
     if (openStreamChannels.size > 0 && options.onStreamNotification) {
-      for (const [channel, companyId] of openStreamChannels) {
+      for (const { channel, companyId } of openStreamChannels.values()) {
         try {
           options.onStreamNotification("streams.close", { channel, companyId });
         } catch {
@@ -1353,8 +1378,15 @@ export function createPluginWorkerHandle(
     terminalObserver?: (reason: "response" | "worker_exit" | "not_dispatched") => void,
   ): Promise<HostToWorkerMethods[M][1]> {
     const invocationScope = deriveInvocationScope(method, params);
-    if (authority) {
-      if (!invocationScope || (!invocationScope.companyId && !authority.allowHostInvocation)) {
+    // Capture the Host's selection before any async check. A caller mutating its
+    // original object cannot retarget an already admitted invocation.
+    const boundWorkspaceId = authority?.boundWorkspaceId;
+    const capturedAuthority = authority && boundWorkspaceId !== undefined
+      ? Object.freeze({ ...authority, boundWorkspaceId }) : authority;
+    if (capturedAuthority) {
+      const authority = capturedAuthority;
+      if (!invocationScope || !matchesBoundCall(method, params, authority)
+        || (!invocationScope.companyId && !authority.allowHostInvocation)) {
         void Promise.resolve((authority.onTerminal ?? terminalObserver)?.("not_dispatched")).catch(() => undefined);
         return Promise.reject(invocationDenied());
       }
@@ -1369,7 +1401,8 @@ export function createPluginWorkerHandle(
           void Promise.resolve((authority.onTerminal ?? terminalObserver)?.("not_dispatched")).catch(() => undefined);
           throw invocationDenied();
         }
-        if (authority.signal?.aborted || !childProcess?.stdin?.writable ||
+        if (!matchesBoundCall(method, params, authority)
+          || authority.signal?.aborted || !childProcess?.stdin?.writable ||
           (status !== "running" && status !== "starting")) {
           void Promise.resolve((authority.onTerminal ?? terminalObserver)?.("not_dispatched")).catch(() => undefined);
           throw invocationDenied();

@@ -60,7 +60,7 @@ describe("Native connectivity through the public SDK worker facade", () => {
       hostHandlers,
       autoRestart: false,
     });
-    const authority: WorkerInvocationAuthority = { assertCurrent, readNativeConnectivity };
+    const authority: WorkerInvocationAuthority = { boundWorkspaceId: WORKSPACE_ID, assertCurrent, readNativeConnectivity };
 
     try {
       await handle.start();
@@ -81,6 +81,7 @@ describe("Native connectivity through the public SDK worker facade", () => {
       expect(workerContext).not.toHaveProperty("hostId");
       expect(workerContext).not.toHaveProperty("userId");
       expect(workerContext).not.toHaveProperty("authority");
+      expect(workerContext).not.toHaveProperty("boundWorkspaceId");
       expect(readNativeConnectivity).toHaveBeenCalledTimes(1);
 
       active = false;

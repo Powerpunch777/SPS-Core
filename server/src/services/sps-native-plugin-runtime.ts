@@ -289,7 +289,8 @@ export function createSpsNativePluginRuntime(
           await authorize();
           return snapshotSpsNativePluginJson(asset, MAX_ASSET_RESULT - 32);
         }
-        const authority: WorkerInvocationAuthority = { assertCurrent: async () => { await authorize(); }, signal: controller.signal,
+        const authority: WorkerInvocationAuthority = { boundWorkspaceId: selected.workspaceId,
+          assertCurrent: async () => { await authorize(); }, signal: controller.signal,
           readNativeConnectivity: async () => {
             await authorize();
             return Object.freeze({ state: "verified" as const, transport: "native_tls" as const,

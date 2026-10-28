@@ -36,6 +36,10 @@ export type EmbeddedPostgresTestDatabase = {
   cleanup(): Promise<void>;
 };
 
+export type EmbeddedPostgresStartupStage = "prepare" | "initdb" | "postgres_start" | "create_database" | "migrations";
+export type EmbeddedPostgresFailureCategory = "process_exited_before_ready" | "initdb_failed" | "permission_denied"
+  | "port_in_use" | "binary_unavailable" | "root_user_unsupported" | "database_unavailable" | "other";
+
 export type FixtureIdentity = { canonicalPath: string; dev: bigint; ino: bigint; birthtimeNs: bigint;
   postmaster?: { pid: number; startedAt: number } };
 
@@ -96,6 +100,10 @@ async function createEmbeddedPostgresTestInstance(tempDirPrefix: string) {
   const dataDirIdentity = await captureFixtureIdentity(dataDir);
   const port = await getAvailablePort();
   const EmbeddedPostgres = await getEmbeddedPostgresCtor();
+  const startupDiagnostics: { logCategory: EmbeddedPostgresFailureCategory | null } = { logCategory: null };
+  const observe = (value: unknown) => {
+    startupDiagnostics.logCategory = embeddedPostgresLogCategory(value) ?? startupDiagnostics.logCategory;
+  };
   const instance = new EmbeddedPostgres({
     databaseDir: dataDir,
     user: "paperclip",
@@ -103,11 +111,11 @@ async function createEmbeddedPostgresTestInstance(tempDirPrefix: string) {
     port,
     persistent: true,
     initdbFlags: ["--encoding=UTF8", "--locale=C", "--lc-messages=C"],
-    onLog: () => {},
-    onError: () => {},
+    onLog: observe,
+    onError: observe,
   });
 
-  return { dataDir, dataDirIdentity, port, instance };
+  return { dataDir, dataDirIdentity, port, instance, startupDiagnostics };
 }
 
 async function captureFixtureIdentity(dataDir: string): Promise<FixtureIdentity> {
@@ -360,10 +368,47 @@ export async function stopEmbeddedPostgresTestInstance(
   }
 }
 
-function formatEmbeddedPostgresError(error: unknown): string {
-  if (error instanceof Error && error.message.length > 0) return error.message;
-  if (typeof error === "string" && error.length > 0) return error;
-  return "embedded Postgres startup failed";
+/** Maps private startup diagnostics to fixed categories; never returns messages or paths. */
+export function classifyEmbeddedPostgresFailure(
+  error: unknown,
+  observedLogCategory: EmbeddedPostgresFailureCategory | null,
+  stage: EmbeddedPostgresStartupStage,
+): EmbeddedPostgresFailureCategory {
+  const code = error && typeof error === "object" && "code" in error && typeof error.code === "string"
+    ? error.code.slice(0, 32) : "";
+  const message = typeof error === "string" ? error.slice(0, 16_384)
+    : error instanceof Error ? error.message.slice(0, 16_384) : "";
+  const diagnostic = `${code} ${message}`.toLowerCase();
+  if (/eacces|eperm|access is denied|permission denied|operation not permitted/.test(diagnostic)) return "permission_denied";
+  if (/eaddrinuse|address already in use|could not bind|failed to bind/.test(diagnostic)) return "port_in_use";
+  if (/enoent|could not load library|specified module could not be found|dll was not found/.test(diagnostic)) return "binary_unavailable";
+  if (/cannot run as a root user|root user/.test(diagnostic)) return "root_user_unsupported";
+  if (/init script exited with code|initdb.*exited/.test(diagnostic)) return "initdb_failed";
+  if (/connection refused|could not connect to server|database system is not accepting/.test(diagnostic)) return "database_unavailable";
+  if (observedLogCategory && observedLogCategory !== "other") return observedLogCategory;
+  if (stage === "postgres_start" && error === undefined) return "process_exited_before_ready";
+  return "other";
+}
+
+export function embeddedPostgresSupportResult(
+  startupFailed: boolean,
+  error: unknown,
+  observedLogCategory: EmbeddedPostgresFailureCategory | null,
+  stage: EmbeddedPostgresStartupStage,
+): EmbeddedPostgresTestSupport {
+  if (!startupFailed) return { supported: true };
+  const category = classifyEmbeddedPostgresFailure(error, observedLogCategory, stage);
+  return { supported: false, reason: `embedded Postgres ${stage} failed (${category})` };
+}
+
+function embeddedPostgresLogCategory(value: unknown): EmbeddedPostgresFailureCategory | null {
+  if (typeof value !== "string") return null;
+  const diagnostic = value.slice(0, 16_384).toLowerCase();
+  if (/access is denied|permission denied|operation not permitted/.test(diagnostic)) return "permission_denied";
+  if (/address already in use|could not bind|failed to bind/.test(diagnostic)) return "port_in_use";
+  if (/could not load library|specified module could not be found|dll was not found/.test(diagnostic)) return "binary_unavailable";
+  if (/could not connect to server|connection refused|database system is not accepting/.test(diagnostic)) return "database_unavailable";
+  return null;
 }
 
 export function classifyPgCtlFailure(output: string): "access_denied" | "pid_file" | "server_unavailable" | "signal_failure" | "shutdown_timeout" | "other" {
@@ -381,7 +426,10 @@ async function probeEmbeddedPostgresSupport(): Promise<EmbeddedPostgresTestSuppo
   let dataDirIdentity: FixtureIdentity | null = null;
   let port: number | null = null;
   let instance: EmbeddedPostgresInstance | null = null;
+  let startupFailed = false;
   let startupError: unknown;
+  let startupStage: EmbeddedPostgresStartupStage = "prepare";
+  let startupDiagnostics: { logCategory: EmbeddedPostgresFailureCategory | null } | null = null;
 
   try {
     const created = await createEmbeddedPostgresTestInstance(
@@ -391,10 +439,14 @@ async function probeEmbeddedPostgresSupport(): Promise<EmbeddedPostgresTestSuppo
     dataDirIdentity = created.dataDirIdentity;
     port = created.port;
     instance = created.instance;
+    startupDiagnostics = created.startupDiagnostics;
+    startupStage = "initdb";
     await instance.initialise();
+    startupStage = "postgres_start";
     await instance.start();
     await captureOwnedPostmasterIdentity(dataDir, port, dataDirIdentity);
   } catch (error) {
+    startupFailed = true;
     startupError = error;
   }
   try {
@@ -403,12 +455,13 @@ async function probeEmbeddedPostgresSupport(): Promise<EmbeddedPostgresTestSuppo
       await cleanupEmbeddedPostgresTestDirs(dataDir, dataDirIdentity);
     }
   } catch (cleanupError) {
-    if (startupError) throw new AggregateError([startupError, cleanupError], "Embedded PostgreSQL support probe and cleanup failed.");
+    if (startupFailed) {
+      const diagnostic = embeddedPostgresSupportResult(true, startupError, startupDiagnostics?.logCategory ?? null, startupStage);
+      throw new AggregateError([new Error(diagnostic.reason), cleanupError], `Embedded PostgreSQL support probe failed (${diagnostic.reason}); cleanup also failed.`);
+    }
     throw cleanupError;
   }
-  return startupError
-    ? { supported: false, reason: formatEmbeddedPostgresError(startupError) }
-    : { supported: true };
+  return embeddedPostgresSupportResult(startupFailed, startupError, startupDiagnostics?.logCategory ?? null, startupStage);
 }
 
 export async function getEmbeddedPostgresTestSupport(): Promise<EmbeddedPostgresTestSupport> {
@@ -425,6 +478,8 @@ export async function startEmbeddedPostgresTestDatabase(
   let dataDirIdentity: FixtureIdentity | null = null;
   let port: number | null = null;
   let instance: EmbeddedPostgresInstance | null = null;
+  let stage: EmbeddedPostgresStartupStage = "prepare";
+  let startupDiagnostics: { logCategory: EmbeddedPostgresFailureCategory | null } | null = null;
 
   try {
     const created = await createEmbeddedPostgresTestInstance(tempDirPrefix);
@@ -432,13 +487,18 @@ export async function startEmbeddedPostgresTestDatabase(
     dataDirIdentity = created.dataDirIdentity;
     instance = created.instance;
     port = created.port;
+    startupDiagnostics = created.startupDiagnostics;
+    stage = "initdb";
     await instance.initialise();
+    stage = "postgres_start";
     await instance.start();
     await captureOwnedPostmasterIdentity(dataDir, port, dataDirIdentity);
 
     const adminConnectionString = `postgres://paperclip:paperclip@127.0.0.1:${port}/postgres`;
+    stage = "create_database";
     await ensurePostgresDatabase(adminConnectionString, "paperclip");
     const connectionString = `postgres://paperclip:paperclip@127.0.0.1:${port}/paperclip`;
+    stage = "migrations";
     await applyPendingMigrations(connectionString);
 
     return {
@@ -450,16 +510,21 @@ export async function startEmbeddedPostgresTestDatabase(
       },
     };
   } catch (error) {
+    // The vendor's start() rejects without an error value when its child closes
+    // before emitting the ready line. Keep only a fixed category from that
+    // lifecycle and from recognized log patterns; never retain raw output.
+    const category = classifyEmbeddedPostgresFailure(error, startupDiagnostics?.logCategory ?? null, stage);
     try {
       if (dataDir && dataDirIdentity && port !== null && instance) {
         await stopEmbeddedPostgresTestInstance(dataDir, port, instance, dataDirIdentity);
         await cleanupEmbeddedPostgresTestDirs(dataDir, dataDirIdentity);
       }
     } catch (cleanupError) {
-      throw new AggregateError([error, cleanupError], "Failed to start embedded PostgreSQL test database; fixture cleanup also failed.");
+      throw new AggregateError([new Error(`Embedded PostgreSQL ${stage} failed (${category}).`), cleanupError],
+        `Failed to start embedded PostgreSQL test database (stage=${stage}; category=${category}); fixture cleanup also failed.`);
     }
     throw new Error(
-      `Failed to start embedded PostgreSQL test database: ${formatEmbeddedPostgresError(error)}`,
+      `Failed to start embedded PostgreSQL test database (stage=${stage}; category=${category}).`,
     );
   }
 }

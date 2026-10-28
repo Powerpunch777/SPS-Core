@@ -125,11 +125,15 @@ describeDatabase("SPS Native Plugin runtime adapter", () => {
     expect((payload as { actorContext: Record<string, unknown> }).actorContext).toMatchObject({
       type: "user", userId: principal.userId, agentId: null, runId: null, companyId,
     });
-    expect(authority).toMatchObject({ assertCurrent: expect.any(Function), signal: expect.any(AbortSignal) });
+    expect(authority).toMatchObject({ boundWorkspaceId: companyId, assertCurrent: expect.any(Function), signal: expect.any(AbortSignal) });
 
     await spsWorkspaceSurfaceService(db).selectShell({ companyId, userId: principal.userId, pluginId });
     await expect(runtime!.invoke(request({ surface: "shell", surfaceId: "fixture-shell", operation: "data" }), authorize))
       .resolves.toEqual({ ok: true });
+    const [, dataMethod, dataPayload, , dataAuthority] = worker.call.mock.calls[1]!;
+    expect(dataMethod).toBe("getData");
+    expect(dataPayload).toMatchObject({ companyId });
+    expect(dataAuthority).toMatchObject({ boundWorkspaceId: companyId });
 
     await expect(runtime!.invoke(request({ surfaceId: "undeclared-widget" }), authorize)).rejects.toThrow("unavailable");
     await expect(runtime!.invoke(request({ surface: "shell", surfaceId: "undeclared-shell" }), authorize))

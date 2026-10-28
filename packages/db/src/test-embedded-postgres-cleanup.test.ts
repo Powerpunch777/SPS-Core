@@ -4,7 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ChildProcess } from "node:child_process";
-import { classifyPgCtlFailure, stopEmbeddedPostgresTestInstance, type EmbeddedPostgresInstance, type FixtureIdentity } from "./test-embedded-postgres.js";
+import { classifyEmbeddedPostgresFailure, embeddedPostgresSupportResult, classifyPgCtlFailure, stopEmbeddedPostgresTestInstance,
+  type EmbeddedPostgresInstance, type FixtureIdentity } from "./test-embedded-postgres.js";
 
 const tempDirs: string[] = [];
 afterEach(() => {
@@ -45,6 +46,28 @@ describe("embedded Postgres test cleanup", () => {
     ["unexpected detail with a private path", "other"],
   ] as const)("classifies pg_ctl diagnostics without retaining raw output", (output, expected) => {
     expect(classifyPgCtlFailure(output)).toBe(expected);
+  });
+
+  it.each([
+    [undefined, null, "postgres_start", "process_exited_before_ready"],
+    ["Postgres init script exited with code 1. Please check the logs for extra info.", null, "initdb", "initdb_failed"],
+    [new Error("private path denied: access is denied"), null, "postgres_start", "permission_denied"],
+    [Object.assign(new Error("startup failed"), { code: "EADDRINUSE" }), null, "postgres_start", "port_in_use"],
+    [new Error("startup failed"), "binary_unavailable", "postgres_start", "binary_unavailable"],
+    [new Error("private token and path"), null, "migrations", "other"],
+  ] as const)("classifies startup failures without retaining private diagnostics", (error, logCategory, stage, expected) => {
+    expect(classifyEmbeddedPostgresFailure(error, logCategory, stage)).toBe(expected);
+  });
+
+  it("keeps a valueless vendor start rejection unsupported with a safe phase and category", () => {
+    expect(embeddedPostgresSupportResult(true, undefined, null, "postgres_start")).toEqual({
+      supported: false,
+      reason: "embedded Postgres postgres_start failed (process_exited_before_ready)",
+    });
+    expect(embeddedPostgresSupportResult(false, undefined, null, "postgres_start")).toEqual({ supported: true });
+    for (const error of [undefined, null, "", 0, false]) {
+      expect(embeddedPostgresSupportResult(true, error, null, "postgres_start")).toMatchObject({ supported: false });
+    }
   });
 
   it("uses pg_ctl for the exact owned pid-file and waits for child close before clearing its hook handle", async () => {

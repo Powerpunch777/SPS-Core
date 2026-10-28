@@ -13,6 +13,7 @@ import {
   appendStderrExcerpt,
   createPluginWorkerHandle,
   formatWorkerFailureMessage,
+  type WorkerInvocationAuthority,
 } from "../services/plugin-worker-manager.js";
 
 const FIXTURES_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures");
@@ -137,6 +138,11 @@ describe("plugin-worker-manager stderr failure context", () => {
   });
 
   it("honors per-call timeout overrides for environmentExecute", async () => {
+    let signalReady!: () => void;
+    let releaseResponse!: () => void;
+    const workerReady = new Promise<void>((resolve) => { signalReady = resolve; });
+    const responseGate = new Promise<void>((resolve) => { releaseResponse = resolve; });
+    let readinessTimer: ReturnType<typeof setTimeout> | undefined;
     const handle = createPluginWorkerHandle("test.plugin", {
       entrypointPath: DELAYED_WORKER_ENTRYPOINT,
       manifest: TEST_MANIFEST,
@@ -146,62 +152,118 @@ describe("plugin-worker-manager stderr failure context", () => {
         hostVersion: "1.0.0",
       },
       apiVersion: 1,
-      hostHandlers: {},
+      hostHandlers: { "config.get": async () => { signalReady(); await responseGate; return {}; } },
       rpcTimeoutMs: 10,
     });
 
     try {
       await handle.start();
-
-      await expect(handle.call("environmentExecute", {
+      const readinessTimeout = new Promise<never>((_resolve, reject) => {
+        readinessTimer = setTimeout(() => reject(new Error("worker did not reach the held response")), 5_000);
+      });
+      vi.useFakeTimers();
+      const call = handle.call("environmentExecute", {
         driverKey: "e2b",
         companyId: "company-1",
         environmentId: "environment-1",
         config: {},
         lease: { providerLeaseId: "lease-1" },
         command: "echo",
-        delayMs: 50,
-      } as HostToWorkerMethods["environmentExecute"][0], 100)).resolves.toMatchObject({
-        exitCode: 0,
-        stdout: "ok\n",
-      });
+        testHandshake: true,
+      } as HostToWorkerMethods["environmentExecute"][0], 100);
+      const observedCall = call.then((value) => ({ value }), (error: unknown) => ({ error }));
+      const readiness = await Promise.race([
+        workerReady.then(() => "ready" as const),
+        observedCall.then((settlement) => ({ settlement })),
+        readinessTimeout.then(() => "timed-out" as const),
+      ]);
+      if (readinessTimer) clearTimeout(readinessTimer);
+      readinessTimer = undefined;
+      expect(readiness).toBe("ready");
+      await vi.advanceTimersByTimeAsync(11);
+      let callSettled = false;
+      void observedCall.then(() => { callSettled = true; });
+      await Promise.resolve();
+      expect(callSettled).toBe(false);
+      releaseResponse();
+      await Promise.resolve();
+      await expect(call).resolves.toMatchObject({ exitCode: 0, stdout: "ok\n" });
     } finally {
+      vi.useRealTimers();
+      if (readinessTimer) clearTimeout(readinessTimer);
+      releaseResponse();
       await handle.stop().catch(() => undefined);
     }
   });
 
   it("does not treat a local timeout as a handler terminal acknowledgement", async () => {
-    const onTerminal = vi.fn();
+    let signalReady!: () => void;
+    let releaseResponse!: () => void;
+    let signalTerminal!: (reason: "response" | "worker_exit" | "not_dispatched") => void;
+    const workerReady = new Promise<void>((resolve) => { signalReady = resolve; });
+    const responseGate = new Promise<void>((resolve) => { releaseResponse = resolve; });
+    const terminal = new Promise<"response" | "worker_exit" | "not_dispatched">((resolve) => { signalTerminal = resolve; });
+    const onTerminal = vi.fn(signalTerminal);
+    let readinessTimer: ReturnType<typeof setTimeout> | undefined;
+    const readinessTimeout = new Promise<never>((_resolve, reject) => {
+      readinessTimer = setTimeout(() => reject(new Error("worker did not reach the held response")), 5_000);
+    });
+    let terminalTimer: ReturnType<typeof setTimeout> | undefined;
+    const terminalTimeout = new Promise<never>((_resolve, reject) => {
+      terminalTimer = setTimeout(() => reject(new Error("worker response did not settle")), 5_000);
+    });
     const handle = createPluginWorkerHandle("test.plugin", {
       entrypointPath: DELAYED_WORKER_ENTRYPOINT,
       manifest: TEST_MANIFEST,
       config: {},
       instanceInfo: { instanceId: "instance-1", hostVersion: "1.0.0" },
       apiVersion: 1,
-      hostHandlers: {},
+      hostHandlers: { "config.get": async () => { signalReady(); await responseGate; return {}; } },
       rpcTimeoutMs: 10,
     });
 
     try {
       await handle.start();
-      await expect(handle.call("environmentExecute", {
+      vi.useFakeTimers();
+      const call = handle.call("environmentExecute", {
         driverKey: "e2b",
         companyId: "company-1",
         environmentId: "environment-1",
         config: {},
         lease: { providerLeaseId: "lease-1" },
         command: "echo",
-        delayMs: 80,
+        testHandshake: true,
       } as HostToWorkerMethods["environmentExecute"][0], 10, {
         assertCurrent: () => undefined,
         onTerminal,
-      })).rejects.toMatchObject({ code: PLUGIN_RPC_ERROR_CODES.TIMEOUT });
+      });
+      const observedCall = call.then(
+        () => ({ unexpectedResponse: true as const }),
+        (error: unknown) => ({ error }),
+      );
+      const readiness = await Promise.race([
+        workerReady.then(() => "ready" as const),
+        observedCall.then((settlement) => ({ settlement })),
+        readinessTimeout.then(() => "timed-out" as const),
+      ]);
+      expect(readiness).toBe("ready");
+      if (readinessTimer) clearTimeout(readinessTimer);
+      readinessTimer = undefined;
+      await vi.advanceTimersByTimeAsync(10);
+      const settlement = await observedCall;
+      expect(settlement).toMatchObject({ error: { code: PLUGIN_RPC_ERROR_CODES.TIMEOUT } });
 
       expect(onTerminal).not.toHaveBeenCalled();
-      await new Promise((resolve) => setTimeout(resolve, 110));
+      vi.useRealTimers();
+      releaseResponse();
+      await expect(Promise.race([terminal, terminalTimeout])).resolves.toBe("response");
       expect(onTerminal).toHaveBeenCalledTimes(1);
       expect(onTerminal).toHaveBeenCalledWith("response");
     } finally {
+      if (readinessTimer) clearTimeout(readinessTimer);
+      if (terminalTimer) clearTimeout(terminalTimer);
+      vi.useRealTimers();
+      releaseResponse();
       await handle.stop().catch(() => undefined);
     }
   });
@@ -741,6 +803,145 @@ describe("plugin-worker-manager stderr failure context", () => {
       expect(missingScopeAuthority.assertCurrent).not.toHaveBeenCalled();
       expect(companiesGet).toHaveBeenCalledTimes(1);
     } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
+  it("binds a guarded worker dispatch to the captured Workspace authority", async () => {
+    const workspaceA = "00000000-0000-4000-8000-000000000001";
+    const workspaceB = "00000000-0000-4000-8000-000000000002";
+    const companiesGet = vi.fn(async (params: { companyId: string }) => createTestCompany(params.companyId));
+    const handle = createPluginWorkerHandle("test.plugin", {
+      entrypointPath: INVOCATION_SCOPE_WORKER_ENTRYPOINT,
+      manifest: TEST_MANIFEST,
+      config: {},
+      instanceInfo: { instanceId: "instance-1", hostVersion: "1.0.0" },
+      apiVersion: 1,
+      hostHandlers: { "companies.get": companiesGet },
+    });
+
+    try {
+      await handle.start();
+      const acceptedTerminal = vi.fn();
+      await expect(handle.call("getData", {
+        key: "probe",
+        companyId: workspaceA,
+        params: { mode: "echo", requestedCompanyId: workspaceA },
+      } as HostToWorkerMethods["getData"][0], undefined, {
+        boundWorkspaceId: workspaceA,
+        assertCurrent: () => undefined,
+      }, acceptedTerminal)).resolves.toMatchObject({ id: workspaceA });
+      expect(acceptedTerminal).toHaveBeenCalledExactlyOnceWith("response");
+      expect(companiesGet).toHaveBeenCalledExactlyOnceWith(
+        { companyId: workspaceA },
+        { invocationScope: { companyId: workspaceA } },
+      );
+
+      const deniedCalls = [
+        {
+          params: { key: "probe", companyId: workspaceA, params: { mode: "echo", requestedCompanyId: workspaceA } },
+          authority: { boundWorkspaceId: workspaceB, assertCurrent: vi.fn() },
+        },
+        {
+          params: { key: "probe", params: { mode: "echo", requestedCompanyId: workspaceA } },
+          authority: { boundWorkspaceId: workspaceA, assertCurrent: vi.fn() },
+        },
+        {
+          params: { key: "probe", companyId: workspaceA, params: { mode: "echo", requestedCompanyId: workspaceA } },
+          authority: { boundWorkspaceId: "not-a-workspace-id", assertCurrent: vi.fn() },
+        },
+      ];
+      for (const denied of deniedCalls) {
+        const terminal = vi.fn();
+        await expect(handle.call("getData", denied.params as HostToWorkerMethods["getData"][0], undefined,
+          denied.authority as WorkerInvocationAuthority, terminal)).rejects.toMatchObject({
+          code: PLUGIN_RPC_ERROR_CODES.INVOCATION_SCOPE_DENIED,
+        });
+        expect(terminal).toHaveBeenCalledExactlyOnceWith("not_dispatched");
+        expect(denied.authority.assertCurrent).not.toHaveBeenCalled();
+      }
+
+      const actorScopeTerminal = vi.fn();
+      await expect(handle.call("performAction", {
+        key: "probe",
+        companyId: workspaceA,
+        params: { mode: "echo", requestedCompanyId: workspaceA },
+        actorContext: { companyId: workspaceB },
+      } as HostToWorkerMethods["performAction"][0], undefined, {
+        boundWorkspaceId: workspaceA,
+        assertCurrent: vi.fn(),
+      }, actorScopeTerminal)).rejects.toMatchObject({ code: PLUGIN_RPC_ERROR_CODES.INVOCATION_SCOPE_DENIED });
+      expect(actorScopeTerminal).toHaveBeenCalledExactlyOnceWith("not_dispatched");
+
+      const hostRunTerminal = vi.fn();
+      await expect(handle.call("runJob", {
+        job: { jobKey: "legacy-host-job", payload: { mode: "echo", requestedCompanyId: workspaceA } },
+      } as HostToWorkerMethods["runJob"][0], undefined, {
+        boundWorkspaceId: workspaceA,
+        allowHostInvocation: true,
+        assertCurrent: vi.fn(),
+      }, hostRunTerminal)).rejects.toMatchObject({ code: PLUGIN_RPC_ERROR_CODES.INVOCATION_SCOPE_DENIED });
+      expect(hostRunTerminal).toHaveBeenCalledExactlyOnceWith("not_dispatched");
+      expect(companiesGet).toHaveBeenCalledTimes(1);
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
+  it("captures bound Workspace authority before async checks and rejects mutated call scope", async () => {
+    const workspaceA = "00000000-0000-4000-8000-000000000001";
+    const workspaceB = "00000000-0000-4000-8000-000000000002";
+    const companiesGet = vi.fn(async (params: { companyId: string }) => createTestCompany(params.companyId));
+    const handle = createPluginWorkerHandle("test.plugin", {
+      entrypointPath: INVOCATION_SCOPE_WORKER_ENTRYPOINT,
+      manifest: TEST_MANIFEST,
+      config: {},
+      instanceInfo: { instanceId: "instance-1", hostVersion: "1.0.0" },
+      apiVersion: 1,
+      hostHandlers: { "companies.get": companiesGet },
+    });
+    let releaseCheck!: () => void;
+    const checkGate = new Promise<void>((resolve) => { releaseCheck = resolve; });
+
+    try {
+      await handle.start();
+      const mutableAuthority = {
+        boundWorkspaceId: workspaceA,
+        assertCurrent: vi.fn(async () => { await checkGate; }),
+      };
+      const acceptedParams = {
+        key: "probe",
+        companyId: workspaceA,
+        params: { mode: "echo", requestedCompanyId: workspaceA },
+      };
+      const accepted = handle.call("getData", acceptedParams as HostToWorkerMethods["getData"][0], undefined,
+        mutableAuthority as WorkerInvocationAuthority);
+      await new Promise((resolve) => setImmediate(resolve));
+      mutableAuthority.boundWorkspaceId = workspaceB;
+      releaseCheck();
+      await expect(accepted).resolves.toMatchObject({ id: workspaceA });
+      expect(companiesGet).toHaveBeenCalledTimes(1);
+
+      let releaseMutatedCheck!: () => void;
+      const mutatedCheckGate = new Promise<void>((resolve) => { releaseMutatedCheck = resolve; });
+      const rejectedParams = {
+        key: "probe",
+        companyId: workspaceA,
+        params: { mode: "echo", requestedCompanyId: workspaceA },
+      };
+      const terminal = vi.fn();
+      const rejected = handle.call("getData", rejectedParams as HostToWorkerMethods["getData"][0], undefined, {
+        boundWorkspaceId: workspaceA,
+        assertCurrent: async () => { await mutatedCheckGate; },
+      }, terminal);
+      await new Promise((resolve) => setImmediate(resolve));
+      rejectedParams.companyId = workspaceB;
+      releaseMutatedCheck();
+      await expect(rejected).rejects.toMatchObject({ code: PLUGIN_RPC_ERROR_CODES.INVOCATION_SCOPE_DENIED });
+      expect(terminal).toHaveBeenCalledExactlyOnceWith("not_dispatched");
+      expect(companiesGet).toHaveBeenCalledTimes(1);
+    } finally {
+      releaseCheck();
       await handle.stop().catch(() => undefined);
     }
   });
