@@ -96,17 +96,49 @@ function makeLoader(overrides: Partial<PluginLoader> = {}): PluginLoader {
   } as unknown as PluginLoader;
 }
 
+function makeWorkerManager(overrides: Record<string, unknown> = {}) {
+  return {
+    getWorker: vi.fn(() => undefined),
+    stopWorker: vi.fn().mockResolvedValue(undefined),
+    withPluginPackageMutation: vi.fn(async (_pluginId: string, action: () => Promise<unknown>) => action()),
+    ...overrides,
+  };
+}
+
+function createLifecycle(loader: PluginLoader, workerManager = makeWorkerManager()) {
+  return pluginLifecycleManager({} as never, { loader, workerManager: workerManager as never });
+}
+
 describe("pluginLifecycleManager.upgrade failure safety", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     resetPlugin();
   });
 
+  it("does not unload handlers or disable the plugin while its worker remains", async () => {
+    const retainedWorker = { status: "running" };
+    const workerManager = makeWorkerManager({
+      getWorker: vi.fn(() => retainedWorker),
+      stopWorker: vi.fn().mockResolvedValue(undefined),
+    });
+    const loader = makeLoader();
+    const lifecycle = createLifecycle(loader, workerManager);
+
+    await expect(lifecycle.disable(pluginId)).rejects.toMatchObject({
+      code: "plugin_package_maintenance_required",
+    });
+
+    expect(workerManager.stopWorker).toHaveBeenCalledWith(pluginId);
+    expect(loader.unloadSingle).not.toHaveBeenCalled();
+    expect(mockRegistry.updateStatus).not.toHaveBeenCalled();
+    expect(currentPlugin).toMatchObject({ status: "ready", packagePath: "C:\\plugins\\example-1.0.0" });
+  });
+
   it("keeps the ready runtime and registry record when preparation fails", async () => {
     const loader = makeLoader({
       prepareUpgrade: vi.fn().mockRejectedValue(new Error("candidate manifest is invalid")),
     });
-    const lifecycle = pluginLifecycleManager({} as never, { loader });
+    const lifecycle = createLifecycle(loader);
 
     await expect(lifecycle.upgrade(pluginId, "1.1.0")).rejects.toThrow("candidate manifest is invalid");
 
@@ -130,7 +162,7 @@ describe("pluginLifecycleManager.upgrade failure safety", () => {
         registered: { worker: true, eventSubscriptions: 0, jobs: 0, webhooks: 0, tools: 0 },
       }),
     });
-    const lifecycle = pluginLifecycleManager({} as never, { loader });
+    const lifecycle = createLifecycle(loader);
 
     await expect(lifecycle.upgrade(pluginId, "1.1.0")).rejects.toThrow("worker stopped before route cleanup failed");
 
@@ -151,7 +183,7 @@ describe("pluginLifecycleManager.upgrade failure safety", () => {
       .mockResolvedValueOnce({ success: false, plugin: currentPlugin, error: "candidate worker failed" })
       .mockResolvedValueOnce({ success: true, plugin: currentPlugin, registered: {} });
     const loader = makeLoader({ loadSingle });
-    const lifecycle = pluginLifecycleManager({} as never, { loader });
+    const lifecycle = createLifecycle(loader);
 
     await expect(lifecycle.upgrade(pluginId, "1.1.0")).rejects.toThrow("candidate worker failed");
 
@@ -179,7 +211,7 @@ describe("pluginLifecycleManager.upgrade failure safety", () => {
       error: "candidate worker registered routes before failing",
     });
     const loader = makeLoader({ loadSingle });
-    const lifecycle = pluginLifecycleManager({} as never, { loader });
+    const lifecycle = createLifecycle(loader);
 
     await expect(lifecycle.upgrade(pluginId, "1.1.0")).rejects.toThrow("candidate worker registered routes before failing");
 
@@ -206,12 +238,47 @@ describe("pluginLifecycleManager.upgrade failure safety", () => {
       }),
       unloadSingle: vi.fn().mockRejectedValue(new Error("candidate cleanup failed")),
     });
-    const lifecycle = pluginLifecycleManager({} as never, { loader });
+    const lifecycle = createLifecycle(loader);
 
     await expect(lifecycle.upgrade(pluginId, "1.1.0")).rejects.toThrow(
-      /candidate worker failed.*candidate runtime cleanup failed: candidate cleanup failed/i,
+      /candidate worker failed.*candidate runtime closure or rollback failed: candidate cleanup failed/i,
     );
-    expect(currentPlugin).toMatchObject({ status: "disabled", manifestJson: oldManifest });
+    expect(mockRegistry.update).not.toHaveBeenCalled();
+    expect(currentPlugin).toMatchObject({
+      status: "ready",
+      packagePath: "C:\\plugins\\.upgrade-staging\\candidate",
+      manifestJson: candidateManifest,
+    });
+  });
+
+  it("keeps the candidate pointer when its worker cannot be closed during rollback", async () => {
+    let candidateStarted = false;
+    const retainedCandidateWorker = { status: "running" };
+    const workerManager = makeWorkerManager({
+      getWorker: vi.fn(() => candidateStarted ? retainedCandidateWorker : undefined),
+      stopWorker: vi.fn().mockResolvedValue(undefined),
+    });
+    const loader = makeLoader({
+      loadSingle: vi.fn().mockImplementation(async () => {
+        candidateStarted = true;
+        return { success: false, plugin: currentPlugin, error: "candidate worker failed" };
+      }),
+    });
+    const lifecycle = createLifecycle(loader, workerManager);
+
+    await expect(lifecycle.upgrade(pluginId, "1.1.0")).rejects.toThrow(
+      /candidate worker failed.*candidate runtime closure or rollback failed/i,
+    );
+
+    expect(workerManager.stopWorker).toHaveBeenCalledWith(pluginId);
+    expect(loader.unloadSingle).toHaveBeenCalledOnce();
+    expect(mockRegistry.update).not.toHaveBeenCalled();
+    expect(loader.loadSingle).toHaveBeenCalledOnce();
+    expect(currentPlugin).toMatchObject({
+      status: "ready",
+      packagePath: "C:\\plugins\\.upgrade-staging\\candidate",
+      manifestJson: candidateManifest,
+    });
   });
 
   it("keeps the reviewed upgrade_pending flow after candidate prevalidation", async () => {
@@ -222,7 +289,7 @@ describe("pluginLifecycleManager.upgrade failure safety", () => {
     const loader = makeLoader({
       prepareUpgrade: vi.fn().mockResolvedValue(preparedUpgrade(reviewManifest)),
     });
-    const lifecycle = pluginLifecycleManager({} as never, { loader });
+    const lifecycle = createLifecycle(loader);
 
     const result = await lifecycle.upgrade(pluginId, "1.1.0");
 
@@ -237,9 +304,64 @@ describe("pluginLifecycleManager.upgrade failure safety", () => {
     });
   });
 
+  it("does not enter upgrade_pending while the prior worker handle remains", async () => {
+    const retainedWorker = { status: "running" };
+    const workerManager = makeWorkerManager({
+      getWorker: vi.fn(() => retainedWorker),
+      stopWorker: vi.fn().mockResolvedValue(undefined),
+    });
+    const loader = makeLoader({
+      prepareUpgrade: vi.fn().mockResolvedValue(preparedUpgrade({
+        ...candidateManifest,
+        capabilities: ["tools.register"],
+      })),
+    });
+    const lifecycle = createLifecycle(loader, workerManager);
+
+    await expect(lifecycle.upgrade(pluginId, "1.1.0")).rejects.toMatchObject({
+      code: "plugin_package_maintenance_required",
+    });
+
+    expect(loader.unloadSingle).not.toHaveBeenCalled();
+    expect(workerManager.stopWorker).toHaveBeenCalledWith(pluginId);
+    expect(loader.commitPreparedUpgrade).not.toHaveBeenCalled();
+    expect(loader.loadSingle).not.toHaveBeenCalled();
+    expect(mockRegistry.updateStatus).not.toHaveBeenCalled();
+    expect(currentPlugin).toMatchObject({
+      status: "ready",
+      packagePath: "C:\\plugins\\example-1.0.0",
+      manifestJson: oldManifest,
+    });
+  });
+
+  it("does not commit or activate an upgrade while the prior worker handle remains", async () => {
+    const retainedWorker = { status: "running" };
+    const workerManager = makeWorkerManager({
+      getWorker: vi.fn(() => retainedWorker),
+      stopWorker: vi.fn().mockResolvedValue(undefined),
+    });
+    const loader = makeLoader();
+    const lifecycle = createLifecycle(loader, workerManager);
+
+    await expect(lifecycle.upgrade(pluginId, "1.1.0")).rejects.toMatchObject({
+      code: "plugin_package_maintenance_required",
+    });
+
+    expect(loader.unloadSingle).not.toHaveBeenCalled();
+    expect(workerManager.stopWorker).toHaveBeenCalledWith(pluginId);
+    expect(loader.commitPreparedUpgrade).not.toHaveBeenCalled();
+    expect(loader.loadSingle).not.toHaveBeenCalled();
+    expect(mockRegistry.updateStatus).not.toHaveBeenCalled();
+    expect(currentPlugin).toMatchObject({
+      status: "ready",
+      packagePath: "C:\\plugins\\example-1.0.0",
+      manifestJson: oldManifest,
+    });
+  });
+
   it("commits and activates a successful candidate", async () => {
     const loader = makeLoader();
-    const lifecycle = pluginLifecycleManager({} as never, { loader });
+    const lifecycle = createLifecycle(loader);
 
     const result = await lifecycle.upgrade(pluginId, "1.1.0");
 
@@ -263,7 +385,7 @@ describe("pluginLifecycleManager.upgrade failure safety", () => {
     const loader = makeLoader({
       prepareUpgrade: vi.fn().mockResolvedValue(preparedUpgrade(sameVersionArtifact)),
     });
-    const lifecycle = pluginLifecycleManager({} as never, { loader });
+    const lifecycle = createLifecycle(loader);
 
     const result = await lifecycle.upgrade(pluginId, { localPath: "C:\\source\\example-plugin" });
 

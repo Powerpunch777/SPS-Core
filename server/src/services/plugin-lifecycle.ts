@@ -300,8 +300,9 @@ export interface PluginLifecycleManagerOptions {
    * process, and transitions that take a plugin offline (disable, unload,
    * markError) will stop it.
    *
-   * When omitted the lifecycle manager operates in state-only mode — the
-   * caller is responsible for managing worker processes externally.
+   * When omitted and the loader has no runtime services, the lifecycle manager
+   * operates in state-only mode. Runtime-backed stop/replacement transitions
+   * require this owner so they can verify closure and fence concurrent starts.
    */
   workerManager?: PluginWorkerManager;
 
@@ -432,9 +433,8 @@ export function pluginLifecycleManager(
   // -----------------------------------------------------------------------
 
   /**
-   * Stop the worker for a plugin if one is running.
-   * This is a best-effort operation — if no worker manager is configured
-   * or no worker is running, it silently succeeds.
+   * Stop the worker for a plugin if one is running. A registered handle must
+   * be removed by the manager before this reports success.
    */
   async function stopWorkerIfRunning(
     pluginId: string,
@@ -443,16 +443,12 @@ export function pluginLifecycleManager(
     if (!workerManager) return;
     if (!workerManager.isRunning(pluginId) && !workerManager.getWorker(pluginId)) return;
 
-    try {
-      await workerManager.stopWorker(pluginId);
-      log.info({ pluginId, pluginKey }, "plugin lifecycle: worker stopped");
-      emitDomain("plugin.worker_stopped", { pluginId, pluginKey });
-    } catch (err) {
-      log.warn(
-        { pluginId, pluginKey, err: err instanceof Error ? err.message : String(err) },
-        "plugin lifecycle: failed to stop worker (best-effort)",
-      );
+    await workerManager.stopWorker(pluginId);
+    if (workerManager.getWorker(pluginId)) {
+      throw new PluginPackageMaintenanceRequiredError();
     }
+    log.info({ pluginId, pluginKey }, "plugin lifecycle: worker stopped");
+    emitDomain("plugin.worker_stopped", { pluginId, pluginKey });
   }
 
   async function activateReadyPlugin(
@@ -510,12 +506,31 @@ export function pluginLifecycleManager(
   }
 
   async function ensurePluginWorkerClosed(pluginId: string): Promise<void> {
-    if (!workerManager) throw new PluginPackageMaintenanceRequiredError();
+    if (!workerManager) {
+      // Preserve the documented metadata-only mode. A runtime-backed loader
+      // without its process owner cannot certify closure. Destructive artifact
+      // cleanup separately requires the manager in withArtifactCleanupFence.
+      if (typeof pluginLoaderInstance.hasRuntimeServices !== "function"
+        || !pluginLoaderInstance.hasRuntimeServices()) return;
+      throw new PluginPackageMaintenanceRequiredError();
+    }
     // unloadSingle is intentionally best-effort for ordinary lifecycle paths.
     // Package deletion needs a confirmed close, so retry through the manager
     // and refuse to touch artifacts if its exact handle remains registered.
     if (workerManager.getWorker(pluginId)) await workerManager.stopWorker(pluginId);
     if (workerManager.getWorker(pluginId)) throw new PluginPackageMaintenanceRequiredError();
+  }
+
+  async function withPluginWorkerStartFence<T>(pluginId: string, action: () => Promise<T>): Promise<T> {
+    if (!workerManager) {
+      if (typeof pluginLoaderInstance.hasRuntimeServices !== "function"
+        || !pluginLoaderInstance.hasRuntimeServices()) return await action();
+      throw new PluginPackageMaintenanceRequiredError();
+    }
+    if (typeof workerManager.withPluginPackageMutation !== "function") {
+      throw new PluginPackageMaintenanceRequiredError();
+    }
+    return await workerManager.withPluginPackageMutation(pluginId, action);
   }
 
   async function restoreUpgradeSnapshot(
@@ -524,43 +539,56 @@ export function pluginLifecycleManager(
     unloadCandidateRuntime: boolean,
   ): Promise<void> {
     const restoreErrors: string[] = [];
+    let previousArtifactRestored = false;
 
     // A failing loader can have registered routes, tools, jobs, or a worker
-    // before it reports activation failure. Unload while the candidate record
-    // still points at that artifact; restoring the old registry entry first
-    // would make this cleanup target ambiguous.
-    if (unloadCandidateRuntime) {
-      try {
-        await deactivatePluginRuntime(snapshot.id, snapshot.pluginKey);
-      } catch (error) {
-        restoreErrors.push(`candidate runtime cleanup failed: ${error instanceof Error ? error.message : String(error)}`);
-      }
-    }
-
+    // before it reports activation failure. Keep starts fenced and confirm the
+    // exact worker is gone before restoring the old package pointer. If closure
+    // is uncertain, leave the candidate record in place so it cannot describe
+    // a different package than the process that may still be running.
     try {
-      const restored = await registry.update(snapshot.id, {
-        packageName: snapshot.packageName,
-        packagePath: snapshot.packagePath,
-        version: snapshot.version,
-        manifest: snapshot.manifestJson as PaperclipPluginManifestV1,
+      await withPluginWorkerStartFence(snapshot.id, async () => {
+        await ensurePluginWorkerClosed(snapshot.id);
+        if (unloadCandidateRuntime) {
+          // A failed unload may leave Host handlers bound to the candidate.
+          // Do not restore the old package pointer or reactivate it unless the
+          // candidate runtime was fully unloaded and its exact worker closed.
+          await deactivatePluginRuntime(snapshot.id, snapshot.pluginKey);
+          await ensurePluginWorkerClosed(snapshot.id);
+        }
+
+        let restored: PluginRecord | null;
+        try {
+          restored = await registry.update(snapshot.id, {
+            packageName: snapshot.packageName,
+            packagePath: snapshot.packagePath,
+            version: snapshot.version,
+            manifest: snapshot.manifestJson as PaperclipPluginManifestV1,
+          }) as PluginRecord | null;
+        } catch (error) {
+          restoreErrors.push(`registry restore failed: ${error instanceof Error ? error.message : String(error)}`);
+          return;
+        }
+        if (!restored) {
+          restoreErrors.push("plugin registry record was not found while restoring the previous artifact");
+          return;
+        }
+        try {
+          const current = await requirePlugin(snapshot.id);
+          if (current.status !== snapshot.status || current.lastError !== snapshot.lastError) {
+            await transition(snapshot.id, snapshot.status, snapshot.lastError ?? null, current);
+          }
+        } catch (error) {
+          restoreErrors.push(`status restore failed: ${error instanceof Error ? error.message : String(error)}`);
+          return;
+        }
+        previousArtifactRestored = true;
       });
-      if (!restored) {
-        restoreErrors.push("plugin registry record was not found while restoring the previous artifact");
-      }
     } catch (error) {
-      restoreErrors.push(`registry restore failed: ${error instanceof Error ? error.message : String(error)}`);
+      restoreErrors.push(`candidate runtime closure or rollback failed: ${error instanceof Error ? error.message : String(error)}`);
     }
 
-    try {
-      const current = await requirePlugin(snapshot.id);
-      if (current.status !== snapshot.status || current.lastError !== snapshot.lastError) {
-        await transition(snapshot.id, snapshot.status, snapshot.lastError ?? null, current);
-      }
-    } catch (error) {
-      restoreErrors.push(`status restore failed: ${error instanceof Error ? error.message : String(error)}`);
-    }
-
-    if (reactivateReadyRuntime) {
+    if (reactivateReadyRuntime && previousArtifactRestored) {
       try {
         await activateReadyPlugin(snapshot.id);
       } catch (error) {
@@ -683,9 +711,12 @@ export function pluginLifecycleManager(
         );
       }
 
-      await deactivatePluginRuntime(pluginId, plugin.pluginKey);
-
-      const result = await transition(pluginId, "disabled", reason ?? null, plugin);
+      const result = await withPluginWorkerStartFence(pluginId, async () => {
+        await ensurePluginWorkerClosed(pluginId);
+        await deactivatePluginRuntime(pluginId, plugin.pluginKey);
+        await ensurePluginWorkerClosed(pluginId);
+        return await transition(pluginId, "disabled", reason ?? null, plugin);
+      });
       emitDomain("plugin.disabled", {
         pluginId,
         pluginKey: result.pluginKey,
@@ -889,23 +920,33 @@ export function pluginLifecycleManager(
             : []),
         ];
         let attemptedReadyRuntimeTeardown = false;
+        let mutationStarted = false;
         try {
-          if (plugin.status === "ready") {
-            attemptedReadyRuntimeTeardown = true;
-            await deactivatePluginRuntime(pluginId, plugin.pluginKey);
-          }
-          const result = await transition(
-            pluginId,
-            "upgrade_pending",
-            `Upgrade review required: ${reviewReasons.join("; ")}`,
-            plugin,
-          );
+          const result = await withPluginWorkerStartFence(pluginId, async () => {
+            if (plugin.status === "ready") {
+              // Close before unloading Host handlers. unloadSingle treats a
+              // process-stop error as best-effort for ordinary lifecycle use.
+              await ensurePluginWorkerClosed(pluginId);
+              attemptedReadyRuntimeTeardown = true;
+              mutationStarted = true;
+              await deactivatePluginRuntime(pluginId, plugin.pluginKey);
+            }
+            await ensurePluginWorkerClosed(pluginId);
+            mutationStarted = true;
+            return await transition(
+              pluginId,
+              "upgrade_pending",
+              `Upgrade review required: ${reviewReasons.join("; ")}`,
+              plugin,
+            );
+          });
           emitDomain("plugin.upgrade_pending", {
             pluginId,
             pluginKey: result.pluginKey,
           });
           return result;
         } catch (error) {
+          if (!mutationStarted) throw error;
           return await failUpgradeWithRollback(
             error,
             originalPlugin,
@@ -936,22 +977,32 @@ export function pluginLifecycleManager(
         }
         let attemptedReadyRuntimeTeardown = false;
         let candidateRuntimeMayBeActive = false;
+        let mutationStarted = false;
         try {
-          if (plugin.status === "ready") {
-            attemptedReadyRuntimeTeardown = true;
-            await deactivatePluginRuntime(pluginId, plugin.pluginKey);
-          }
-          await pluginLoaderInstance.commitPreparedUpgrade(pluginId, {
-            oldManifest,
-            newManifest,
-            discovered,
+          const result = await withPluginWorkerStartFence(pluginId, async () => {
+            if (plugin.status === "ready") {
+              // Close before unloading Host handlers. The manager fence keeps
+              // a direct Host start from slipping between closure and commit.
+              await ensurePluginWorkerClosed(pluginId);
+              attemptedReadyRuntimeTeardown = true;
+              mutationStarted = true;
+              await deactivatePluginRuntime(pluginId, plugin.pluginKey);
+            }
+            await ensurePluginWorkerClosed(pluginId);
+            mutationStarted = true;
+            await pluginLoaderInstance.commitPreparedUpgrade(pluginId, {
+              oldManifest,
+              newManifest,
+              discovered,
+            });
+            const transitioned = await transition(pluginId, "ready", null, {
+              ...plugin,
+              version: discovered.version,
+              manifestJson: newManifest,
+            } as PluginRecord);
+            candidateRuntimeMayBeActive = true;
+            return transitioned;
           });
-          const result = await transition(pluginId, "ready", null, {
-            ...plugin,
-            version: discovered.version,
-            manifestJson: newManifest,
-          } as PluginRecord);
-          candidateRuntimeMayBeActive = true;
           await activateReadyPlugin(
             pluginId,
             migrationPlan?.requiresHostApproval ? migrationPlan.reviewHash : undefined,
@@ -968,6 +1019,7 @@ export function pluginLifecycleManager(
 
           return result;
         } catch (error) {
+          if (!mutationStarted) throw error;
           return await failUpgradeWithRollback(
             error,
             originalPlugin,
@@ -1070,7 +1122,11 @@ export function pluginLifecycleManager(
         // Bouncing the worker process alone (`handle.restart()`) leaves plugin
         // schema out of sync with worker code whenever a hot reload adds a new
         // migration, which makes downstream queries fail against missing tables.
-        await deactivatePluginRuntime(pluginId, plugin.pluginKey);
+        await withPluginWorkerStartFence(pluginId, async () => {
+          await ensurePluginWorkerClosed(pluginId);
+          await deactivatePluginRuntime(pluginId, plugin.pluginKey);
+          await ensurePluginWorkerClosed(pluginId);
+        });
         await activateReadyPlugin(pluginId);
       } else {
         // No runtime activation services wired in (e.g. state-only test harness)
@@ -1079,7 +1135,19 @@ export function pluginLifecycleManager(
           { pluginId, pluginKey: plugin.pluginKey },
           "plugin lifecycle: restarting worker (runtime services unavailable; skipping migration re-apply)",
         );
-        await handle.restart();
+        await withPluginWorkerStartFence(pluginId, async () => {
+          await handle.stop();
+          const diagnostics = handle.diagnostics();
+          if (diagnostics.status !== "stopped" || diagnostics.pid !== null) {
+            throw new PluginPackageMaintenanceRequiredError();
+          }
+        });
+        // startInternal checks the manager's owner fence, so restarting the
+        // retained handle must happen after the package-mutation fence opens.
+        if (workerManager.getWorker(pluginId) !== handle) {
+          throw new PluginPackageMaintenanceRequiredError();
+        }
+        await handle.start();
         emitDomain("plugin.worker_stopped", { pluginId, pluginKey: plugin.pluginKey });
         emitDomain("plugin.worker_started", { pluginId, pluginKey: plugin.pluginKey });
       }
