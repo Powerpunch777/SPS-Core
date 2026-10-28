@@ -40,6 +40,7 @@ import { userProfileRoutes } from "./routes/user-profiles.js";
 import { sidebarBadgeRoutes } from "./routes/sidebar-badges.js";
 import { sidebarPreferenceRoutes } from "./routes/sidebar-preferences.js";
 import { spsWorkspaceSurfaceRoutes } from "./routes/sps-workspace-surfaces.js";
+import { spsWorkspacePluginConfigRoutes } from "./routes/sps-workspace-plugin-config.js";
 import { resourceMembershipRoutes } from "./routes/resource-memberships.js";
 import { inboxDismissalRoutes } from "./routes/inbox-dismissals.js";
 import { instanceSettingsRoutes } from "./routes/instance-settings.js";
@@ -71,6 +72,7 @@ import { logger } from "./middleware/logger.js";
 import { DEFAULT_LOCAL_PLUGIN_DIR, pluginLoader } from "./services/plugin-loader.js";
 import { createPluginWorkerManager, type PluginWorkerManager } from "./services/plugin-worker-manager.js";
 import { createSpsNativePluginRuntime } from "./services/sps-native-plugin-runtime.js";
+import { createSpsWorkspacePluginWorkers } from "./services/sps-workspace-plugin-workers.js";
 import { createSpsNativeNodeRuntime } from "./services/sps-native-node-runtime.js";
 import { createPluginJobScheduler } from "./services/plugin-job-scheduler.js";
 import { pluginJobStore } from "./services/plugin-job-store.js";
@@ -251,8 +253,16 @@ export async function createApp(
 
   const hostServicesDisposers = new Map<string, () => void>();
   const workerManager = opts.pluginWorkerManager ?? createPluginWorkerManager();
+  const eventBus = createPluginEventBus();
+  const workspacePluginWorkers = createSpsWorkspacePluginWorkers(db, workerManager, {
+    localPluginDir: opts.localPluginDir ?? DEFAULT_LOCAL_PLUGIN_DIR,
+    instanceInfo: { instanceId: opts.instanceId ?? "default", hostVersion: opts.hostVersion ?? "0.0.0" },
+    eventBus,
+  });
   const nativePluginRuntime = createSpsNativePluginRuntime(db, workerManager, {
     localPluginDir: opts.localPluginDir ?? DEFAULT_LOCAL_PLUGIN_DIR,
+    instanceInfo: { instanceId: opts.instanceId ?? "default", hostVersion: opts.hostVersion ?? "0.0.0" },
+    workspaceWorkers: workspacePluginWorkers,
   });
   const nativeNodeRuntime = createSpsNativeNodeRuntime(db);
 
@@ -307,7 +317,6 @@ export async function createApp(
     api.use(instanceDatabaseBackupRoutes(opts.databaseBackupService));
   }
   const pluginRegistry = pluginRegistryService(db);
-  const eventBus = createPluginEventBus();
   setPluginEventBus(eventBus);
   const jobStore = pluginJobStore(db);
   const lifecycle = pluginLifecycleManager(db, {
@@ -394,7 +403,7 @@ export async function createApp(
       { scheduler, jobStore },
       { workerManager },
       { toolDispatcher },
-      { workerManager },
+      { workerManager, workspaceWorkers: workspacePluginWorkers },
       { runtime: memoryProviderRuntime },
       {
         stagingRoot: opts.registryStagingDir
@@ -409,7 +418,11 @@ export async function createApp(
       pluginRecoveryState,
     ),
   );
-  api.use(spsWorkspaceSurfaceRoutes(db, workerManager));
+  api.use(spsWorkspaceSurfaceRoutes(db, workerManager, workspacePluginWorkers));
+  api.use(spsWorkspacePluginConfigRoutes(db, {
+    invalidate: (workspaceId, pluginId, previousRevision) =>
+      nativePluginRuntime.invalidateWorkspaceConfig(workspaceId, pluginId, previousRevision),
+  }));
   api.use(adapterRoutes());
   api.use(spsNodeRoutes(db));
   api.use(spsExecutionRoutes(db));
@@ -723,6 +736,7 @@ export async function createApp(
     pluginRuntimeShutdown = Promise.allSettled([
       Promise.resolve(pluginStartup).catch(() => undefined),
       stoppingWorkers,
+      nativePluginRuntime.shutdownWorkspaceWorkers(),
     ]).then(results => {
       const failures = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
       if (failures.length) throw new AggregateError(failures.map(result => result.reason), "Plugin runtime shutdown failed.");

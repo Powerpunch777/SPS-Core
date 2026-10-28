@@ -15,6 +15,7 @@ import { Badge } from "@/components/ui/badge";
 import { ChoosePathButton } from "@/components/PathInstructionsModal";
 import { SpsPluginExecutions } from "@/components/SpsPluginExecutions";
 import { SpsPluginUsage } from "@/components/SpsPluginUsage";
+import { SpsWorkspacePluginConfig } from "@/components/SpsWorkspacePluginConfig";
 import {
   Card,
   CardContent,
@@ -203,6 +204,10 @@ export function PluginSettings() {
         />
 
         <TabsContent value="configuration" className="space-y-6">
+          {selectedCompanyId && plugin.manifestJson.entrypoints.workspaceWorker ? (
+            <SpsWorkspacePluginConfig key={`${selectedCompanyId}:${plugin.id}`}
+              plugin={plugin} workspaceId={selectedCompanyId} />
+          ) : null}
           <div className="space-y-8">
             <section className="space-y-5">
               <h2 className="text-base font-semibold">About</h2>
@@ -318,7 +323,8 @@ export function PluginSettings() {
                     </Link>
                   </div>
                 </div>
-              ) : !hasLocalFolders && !hasExplicitAgentToolAccess && !hasMemoryProvider ? (
+              ) : !hasLocalFolders && !hasExplicitAgentToolAccess && !hasMemoryProvider
+                && !plugin.manifestJson.entrypoints.workspaceWorker ? (
                 <p className="text-sm text-muted-foreground">
                   This plugin does not require any settings.
                 </p>

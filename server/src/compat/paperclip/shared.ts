@@ -1,4 +1,5 @@
 export {
+  pluginManifestV1Schema,
   createSpsModelConnectionSchema,
   createSpsMemberDeviceRequestSchema,
   updateSpsModelConnectionStatusSchema,
@@ -26,6 +27,7 @@ export {
   upsertSpsHostProjectShareSchema,
 } from "@paperclipai/shared";
 export type {
+  JsonSchema,
   PaperclipPluginManifestV1,
   SpsMemberDevice,
   SpsMemberDeviceEvent,

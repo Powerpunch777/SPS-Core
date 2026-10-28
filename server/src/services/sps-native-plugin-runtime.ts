@@ -12,6 +12,7 @@ import type { PluginWorkerManager, WorkerInvocationAuthority } from "./plugin-wo
 import { assertSpsPluginAvailable } from "./sps-plugin-availability.js";
 import { readSpsPluginAuthorityRevision, sameSpsPluginAuthorityRevision,
   type SpsPluginAuthorityRevision } from "./sps-plugin-authority-revision.js";
+import { createSpsWorkspacePluginWorkers, type SpsWorkspacePluginWorkers } from "./sps-workspace-plugin-workers.js";
 import { spsWorkspaceSurfaceService } from "./sps-workspace-surfaces.js";
 import { resolvePluginRecoveryState } from "./sps-plugin-recovery.js";
 import { createSpsNativePluginUiAssetService, type SpsNativePluginUiAsset } from "./sps-native-plugin-ui-assets.js";
@@ -25,7 +26,13 @@ const MAX_NODES = 8192;
 const unavailable = () => new Error("Native Plugin access is unavailable.");
 
 export type SpsNativePluginOperation = "describe" | "asset" | "data" | "action";
-export type SpsNativePluginRuntimeOptions = { localPluginDir: string };
+export type SpsNativePluginRuntimeOptions = {
+  localPluginDir: string;
+  instanceInfo?: { instanceId: string; hostVersion: string };
+  workspaceWorkers?: SpsWorkspacePluginWorkers;
+  workspaceBuildServices?: Parameters<typeof createSpsWorkspacePluginWorkers>[2]["buildServices"];
+  workspaceEventBus?: Parameters<typeof createSpsWorkspacePluginWorkers>[2]["eventBus"];
+};
 
 export class SpsNativePluginUnsupportedError extends Error {
   readonly code = "native_plugin_ui_unsupported";
@@ -211,6 +218,15 @@ export function createSpsNativePluginRuntime(
   const surfaces = spsWorkspaceSurfaceService(db);
   const actions = createPluginUiActionAuthority(accessService(db));
   const uiAssets = options ? createSpsNativePluginUiAssetService(options) : null;
+  let workspaceWorkers = options?.workspaceWorkers;
+  function scopedWorkers() {
+    if (!options) throw new SpsNativePluginUnsupportedError();
+    return workspaceWorkers ??= createSpsWorkspacePluginWorkers(db, workerManager, {
+      localPluginDir: options.localPluginDir, instanceInfo: options.instanceInfo,
+      buildServices: options.workspaceBuildServices,
+      eventBus: options.workspaceEventBus,
+    });
+  }
   let active = 0, disposed = false;
   const controllers = new Set<AbortController>();
   return Object.freeze({
@@ -309,16 +325,22 @@ export function createSpsNativePluginRuntime(
         const params = actions.actionParams(selected.params, selected.workspaceId);
         let result: unknown;
         if (selected.operation === "data") {
-          result = await workerManager.call(selected.pluginId, "getData", {
+          const payload = {
             key: selected.key, companyId: selected.workspaceId, params, renderEnvironment: null,
-          }, 10_000, authority);
+          };
+          result = initial.plugin.manifestJson.entrypoints.workspaceWorker
+            ? await scopedWorkers().call(selected.workspaceId, selected.pluginId, "getData", payload, 10_000, authority)
+            : await workerManager.call(selected.pluginId, "getData", payload, 10_000, authority);
         } else {
           const actorContext = await actions.actorContext(actor, requested);
           permissionSnapshot = JSON.stringify(actorContext.permissions ?? []);
           await authorize();
-          result = await workerManager.call(selected.pluginId, "performAction", {
+          const payload = {
             key: selected.key, companyId: selected.workspaceId, params, actorContext, renderEnvironment: null,
-          }, 10_000, authority);
+          };
+          result = initial.plugin.manifestJson.entrypoints.workspaceWorker
+            ? await scopedWorkers().call(selected.workspaceId, selected.pluginId, "performAction", payload, 10_000, authority)
+            : await workerManager.call(selected.pluginId, "performAction", payload, 10_000, authority);
         }
         await authorize();
         return snapshotSpsNativePluginJson(result === undefined ? null : result, MAX_RESULT - 32);
@@ -331,6 +353,18 @@ export function createSpsNativePluginRuntime(
         controllers.delete(controller); active--;
       }
     },
-    dispose() { disposed = true; for (const controller of controllers) controller.abort(); },
+    dispose() {
+      disposed = true;
+      for (const controller of controllers) controller.abort();
+      workspaceWorkers?.closeAdmission();
+    },
+    async invalidateWorkspaceConfig(workspaceId: string, pluginId: string, previousRevision: string | null) {
+      await workspaceWorkers?.invalidate(workspaceId, pluginId, previousRevision);
+    },
+    async shutdownWorkspaceWorkers() {
+      disposed = true;
+      for (const controller of controllers) controller.abort();
+      await workspaceWorkers?.shutdown();
+    },
   });
 }

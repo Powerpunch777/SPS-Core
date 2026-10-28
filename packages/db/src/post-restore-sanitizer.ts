@@ -62,6 +62,10 @@ const UPDATE_PLANS: UpdatePlan[] = [
     assignments: { revision: "gen_random_uuid()" },
   },
   {
+    table: "sps_workspace_plugin_runtime_configs",
+    assignments: { revision: "gen_random_uuid()", updated_at: "NOW()" },
+  },
+  {
     table: "sps_model_connections",
     assignments: { status: "'disabled'", secret_id: "NULL", updated_at: "NOW()" },
   },

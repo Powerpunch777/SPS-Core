@@ -44,6 +44,50 @@ describe("plugin capability constants", () => {
 });
 
 describe("plugin manifest validators", () => {
+  it("accepts Workspace worker/config declarations only as a paired nonsecret contract", () => {
+    const base = {
+      id: "sps.workspace-runtime", apiVersion: 1 as const, version: "1.0.0", displayName: "Workspace runtime",
+      description: "Per-Workspace runtime fixture.", author: "SPS", categories: ["automation"] as const,
+      capabilities: ["jobs.schedule"] as const, entrypoints: { worker: "./worker.js" },
+    };
+    expect(pluginManifestV1Schema.safeParse({
+      ...base,
+      entrypoints: { ...base.entrypoints, workspaceWorker: "./workspace-worker.js" },
+      workspaceConfigSchema: { type: "object", properties: { mode: { type: "string" } }, additionalProperties: false },
+    }).success).toBe(true);
+    expect(pluginManifestV1Schema.safeParse({
+      ...base,
+      workspaceConfigSchema: { type: "object", additionalProperties: false },
+    }).success).toBe(false);
+    expect(pluginManifestV1Schema.safeParse({
+      ...base,
+      entrypoints: { ...base.entrypoints, workspaceWorker: "./workspace-worker.js" },
+      workspaceConfigSchema: { type: "object", properties: { token: { type: "string", format: "secret-ref" } } },
+    }).success).toBe(false);
+    expect(pluginManifestV1Schema.safeParse({
+      ...base,
+      entrypoints: { ...base.entrypoints, workspaceWorker: "./nested/workspace-worker.js" },
+      workspaceConfigSchema: { type: "object", properties: { connectionId: { type: "string", format: "uuid" } } },
+    }).success).toBe(true);
+    expect(pluginManifestV1Schema.safeParse({
+      ...base,
+      entrypoints: { ...base.entrypoints, workspaceWorker: "./workspace-worker.js" },
+      workspaceConfigSchema: { type: "object", properties: { nested: { $async: true } } },
+    }).success).toBe(false);
+    for (const workspaceWorker of ["../outside.js", "/absolute.js", "C:/worker.js", "./nested/../outside.js",
+      "nested\\worker.js", "https://example.test/worker.js", "././worker.js", "nested//worker.js", "worker.js/",
+      "worker.js?x", "worker.js#x", "worker*.js", "mailto:worker.js"]) {
+      expect(pluginManifestV1Schema.safeParse({ ...base,
+        entrypoints: { ...base.entrypoints, workspaceWorker },
+      }).success, workspaceWorker).toBe(false);
+    }
+    // Instance-wide config keeps its existing secret-ref declaration behavior.
+    expect(pluginManifestV1Schema.safeParse({
+      ...base,
+      instanceConfigSchema: { type: "object", properties: { token: { type: "string", format: "secret-ref" } } },
+    }).success).toBe(true);
+  });
+
   it("validates dependency declarations, inclusive bounds, and legacy underscore ids", () => {
     const base = {
       id: "sps_legacy.plugin", apiVersion: 1 as const, version: "1.0.0", displayName: "Dependency test", description: "Dependency test", author: "SPS", categories: ["automation"] as const, capabilities: ["jobs.schedule"] as const, entrypoints: { worker: "./worker.js" },

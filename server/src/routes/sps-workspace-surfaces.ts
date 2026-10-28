@@ -5,9 +5,13 @@ import {
   assertBoard,
   assertCompanyAccess,
   assertSpsCoreHostAuthority,
+  hasSpsCoreHostAuthority,
   logActivity,
+  accessService,
   type PluginWorkerManager,
+  type WorkerInvocationAuthority,
 } from "../compat/paperclip/control-plane.js";
+import type { SpsWorkspacePluginWorkers } from "../services/sps-workspace-plugin-workers.js";
 import { spsWorkspaceSurfaceService } from "../services/sps-workspace-surfaces.js";
 import { validate } from "../middleware/validate.js";
 
@@ -45,9 +49,11 @@ function routeParam(value: string | string[]): string {
 export function spsWorkspaceSurfaceRoutes(
   db: Db,
   workerManager?: PluginWorkerManager,
+  workspaceWorkers?: Pick<SpsWorkspacePluginWorkers, "call">,
 ) {
   const router = Router();
   const surfaces = spsWorkspaceSurfaceService(db);
+  const access = accessService(db);
 
   router.get("/companies/:companyId/workspace-shell/providers", async (req, res) => {
     const companyId = routeParam(req.params.companyId);
@@ -158,7 +164,7 @@ export function spsWorkspaceSurfaceRoutes(
       const actionId = routeParam(req.params.actionId);
       assertBoard(req);
       assertCompanyAccess(req, companyId);
-      if (!workerManager) {
+      if (!workerManager && !workspaceWorkers) {
         res.status(501).json({ error: "Plugin Inbox actions are unavailable" });
         return;
       }
@@ -169,7 +175,7 @@ export function spsWorkspaceSurfaceRoutes(
         itemId,
         actionId,
       });
-      const data = await workerManager.call(resolved.plugin.id, "performAction", {
+      const params = {
         key: resolved.declaration.action,
         params: {
           companyId,
@@ -178,14 +184,53 @@ export function spsWorkspaceSurfaceRoutes(
           opaqueReference: resolved.item.opaqueReference,
         },
         actorContext: {
-          type: "user",
+          type: "user" as const,
           userId: req.actor.userId ?? null,
           agentId: null,
           runId: req.actor.runId ?? null,
           companyId,
         },
         renderEnvironment: null,
-      });
+      };
+      let data: unknown;
+      if (resolved.plugin.manifestJson.entrypoints.workspaceWorker) {
+        if (!workspaceWorkers) {
+          res.status(501).json({ error: "Workspace Plugin Inbox actions are unavailable" });
+          return;
+        }
+        const actorJson = JSON.stringify({ type: req.actor.type, userId: req.actor.userId ?? null,
+          runId: req.actor.runId ?? null, companyId });
+        const authority: WorkerInvocationAuthority = {
+          boundWorkspaceId: companyId,
+          assertCurrent: async () => {
+            assertBoard(req);
+            assertCompanyAccess(req, companyId);
+            if (boardUserId(req) !== userId || JSON.stringify({ type: req.actor.type, userId: req.actor.userId ?? null,
+              runId: req.actor.runId ?? null, companyId }) !== actorJson) {
+              throw new Error("Plugin Inbox actor authority changed.");
+            }
+            if (!hasSpsCoreHostAuthority(req)) {
+              const membership = await access.getMembership(companyId, "user", userId);
+              if (!membership || membership.status !== "active") {
+                throw new Error("Plugin Inbox company membership is no longer active.");
+              }
+            }
+            const current = await surfaces.resolveInboxAction({ companyId, userId, itemId, actionId });
+            if (current.plugin.id !== resolved.plugin.id || current.item.id !== resolved.item.id
+              || current.declaration.action !== resolved.declaration.action
+              || !current.plugin.manifestJson.entrypoints.workspaceWorker) {
+              throw new Error("Plugin Inbox action authority changed.");
+            }
+          },
+        };
+        data = await workspaceWorkers.call(companyId, resolved.plugin.id, "performAction", params, 30_000, authority);
+      } else {
+        if (!workerManager) {
+          res.status(501).json({ error: "Plugin Inbox actions are unavailable" });
+          return;
+        }
+        data = await workerManager.call(resolved.plugin.id, "performAction", params);
+      }
       await surfaces.setInboxUserState({
         companyId,
         userId,

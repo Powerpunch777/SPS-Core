@@ -194,6 +194,21 @@ export interface WorkerStartOptions {
   onStreamNotification?: (method: string, params: Record<string, unknown>) => void;
 }
 
+interface WorkerOwner {
+  readonly workspaceId: string | null;
+  readonly pluginId: string;
+}
+
+const WORKSPACE_ID_PATTERN = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/;
+
+function workerOwnerKey(owner: WorkerOwner): string {
+  return JSON.stringify([owner.workspaceId, owner.pluginId]);
+}
+
+function assertWorkspaceId(workspaceId: string): void {
+  if (!WORKSPACE_ID_PATTERN.test(workspaceId)) throw new TypeError("Workspace worker requires a valid Workspace ID");
+}
+
 /**
  * A pending RPC call waiting for a response from the worker.
  */
@@ -255,6 +270,9 @@ interface ActiveInvocation {
 export interface PluginWorkerHandle {
   /** The plugin ID this worker serves. */
   readonly pluginId: string;
+
+  /** Workspace owner for scoped workers; omitted for the legacy Host worker. */
+  readonly workspaceId?: string;
 
   /** Current worker status. */
   readonly status: WorkerStatus;
@@ -322,6 +340,7 @@ export interface PluginWorkerHandle {
  */
 export interface WorkerDiagnostics {
   pluginId: string;
+  workspaceId?: string;
   status: WorkerStatus;
   pid: number | null;
   uptime: number | null;
@@ -351,15 +370,24 @@ export interface PluginWorkerManager {
    */
   startWorker(pluginId: string, options: WorkerStartOptions): Promise<PluginWorkerHandle>;
 
+  /** Start a worker owned by exactly one Workspace and Plugin. */
+  startWorkspaceWorker(workspaceId: string, pluginId: string, options: WorkerStartOptions): Promise<PluginWorkerHandle>;
+
   /**
    * Stop and unregister a specific plugin worker.
    */
   stopWorker(pluginId: string): Promise<void>;
 
+  /** Stop matching Workspace workers, leaving other Workspaces untouched. */
+  stopWorkspaceWorkers(workspaceId: string, pluginId?: string): Promise<void>;
+
   /**
    * Get the worker handle for a plugin.
    */
   getWorker(pluginId: string): PluginWorkerHandle | undefined;
+
+  /** Get only the worker owned by this Workspace and Plugin pair. */
+  getWorkspaceWorker(workspaceId: string, pluginId: string): PluginWorkerHandle | undefined;
 
   /**
    * Check if a worker is registered and running for a plugin.
@@ -396,6 +424,17 @@ export interface PluginWorkerManager {
     authority?: WorkerInvocationAuthority,
     terminalObserver?: (reason: "response" | "worker_exit" | "not_dispatched") => void,
   ): Promise<HostToWorkerMethods[M][1]>;
+
+  /** Call a Workspace-owned UI/data/action handler using Host-verified authority. */
+  callWorkspaceWorker<M extends HostToWorkerMethodName>(
+    workspaceId: string,
+    pluginId: string,
+    method: M,
+    params: HostToWorkerMethods[M][0],
+    timeoutMs?: number,
+    authority?: WorkerInvocationAuthority,
+    terminalObserver?: (reason: "response" | "worker_exit" | "not_dispatched") => void,
+  ): Promise<HostToWorkerMethods[M][1]>;
 }
 
 // ---------------------------------------------------------------------------
@@ -412,7 +451,16 @@ export function createPluginWorkerHandle(
   options: WorkerStartOptions,
   canStart: () => boolean = () => true,
 ): PluginWorkerHandle {
-  const log = logger.child({ service: "plugin-worker", pluginId });
+  return createPluginWorkerHandleInternal(pluginId, options, canStart);
+}
+
+function createPluginWorkerHandleInternal(
+  pluginId: string,
+  options: WorkerStartOptions,
+  canStart: () => boolean,
+  ownerWorkspaceId?: string,
+): PluginWorkerHandle {
+  const log = logger.child({ service: "plugin-worker", pluginId, ...(ownerWorkspaceId ? { workspaceId: ownerWorkspaceId } : {}) });
   const emitter = new EventEmitter();
   /**
    * Higher than default (10) to accommodate multiple subscribers to
@@ -439,6 +487,7 @@ export function createPluginWorkerHandle(
   const lateTerminalAcks = new Map<string | number, { invocationId: string; onTerminal: (reason: "response" | "worker_exit" | "not_dispatched") => void }>();
   // Optional methods reported by the worker during initialization
   let supportedMethods: string[] = [];
+  let initializing = false;
 
   // Crash tracking for exponential backoff
   let consecutiveCrashes = 0;
@@ -644,6 +693,7 @@ export function createPluginWorkerHandle(
 
   function matchesBoundCall(method: HostToWorkerMethodName, params: unknown, authority: WorkerInvocationAuthority): boolean {
     if (!matchesBoundWorkspace(deriveInvocationScope(method, params), authority)) return false;
+    if (ownerWorkspaceId !== undefined && authority.boundWorkspaceId !== ownerWorkspaceId) return false;
     if (authority.boundWorkspaceId === undefined || !isRecord(params)) return true;
     // A direct companyId must not conceal a contradictory authenticated
     // actor/tool/job/event envelope used by the receiving worker.
@@ -651,6 +701,9 @@ export function createPluginWorkerHandle(
       : method === "executeTool" ? params.runContext
       : method === "runJob" ? params.job
       : method === "onEvent" ? params.event : undefined;
+    if (ownerWorkspaceId !== undefined && method === "performAction") {
+      return isRecord(envelope) && envelope.companyId === ownerWorkspaceId;
+    }
     return envelope === undefined || (isRecord(envelope) && envelope.companyId === authority.boundWorkspaceId);
   }
 
@@ -727,9 +780,34 @@ export function createPluginWorkerHandle(
   }
 
   async function contextForWorkerMessage(message: JsonRpcRequest | JsonRpcNotification): Promise<WorkerHostCallContext> {
+    const method = message.method;
     const invocationId = readNonEmptyString(
       (message as { paperclipInvocationId?: unknown }).paperclipInvocationId,
     );
+
+    if (ownerWorkspaceId !== undefined) {
+      if (!invocationId) {
+        // Setup may read only its already Workspace-bound startup config. All
+        // other worker→Host requests require a live Host-created invocation.
+        if (initializing && method === "config.get") {
+          return { invocationScope: { companyId: ownerWorkspaceId } };
+        }
+        return { invalidInvocationScope: true };
+      }
+      const ownedEntry = activeInvocations.get(invocationId);
+      if (!ownedEntry?.authority
+        || ownedEntry.authority.boundWorkspaceId !== ownerWorkspaceId
+        || ownedEntry.scope.companyId !== ownerWorkspaceId) {
+        return { invalidInvocationScope: true };
+      }
+      try {
+        await assertInvocationCurrent(ownedEntry);
+      } catch {
+        return { invalidInvocationScope: true };
+      }
+      return { invocationScope: ownedEntry.scope };
+    }
+
     if (invocationId?.startsWith(GUARDED_INVOCATION_PREFIX) && !activeInvocations.get(invocationId)?.authority) {
       return { invalidInvocationScope: true };
     }
@@ -772,7 +850,7 @@ export function createPluginWorkerHandle(
     const hasGuardedInvocation = Array.from(activeInvocations.values()).some((entry) => entry.authority);
     const context = await contextForWorkerMessage(request);
     if (childProcess !== requestChild || processExited) return;
-    if (context.invalidInvocationScope && (hasGuardedInvocation || invocationId?.startsWith(GUARDED_INVOCATION_PREFIX))) {
+    if (context.invalidInvocationScope && (ownerWorkspaceId !== undefined || hasGuardedInvocation || invocationId?.startsWith(GUARDED_INVOCATION_PREFIX))) {
       try {
         sendMessage(createErrorResponse(
           request.id,
@@ -1249,6 +1327,7 @@ export function createPluginWorkerHandle(
       databaseNamespace: options.databaseNamespace ?? null,
     };
 
+    initializing = true;
     try {
       const result = await callInternal(
         "initialize",
@@ -1273,6 +1352,8 @@ export function createPluginWorkerHandle(
         setStatus("crashed");
       }
       throw new Error(`Worker initialize failed for "${pluginId}": ${msg}`);
+    } finally {
+      initializing = false;
     }
 
     // Reset crash counter on successful start
@@ -1677,6 +1758,8 @@ export function createPluginWorkerHandle(
       return pluginId;
     },
 
+    ...(ownerWorkspaceId !== undefined ? { workspaceId: ownerWorkspaceId } : {}),
+
     get status() {
       return status;
     },
@@ -1706,6 +1789,15 @@ export function createPluginWorkerHandle(
       authority?: WorkerInvocationAuthority,
       terminalObserver?: (reason: "response" | "worker_exit" | "not_dispatched") => void,
     ): Promise<HostToWorkerMethods[M][1]> {
+      if (ownerWorkspaceId !== undefined) {
+        const allowedHealthCheck = method === "health" && authority === undefined;
+        const allowedWorkspaceInvocation = (method === "getData" || method === "performAction")
+          && authority?.boundWorkspaceId === ownerWorkspaceId;
+        if (!allowedHealthCheck && !allowedWorkspaceInvocation) {
+          void Promise.resolve((authority?.onTerminal ?? terminalObserver)?.("not_dispatched")).catch(() => undefined);
+          return Promise.reject(invocationDenied());
+        }
+      }
       if (status !== "running" && status !== "starting") {
         void Promise.resolve((authority?.onTerminal ?? terminalObserver)?.("not_dispatched")).catch(() => undefined);
         return Promise.reject(
@@ -1718,6 +1810,7 @@ export function createPluginWorkerHandle(
     },
 
     notify(method: string, params: unknown) {
+      if (ownerWorkspaceId !== undefined) return;
       if (status !== "running") return;
       const invocationScope = deriveInvocationScope(method, params);
       const invocation = invocationScope ? registerInvocation(invocationScope, MAX_RPC_TIMEOUT_MS) : null;
@@ -1751,6 +1844,7 @@ export function createPluginWorkerHandle(
     diagnostics(): WorkerDiagnostics {
       return {
         pluginId,
+        ...(ownerWorkspaceId !== undefined ? { workspaceId: ownerWorkspaceId } : {}),
         status,
         pid: childProcess?.pid ?? null,
         uptime:
@@ -1784,6 +1878,7 @@ export interface PluginWorkerManagerOptions {
   onWorkerEvent?: (event: {
     type: "plugin.worker.crashed" | "plugin.worker.restarted";
     pluginId: string;
+    workspaceId?: string;
     code?: number | null;
     signal?: string | null;
     willRestart?: boolean;
@@ -1821,96 +1916,168 @@ export function createPluginWorkerManager(
 ): PluginWorkerManager {
   const log = logger.child({ service: "plugin-worker-manager" });
   const workers = new Map<string, PluginWorkerHandle>();
-  /** Per-plugin startup locks to prevent concurrent spawn races. */
+  /** Per-owner startup locks to prevent concurrent spawn races. */
   const startupLocks = new Map<string, Promise<PluginWorkerHandle>>();
+  const stoppingPlugins = new Set<string>();
+  const stoppingWorkspaceScopes = new Set<string>();
+  const stoppingWorkspacePlugins = new Set<string>();
+  const workspaceStopPromises = new Map<string, Promise<void>>();
+  const pluginStopPromises = new Map<string, Promise<void>>();
   let closed = false;
   let shutdownPromise: Promise<void> | null = null;
   let stoppingAll = false;
   let stopAllPromise: Promise<void> | null = null;
 
-  return {
-    async startWorker(
-      pluginId: string,
-      options: WorkerStartOptions,
-    ): Promise<PluginWorkerHandle> {
-      if (closed) {
-        throw new Error("Plugin worker manager is shut down");
-      }
-      if (stoppingAll) {
-        throw new Error("Plugin worker manager is stopping all workers");
-      }
+  const hostOwner = (pluginId: string): WorkerOwner => ({ workspaceId: null, pluginId });
+  const workspaceOwner = (workspaceId: string, pluginId: string): WorkerOwner => ({ workspaceId, pluginId });
+  const ownerOf = (handle: PluginWorkerHandle): WorkerOwner => ({
+    workspaceId: handle.workspaceId ?? null,
+    pluginId: handle.pluginId,
+  });
+  const keyOf = (owner: WorkerOwner): string => workerOwnerKey(owner);
+  const canStartOwner = (owner: WorkerOwner): boolean => !closed && !stoppingAll
+    && !stoppingPlugins.has(owner.pluginId)
+    && (owner.workspaceId === null || (!stoppingWorkspaceScopes.has(owner.workspaceId)
+      && !stoppingWorkspacePlugins.has(keyOf(owner))));
 
-      // Mutex: if a start is already in-flight for this plugin, wait for it
-      const inFlight = startupLocks.get(pluginId);
-      if (inFlight) {
-        log.warn({ pluginId }, "concurrent startWorker call — waiting for in-flight start");
-        return inFlight;
-      }
+  function rejectTerminal(observer?: WorkerInvocationAuthority["onTerminal"]): void {
+    void Promise.resolve(observer?.("not_dispatched")).catch(() => undefined);
+  }
 
-      const existing = workers.get(pluginId);
-      if (existing && existing.status !== "stopped") {
-        throw new Error(
-          `Worker already registered for plugin "${pluginId}" (status: ${existing.status})`,
-        );
-      }
+  function startOwnedWorker(owner: WorkerOwner, options: WorkerStartOptions): Promise<PluginWorkerHandle> {
+    if (Object.prototype.hasOwnProperty.call(options, "workspaceId")) {
+      throw new TypeError("Workspace ownership must be selected with startWorkspaceWorker");
+    }
+    if (closed) throw new Error("Plugin worker manager is shut down");
+    if (stoppingAll) throw new Error("Plugin worker manager is stopping all workers");
+    if (stoppingPlugins.has(owner.pluginId)) throw new Error(`Plugin worker manager is stopping plugin "${owner.pluginId}"`);
+    if (owner.workspaceId !== null && stoppingWorkspaceScopes.has(owner.workspaceId)) {
+      throw new Error(`Plugin worker manager is stopping Workspace "${owner.workspaceId}"`);
+    }
+    if (owner.workspaceId !== null && stoppingWorkspacePlugins.has(keyOf(owner))) {
+      throw new Error(`Plugin worker manager is stopping Workspace worker "${owner.pluginId}"`);
+    }
 
-      const handle = createPluginWorkerHandle(pluginId, options,
-        () => !closed && !stoppingAll && workers.get(pluginId) === handle);
-      workers.set(pluginId, handle);
+    const key = keyOf(owner);
+    const inFlight = startupLocks.get(key);
+    if (inFlight) return inFlight;
 
-      // Subscribe to crash/ready events for live event forwarding
-      if (managerOptions?.onWorkerEvent) {
-        const notify = managerOptions.onWorkerEvent;
-        handle.on("crash", (payload) => {
-          notify({
-            type: "plugin.worker.crashed",
-            pluginId: payload.pluginId,
-            code: payload.code,
-            signal: payload.signal,
-            willRestart: payload.willRestart,
-          });
-        });
-        handle.on("ready", (payload) => {
-          // Only emit restarted if this was a crash recovery (totalCrashes > 0)
-          const diag = handle.diagnostics();
-          if (diag.totalCrashes > 0) {
-            notify({
-              type: "plugin.worker.restarted",
-              pluginId: payload.pluginId,
-            });
-          }
-        });
-      }
+    const existing = workers.get(key);
+    if (existing && existing.status !== "stopped") {
+      throw new Error(`Worker already registered for plugin "${owner.pluginId}" (status: ${existing.status})`);
+    }
 
-      log.info({ pluginId }, "starting plugin worker");
+    const startOptions = owner.workspaceId === null ? options : { ...options, autoRestart: false };
+    const handle = createPluginWorkerHandleInternal(
+      owner.pluginId,
+      startOptions,
+      () => canStartOwner(owner) && workers.get(key) === handle,
+      owner.workspaceId ?? undefined,
+    );
+    workers.set(key, handle);
 
-      // Set the lock before awaiting start() to prevent concurrent spawns
-      const startPromise = handle.start().then(() => handle).finally(() => {
-        startupLocks.delete(pluginId);
+    if (managerOptions?.onWorkerEvent) {
+      const notify = managerOptions.onWorkerEvent;
+      const workspaceEvent = owner.workspaceId !== null ? { workspaceId: owner.workspaceId } : {};
+      handle.on("crash", (payload) => notify({
+        type: "plugin.worker.crashed",
+        pluginId: payload.pluginId,
+        ...workspaceEvent,
+        code: payload.code,
+        signal: payload.signal,
+        willRestart: payload.willRestart,
+      }));
+      handle.on("ready", (payload) => {
+        if (handle.diagnostics().totalCrashes > 0) {
+          notify({ type: "plugin.worker.restarted", pluginId: payload.pluginId, ...workspaceEvent });
+        }
       });
-      startupLocks.set(pluginId, startPromise);
+    }
 
-      return startPromise;
+    log.info({ pluginId: owner.pluginId, ...(owner.workspaceId ? { workspaceId: owner.workspaceId } : {}) }, "starting plugin worker");
+    let startPromise!: Promise<PluginWorkerHandle>;
+    startPromise = handle.start().then(() => handle).finally(() => {
+      if (startupLocks.get(key) === startPromise) startupLocks.delete(key);
+    });
+    startupLocks.set(key, startPromise);
+    return startPromise;
+  }
+
+  async function stopMatchingWorkers(predicate: (owner: WorkerOwner) => boolean): Promise<void> {
+    // The caller fences matching starts before entering here. Every admitted
+    // start already has a registered handle, so snapshot and stop those exact
+    // children immediately, then join their initialize promises concurrently.
+    const entries = Array.from(workers.entries()).filter(([, handle]) => predicate(ownerOf(handle)));
+    const selectedKeys = new Set(entries.map(([key]) => key));
+    const starts = Array.from(startupLocks.entries())
+      .filter(([key]) => selectedKeys.has(key))
+      .map(([, promise]) => promise);
+    const stopResultsPromise = Promise.allSettled(entries.map(async ([key, handle]) => {
+      await handle.stop();
+      const diag = handle.diagnostics();
+      if (diag.status !== "stopped" || diag.pid !== null) {
+        throw new Error(`Worker for plugin "${handle.pluginId}" did not confirm process and stdio close`);
+      }
+      if (workers.get(key) === handle) workers.delete(key);
+    }));
+    await Promise.allSettled(starts);
+    const results = await stopResultsPromise;
+    const failures = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
+    if (failures.length) {
+      throw new AggregateError(failures.map((result) => result.reason), "One or more plugin workers failed to stop");
+    }
+  }
+
+  return {
+    async startWorker(pluginId: string, options: WorkerStartOptions): Promise<PluginWorkerHandle> {
+      return startOwnedWorker(hostOwner(pluginId), options);
     },
 
-    async stopWorker(pluginId: string): Promise<void> {
-      const handle = workers.get(pluginId);
-      if (!handle) {
-        log.warn({ pluginId }, "no worker registered for plugin, nothing to stop");
-        return;
-      }
+    async startWorkspaceWorker(workspaceId: string, pluginId: string, options: WorkerStartOptions): Promise<PluginWorkerHandle> {
+      assertWorkspaceId(workspaceId);
+      return startOwnedWorker(workspaceOwner(workspaceId, pluginId), options);
+    },
 
-      log.info({ pluginId }, "stopping plugin worker");
-      await handle.stop();
-      if (workers.get(pluginId) === handle) workers.delete(pluginId);
+    stopWorker(pluginId: string): Promise<void> {
+      const existingStop = pluginStopPromises.get(pluginId);
+      if (existingStop) return existingStop;
+      stoppingPlugins.add(pluginId);
+      const stopPromise = stopMatchingWorkers((owner) => owner.pluginId === pluginId).finally(() => {
+        stoppingPlugins.delete(pluginId);
+        if (pluginStopPromises.get(pluginId) === stopPromise) pluginStopPromises.delete(pluginId);
+      });
+      pluginStopPromises.set(pluginId, stopPromise);
+      return stopPromise;
+    },
+
+    async stopWorkspaceWorkers(workspaceId: string, pluginId?: string): Promise<void> {
+      assertWorkspaceId(workspaceId);
+      const selectorKey = JSON.stringify([workspaceId, pluginId ?? null]);
+      const existingStop = workspaceStopPromises.get(selectorKey);
+      if (existingStop) return existingStop;
+      if (pluginId === undefined) stoppingWorkspaceScopes.add(workspaceId);
+      else stoppingWorkspacePlugins.add(keyOf(workspaceOwner(workspaceId, pluginId)));
+      const stopPromise = stopMatchingWorkers((owner) => owner.workspaceId === workspaceId
+        && (pluginId === undefined || owner.pluginId === pluginId)).finally(() => {
+        if (pluginId === undefined) stoppingWorkspaceScopes.delete(workspaceId);
+        else stoppingWorkspacePlugins.delete(keyOf(workspaceOwner(workspaceId, pluginId)));
+        if (workspaceStopPromises.get(selectorKey) === stopPromise) workspaceStopPromises.delete(selectorKey);
+      });
+      workspaceStopPromises.set(selectorKey, stopPromise);
+      return stopPromise;
     },
 
     getWorker(pluginId: string): PluginWorkerHandle | undefined {
-      return workers.get(pluginId);
+      return workers.get(keyOf(hostOwner(pluginId)));
+    },
+
+    getWorkspaceWorker(workspaceId: string, pluginId: string): PluginWorkerHandle | undefined {
+      assertWorkspaceId(workspaceId);
+      return workers.get(keyOf(workspaceOwner(workspaceId, pluginId)));
     },
 
     isRunning(pluginId: string): boolean {
-      const handle = workers.get(pluginId);
+      const handle = workers.get(keyOf(hostOwner(pluginId)));
       return handle?.status === "running";
     },
 
@@ -1918,22 +2085,8 @@ export function createPluginWorkerManager(
       if (stopAllPromise) return stopAllPromise;
       stoppingAll = true;
       log.info({ count: workers.size }, "stopping all plugin workers");
-      const existingWorkers = Array.from(workers.entries());
-      const inFlightStarts = Array.from(startupLocks.values());
       const current = (async () => {
-        await Promise.allSettled(inFlightStarts);
-        const results = await Promise.allSettled(existingWorkers.map(async ([pluginId, handle]) => {
-          await handle.stop();
-          const diagnostics = handle.diagnostics();
-          if (diagnostics.status !== "stopped" || diagnostics.pid !== null) {
-            throw new Error(`Worker for plugin "${pluginId}" did not confirm process exit`);
-          }
-          if (workers.get(pluginId) === handle) workers.delete(pluginId);
-        }));
-        const failures = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
-        if (failures.length) {
-          throw new AggregateError(failures.map(result => result.reason), "One or more plugin workers failed to stop");
-        }
+        await stopMatchingWorkers(() => true);
       })().finally(() => {
         stoppingAll = false;
         if (stopAllPromise === current) stopAllPromise = null;
@@ -1946,17 +2099,18 @@ export function createPluginWorkerManager(
       if (shutdownPromise) return shutdownPromise;
 
       closed = true;
-      const inFlightStarts = Array.from(startupLocks.values());
-      const existingWorkers = Array.from(workers.values());
       const current = (async () => {
-        await Promise.allSettled(inFlightStarts);
-
-        const results = await Promise.allSettled(existingWorkers.map(async (handle) => {
-          await handle.stop();
-          const diagnostics = handle.diagnostics();
+        // Terminal shutdown keeps its legacy startup-join behavior: callers
+        // awaiting start() receive its normal completion/failure before the
+        // shutdown promise settles, then every registered child is closed.
+        await Promise.allSettled(Array.from(startupLocks.values()));
+        const existingWorkers = Array.from(workers.entries());
+        const results = await Promise.allSettled(existingWorkers.map(async ([, worker]) => {
+          await worker.stop();
+          const diagnostics = worker.diagnostics();
           if (diagnostics.status !== "stopped" || diagnostics.pid !== null) {
             throw new Error(
-              `Worker for plugin "${handle.pluginId}" did not confirm process exit ` +
+              `Worker for plugin "${worker.pluginId}" did not confirm process and stdio close ` +
               `(status: ${diagnostics.status}, pid: ${diagnostics.pid ?? "none"})`,
             );
           }
@@ -1965,7 +2119,7 @@ export function createPluginWorkerManager(
         const errors: Error[] = [];
         results.forEach((result, index) => {
           if (result.status === "fulfilled") return;
-          const handle = existingWorkers[index];
+          const [, handle] = existingWorkers[index]!;
           const error = result.reason instanceof Error
             ? result.reason
             : new Error(String(result.reason));
@@ -1996,12 +2150,38 @@ export function createPluginWorkerManager(
       authority?: WorkerInvocationAuthority,
       terminalObserver?: (reason: "response" | "worker_exit" | "not_dispatched") => void,
     ): Promise<HostToWorkerMethods[M][1]> {
-      const handle = workers.get(pluginId);
+      const handle = workers.get(keyOf(hostOwner(pluginId)));
       if (!handle) {
         void Promise.resolve(terminalObserver?.("not_dispatched")).catch(() => undefined);
         return Promise.reject(
           new Error(`No worker registered for plugin "${pluginId}"`),
         );
+      }
+      return handle.call(method, params, timeoutMs, authority, terminalObserver);
+    },
+
+    callWorkspaceWorker<M extends HostToWorkerMethodName>(
+      workspaceId: string,
+      pluginId: string,
+      method: M,
+      params: HostToWorkerMethods[M][0],
+      timeoutMs?: number,
+      authority?: WorkerInvocationAuthority,
+      terminalObserver?: (reason: "response" | "worker_exit" | "not_dispatched") => void,
+    ): Promise<HostToWorkerMethods[M][1]> {
+      assertWorkspaceId(workspaceId);
+      if (!authority || authority.boundWorkspaceId !== workspaceId
+        || (method !== "getData" && method !== "performAction")) {
+        rejectTerminal(authority?.onTerminal ?? terminalObserver);
+        return Promise.reject(new JsonRpcCallError({
+          code: PLUGIN_RPC_ERROR_CODES.INVOCATION_SCOPE_DENIED,
+          message: "Workspace worker calls require matching Host authority",
+        }));
+      }
+      const handle = workers.get(keyOf(workspaceOwner(workspaceId, pluginId)));
+      if (!handle) {
+        rejectTerminal(authority.onTerminal ?? terminalObserver);
+        return Promise.reject(new Error(`No Workspace worker registered for plugin "${pluginId}"`));
       }
       return handle.call(method, params, timeoutMs, authority, terminalObserver);
     },

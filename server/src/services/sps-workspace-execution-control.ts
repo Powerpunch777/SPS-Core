@@ -11,7 +11,9 @@ export type SpsWorkspaceExecutionSnapshot = Readonly<{
   state: SpsWorkspaceExecutionState; epoch: string; revision: number; updatedAt: string | null;
 }>;
 type StopHandler = (companyId: string, reason: string, stoppedEpoch: string) => Promise<void>;
+type PluginPendingObserver = (companyId: string) => number;
 const stopHandlers = new WeakMap<object, Map<string, StopHandler>>();
+const pluginPendingObservers = new WeakMap<object, Map<string, PluginPendingObserver>>();
 const stopping = new WeakMap<object, Map<string, Promise<void>>>();
 const canonicalEpoch = /^(?:0|[1-9][0-9]*)$/;
 
@@ -75,7 +77,8 @@ export async function assertSpsWorkspaceExecutionActive(
 }
 
 /** Only the latest owner of a lane may unregister its callback. */
-export function registerSpsWorkspaceExecutionStopHandler(db: SpsWorkspaceExecutionDb, lane: string, handler: StopHandler) {
+export function registerSpsWorkspaceExecutionStopHandler(db: SpsWorkspaceExecutionDb, lane: string, handler: StopHandler,
+  observePluginPending?: PluginPendingObserver) {
   // A few compatibility route tests construct the heartbeat service without a
   // database because they exercise only public routing/auth behavior. There is
   // no durable stop fanout to register for that fixture; production callers
@@ -84,7 +87,28 @@ export function registerSpsWorkspaceExecutionStopHandler(db: SpsWorkspaceExecuti
   let handlers = stopHandlers.get(db);
   if (!handlers) { handlers = new Map(); stopHandlers.set(db, handlers); }
   handlers.set(lane, handler);
-  return () => { if (handlers?.get(lane) === handler) handlers.delete(lane); };
+  let observers = pluginPendingObservers.get(db);
+  if (!observers) { observers = new Map(); pluginPendingObservers.set(db, observers); }
+  if (observePluginPending) observers.set(lane, observePluginPending);
+  else observers.delete(lane);
+  return () => {
+    if (handlers?.get(lane) !== handler) return;
+    handlers.delete(lane);
+    if (observers?.get(lane) === observePluginPending) observers.delete(lane);
+  };
+}
+
+/** Actual local Plugin resources supplement durable Node Plugin run counts. */
+export function getSpsWorkspaceExecutionLocalPluginPending(db: SpsWorkspaceExecutionDb, companyId: string): number {
+  let pending = 0;
+  for (const observe of pluginPendingObservers.get(db)?.values() ?? []) {
+    const value = observe(companyId);
+    if (!Number.isSafeInteger(value) || value < 0 || !Number.isSafeInteger(pending + value)) {
+      throw conflict("Workspace Plugin resource state is unavailable.");
+    }
+    pending += value;
+  }
+  return pending;
 }
 
 async function persistStopIntent(tx: SpsWorkspaceExecutionDb, companyId: string, stoppedEpoch: string) {
@@ -132,7 +156,8 @@ export async function getSpsWorkspaceExecutionPending(db: SpsWorkspaceExecutionD
     db.select({ value: count() }).from(spsPluginNodeRuns).where(and(eq(spsPluginNodeRuns.companyId, companyId), inArray(spsPluginNodeRuns.status, ["queued", "claimed", "running", "cancelling"]))),
   ]);
   return Object.freeze({ agents: Number(agents[0]?.value ?? 0), jobs: Number(jobs[0]?.value ?? 0),
-    models: Number(models[0]?.value ?? 0), commands: Number(commands[0]?.value ?? 0), plugins: Number(plugins[0]?.value ?? 0) });
+    models: Number(models[0]?.value ?? 0), commands: Number(commands[0]?.value ?? 0),
+    plugins: Number(plugins[0]?.value ?? 0) + getSpsWorkspaceExecutionLocalPluginPending(db, companyId) });
 }
 
 export function spsWorkspaceExecutionControlService(db: Db) {

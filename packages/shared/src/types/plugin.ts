@@ -768,11 +768,15 @@ export interface PaperclipPluginManifestV1 {
   entrypoints: {
     /** Path to the worker entrypoint (required). */
     worker: string;
+    /** Optional independent entrypoint used for per-Workspace plugin workers. */
+    workspaceWorker?: string;
     /** Path to the UI bundle directory (required when `ui.slots` is declared). */
     ui?: string;
   };
   /** JSON Schema for operator-editable instance configuration. */
   instanceConfigSchema?: JsonSchema;
+  /** JSON Schema for nonsecret per-Workspace worker configuration; requires workspaceWorker. */
+  workspaceConfigSchema?: JsonSchema;
   /** Scheduled jobs this plugin declares. Requires `jobs.schedule` capability. */
   jobs?: PluginJobDeclaration[];
   /** Webhook endpoints this plugin declares. Requires `webhooks.receive` capability. */

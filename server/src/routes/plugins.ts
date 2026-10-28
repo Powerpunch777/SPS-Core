@@ -79,7 +79,8 @@ import { accessService } from "../services/access.js";
 import { createPluginUiActionAuthority, type PluginUiActionActor } from "../services/plugin-ui-action-authority.js";
 import type { PluginJobScheduler } from "../services/plugin-job-scheduler.js";
 import type { PluginJobStore } from "../services/plugin-job-store.js";
-import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
+import type { PluginWorkerManager, WorkerInvocationAuthority } from "../compat/paperclip/control-plane.js";
+import type { SpsWorkspacePluginWorkers } from "../services/sps-workspace-plugin-workers.js";
 import type { PluginStreamBus } from "../services/plugin-stream-bus.js";
 import type { PluginToolDispatcher } from "../services/plugin-tool-dispatcher.js";
 import type { PluginCanonicalDiagnostics } from "../services/plugin-canonical-diagnostics.js";
@@ -449,6 +450,8 @@ export interface PluginRouteToolDeps {
 export interface PluginRouteBridgeDeps {
   /** The worker manager for dispatching getData/performAction RPC calls. */
   workerManager: PluginWorkerManager;
+  /** Optional owner-scoped caller for manifests declaring entrypoints.workspaceWorker. */
+  workspaceWorkers?: Pick<SpsWorkspacePluginWorkers, "call">;
   /** Optional stream bus for SSE push from worker to UI. */
   streamBus?: PluginStreamBus;
 }
@@ -798,6 +801,53 @@ export function pluginRoutes(
       companyId: companyId ?? null,
       hostAuthority: hasSpsCoreHostAuthority(req),
     };
+  }
+
+  async function callPluginUiWorker(
+    plugin: { id: string; pluginKey: string; status: string; manifestJson: PaperclipPluginManifestV1 },
+    req: Request,
+    companyId: string | undefined,
+    method: "getData" | "performAction",
+    params: unknown,
+    actionFence?: { actor: PluginUiActionActor; requestedPermissions: ReturnType<typeof pluginUiActionAuthority.requestedPermissions>; actorContext: unknown },
+  ) {
+    if (!plugin.manifestJson.entrypoints.workspaceWorker) {
+      return bridgeDeps!.workerManager.call(plugin.id, method, params as never);
+    }
+    const workspaceWorkers = bridgeDeps?.workspaceWorkers;
+    if (!workspaceWorkers || !companyId) throw new Error("Workspace Plugin worker is unavailable.");
+
+    const actorSnapshot = actionFence?.actor ?? trustedPluginActionActor(req, companyId);
+    const actorJson = JSON.stringify(actorSnapshot);
+    const permissionJson = actionFence ? JSON.stringify(actionFence.actorContext) : undefined;
+    const authority: WorkerInvocationAuthority = {
+      boundWorkspaceId: companyId,
+      assertCurrent: async () => {
+        assertCompanyAccess(req, companyId);
+        const currentPlugin = await resolvePlugin(registry, plugin.id);
+        if (!currentPlugin || currentPlugin.status !== "ready"
+          || !currentPlugin.manifestJson.entrypoints.workspaceWorker) {
+          throw new Error("Workspace Plugin worker is unavailable.");
+        }
+        await assertCompanyPluginEnabled(currentPlugin, companyId);
+        const actor = trustedPluginActionActor(req, companyId);
+        if (JSON.stringify(actor) !== actorJson) throw new Error("Plugin UI actor authority changed.");
+        if (!hasSpsCoreHostAuthority(req)) {
+          const principalType = req.actor.type === "agent" ? "agent" : "user";
+          const principalId = principalType === "agent" ? req.actor.agentId : req.actor.userId;
+          if (!principalId) throw new Error("Plugin UI company membership is unavailable.");
+          const membership = await accessSvc.getMembership(companyId, principalType, principalId);
+          if (!membership || membership.status !== "active") throw new Error("Plugin UI company membership is no longer active.");
+        }
+        if (actionFence) {
+          const currentActorContext = await pluginUiActionAuthority.actorContext(actor, actionFence.requestedPermissions);
+          if (JSON.stringify(currentActorContext) !== permissionJson) {
+            throw new Error("Plugin UI action permissions changed.");
+          }
+        }
+      },
+    };
+    return workspaceWorkers.call(companyId, plugin.id, method, params as never, 30_000, authority);
   }
 
   async function validateToolRunContextScope(runContext: ToolRunContext): Promise<string | null> {
@@ -1938,8 +1988,10 @@ export function pluginRoutes(
     if (companyId) await assertCompanyPluginEnabled(plugin, companyId);
 
     try {
-      const result = await bridgeDeps.workerManager.call(
-        plugin.id,
+      const result = await callPluginUiWorker(
+        plugin,
+        req,
+        companyId,
         "getData",
         {
           key: body.key,
@@ -2029,18 +2081,23 @@ export function pluginRoutes(
     }
     const companyId = assertPluginBridgeScope(req, body.companyId);
     if (companyId) await assertCompanyPluginEnabled(plugin, companyId);
-    const requestedPermissions = pluginUiActionAuthority.requestedPermissions(body.params);
 
     try {
-      const result = await bridgeDeps.workerManager.call(
-        plugin.id,
+      const requestedPermissions = pluginUiActionAuthority.requestedPermissions(body.params);
+      const actor = trustedPluginActionActor(req, companyId);
+      const actorContext = await pluginUiActionAuthority.actorContext(actor, requestedPermissions);
+      const result = await callPluginUiWorker(
+        plugin,
+        req,
+        companyId,
         "performAction",
         {
           key: body.key,
           params: pluginUiActionAuthority.actionParams(body.params, companyId),
-          actorContext: await pluginUiActionAuthority.actorContext(trustedPluginActionActor(req, companyId), requestedPermissions),
+          actorContext,
           renderEnvironment: body.renderEnvironment ?? null,
         },
+        { actor, requestedPermissions, actorContext },
       );
       res.json({ data: result });
     } catch (err) {
@@ -2127,8 +2184,10 @@ export function pluginRoutes(
     if (companyId) await assertCompanyPluginEnabled(plugin, companyId);
 
     try {
-      const result = await bridgeDeps.workerManager.call(
-        plugin.id,
+      const result = await callPluginUiWorker(
+        plugin,
+        req,
+        companyId,
         "getData",
         {
           key,
@@ -2216,18 +2275,23 @@ export function pluginRoutes(
 
     const companyId = assertPluginBridgeScope(req, body?.companyId);
     if (companyId) await assertCompanyPluginEnabled(plugin, companyId);
-    const requestedPermissions = pluginUiActionAuthority.requestedPermissions(body?.params);
 
     try {
-      const result = await bridgeDeps.workerManager.call(
-        plugin.id,
+      const requestedPermissions = pluginUiActionAuthority.requestedPermissions(body?.params);
+      const actor = trustedPluginActionActor(req, companyId);
+      const actorContext = await pluginUiActionAuthority.actorContext(actor, requestedPermissions);
+      const result = await callPluginUiWorker(
+        plugin,
+        req,
+        companyId,
         "performAction",
         {
           key,
           params: pluginUiActionAuthority.actionParams(body?.params, companyId),
-          actorContext: await pluginUiActionAuthority.actorContext(trustedPluginActionActor(req, companyId), requestedPermissions),
+          actorContext,
           renderEnvironment: body?.renderEnvironment ?? null,
         },
+        { actor, requestedPermissions, actorContext },
       );
       res.json({ data: result });
     } catch (err) {

@@ -59,10 +59,15 @@ must use SPS-owned namespaces or an explicitly documented compatibility adapter.
 Existing compatibility behavior remains protected until a migration and rollback
 path is available.
 
-Plugin packages and worker lifecycle are Host-wide in the current runtime.
+Plugin packages and legacy worker lifecycle are Host-wide in the current runtime.
 Workspace activation and plugin settings are scoped separately, so one installed
 package can be available to multiple Workspaces without forcing every Workspace
 to expose or use it.
+
+Plugins may additionally declare a dedicated Workspace UI/action worker with
+separate configuration and owned process cleanup. See
+[Workspace Plugin workers](doc/SPS-WORKSPACE-PLUGIN-WORKERS.md) for the opt-in
+contract, supported APIs and isolation limits.
 
 ## Repository Map
 

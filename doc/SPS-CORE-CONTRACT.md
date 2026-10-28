@@ -2,6 +2,11 @@
 
 Status: current engineering contract
 
+Plugins may opt into a dedicated Workspace UI/action worker and per-Workspace
+runtime configuration. The ownership, authorization, compatibility and cleanup
+contract is documented in [Workspace Plugin workers](SPS-WORKSPACE-PLUGIN-WORKERS.md).
+This separate process lane does not establish an OS sandbox.
+
 Workspace-wide execution admission and cancellation are platform-owned. The
 durable pause/stop/resume contract, per-lane acknowledgement limits, Host-only
 mutation authority and compatibility requirements are specified in

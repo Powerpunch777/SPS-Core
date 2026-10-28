@@ -242,6 +242,21 @@ describe("sanitizePostRestoreDatabaseWithExecutor", () => {
     expect(legacy.calls.some((query) => query.includes('"sps_workspace_plugin_authority"'))).toBe(false);
   });
 
+  it("rotates restored Workspace plugin runtime config revision tokens", async () => {
+    const executor = fakeExecutor({
+      tables: ["sps_workspace_plugin_runtime_configs"],
+      columnsByTable: { sps_workspace_plugin_runtime_configs: ["revision", "updated_at"] },
+    });
+    await run(executor);
+    expect(executor.calls).toContain(
+      `UPDATE "sps_workspace_plugin_runtime_configs" SET "revision" = gen_random_uuid(), "updated_at" = NOW()`,
+    );
+
+    const legacy = fakeExecutor({ tables: ["account"] });
+    await run(legacy);
+    expect(legacy.calls.some((query) => query.includes('"sps_workspace_plugin_runtime_configs"'))).toBe(false);
+  });
+
   it("rolls back atomically when a scrub operation fails", async () => {
     const executor = fakeExecutor({ tables: ["session"], failOn: 'DELETE FROM "session"' });
 

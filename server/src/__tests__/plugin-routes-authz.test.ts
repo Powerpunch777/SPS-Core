@@ -25,6 +25,7 @@ const mockLifecycle = vi.hoisted(() => ({
 const mockAccess = vi.hoisted(() => ({
   canUser: vi.fn(),
   hasPermission: vi.fn(),
+  getMembership: vi.fn(),
 }));
 
 const mockWorkspaceSurfaces = vi.hoisted(() => ({
@@ -197,6 +198,7 @@ function readyPlugin() {
   };
   mockRegistry.getById.mockResolvedValue(plugin);
   mockRegistry.listInstalled.mockResolvedValue([plugin]);
+  return plugin;
 }
 
 describe.sequential("plugin install and upgrade authz", () => {
@@ -204,6 +206,7 @@ describe.sequential("plugin install and upgrade authz", () => {
     vi.clearAllMocks();
     mockAccess.canUser.mockResolvedValue(false);
     mockAccess.hasPermission.mockResolvedValue(false);
+    mockAccess.getMembership.mockResolvedValue({ status: "active" });
     mockRegistry.listInstalled.mockResolvedValue([]);
     mockWorkspaceSurfaces.deleteInboxSummariesBySourcePluginKey.mockResolvedValue(0);
   });
@@ -1043,6 +1046,77 @@ describe.sequential("plugin tool and bridge authz", () => {
       params: { view: "compact" },
       renderEnvironment: null,
     });
+  });
+
+  it.each([
+    ["legacy data", `/api/plugins/${pluginId}/bridge/data`, { key: "health", params: {} }, "getData"],
+    ["legacy action", `/api/plugins/${pluginId}/bridge/action`, { key: "sync", params: {} }, "performAction"],
+    ["url data", `/api/plugins/${pluginId}/data/health`, { params: {} }, "getData"],
+    ["url action", `/api/plugins/${pluginId}/actions/sync`, { params: {} }, "performAction"],
+  ] as const)("routes declared Workspace Worker %s through the owner-scoped caller", async (_name, path, body, method) => {
+    const plugin = readyPlugin();
+    plugin.manifestJson.entrypoints.workspaceWorker = "./workspace-worker.js";
+    mockAccess.canUser.mockResolvedValue(true);
+    const call = vi.fn(async (...args: any[]) => {
+      await args[5].assertCurrent();
+      return { ok: true };
+    });
+    const hostCall = vi.fn();
+    const { app } = await createApp(boardActor(), {}, {
+      bridgeDeps: { workerManager: { call: hostCall }, workspaceWorkers: { call } },
+    });
+    const res = await request(app).post(path).send({ ...body, companyId: companyA,
+      params: method === "performAction" ? { __paperclipRequestedPermissions: ["agents:configure"] } : body.params });
+    expect(res.status).toBe(200);
+    expect(call).toHaveBeenCalledOnce();
+    expect(call).toHaveBeenCalledWith(companyA, pluginId, method, expect.objectContaining({
+      key: method === "getData" ? "health" : "sync",
+    }), 30_000, expect.objectContaining({ boundWorkspaceId: companyA, assertCurrent: expect.any(Function) }));
+    expect(hostCall).not.toHaveBeenCalled();
+    if (method === "performAction") {
+      expect(call.mock.calls[0]?.[3]).toMatchObject({
+        params: { companyId: companyA },
+        actorContext: { type: "user", userId: "user-1", companyId: companyA, permissions: ["agents:configure"] },
+      });
+    }
+  });
+
+  it("fails closed for a declared Workspace Worker when its caller or company scope is missing", async () => {
+    const plugin = readyPlugin();
+    plugin.manifestJson.entrypoints.workspaceWorker = "./workspace-worker.js";
+    const hostCall = vi.fn().mockResolvedValue({ ok: true });
+    const { app } = await createApp(boardActor(), {}, {
+      bridgeDeps: { workerManager: { call: hostCall } },
+    });
+    const scoped = await request(app).post(`/api/plugins/${pluginId}/data/health`).send({ companyId: companyA });
+    const admin = await createApp(boardActor({ isInstanceAdmin: true, companyIds: [] }), {}, {
+      bridgeDeps: { workerManager: { call: hostCall } },
+    });
+    const unscoped = await request(admin.app).post(`/api/plugins/${pluginId}/actions/sync`).send({});
+    expect(scoped.status).toBe(502);
+    expect(unscoped.status).toBe(502);
+    expect(hostCall).not.toHaveBeenCalled();
+  });
+
+  it("revokes a Workspace action invocation when its permission snapshot changes", async () => {
+    const plugin = readyPlugin();
+    plugin.manifestJson.entrypoints.workspaceWorker = "./workspace-worker.js";
+    mockAccess.canUser.mockResolvedValue(true);
+    const call = vi.fn(async (...args: any[]) => {
+      mockAccess.canUser.mockResolvedValue(false);
+      await args[5].assertCurrent();
+      return { ok: true };
+    });
+    const hostCall = vi.fn();
+    const { app } = await createApp(boardActor(), {}, {
+      bridgeDeps: { workerManager: { call: hostCall }, workspaceWorkers: { call } },
+    });
+    const res = await request(app).post(`/api/plugins/${pluginId}/actions/sync`).send({
+      companyId: companyA, params: { __paperclipRequestedPermissions: ["agents:configure"] },
+    });
+    expect(res.status).toBe(502);
+    expect(call).toHaveBeenCalledOnce();
+    expect(hostCall).not.toHaveBeenCalled();
   });
 
   it("allows omitted-company bridge calls for instance admins as global plugin actions", async () => {

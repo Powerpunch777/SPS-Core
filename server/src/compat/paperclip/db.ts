@@ -14,6 +14,7 @@ export {
   pluginCompanySettings,
   spsPluginAuthorityCatalog,
   spsWorkspacePluginAuthority,
+  spsWorkspacePluginRuntimeConfigs,
   agents,
   agentTaskSessions,
   heartbeatRuns,
