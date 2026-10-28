@@ -43,10 +43,18 @@ async function handleMessage(message) {
   }
   if (message.method === "health") {
     if (message.params?.crash === true) {
-      writeResponse(message.id, { alive: true }, () => setTimeout(() => process.exit(17), 0));
+      writeResponse(message.id, {
+        alive: true,
+        workerPid: process.pid,
+        descendantPid: descendant?.pid ?? null,
+      }, () => setTimeout(() => process.exit(17), 0));
       return;
     }
-    writeResponse(message.id, { alive: true });
+    writeResponse(message.id, {
+      alive: true,
+      workerPid: process.pid,
+      descendantPid: descendant?.pid ?? null,
+    });
     return;
   }
   if (message.method === "shutdown") {
