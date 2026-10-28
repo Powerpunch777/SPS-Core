@@ -13,5 +13,7 @@ export type {
   PluginRecord,
   PluginWorkspaceShellDeclaration,
   Project,
+  CompanySecret,
+  CreateSpsModelConnection,
   WorkspaceRuntimeControlTarget,
 } from "@paperclipai/shared";

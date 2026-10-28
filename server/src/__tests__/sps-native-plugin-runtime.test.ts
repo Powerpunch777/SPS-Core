@@ -11,6 +11,7 @@ import {
   pluginConfig,
   plugins,
   spsDashboardLayoutItems,
+  spsWorkspacePluginRuntimeConfigs,
   spsWorkspaceShellSettings,
 } from "@paperclipai/db";
 import type { PaperclipPluginManifestV1 } from "@paperclipai/shared";
@@ -402,6 +403,91 @@ describeDatabase("SPS Native Plugin runtime adapter", () => {
     expect(afterRetargetB.catalogRevision).toBe(beforeB.catalogRevision);
     expect(afterRetargetA.workspaceRevision).not.toBe(beforeA.workspaceRevision);
     expect(afterRetargetB.workspaceRevision).not.toBe(beforeB.workspaceRevision);
+  }, 60_000);
+
+  it("enforces Workspace plugin config keys and rotates migration-backed revisions across CRUD, ABA, cascades, and truncate", async () => {
+    await seed();
+    const secondWorkspaceId = randomUUID();
+    const missingPluginId = randomUUID();
+    await db.insert(companies).values({ id: secondWorkspaceId, name: "Native runtime config Workspace B",
+      issuePrefix: `N${secondWorkspaceId.replaceAll("-", "").slice(0, 8).toUpperCase()}` });
+
+    const initialA = await readSpsPluginAuthorityRevision(db, companyId);
+    const initialB = await readSpsPluginAuthorityRevision(db, secondWorkspaceId);
+    await expect(db.insert(spsWorkspacePluginRuntimeConfigs).values({
+      workspaceId: randomUUID(), pluginId, configJson: { mode: "invalid-workspace" },
+    })).rejects.toThrow();
+    await expect(db.insert(spsWorkspacePluginRuntimeConfigs).values({
+      workspaceId: secondWorkspaceId, pluginId: missingPluginId, configJson: { mode: "invalid-plugin" },
+    })).rejects.toThrow();
+
+    const [firstA] = await db.insert(spsWorkspacePluginRuntimeConfigs).values({
+      workspaceId: companyId, pluginId, configJson: { mode: "one" },
+    }).returning();
+    expect(firstA!.revision).toMatch(/^[0-9a-f-]{36}$/i);
+    const afterInsertA = await readSpsPluginAuthorityRevision(db, companyId);
+    const afterInsertB = await readSpsPluginAuthorityRevision(db, secondWorkspaceId);
+    expect(afterInsertA.workspaceRevision).not.toBe(initialA.workspaceRevision);
+    expect(afterInsertA.catalogRevision).toBe(initialA.catalogRevision);
+    expect(afterInsertB).toEqual(initialB);
+
+    await expect(db.insert(spsWorkspacePluginRuntimeConfigs).values({
+      workspaceId: companyId, pluginId, configJson: { mode: "duplicate-key" },
+    })).rejects.toThrow();
+
+    const [updatedA] = await db.update(spsWorkspacePluginRuntimeConfigs)
+      .set({ configJson: { mode: "two" } })
+      .where(and(eq(spsWorkspacePluginRuntimeConfigs.workspaceId, companyId),
+        eq(spsWorkspacePluginRuntimeConfigs.pluginId, pluginId))).returning();
+    expect(updatedA!.revision).not.toBe(firstA!.revision);
+    const afterUpdateA = await readSpsPluginAuthorityRevision(db, companyId);
+    expect(afterUpdateA.workspaceRevision).not.toBe(afterInsertA.workspaceRevision);
+    expect((await readSpsPluginAuthorityRevision(db, secondWorkspaceId))).toEqual(initialB);
+
+    const [abaA] = await db.update(spsWorkspacePluginRuntimeConfigs)
+      .set({ configJson: { mode: "one" } })
+      .where(and(eq(spsWorkspacePluginRuntimeConfigs.workspaceId, companyId),
+        eq(spsWorkspacePluginRuntimeConfigs.pluginId, pluginId))).returning();
+    expect(abaA!.configJson).toEqual(firstA!.configJson);
+    expect(abaA!.revision).not.toBe(firstA!.revision);
+    const afterAbaA = await readSpsPluginAuthorityRevision(db, companyId);
+    expect(afterAbaA.workspaceRevision).not.toBe(afterUpdateA.workspaceRevision);
+
+    const [firstB] = await db.insert(spsWorkspacePluginRuntimeConfigs).values({
+      workspaceId: secondWorkspaceId, pluginId, configJson: { mode: "workspace-b" },
+    }).returning();
+    expect(firstB!.revision).toMatch(/^[0-9a-f-]{36}$/i);
+    const afterInsertBConfig = await readSpsPluginAuthorityRevision(db, secondWorkspaceId);
+    expect(afterInsertBConfig.workspaceRevision).not.toBe(initialB.workspaceRevision);
+    expect((await readSpsPluginAuthorityRevision(db, companyId))).toEqual(afterAbaA);
+
+    await db.delete(spsWorkspacePluginRuntimeConfigs).where(and(
+      eq(spsWorkspacePluginRuntimeConfigs.workspaceId, companyId),
+      eq(spsWorkspacePluginRuntimeConfigs.pluginId, pluginId),
+    ));
+    const afterDeleteA = await readSpsPluginAuthorityRevision(db, companyId);
+    expect(afterDeleteA.workspaceRevision).not.toBe(afterAbaA.workspaceRevision);
+    await expect(db.select().from(spsWorkspacePluginRuntimeConfigs)).resolves.toMatchObject([
+      { workspaceId: secondWorkspaceId, pluginId },
+    ]);
+    await db.insert(spsWorkspacePluginRuntimeConfigs).values({
+      workspaceId: companyId, pluginId, configJson: { mode: "cascade-target" },
+    });
+
+    await db.delete(companies).where(eq(companies.id, secondWorkspaceId));
+    const remainingAfterWorkspaceCascade = await db.select().from(spsWorkspacePluginRuntimeConfigs);
+    expect(remainingAfterWorkspaceCascade).toHaveLength(1);
+    expect(remainingAfterWorkspaceCascade[0]).toMatchObject({ workspaceId: companyId, pluginId });
+
+    await db.delete(plugins).where(eq(plugins.id, pluginId));
+    await expect(db.select().from(spsWorkspacePluginRuntimeConfigs)).resolves.toEqual([]);
+
+    const beforeTruncate = await readSpsPluginAuthorityRevision(db, companyId);
+    await db.execute(sql`TRUNCATE ONLY sps_workspace_plugin_runtime_configs`);
+    const afterTruncate = await readSpsPluginAuthorityRevision(db, companyId);
+    expect(afterTruncate.catalogRevision).not.toBe(beforeTruncate.catalogRevision);
+    expect(afterTruncate.workspaceRevision).toBe(beforeTruncate.workspaceRevision);
+    await expect(db.select().from(spsWorkspacePluginRuntimeConfigs)).resolves.toEqual([]);
   }, 60_000);
 
   it("rotates the catalog revision on TRUNCATE ONLY plugin_config and keeps a fresh Native read available", async () => {

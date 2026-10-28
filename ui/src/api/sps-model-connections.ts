@@ -1,4 +1,4 @@
-import type { CreateSpsModelConnection } from "@paperclipai/shared";
+import type { CreateSpsModelConnection } from "@/compat/paperclip/shared";
 import { api, type RequestOptions } from "./client";
 
 /** Host-only model connection row returned by the SPS Core settings API. */

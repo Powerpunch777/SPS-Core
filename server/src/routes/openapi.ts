@@ -665,6 +665,9 @@ const SPS_HOST_SECURITY = BOARD_SECURITY.map((authentication) => ({
 }));
 const SPS_HOST_AUTH_DESCRIPTION = "Host-only Core infrastructure endpoint. In the SPS Core baseline, a Board actor must use direct loopback transport with both per-launch Desktop access and separate owner-bootstrap Host proofs. A Board session or API key alone is not Host authority. Workspace access is checked separately. Existing local_implicit development authority and non-baseline instance-admin compatibility remain unchanged; this is not the Plugin capability API.";
 const SPS_HOST_OPERATIONS = new Set([
+  "GET /api/plugins/{pluginId}/companies/{companyId}/workspace-runtime-config",
+  "PUT /api/plugins/{pluginId}/companies/{companyId}/workspace-runtime-config",
+  "DELETE /api/plugins/{pluginId}/companies/{companyId}/workspace-runtime-config",
   "GET /api/companies/{companyId}/sps-executions",
   "GET /api/companies/{companyId}/sps-executions/summary",
   "GET /api/companies/{companyId}/sps-executions/{lane}/{runId}",
@@ -6006,6 +6009,41 @@ const spsModelGrantRecordSchema = z.object({
 const noStoreResponse = (response: OpenApiResponse): OpenApiResponse => ({
   ...response,
   headers: { "Cache-Control": { description: "This response is not cached.", schema: { type: "string", enum: ["no-store"] } } },
+});
+
+const workspacePluginConfigPath = "/api/plugins/{pluginId}/companies/{companyId}/workspace-runtime-config";
+const workspacePluginConfigParams = z.object({ pluginId: z.string().uuid(), companyId: z.string().uuid() });
+const workspacePluginConfigRecord = z.object({
+  workspaceId: z.string().uuid(), pluginId: z.string().uuid(), configJson: z.record(z.string(), z.unknown()),
+  revision: z.string().uuid().nullable(), updatedAt: z.string().datetime().nullable(),
+}).strict();
+const workspacePluginConfigRevision = z.object({ expectedRevision: z.string().uuid().nullable() }).strict();
+const workspacePluginConfigResponses = {
+  200: noStoreResponse(r.ok(workspacePluginConfigRecord)), 400: r.badRequest,
+  403: r.forbidden, 404: r.notFound,
+  409: { description: "Plugin is unavailable, has no valid Workspace worker, or the expected revision is stale." },
+};
+registerCurrentRoute({
+  method: "get", path: workspacePluginConfigPath, tags: ["plugins"],
+  summary: "Read Host-managed Workspace Plugin runtime configuration", params: workspacePluginConfigParams,
+  description: "Returns the dedicated Workspace config snapshot. An absent record returns empty config and null revision; global Plugin settings are never inherited. Requires a ready Plugin with a declared Workspace worker.",
+  responses: workspacePluginConfigResponses,
+});
+registerCurrentRoute({
+  method: "put", path: workspacePluginConfigPath, tags: ["plugins"],
+  summary: "Save Workspace Plugin runtime configuration", params: workspacePluginConfigParams,
+  body: workspacePluginConfigRevision.extend({ configJson: z.record(z.string(), z.unknown()) }),
+  description: "Validates nonsecret config against the inline Workspace schema and atomically compares expectedRevision. Invalidates only the previous owned runtime after commit. A saved-but-unconfirmed restart returns 503 and the saved revision; refresh explicitly before retrying. Does not replay an action or inherit Host config.",
+  responses: { ...workspacePluginConfigResponses, 422: r.unprocessable,
+    503: { description: "Invalidation is unavailable before save, or saved configuration has an unconfirmed previous-worker close; the latter returns its saved revision." } },
+});
+registerCurrentRoute({
+  method: "delete", path: workspacePluginConfigPath, tags: ["plugins"],
+  summary: "Reset Workspace Plugin runtime configuration", params: workspacePluginConfigParams,
+  body: workspacePluginConfigRevision,
+  description: "Compares expectedRevision and removes the Workspace-owned config record. Returns empty config with a null revision. Required schema fields may need configuration before the next lazy start. A post-commit restart failure returns 503; refresh explicitly before retrying.",
+  responses: { ...workspacePluginConfigResponses,
+    503: { description: "Invalidation is unavailable before reset, or reset committed but the previous owned runtime has not confirmed close." } },
 });
 
 registerCurrentRoute({

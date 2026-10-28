@@ -48,6 +48,8 @@ function restartUnconfirmed(
 /** Host-only private settings surface. Mount under `/api` in the SPS app. */
 export function spsWorkspacePluginConfigRoutes(db: Db, options: SpsWorkspacePluginConfigRouteOptions = {}) {
   const router = Router();
+  router.use("/plugins/:pluginId/companies/:companyId/workspace-runtime-config",
+    (_req, res, next) => { res.setHeader("Cache-Control", "no-store"); next(); });
   const service = createSpsWorkspacePluginConfigService(db);
 
   router.get("/plugins/:pluginId/companies/:companyId/workspace-runtime-config", async (req, res) => {

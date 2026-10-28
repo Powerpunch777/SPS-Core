@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { z } from "zod";
-import { spsWorkspaceExecutionActionSchema, type SpsWorkspaceExecutionAction } from "@paperclipai/shared";
-import type { Db } from "@paperclipai/db";
+import { spsWorkspaceExecutionActionSchema, type SpsWorkspaceExecutionAction } from "../compat/paperclip/shared.js";
+import type { Db } from "../compat/paperclip/db.js";
 import { validate } from "../middleware/validate.js";
 import { spsWorkspaceExecutionControlService } from "../services/sps-workspace-execution-control.js";
 import { assertBoard, assertCompanyAccess, assertInstanceAdmin, hasSpsCoreHostAuthority } from "./authz.js";

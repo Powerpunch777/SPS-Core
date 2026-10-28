@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { Check, Cpu, RefreshCw, ShieldCheck, X } from "lucide-react";
-import type { CompanySecret } from "@paperclipai/shared";
+import type { CompanySecret } from "@/compat/paperclip/shared";
 import { accessApi, type CurrentBoardAccess } from "@/api/access";
 import { ApiError } from "@/api/client";
 import { pluginsApi, type CompanyPluginRecord } from "@/api/plugins";

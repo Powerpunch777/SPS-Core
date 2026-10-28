@@ -32,12 +32,16 @@ export type EmbeddedPostgresTestSupport = {
   reason?: string;
   startupTermination?: EmbeddedPostgresStartupTermination;
   startupSqlState?: EmbeddedPostgresStartupSqlState;
+  startupPidFileFailure?: EmbeddedPostgresPidFileFailure;
 };
 
 export type EmbeddedPostgresStartupTermination = { kind: "exit"; code: number } | { kind: "signal" };
 export type EmbeddedPostgresStartupSqlState = "22023" | "28P01" | "3D000" | "42501" | "53100" | "53200" | "53300"
   | "53400" | "55000" | "55P03" | "57P03" | "58030" | "58P01" | "58P02" | "F0000" | "F0001"
   | "XX000" | "XX001" | "XX002";
+export type EmbeddedPostgresPidFileFailure = "pid_invalid" | "pid_mismatch" | "started_at_invalid" | "started_at_mismatch"
+  | "data_directory_not_absolute" | "data_directory_unresolvable" | "data_directory_mismatch" | "port_mismatch"
+  | "pid_file_unavailable" | "pid_file_not_regular";
 export type EmbeddedPostgresShutdownPhase = "none" | "fast_shutdown_received" | "transactions_aborting"
   | "shutdown_checkpoint_starting" | "shutdown_checkpoint_complete" | "database_shutdown_complete";
 
@@ -300,6 +304,77 @@ function normalizedPath(value: string): string {
   return process.platform === "win32" ? resolved.toLowerCase() : resolved;
 }
 
+async function inspectPostmasterDataDirectory(
+  recordedDirectory: unknown,
+  canonicalFixtureDirectory: string,
+  resolvePath: (value: string) => Promise<string> = value => fs.promises.realpath(value),
+): Promise<"matches" | "unresolvable" | "mismatch"> {
+  if (typeof recordedDirectory !== "string" || !path.isAbsolute(recordedDirectory)
+    || !path.isAbsolute(canonicalFixtureDirectory)) return "mismatch";
+  try {
+    const resolvedRecordedDirectory = await resolvePath(recordedDirectory);
+    return path.isAbsolute(resolvedRecordedDirectory)
+      && normalizedPath(resolvedRecordedDirectory) === normalizedPath(canonicalFixtureDirectory) ? "matches" : "mismatch";
+  } catch {
+    return "unresolvable";
+  }
+}
+
+/** Resolves Windows 8.3/long-path aliases only when they identify this canonical fixture. */
+export async function postmasterDataDirectoryMatches(
+  recordedDirectory: unknown,
+  canonicalFixtureDirectory: string,
+  resolvePath?: (value: string) => Promise<string>,
+): Promise<boolean> {
+  return await inspectPostmasterDataDirectory(recordedDirectory, canonicalFixtureDirectory, resolvePath) === "matches";
+}
+
+export async function validateOwnedPostmasterPidFile(
+  contents: string,
+  port: number,
+  canonicalFixtureDirectory: string,
+  expectedIdentity?: { pid: number; startedAt: number },
+  expectedChildPid?: number,
+  resolvePath?: (value: string) => Promise<string>,
+): Promise<{ pid: number; startedAt: number }> {
+  if (expectedChildPid === undefined && expectedIdentity === undefined) throw postmasterPidFileFailure("pid_mismatch");
+  const lines = contents.split(/\r?\n/);
+  const pid = Number(lines[0]);
+  const recordedDir = lines[1];
+  const startedAt = Number(lines[2]);
+  const recordedPort = Number(lines[3]);
+  if (!Number.isSafeInteger(pid) || pid <= 0) throw postmasterPidFileFailure("pid_invalid");
+  const requiredPid = expectedChildPid ?? expectedIdentity?.pid;
+  if ((expectedChildPid !== undefined && (!Number.isSafeInteger(expectedChildPid) || expectedChildPid <= 0))
+    || (requiredPid !== undefined && pid !== requiredPid)) throw postmasterPidFileFailure("pid_mismatch");
+  if (!Number.isSafeInteger(startedAt) || startedAt <= 0) throw postmasterPidFileFailure("started_at_invalid");
+  if (expectedIdentity && startedAt !== expectedIdentity.startedAt) throw postmasterPidFileFailure("started_at_mismatch");
+  if (typeof recordedDir !== "string" || !path.isAbsolute(recordedDir)) throw postmasterPidFileFailure("data_directory_not_absolute");
+  const directoryCheck = await inspectPostmasterDataDirectory(recordedDir, canonicalFixtureDirectory, resolvePath);
+  if (directoryCheck !== "matches") throw postmasterPidFileFailure(
+    directoryCheck === "unresolvable" ? "data_directory_unresolvable" : "data_directory_mismatch",
+  );
+  if (!Number.isSafeInteger(port) || recordedPort !== port) throw postmasterPidFileFailure("port_mismatch");
+  return { pid, startedAt };
+}
+
+function postmasterPidFileFailure(code: EmbeddedPostgresPidFileFailure): Error {
+  return Object.assign(new Error(`Embedded PostgreSQL test pid file validation failed (${code}).`), {
+    code: `SPS_PG_PIDFILE_${code.toUpperCase()}`,
+  });
+}
+
+function embeddedPostgresPidFileFailure(error: unknown): EmbeddedPostgresPidFileFailure | undefined {
+  const code = error && typeof error === "object" && "code" in error && typeof error.code === "string"
+    ? error.code : "";
+  const match = /^SPS_PG_PIDFILE_([A-Z_]+)$/.exec(code);
+  const failure = match?.[1]?.toLowerCase();
+  const failures: readonly EmbeddedPostgresPidFileFailure[] = ["pid_invalid", "pid_mismatch", "started_at_invalid", "started_at_mismatch",
+    "data_directory_not_absolute", "data_directory_unresolvable", "data_directory_mismatch", "port_mismatch",
+    "pid_file_unavailable", "pid_file_not_regular"];
+  return failures.find(value => value === failure);
+}
+
 async function readOwnedPostmasterPidFile(dataDir: string, port: number, fixture: FixtureIdentity) {
   const canonicalDataDir = await fs.promises.realpath(dataDir);
   await assertFixtureIdentity(dataDir, fixture);
@@ -313,36 +388,27 @@ async function readOwnedPostmasterPidFile(dataDir: string, port: number, fixture
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw error;
   }
-  if (!info.isFile() || info.isSymbolicLink()) throw new Error("Embedded PostgreSQL test pid file is not an owned regular file.");
-  const lines = (await fs.promises.readFile(pidFile, "utf8")).split(/\r?\n/);
-  const pid = Number(lines[0]);
-  const recordedDir = lines[1];
-  const startedAt = Number(lines[2]);
-  const recordedPort = Number(lines[3]);
-  if (!fixture.postmaster || !Number.isSafeInteger(pid) || pid !== fixture.postmaster.pid
-    || !Number.isSafeInteger(startedAt) || startedAt !== fixture.postmaster.startedAt
-    || typeof recordedDir !== "string" || normalizedPath(recordedDir) !== normalizedPath(canonicalDataDir)
-    || recordedPort !== port) {
-    throw new Error("Embedded PostgreSQL test pid file does not match this fixture.");
-  }
-  return { pidFile, pid };
+  if (!info.isFile() || info.isSymbolicLink()) throw postmasterPidFileFailure("pid_file_not_regular");
+  let contents: string;
+  try { contents = await fs.promises.readFile(pidFile, "utf8"); }
+  catch { throw postmasterPidFileFailure("pid_file_unavailable"); }
+  if (!fixture.postmaster) throw postmasterPidFileFailure("pid_mismatch");
+  const identity = await validateOwnedPostmasterPidFile(contents, port, canonicalDataDir, fixture.postmaster);
+  return { pidFile, pid: identity.pid };
 }
 
-async function captureOwnedPostmasterIdentity(dataDir: string, port: number, fixture: FixtureIdentity) {
+async function captureOwnedPostmasterIdentity(dataDir: string, port: number, fixture: FixtureIdentity, childPid: number | undefined) {
   await assertFixtureIdentity(dataDir, fixture);
   const pidFile = path.join(dataDir, "postmaster.pid");
-  const info = await fs.promises.lstat(pidFile);
-  if (!info.isFile() || info.isSymbolicLink()) throw new Error("Embedded PostgreSQL test pid file is not an owned regular file.");
-  const lines = (await fs.promises.readFile(pidFile, "utf8")).split(/\r?\n/);
-  const pid = Number(lines[0]);
-  const startedAt = Number(lines[2]);
-  const recordedPort = Number(lines[3]);
-  if (!Number.isSafeInteger(pid) || pid <= 0 || !Number.isSafeInteger(startedAt) || startedAt <= 0
-    || typeof lines[1] !== "string" || normalizedPath(lines[1]) !== normalizedPath(fixture.canonicalPath)
-    || recordedPort !== port) {
-    throw new Error("Embedded PostgreSQL test ready pid file does not match this fixture.");
-  }
-  fixture.postmaster = { pid, startedAt };
+  let info;
+  try { info = await fs.promises.lstat(pidFile); }
+  catch { throw postmasterPidFileFailure("pid_file_unavailable"); }
+  if (!info.isFile() || info.isSymbolicLink()) throw postmasterPidFileFailure("pid_file_not_regular");
+  let contents: string;
+  try { contents = await fs.promises.readFile(pidFile, "utf8"); }
+  catch { throw postmasterPidFileFailure("pid_file_unavailable"); }
+  if (!Number.isSafeInteger(childPid) || childPid === undefined || childPid <= 0) throw postmasterPidFileFailure("pid_mismatch");
+  fixture.postmaster = await validateOwnedPostmasterPidFile(contents, port, fixture.canonicalPath, undefined, childPid);
 }
 
 type OwnedChildTerminalPhase = "already_closed" | "close_observed" | "error_observed" | "not_observed";
@@ -544,6 +610,7 @@ export function embeddedPostgresSupportResult(
   stage: EmbeddedPostgresStartupStage,
   startupTermination?: EmbeddedPostgresStartupTermination,
   startupSqlState?: EmbeddedPostgresStartupSqlState,
+  startupPidFileFailure?: EmbeddedPostgresPidFileFailure,
 ): EmbeddedPostgresTestSupport {
   if (!startupFailed) return { supported: true };
   const category = classifyEmbeddedPostgresFailure(error, observedLogCategory, stage, startupTermination);
@@ -552,6 +619,7 @@ export function embeddedPostgresSupportResult(
     reason: `embedded Postgres ${stage} failed (${category})`,
     ...(stage === "postgres_start" && startupTermination ? { startupTermination } : {}),
     ...(stage === "postgres_start" && isEmbeddedPostgresStartupSqlState(startupSqlState) ? { startupSqlState } : {}),
+    ...(stage === "postgres_start" && startupPidFileFailure ? { startupPidFileFailure } : {}),
   };
 }
 
@@ -575,12 +643,21 @@ export function formatEmbeddedPostgresTestSupportFailure(support: EmbeddedPostgr
     if (isEmbeddedPostgresStartupSqlState(support.startupSqlState)) {
       message += `; sqlstate=${support.startupSqlState}`;
     }
+    if (isEmbeddedPostgresPidFileFailure(support.startupPidFileFailure)) {
+      message += `; pidfile=${support.startupPidFileFailure}`;
+    }
   }
   return message;
 }
 
 function isEmbeddedPostgresStartupSqlState(value: unknown): value is EmbeddedPostgresStartupSqlState {
   return typeof value === "string" && EMBEDDED_POSTGRES_STARTUP_SQLSTATES.has(value as EmbeddedPostgresStartupSqlState);
+}
+
+function isEmbeddedPostgresPidFileFailure(value: unknown): value is EmbeddedPostgresPidFileFailure {
+  return value === "pid_invalid" || value === "pid_mismatch" || value === "started_at_invalid" || value === "started_at_mismatch"
+    || value === "data_directory_not_absolute" || value === "data_directory_unresolvable" || value === "data_directory_mismatch"
+    || value === "port_mismatch" || value === "pid_file_unavailable" || value === "pid_file_not_regular";
 }
 
 function embeddedPostgresLogCategory(value: unknown): EmbeddedPostgresFailureCategory | null {
@@ -615,6 +692,7 @@ async function probeEmbeddedPostgresSupport(): Promise<EmbeddedPostgresTestSuppo
     sqlState: () => EmbeddedPostgresStartupSqlState | undefined; resetSqlState: () => void } | null = null;
   let startupTermination: EmbeddedPostgresStartupTermination | undefined;
   let startupSqlState: EmbeddedPostgresStartupSqlState | undefined;
+  let startupPidFileFailure: EmbeddedPostgresPidFileFailure | undefined;
 
   try {
     const created = await createEmbeddedPostgresTestInstance(
@@ -630,13 +708,14 @@ async function probeEmbeddedPostgresSupport(): Promise<EmbeddedPostgresTestSuppo
     startupStage = "postgres_start";
     startupDiagnostics.resetSqlState();
     await instance.start();
-    await captureOwnedPostmasterIdentity(dataDir, port, dataDirIdentity);
+    await captureOwnedPostmasterIdentity(dataDir, port, dataDirIdentity, instance.process?.pid);
   } catch (error) {
     startupFailed = true;
     startupError = error;
     if (startupStage === "postgres_start") {
       startupTermination = embeddedPostgresStartupTermination(instance?.process);
       startupSqlState = startupDiagnostics?.sqlState();
+      startupPidFileFailure = embeddedPostgresPidFileFailure(error);
     }
   }
   try {
@@ -649,13 +728,14 @@ async function probeEmbeddedPostgresSupport(): Promise<EmbeddedPostgresTestSuppo
   } catch (cleanupError) {
     if (startupFailed) {
       const diagnostic = embeddedPostgresSupportResult(true, startupError, startupDiagnostics?.logCategory ?? null, startupStage,
-        startupTermination, startupSqlState);
-      throw new AggregateError([new Error(diagnostic.reason), cleanupError], `Embedded PostgreSQL support probe failed (${diagnostic.reason}); cleanup also failed.`);
+        startupTermination, startupSqlState, startupPidFileFailure);
+      const safeDiagnostic = formatEmbeddedPostgresTestSupportFailure(diagnostic);
+      throw new AggregateError([new Error(safeDiagnostic), cleanupError], `Embedded PostgreSQL support probe failed (${safeDiagnostic}); cleanup also failed.`);
     }
     throw cleanupError;
   }
   return embeddedPostgresSupportResult(startupFailed, startupError, startupDiagnostics?.logCategory ?? null, startupStage,
-    startupTermination, startupSqlState);
+    startupTermination, startupSqlState, startupPidFileFailure);
 }
 
 export async function getEmbeddedPostgresTestSupport(): Promise<EmbeddedPostgresTestSupport> {
@@ -688,7 +768,7 @@ export async function startEmbeddedPostgresTestDatabase(
     stage = "postgres_start";
     startupDiagnostics.resetSqlState();
     await instance.start();
-    await captureOwnedPostmasterIdentity(dataDir, port, dataDirIdentity);
+    await captureOwnedPostmasterIdentity(dataDir, port, dataDirIdentity, instance.process?.pid);
 
     const adminConnectionString = `postgres://paperclip:paperclip@127.0.0.1:${port}/postgres`;
     stage = "create_database";
@@ -713,8 +793,10 @@ export async function startEmbeddedPostgresTestDatabase(
     // lifecycle and from recognized log patterns; never retain raw output.
     const startupTermination = stage === "postgres_start" ? embeddedPostgresStartupTermination(instance?.process) : undefined;
     const startupSqlState = stage === "postgres_start" ? startupDiagnostics?.sqlState() : undefined;
+    const startupPidFileFailure = stage === "postgres_start" ? embeddedPostgresPidFileFailure(error) : undefined;
     const category = classifyEmbeddedPostgresFailure(error, startupDiagnostics?.logCategory ?? null, stage, startupTermination);
     const sqlStateSuffix = isEmbeddedPostgresStartupSqlState(startupSqlState) ? `; sqlstate=${startupSqlState}` : "";
+    const pidFileSuffix = isEmbeddedPostgresPidFileFailure(startupPidFileFailure) ? `; pidfile=${startupPidFileFailure}` : "";
     try {
       if (dataDir && dataDirIdentity && port !== null && instance) {
         await stopEmbeddedPostgresTestInstance(dataDir, port, instance, dataDirIdentity, {
@@ -723,9 +805,9 @@ export async function startEmbeddedPostgresTestDatabase(
         await cleanupEmbeddedPostgresTestDirs(dataDir, dataDirIdentity);
       }
     } catch (cleanupError) {
-      throw new AggregateError([new Error(`Embedded PostgreSQL ${stage} failed (${category})${sqlStateSuffix}.`), cleanupError],
-        `Failed to start embedded PostgreSQL test database (stage=${stage}; category=${category}${sqlStateSuffix}); fixture cleanup also failed.`);
+      throw new AggregateError([new Error(`Embedded PostgreSQL ${stage} failed (${category})${sqlStateSuffix}${pidFileSuffix}.`), cleanupError],
+        `Failed to start embedded PostgreSQL test database (stage=${stage}; category=${category}${sqlStateSuffix}${pidFileSuffix}); fixture cleanup also failed.`);
     }
-    throw new Error(`Failed to start embedded PostgreSQL test database (stage=${stage}; category=${category}${sqlStateSuffix}).`);
+    throw new Error(`Failed to start embedded PostgreSQL test database (stage=${stage}; category=${category}${sqlStateSuffix}${pidFileSuffix}).`);
   }
 }

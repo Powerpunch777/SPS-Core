@@ -204,7 +204,7 @@ export function PluginSettings() {
         />
 
         <TabsContent value="configuration" className="space-y-6">
-          {selectedCompanyId && plugin.manifestJson.entrypoints.workspaceWorker ? (
+          {selectedCompanyId && plugin.manifestJson.entrypoints?.workspaceWorker ? (
             <SpsWorkspacePluginConfig key={`${selectedCompanyId}:${plugin.id}`}
               plugin={plugin} workspaceId={selectedCompanyId} />
           ) : null}
@@ -324,7 +324,7 @@ export function PluginSettings() {
                   </div>
                 </div>
               ) : !hasLocalFolders && !hasExplicitAgentToolAccess && !hasMemoryProvider
-                && !plugin.manifestJson.entrypoints.workspaceWorker ? (
+                && !plugin.manifestJson.entrypoints?.workspaceWorker ? (
                 <p className="text-sm text-muted-foreground">
                   This plugin does not require any settings.
                 </p>

@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ChildProcess } from "node:child_process";
 import { classifyEmbeddedPostgresFailure, createEmbeddedPostgresShutdownPhaseObserver, createEmbeddedPostgresStartupSqlStateObserver,
   embeddedPostgresStartupTermination, embeddedPostgresSupportResult, formatEmbeddedPostgresTestSupportFailure, classifyPgCtlFailure, stopEmbeddedPostgresTestInstance,
+  postmasterDataDirectoryMatches, validateOwnedPostmasterPidFile,
   type EmbeddedPostgresInstance, type FixtureIdentity } from "./test-embedded-postgres.js";
 
 const tempDirs: string[] = [];
@@ -133,6 +134,39 @@ describe("embedded Postgres test cleanup", () => {
     expect(observer.sqlState()).toBeUndefined();
   });
 
+  it("accepts a canonicalized path alias only when it resolves to this absolute fixture", async () => {
+    const expected = path.resolve(os.tmpdir(), "owned-fixture");
+    const alias = path.resolve(os.tmpdir(), "OWNED~1");
+    const other = path.resolve(os.tmpdir(), "other-fixture");
+    const resolveAlias = async (value: string) => value === alias ? expected : value;
+    expect(await postmasterDataDirectoryMatches(alias, expected, resolveAlias)).toBe(true);
+    expect(await postmasterDataDirectoryMatches(other, expected, resolveAlias)).toBe(false);
+    expect(await postmasterDataDirectoryMatches("relative\\owned-fixture", expected, resolveAlias)).toBe(false);
+
+    const record = `${43210}\n${alias}\n1798000000\n54389\n`;
+    await expect(validateOwnedPostmasterPidFile(record, 54389, expected, undefined, 43210, resolveAlias))
+      .resolves.toEqual({ pid: 43210, startedAt: 1798000000 });
+    await expect(validateOwnedPostmasterPidFile(`${43210}\n${other}\n1798000000\n54389\n`, 54389,
+      expected, undefined, 43210, resolveAlias)).rejects.toMatchObject({ code: "SPS_PG_PIDFILE_DATA_DIRECTORY_MISMATCH" });
+  });
+
+  it("binds the ready pid file to the actual spawned Postgres child and keeps other checks strict", async () => {
+    const dataDir = path.resolve(os.tmpdir(), "owned-postgres-fixture");
+    const record = `${43210}\n${dataDir}\n1798000000\n54389\n`;
+    const resolvePath = async (value: string) => value;
+    await expect(validateOwnedPostmasterPidFile(record, 54389, dataDir, undefined, 43210, resolvePath))
+      .resolves.toEqual({ pid: 43210, startedAt: 1798000000 });
+    await expect(validateOwnedPostmasterPidFile(record, 54389, dataDir, undefined, undefined, resolvePath))
+      .rejects.toMatchObject({ code: "SPS_PG_PIDFILE_PID_MISMATCH" });
+    await expect(validateOwnedPostmasterPidFile(record, 54389, dataDir, undefined, 43211, resolvePath))
+      .rejects.toMatchObject({ code: "SPS_PG_PIDFILE_PID_MISMATCH" });
+    await expect(validateOwnedPostmasterPidFile(`${43210}\n${dataDir}\n1798000001\n54389\n`, 54389,
+      dataDir, { pid: 43210, startedAt: 1798000000 }, undefined, resolvePath))
+      .rejects.toMatchObject({ code: "SPS_PG_PIDFILE_STARTED_AT_MISMATCH" });
+    await expect(validateOwnedPostmasterPidFile(`${43210}\n${dataDir}\n1798000000\n54390\n`, 54389,
+      dataDir, undefined, 43210, resolvePath)).rejects.toMatchObject({ code: "SPS_PG_PIDFILE_PORT_MISMATCH" });
+  });
+
   it("formats only fixed startup category, bounded exit metadata, and allowlisted startup SQLSTATE", () => {
     const support = embeddedPostgresSupportResult(true, undefined, null, "postgres_start", { kind: "exit", code: 1 }, "28P01");
     expect(support).toEqual({
@@ -167,6 +201,17 @@ describe("embedded Postgres test cleanup", () => {
       startupTermination: { kind: "exit", code: 1 },
       startupSqlState: "28P01",
     })).toBe("embedded Postgres test support is available");
+  });
+
+  it("formats only an allowlisted startup pid-file validation field", () => {
+    expect(formatEmbeddedPostgresTestSupportFailure(embeddedPostgresSupportResult(true, undefined, null,
+      "postgres_start", { kind: "exit", code: 1 }, undefined, "data_directory_mismatch")))
+      .toBe("embedded Postgres postgres_start failed (process_exited_before_ready); child_exit=1; pidfile=data_directory_mismatch");
+    expect(formatEmbeddedPostgresTestSupportFailure({
+      supported: false,
+      reason: "embedded Postgres postgres_start failed (other)",
+      startupPidFileFailure: "private-path" as never,
+    })).toBe("embedded Postgres postgres_start failed (other)");
   });
 
   it("uses pg_ctl for the exact owned pid-file and waits for child close before clearing its hook handle", async () => {
@@ -263,12 +308,12 @@ describe("embedded Postgres test cleanup", () => {
   it("preserves a pid file whose port does not match this fixture and never invokes pg_ctl", async () => {
     const value = fixture();
     const spawnPgCtl = vi.fn();
-    writeFileSync(value.pidFile, `${value.pid}\n${value.dataDir}\n0\n${value.port + 1}\n`, "utf8");
+    writeFileSync(value.pidFile, `${value.pid}\n${value.dataDir}\n${value.dataDirIdentity.postmaster?.startedAt}\n${value.port + 1}\n`, "utf8");
 
     await expect(stopEmbeddedPostgresTestInstance(value.dataDir, value.port, value.instance, value.dataDirIdentity, {
       resolvePgCtl: async () => "pg_ctl-fixture",
       spawnPgCtl: spawnPgCtl as never,
-    })).rejects.toThrow("does not match this fixture");
+    })).rejects.toMatchObject({ code: "SPS_PG_PIDFILE_PORT_MISMATCH" });
 
     expect(spawnPgCtl).not.toHaveBeenCalled();
     expect(value.instance.process).toBe(value.child);
@@ -284,7 +329,7 @@ describe("embedded Postgres test cleanup", () => {
     await expect(stopEmbeddedPostgresTestInstance(value.dataDir, value.port, value.instance, value.dataDirIdentity, {
       resolvePgCtl: async () => "pg_ctl-fixture",
       spawnPgCtl: spawnPgCtl as never,
-    })).rejects.toThrow("does not match this fixture");
+    })).rejects.toMatchObject({ code: "SPS_PG_PIDFILE_PID_MISMATCH" });
 
     expect(spawnPgCtl).not.toHaveBeenCalled();
     expect(value.child.listenerCount("close")).toBe(0);

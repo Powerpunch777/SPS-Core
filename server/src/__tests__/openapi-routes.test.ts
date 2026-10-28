@@ -53,6 +53,7 @@ const apiPrefixes: Record<string, string> = {
   "sps-native-pairings.ts": "/api",
   "sps-nodes.ts": "/api",
   "sps-workspace-surfaces.ts": "/api",
+  "sps-workspace-plugin-config.ts": "/api",
   "sps-workspace-sources.ts": "/api",
   "teams-catalog.ts": "/api",
   "user-profiles.ts": "/api",
@@ -62,6 +63,9 @@ const ROUTE_LITERAL_PATTERN = /router\.(get|post|put|patch|delete)\(\s*["'`]([^"
 const ROUTER_METHOD_PATTERN = /router\.(get|post|put|patch|delete)\(/;
 const HTTP_METHODS = new Set(["get", "put", "post", "delete", "options", "head", "patch", "trace"]);
 const spsHostOperations = [
+  ["get", "/api/plugins/{pluginId}/companies/{companyId}/workspace-runtime-config"],
+  ["put", "/api/plugins/{pluginId}/companies/{companyId}/workspace-runtime-config"],
+  ["delete", "/api/plugins/{pluginId}/companies/{companyId}/workspace-runtime-config"],
   ["get", "/api/companies/{companyId}/sps-executions"],
   ["get", "/api/companies/{companyId}/sps-executions/summary"],
   ["get", "/api/companies/{companyId}/sps-executions/{lane}/{runId}"],

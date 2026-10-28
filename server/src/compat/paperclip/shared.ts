@@ -12,6 +12,7 @@ export {
   isAgentStatusAssignableToWork,
   isAgentStatusInvokable,
   reportSpsNodeRunnerAvailabilitySchema,
+  spsWorkspaceExecutionActionSchema,
   spsNodeCapabilityForAdapter,
   spsNodeCommandCompleteSchema,
   spsPluginNodeRunCompleteSchema,
@@ -36,4 +37,5 @@ export type {
   PluginRecord,
   PluginWorkspaceShellDeclaration,
   SpsNodeRunnerProfile,
+  SpsWorkspaceExecutionAction,
 } from "@paperclipai/shared";

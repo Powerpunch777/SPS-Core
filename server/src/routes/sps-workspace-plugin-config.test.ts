@@ -60,10 +60,12 @@ describe("SPS Workspace Plugin config routes", () => {
   it("requires Host authority for reads even when the caller has Workspace access", async () => {
     const denied = await request(createApp(memberActor)).get(endpoint);
     expect(denied.status).toBe(403);
+    expect(denied.headers["cache-control"]).toBe("no-store");
     expect(configService.get).not.toHaveBeenCalled();
 
     const allowed = await request(createApp(hostActor)).get(endpoint);
     expect(allowed.status).toBe(200);
+    expect(allowed.headers["cache-control"]).toBe("no-store");
     expect(allowed.body).toMatchObject({ workspaceId, pluginId, configJson: {}, revision: currentRevision });
     expect(configService.get).toHaveBeenCalledExactlyOnceWith(workspaceId, pluginId);
   });
