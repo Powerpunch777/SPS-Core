@@ -24,6 +24,11 @@ const fakes = vi.hoisted(() => ({
 }));
 
 vi.mock("node:child_process", async (importOriginal) => ({ ...await importOriginal<typeof import("node:child_process")>(), fork: fakes.fork }));
+vi.mock("../services/plugin-worker-process.js", () => ({
+  preparePluginWorkerProcess: () => undefined,
+  spawnPluginWorkerProcess: (...args: unknown[]) => fakes.fork(...args),
+  getPluginWorkerProcessOwnership: () => null,
+}));
 vi.mock("../services/plugin-registry.js", () => ({ pluginRegistryService: () => ({ getById: async () => fakes.plugin }) }));
 vi.mock("../services/sps-workspace-plugin-config.js", async (importOriginal) => ({
   ...await importOriginal<typeof import("../services/sps-workspace-plugin-config.js")>(),

@@ -11,6 +11,11 @@ vi.mock("node:child_process", async (importOriginal) => ({
   ...await importOriginal<typeof import("node:child_process")>(),
   fork: childProcessMock.fork,
 }));
+vi.mock("../services/plugin-worker-process.js", () => ({
+  preparePluginWorkerProcess: () => undefined,
+  spawnPluginWorkerProcess: (...args: unknown[]) => childProcessMock.fork(...args),
+  getPluginWorkerProcessOwnership: () => null,
+}));
 
 class FakeChild extends EventEmitter {
   readonly pid: number;

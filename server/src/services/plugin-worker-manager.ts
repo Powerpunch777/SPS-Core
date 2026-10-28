@@ -18,7 +18,7 @@
  * @see PLUGIN_SPEC.md §13 — Host-Worker Protocol
  */
 
-import { fork, type ChildProcess } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { createInterface, type Interface as ReadlineInterface } from "node:readline";
@@ -54,6 +54,11 @@ import type {
 } from "@paperclipai/plugin-sdk";
 import { logger } from "../middleware/logger.js";
 import { describeSpsHostSupport } from "./sps-host-support.js";
+import {
+  preparePluginWorkerProcess,
+  spawnPluginWorkerProcess,
+  getPluginWorkerProcessOwnership,
+} from "./plugin-worker-process.js";
 import {
   PluginPackageMaintenanceRequiredError,
   withPluginPackageMutationPermit,
@@ -1200,6 +1205,12 @@ function createPluginWorkerHandleInternal(
   // Process lifecycle
   // -----------------------------------------------------------------------
 
+  function workerProcessId(child: ChildProcess | null): number | null {
+    if (!child) return null;
+    const ownership = getPluginWorkerProcessOwnership(child);
+    return ownership ? ownership.processId() : child.pid ?? null;
+  }
+
   function spawnProcess(): ChildProcess {
     // Security: Do NOT spread process.env into the worker. Plugins should only
     // receive a minimal, controlled environment to prevent leaking host
@@ -1213,12 +1224,9 @@ function createPluginWorkerHandleInternal(
       TZ: process.env.TZ ?? "UTC",
     };
 
-    const child = fork(options.entrypointPath, [], {
-      stdio: ["pipe", "pipe", "pipe", "ipc"],
+    const child = spawnPluginWorkerProcess(options.entrypointPath, {
       execArgv: options.execArgv ?? [],
       env: workerEnv,
-      // Don't let the child keep the parent alive
-      detached: false,
     });
 
     streamOwnerGeneration = randomUUID();
@@ -1244,7 +1252,9 @@ function createPluginWorkerHandleInternal(
 
     // `exit` means the process has terminated; stdio may still be open.
     child.on("exit", (code, signal) => {
-      handleProcessExit(child, code, signal);
+      // A supervisor exit alone does not certify its owned process tree. Keep
+      // the public exit/terminal acknowledgments fenced until scope closure.
+      handleProcessExit(child, code, signal, !getPluginWorkerProcessOwnership(child));
     });
 
     // ChildProcess `close` follows exit and all stdio closure. Do not release
@@ -1310,13 +1320,37 @@ function createPluginWorkerHandleInternal(
     setStatus("crashed");
   }
 
+  const ownedCloseJoins = new WeakMap<ChildProcess, Promise<void>>();
+
   function handleProcessClose(
     child: ChildProcess,
     code: number | null,
     signal: NodeJS.Signals | null,
+    ownedScopeConfirmed = false,
   ): void {
     if (childProcess !== child) return;
     if (!processExited) handleProcessExit(child, code, signal, false);
+    const ownership = getPluginWorkerProcessOwnership(child);
+    if (ownership && !ownedScopeConfirmed) {
+      if (ownedCloseJoins.has(child)) return;
+      const joined = ownership.waitForClosure().then(() => {
+        if (ownership.hasUnconfirmed()) throw new Error("Plugin worker process-tree closure is unconfirmed.");
+        handleProcessClose(child, code, signal, true);
+      }).catch(() => {
+        if (childProcess !== child) return;
+        // Retain this exact generation and its terminal callbacks. A dead
+        // helper cannot be used as proof that its descendants stopped.
+        setStatus("crashed");
+        cancelPendingRestart();
+        log.error("plugin worker process-tree closure is unconfirmed; owner retained");
+        if (emitter.listenerCount("error") > 0) {
+          emitter.emit("error", { pluginId, error: new Error("Plugin worker process-tree closure is unconfirmed.") });
+        }
+      });
+      ownedCloseJoins.set(child, joined);
+      return;
+    }
+    if (ownership) emitter.emit("exit", { pluginId, code, signal });
 
     // At close, all stdio is drained. Any RPC without a buffered final
     // response is now terminal and may receive worker_exit acknowledgement.
@@ -1493,6 +1527,20 @@ function createPluginWorkerHandleInternal(
     setStatus("starting");
     stderrExcerpt = "";
 
+    try {
+      const preparation = preparePluginWorkerProcess();
+      if (preparation) await preparation;
+      // Compilation may have yielded while a stop/shutdown retired this owner.
+      // Recheck before the synchronous spawn, assignment and listener setup.
+      assertManagerAcceptsStart();
+      if (intentionalStop || currentStatus() !== "starting") {
+        throw new Error(`Worker for plugin "${pluginId}" was stopped before process startup`);
+      }
+    } catch (error) {
+      if (currentStatus() === "starting") setStatus("crashed");
+      throw error;
+    }
+
     const child = spawnProcess();
     childProcess = child;
     processExited = false;
@@ -1513,6 +1561,11 @@ function createPluginWorkerHandleInternal(
 
     initializing = true;
     try {
+      const ownership = getPluginWorkerProcessOwnership(child);
+      if (ownership) await ownership.ready;
+      if (intentionalStop || currentStatus() !== "starting") {
+        throw new Error("Worker was stopped before initialize");
+      }
       const result = await callInternal(
         "initialize",
         initParams,
@@ -1544,7 +1597,7 @@ function createPluginWorkerHandleInternal(
     consecutiveCrashes = 0;
     setStatus("running");
     emitter.emit("ready", { pluginId });
-    log.info({ pid: child.pid }, "worker process started and initialized");
+    log.info({ pid: workerProcessId(child) }, "worker process started and initialized");
   }
 
   async function stopInternal(): Promise<void> {
@@ -1698,6 +1751,22 @@ function createPluginWorkerHandleInternal(
     });
   }
 
+  const ownedTerminations = new WeakMap<ChildProcess, Promise<unknown>>();
+
+  function requestOwnedTermination(child: ChildProcess): Promise<unknown> {
+    const existing = ownedTerminations.get(child);
+    if (existing) return existing;
+    const ownership = getPluginWorkerProcessOwnership(child);
+    const operation = ownership
+      ? Promise.resolve().then(() => ownership.terminate())
+      : Promise.reject(new Error("Plugin worker process ownership is unavailable."));
+    // Escalation may time out before the exact scope confirms closure. Keep
+    // observing this same request; never turn the timeout into exit evidence.
+    void operation.catch(() => {});
+    ownedTerminations.set(child, operation);
+    return operation;
+  }
+
   /** Send the final signal and spend the existing final-drain budget awaiting close. */
   async function killWithSignalAndWaitForClose(
     signal: NodeJS.Signals,
@@ -1705,6 +1774,10 @@ function createPluginWorkerHandleInternal(
   ): Promise<boolean> {
     const child = childProcess;
     if (!child) return true;
+    if (getPluginWorkerProcessOwnership(child)) {
+      requestOwnedTermination(child);
+      return waitForClose(waitMs);
+    }
     try {
       if (childProcess === child && !processExited) child.kill(signal);
     } catch {
@@ -1717,6 +1790,17 @@ function createPluginWorkerHandleInternal(
     signal: NodeJS.Signals,
     waitMs: number,
   ): Promise<void> {
+    const ownedChild = childProcess;
+    if (ownedChild && getPluginWorkerProcessOwnership(ownedChild)) {
+      const termination = requestOwnedTermination(ownedChild);
+      return new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(resolve, waitMs);
+        void termination.then(() => { clearTimeout(timer); resolve(); }, () => {
+          clearTimeout(timer);
+          reject(new Error("Plugin worker process-tree closure is unconfirmed."));
+        });
+      });
+    }
     return new Promise<void>((resolve) => {
       const child = childProcess;
       if (!child || processExited) {
@@ -1746,6 +1830,11 @@ function createPluginWorkerHandleInternal(
     intentionalStop = true;
     const child = childProcess;
     if (!child) return;
+    if (getPluginWorkerProcessOwnership(child)) {
+      requestOwnedTermination(child);
+      if (childProcess === child) await waitForClose(1_000);
+      return;
+    }
     try {
       if (childProcess === child && !processExited) child.kill("SIGKILL");
     } catch {
@@ -2033,7 +2122,7 @@ function createPluginWorkerHandleInternal(
         pluginId,
         ...(ownerWorkspaceId !== undefined ? { workspaceId: ownerWorkspaceId } : {}),
         status,
-        pid: childProcess?.pid ?? null,
+        pid: workerProcessId(childProcess),
         uptime:
           startedAt !== null && status === "running"
             ? Date.now() - startedAt
