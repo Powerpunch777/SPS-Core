@@ -10,6 +10,8 @@ import { pluginRegistryService } from "./plugin-registry.js";
 import { createPluginUiActionAuthority } from "./plugin-ui-action-authority.js";
 import type { PluginWorkerManager, WorkerInvocationAuthority } from "./plugin-worker-manager.js";
 import { assertSpsPluginAvailable } from "./sps-plugin-availability.js";
+import { readSpsPluginAuthorityRevision, sameSpsPluginAuthorityRevision,
+  type SpsPluginAuthorityRevision } from "./sps-plugin-authority-revision.js";
 import { spsWorkspaceSurfaceService } from "./sps-workspace-surfaces.js";
 import { resolvePluginRecoveryState } from "./sps-plugin-recovery.js";
 import { createSpsNativePluginUiAssetService, type SpsNativePluginUiAsset } from "./sps-native-plugin-ui-assets.js";
@@ -228,6 +230,7 @@ export function createSpsNativePluginRuntime(
         const expected = principal(await authorizeNative());
         let pluginSnapshot: string | undefined;
         let permissionSnapshot: string | undefined;
+        let authorityRevision: SpsPluginAuthorityRevision | undefined;
         const requested = selected.operation === "action" ? actions.requestedPermissions(selected.params) : [];
         const actor = { type: "user" as const, userId: expected.userId, agentId: null,
           runId: null, companyId: selected.workspaceId, hostAuthority: false };
@@ -235,6 +238,8 @@ export function createSpsNativePluginRuntime(
           check();
           const current = principal(await authorizeNative());
           if (Object.keys(expected).some(key => current[key as keyof SpsNativePluginPrincipal] !== expected[key as keyof SpsNativePluginPrincipal])) throw unavailable();
+          const before = await readSpsPluginAuthorityRevision(db, selected.workspaceId);
+          if (authorityRevision && !sameSpsPluginAuthorityRevision(authorityRevision, before)) throw unavailable();
           await assertSpsPluginAvailable(db, { companyId: selected.workspaceId, pluginId: selected.pluginId },
             selected.surface === "shell" ? "ui.workspaceShell.provide" : "ui.dashboard.contribute");
           const plugin = await registry.getById(selected.pluginId);
@@ -256,6 +261,9 @@ export function createSpsNativePluginRuntime(
           }
           if (selected.operation === "action" && permissionSnapshot !== undefined
             && JSON.stringify((await actions.actorContext(actor, requested)).permissions ?? []) !== permissionSnapshot) throw unavailable();
+          const after = await readSpsPluginAuthorityRevision(db, selected.workspaceId);
+          if (!sameSpsPluginAuthorityRevision(before, after)) throw unavailable();
+          authorityRevision ??= after;
           check();
           return { plugin, revision: snapshot, widget };
         };

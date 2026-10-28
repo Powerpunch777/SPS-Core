@@ -52,6 +52,16 @@ type UpdatePlan = {
 
 const UPDATE_PLANS: UpdatePlan[] = [
   {
+    table: "sps_plugin_authority_catalog",
+    assignments: { revision: "gen_random_uuid()" },
+    requiredWhereColumns: ["id"],
+    where: `"id" = 'runtime'`,
+  },
+  {
+    table: "sps_workspace_plugin_authority",
+    assignments: { revision: "gen_random_uuid()" },
+  },
+  {
     table: "sps_model_connections",
     assignments: { status: "'disabled'", secret_id: "NULL", updated_at: "NOW()" },
   },

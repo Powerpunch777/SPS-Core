@@ -2,12 +2,13 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   companies,
   createDb,
   pluginCompanySettings,
+  pluginConfig,
   plugins,
   spsDashboardLayoutItems,
   spsWorkspaceShellSettings,
@@ -16,6 +17,7 @@ import type { PaperclipPluginManifestV1 } from "@paperclipai/shared";
 import type { PluginWorkerManager, WorkerInvocationAuthority } from "../services/plugin-worker-manager.js";
 import { createSpsNativePluginRuntime, snapshotSpsNativePluginJson,
   SpsNativePluginUnsupportedError, type SpsNativePluginPrincipal, type SpsNativePluginRequest } from "../services/sps-native-plugin-runtime.js";
+import { readSpsPluginAuthorityRevision } from "../services/sps-plugin-authority-revision.js";
 import { spsWorkspaceSurfaceService } from "../services/sps-workspace-surfaces.js";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 
@@ -52,15 +54,19 @@ function manifest(): PaperclipPluginManifestV1 {
 describeDatabase("SPS Native Plugin runtime adapter", () => {
   let db!: ReturnType<typeof createDb>;
   let database: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | undefined;
+  let startupPromise: Promise<void> | undefined;
   let companyId = "";
   let pluginId = "";
   let worker: { call: ReturnType<typeof vi.fn> };
   let runtime: ReturnType<typeof createSpsNativePluginRuntime> | undefined;
 
   beforeAll(async () => {
-    database = await startEmbeddedPostgresTestDatabase("sps-native-plugin-runtime-");
-    db = createDb(database.connectionString);
-    localPluginDir = await mkdtemp(path.join(os.tmpdir(), "sps-native-plugin-runtime-files-"));
+    startupPromise = (async () => {
+      database = await startEmbeddedPostgresTestDatabase("sps-native-plugin-runtime-");
+      db = createDb(database.connectionString);
+      localPluginDir = await mkdtemp(path.join(os.tmpdir(), "sps-native-plugin-runtime-files-"));
+    })();
+    await startupPromise;
   }, 120_000);
 
   afterEach(async () => {
@@ -76,10 +82,26 @@ describeDatabase("SPS Native Plugin runtime adapter", () => {
   }, 30_000);
 
   afterAll(async () => {
-    // Bound the owned client drain before the helper's bounded pg_ctl shutdown.
-    await db?.$client.end({ timeout: 5 });
-    await database?.cleanup();
-    if (localPluginDir) await rm(localPluginDir, { recursive: true, force: true });
+    try {
+      if (startupPromise) {
+        try {
+          await startupPromise;
+        } catch {
+          // Continue teardown for resources that setup assigned before it failed.
+        }
+      }
+    } finally {
+      try {
+        // Bound the owned client drain before the helper's bounded pg_ctl shutdown.
+        await db?.$client.end({ timeout: 5 });
+      } finally {
+        try {
+          await database?.cleanup();
+        } finally {
+          if (localPluginDir) await rm(localPluginDir, { recursive: true, force: true });
+        }
+      }
+    }
   }, 60_000);
 
   async function seed() {
@@ -111,6 +133,13 @@ describeDatabase("SPS Native Plugin runtime adapter", () => {
     operation: "action", key: "widget.activate", params: {}, ...overrides,
   });
   const authorize = async () => principal;
+  async function expectWorkerEntry(workerEntered: Promise<void>, invocation: Promise<unknown>) {
+    const settled = invocation.then(() => "settled" as const, () => "settled" as const);
+    await expect(Promise.race([
+      workerEntered.then(() => "entered" as const),
+      settled,
+    ])).resolves.toBe("entered");
+  }
 
   it("dispatches only a ready, Workspace-enabled plugin's declared widget and forces its user/company actor", async () => {
     await seed();
@@ -232,6 +261,162 @@ describeDatabase("SPS Native Plugin runtime adapter", () => {
     await expect(runtime!.invoke(request({ operation: "data" }), authorize)).rejects.toThrow("unavailable");
     expect(worker.call).toHaveBeenCalledTimes(1);
   });
+
+  it("rejects a held Workspace A call after activation ABA while Workspace B and fresh A calls remain valid", async () => {
+    await seed();
+    const secondWorkspaceId = randomUUID();
+    await db.insert(companies).values({ id: secondWorkspaceId, name: "Native runtime second Workspace",
+      issuePrefix: `N${secondWorkspaceId.replaceAll("-", "").slice(0, 8).toUpperCase()}` });
+    const surfaces = spsWorkspaceSurfaceService(db);
+    await surfaces.selectShell({ companyId, userId: principal.userId, pluginId });
+    await surfaces.selectShell({ companyId: secondWorkspaceId, userId: principal.userId, pluginId });
+
+    let entered!: () => void;
+    let release!: () => void;
+    const workerEntered = new Promise<void>(resolve => { entered = resolve; });
+    const workerRelease = new Promise<void>(resolve => { release = resolve; });
+    worker.call.mockImplementationOnce(async (_id, _method, _params, _timeout, authority) => {
+      entered();
+      await workerRelease;
+      await authority?.assertCurrent();
+      return { shouldNotSurviveWorkspaceActivationABA: true };
+    });
+
+    const heldA = runtime!.invoke(request({ surface: "shell", surfaceId: "fixture-shell", operation: "data" }), authorize);
+    try {
+      await expectWorkerEntry(workerEntered, heldA);
+      await db.insert(pluginCompanySettings).values({ pluginId, companyId, enabled: false, settingsJson: {} });
+      await db.update(pluginCompanySettings).set({ enabled: true })
+        .where(and(eq(pluginCompanySettings.pluginId, pluginId), eq(pluginCompanySettings.companyId, companyId)));
+
+      await expect(runtime!.invoke(request({ workspaceId: secondWorkspaceId, surface: "shell",
+        surfaceId: "fixture-shell", operation: "data" }), authorize)).resolves.toEqual({ ok: true });
+    } finally {
+      release();
+    }
+    await expect(heldA).rejects.toThrow("unavailable");
+    await expect(runtime!.invoke(request({ surface: "shell", surfaceId: "fixture-shell", operation: "data" }), authorize))
+      .resolves.toEqual({ ok: true });
+    expect(worker.call).toHaveBeenCalledTimes(3);
+  }, 60_000);
+
+  it("retains the Workspace fence through disabled-row deletion and default-enabled absence", async () => {
+    await seed();
+    await spsWorkspaceSurfaceService(db).selectShell({ companyId, userId: principal.userId, pluginId });
+
+    let entered!: () => void;
+    let release!: () => void;
+    const workerEntered = new Promise<void>(resolve => { entered = resolve; });
+    const workerRelease = new Promise<void>(resolve => { release = resolve; });
+    worker.call.mockImplementationOnce(async (_id, _method, _params, _timeout, authority) => {
+      entered();
+      await workerRelease;
+      await authority?.assertCurrent();
+      return { shouldNotSurviveDeletedOverrideABA: true };
+    });
+
+    const held = runtime!.invoke(request({ surface: "shell", surfaceId: "fixture-shell", operation: "data" }), authorize);
+    try {
+      await expectWorkerEntry(workerEntered, held);
+      await db.insert(pluginCompanySettings).values({ pluginId, companyId, enabled: false, settingsJson: {} });
+      await db.delete(pluginCompanySettings).where(and(eq(pluginCompanySettings.pluginId, pluginId), eq(pluginCompanySettings.companyId, companyId)));
+    } finally {
+      release();
+    }
+
+    await expect(held).rejects.toThrow("unavailable");
+    await expect(runtime!.invoke(request({ surface: "shell", surfaceId: "fixture-shell", operation: "data" }), authorize))
+      .resolves.toEqual({ ok: true });
+    expect(worker.call).toHaveBeenCalledTimes(2);
+  }, 60_000);
+
+  it("rejects held calls after global plugin config or manifest/status changes are reverted", async () => {
+    await seed();
+    await spsWorkspaceSurfaceService(db).selectShell({ companyId, userId: principal.userId, pluginId });
+
+    async function expectHeldCallRejectedAfter(mutate: () => Promise<void>) {
+      let entered!: () => void;
+      let release!: () => void;
+      const workerEntered = new Promise<void>(resolve => { entered = resolve; });
+      const workerRelease = new Promise<void>(resolve => { release = resolve; });
+      worker.call.mockImplementationOnce(async (_id, _method, _params, _timeout, authority) => {
+        entered();
+        await workerRelease;
+        await authority?.assertCurrent();
+        return { shouldNotSurviveGlobalPluginABA: true };
+      });
+      const held = runtime!.invoke(request({ surface: "shell", surfaceId: "fixture-shell", operation: "data" }), authorize);
+      try {
+        await expectWorkerEntry(workerEntered, held);
+        await mutate();
+      } finally {
+        release();
+      }
+      await expect(held).rejects.toThrow("unavailable");
+      await expect(runtime!.invoke(request({ surface: "shell", surfaceId: "fixture-shell", operation: "data" }), authorize))
+        .resolves.toEqual({ ok: true });
+    }
+
+    await expectHeldCallRejectedAfter(async () => {
+      await db.insert(pluginConfig).values({ pluginId, configJson: { fixture: "changed" } });
+      await db.delete(pluginConfig).where(eq(pluginConfig.pluginId, pluginId));
+    });
+
+    await expectHeldCallRejectedAfter(async () => {
+      const original = await db.select().from(plugins).where(eq(plugins.id, pluginId)).then(rows => rows[0]!);
+      const temporary = { ...original.manifestJson, displayName: "Temporary manifest" };
+      await db.update(plugins).set({ manifestJson: temporary, updatedAt: new Date() }).where(eq(plugins.id, pluginId));
+      await db.update(plugins).set({ manifestJson: original.manifestJson, updatedAt: original.updatedAt }).where(eq(plugins.id, pluginId));
+    });
+
+    await expectHeldCallRejectedAfter(async () => {
+      await db.update(plugins).set({ status: "installed" }).where(eq(plugins.id, pluginId));
+      await db.update(plugins).set({ status: "ready" }).where(eq(plugins.id, pluginId));
+    });
+  }, 90_000);
+
+  it("rolls back revision-trigger changes and rotates both Workspace fences when a settings row is retargeted", async () => {
+    await seed();
+    const secondWorkspaceId = randomUUID();
+    await db.insert(companies).values({ id: secondWorkspaceId, name: "Native runtime revision Workspace",
+      issuePrefix: `N${secondWorkspaceId.replaceAll("-", "").slice(0, 8).toUpperCase()}` });
+    await db.insert(pluginCompanySettings).values({ pluginId, companyId, enabled: true, settingsJson: {} });
+
+    const beforeA = await readSpsPluginAuthorityRevision(db, companyId);
+    const beforeB = await readSpsPluginAuthorityRevision(db, secondWorkspaceId);
+    await expect(db.transaction(async tx => {
+      await tx.update(pluginCompanySettings).set({ enabled: false })
+        .where(and(eq(pluginCompanySettings.pluginId, pluginId), eq(pluginCompanySettings.companyId, companyId)));
+      throw new Error("rollback authority revision fixture");
+    })).rejects.toThrow("rollback authority revision fixture");
+    const afterRollbackA = await readSpsPluginAuthorityRevision(db, companyId);
+    const afterRollbackB = await readSpsPluginAuthorityRevision(db, secondWorkspaceId);
+    expect(afterRollbackA).toEqual(beforeA);
+    expect(afterRollbackB).toEqual(beforeB);
+
+    await db.update(pluginCompanySettings).set({ companyId: secondWorkspaceId })
+      .where(and(eq(pluginCompanySettings.pluginId, pluginId), eq(pluginCompanySettings.companyId, companyId)));
+    const afterRetargetA = await readSpsPluginAuthorityRevision(db, companyId);
+    const afterRetargetB = await readSpsPluginAuthorityRevision(db, secondWorkspaceId);
+    expect(afterRetargetA.catalogRevision).toBe(beforeA.catalogRevision);
+    expect(afterRetargetB.catalogRevision).toBe(beforeB.catalogRevision);
+    expect(afterRetargetA.workspaceRevision).not.toBe(beforeA.workspaceRevision);
+    expect(afterRetargetB.workspaceRevision).not.toBe(beforeB.workspaceRevision);
+  }, 60_000);
+
+  it("rotates the catalog revision on TRUNCATE ONLY plugin_config and keeps a fresh Native read available", async () => {
+    await seed();
+    await spsWorkspaceSurfaceService(db).selectShell({ companyId, userId: principal.userId, pluginId });
+    const before = await readSpsPluginAuthorityRevision(db, companyId);
+
+    await db.execute(sql`TRUNCATE ONLY plugin_config`);
+
+    const after = await readSpsPluginAuthorityRevision(db, companyId);
+    expect(after.catalogRevision).not.toBe(before.catalogRevision);
+    expect(after.workspaceRevision).toBe(before.workspaceRevision);
+    await expect(runtime!.invoke(request({ surface: "shell", surfaceId: "fixture-shell", operation: "data" }), authorize))
+      .resolves.toEqual({ ok: true });
+  }, 60_000);
 
   it("does not dispatch while plugin recovery mode is active", async () => {
     await seed();

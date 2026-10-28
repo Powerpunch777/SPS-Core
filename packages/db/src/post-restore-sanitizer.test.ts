@@ -212,6 +212,36 @@ describe("sanitizePostRestoreDatabaseWithExecutor", () => {
     expect(executor.calls.filter(query => query.startsWith('UPDATE "sps_model_runs"')).join(" ")).not.toMatch(/result_json|usage_json/);
   });
 
+  it("rotates plugin authority revisions after restore without creating missing legacy tables", async () => {
+    const executor = fakeExecutor({
+      tables: ["sps_plugin_authority_catalog", "sps_workspace_plugin_authority"],
+      columnsByTable: {
+        sps_plugin_authority_catalog: ["id", "revision"],
+        sps_workspace_plugin_authority: ["workspace_id", "revision"],
+      },
+    });
+
+    await run(executor);
+
+    expect(executor.calls).toContain(
+      `UPDATE "sps_plugin_authority_catalog" SET "revision" = gen_random_uuid() WHERE "id" = 'runtime'`,
+    );
+    expect(executor.calls).toContain(
+      `UPDATE "sps_workspace_plugin_authority" SET "revision" = gen_random_uuid()`,
+    );
+    expect(executor.calls.indexOf("BEGIN")).toBeLessThan(
+      executor.calls.indexOf(`UPDATE "sps_plugin_authority_catalog" SET "revision" = gen_random_uuid() WHERE "id" = 'runtime'`),
+    );
+    expect(executor.calls.indexOf(`UPDATE "sps_workspace_plugin_authority" SET "revision" = gen_random_uuid()`)).toBeLessThan(
+      executor.calls.indexOf("COMMIT"),
+    );
+
+    const legacy = fakeExecutor({ tables: ["account"] });
+    await run(legacy);
+    expect(legacy.calls.some((query) => query.includes('"sps_plugin_authority_catalog"'))).toBe(false);
+    expect(legacy.calls.some((query) => query.includes('"sps_workspace_plugin_authority"'))).toBe(false);
+  });
+
   it("rolls back atomically when a scrub operation fails", async () => {
     const executor = fakeExecutor({ tables: ["session"], failOn: 'DELETE FROM "session"' });
 

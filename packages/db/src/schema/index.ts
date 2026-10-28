@@ -134,6 +134,7 @@ export { companySecretVersions } from "./company_secret_versions.js";
 export { companySecretBindings } from "./company_secret_bindings.js";
 export { spsModelConnections, spsModelGrants, spsModelRuns } from "./sps_model_execution.js";
 export { spsWorkspaceExecutionControl } from "./sps_workspace_execution_control.js";
+export { spsPluginAuthorityCatalog, spsWorkspacePluginAuthority } from "./sps_plugin_authority.js";
 export { userSecretDeclarations } from "./user_secret_declarations.js";
 export { secretAccessEvents } from "./secret_access_events.js";
 export {

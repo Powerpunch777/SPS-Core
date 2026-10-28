@@ -12,6 +12,8 @@ export {
   companySecretVersions,
   plugins,
   pluginCompanySettings,
+  spsPluginAuthorityCatalog,
+  spsWorkspacePluginAuthority,
   agents,
   agentTaskSessions,
   heartbeatRuns,
