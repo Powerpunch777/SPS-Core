@@ -19,6 +19,15 @@ non-AI programs. Core remains private and the Plugin SDK public. AI, OpenClaw,
 OCE and Agent registration are not mandatory. Current Windows/Tailscale access,
 identity and recovery contracts remain unchanged by this direction.
 
+Authentication keeps instance-scoped session cookies and explicit Origin/CSRF
+checks in every environment. Auth dependency upgrades must preserve the existing
+user/account/session schema and secret/cookie prefix. Better Auth1.7.7 isolates
+OAuth verification identifiers by purpose; redirects started before this upgrade
+must restart sign-in rather than migrate or reinterpret old verification state.
+This source contract does not authorize changing an installed Host or customer
+credentials, and does not qualify production-provider or cross-version sessions
+without separate evidence.
+
 ### Native Member foundation and local Host management
 
 Full Windows Native LAN is not yet qualified. Prepared, directly owned startup

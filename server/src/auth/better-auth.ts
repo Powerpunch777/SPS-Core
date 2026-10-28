@@ -73,6 +73,9 @@ export function deriveAuthCookiePrefix(instanceId = resolvePaperclipInstanceId()
 export function buildBetterAuthAdvancedOptions(input: { disableSecureCookies: boolean }) {
   return {
     cookiePrefix: deriveAuthCookiePrefix(),
+    // Keep Core's trust boundary explicit even under the library's test defaults.
+    disableOriginCheck: false,
+    disableCSRFCheck: false,
     ...(input.disableSecureCookies ? { useSecureCookies: false } : {}),
   };
 }
