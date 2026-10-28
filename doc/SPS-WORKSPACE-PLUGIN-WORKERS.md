@@ -5,6 +5,24 @@ behavior; Core owns process identity, configuration, admission, capabilities and
 cleanup. Legacy packages continue to use their existing Host worker and global
 configuration. This feature does not migrate those records.
 
+## Completion boundary
+
+The implementation provides logical Workspace authorization and a separate
+process for each declared `(Workspace, Plugin)` worker. It is not a completed
+untrusted-code sandbox or a Windows release qualification.
+
+| Boundary | Current implementation | Remaining qualification |
+| --- | --- | --- |
+| Worker ownership | Separate process and service adapters for each declared Workspace worker | Actual Windows Desktop stop, restart and recovery acceptance |
+| Core access | Current invocation, Workspace policy and execution epoch checks; per-Workspace configuration | Broader regression and release evidence for the integrated candidate |
+| Progress delivery | Scoped local SSE subscriptions, generation fences and bounded queues | Actual Windows Desktop scoped streaming acceptance |
+| Operating system access | Worker runs under the Host OS account | Filesystem, network and credential isolation for untrusted code |
+| Existing packages | Legacy Host workers retain their existing execution contract | Packages must explicitly adopt `workspaceWorker` to use this execution lane |
+
+Passing scoped RPC tests does not prove OS isolation. A process can use its OS
+account directly without calling a Core adapter; unsupported Host RPCs do not
+prevent that access. Do not describe every installed Plugin as Workspace-isolated.
+
 ## Manifest and configuration
 
 ```json
@@ -73,6 +91,41 @@ attempt may be retried after the owned child can be closed.
 These processes run under the Host's OS account. They are not a Windows filesystem,
 network or Vault sandbox. Process ownership and Host RPC checks alone do not
 qualify untrusted Plugin execution, physical Native LAN, or a production release.
+
+## Local Desktop progress streams
+
+Core composes the retained SDK stream notification bus with the ordinary Desktop
+SSE bridge. A UI subscribes to its Plugin/channel/Workspace tuple before starting
+an action. The worker calls `streams.open`, `streams.emit` and `streams.close`.
+The declared Workspace lane admits notifications only from the exact active
+UI/action invocation, matching owner and current authority. Ending, aborting or
+timing out that RPC closes its channels; it does not create a background lease
+or extend the action deadline. Legacy Host workers retain their existing stream
+lifetime, and cannot publish into a declared Workspace worker's stream tuples.
+
+Each process receives an opaque private generation identifier. A retired
+generation cannot emit into or close a replacement generation's stream. The
+factory checks current config/policy/execution before publication, including a
+synchronous originating-call fence after asynchronous checks. Failed process
+cleanup retains ownership rather than handing a stream to a new process.
+Stream callbacks preserve their originating child's stdout order; matching RPC
+responses drain preceding callbacks before settling the invocation. Notification
+admission is bounded per child and overflow closes its channels and denies further
+stream notifications for that child.
+
+SSE readers recheck current session or board credential, current membership
+(with the existing trusted Host exception), Plugin availability, private policy
+revision and execution epoch on delivery and periodic checks. A changed revision,
+revoked credential or stopped epoch ends the subscription. Queues, payloads,
+channels and slow-client waits are bounded. The ordinary UI keeps only its newest
+128 messages and ignores callbacks from a superseded Workspace/connection.
+These ephemeral messages are not durable history and have no replay contract.
+Core shutdown closes idle subscriptions as well as active channels synchronously,
+without another session/database lookup, and terminally rejects new subscriptions.
+
+Native Plugin windows still reject the stream hook until an authenticated Native
+stream transport and its window/credential teardown are implemented and verified.
+The local SSE bridge does not add a Native LAN or generic EventBus subscription.
 
 ## Storage and rollback
 

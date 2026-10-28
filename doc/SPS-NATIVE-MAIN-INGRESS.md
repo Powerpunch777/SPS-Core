@@ -21,6 +21,7 @@ the instance; there is no attachment to an external or replacement Host.
 | `enrollment.issue` | Fresh TLS 1.3, no client certificate | Current Identity cookie and pairing/CSR |
 | `enrollment.complete` | Fresh TLS 1.3, exact authorized client leaf DER | Current Identity cookie and pairing/enrollment |
 | `enrollment.reconcile` | Fresh TLS 1.3, exact authorized client leaf DER | Current Identity cookie and enrollment UUID |
+| `enrollment.renew` | Fresh TLS 1.3, exact currently valid authorized client leaf DER | Current Identity cookie and same-key renewal CSR |
 
 The envelope's `request` contains only exact `body`, `transport` and, when
 required, `credential` slots. Main obtains transport evidence from its real TLS
@@ -35,6 +36,30 @@ transactions. Main's proof is not user authentication, approval, membership or
 execution permission. Completion projects only `{deviceId,status}` from the
 stored device DTO. Reconcile reads the already committed device and does not
 consume an invitation, issue a new certificate or add grants.
+
+Renewal is a separate explicit operation for an already approved Member device.
+The request contains only the existing device-key UUID and a CSR signed by that
+same protected key; Main supplies the current Identity cookie and the exact
+current TLS peer. Core verifies the live session and approved device in a bounded
+transaction, matches the predecessor certificate and CSR public key to the
+device's existing SPKI, and signs only while both the predecessor leaf and issuer
+are currently valid. Renewal opens when the predecessor has at most the smaller
+of 30 days or one third of its original lifetime remaining. It cannot renew an
+expired leaf or change the device key, Host, issuer or approval state. Each new
+leaf is recorded as an append-only renewal for the same device; it does not
+replay an invitation or create new Workspace/Node/Plugin grants. A repeated
+request for the same predecessor, account and CSR can return the committed
+renewal, while a different CSR for that predecessor is rejected.
+
+Desktop Main exposes renewal from the Native Member settings flow only after a
+certificate inspection and explicit user confirmation. It validates the
+returned leaf against the existing key and issuer, then publishes it through a
+Windows safeStorage-encrypted renewal capsule with the prior credential context
+checked before commit. Private keys, certificates and the session cookie stay
+in Main. This is not an SPS Plugin SDK operation: `runtime.connectivity.current()`
+remains a read-only, invocation-scoped connectivity snapshot and carries no
+certificate or renewal authority. Expired Member credentials require a separate
+re-enrollment path; renewal is not retried automatically.
 
 Cancellation fences future work and delivery. Timed-out/aborted operations
 retain capacity until they actually settle. Loss after commit does not undo

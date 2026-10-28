@@ -5,6 +5,8 @@ import type { HostServices, HostToWorkerMethods } from "../compat/paperclip/plug
 import type { Db } from "../compat/paperclip/db.js";
 import type { PluginRecord } from "../compat/paperclip/shared.js";
 import type { PluginEventBus } from "./plugin-event-bus.js";
+import type { PluginStreamBus } from "./plugin-stream-bus.js";
+import { publishPluginStreamNotification } from "./plugin-stream-notifications.js";
 import { createSpsWorkspacePluginEventBus } from "./sps-workspace-plugin-event-bus.js";
 import { pluginRegistryService } from "./plugin-registry.js";
 import type { PluginWorkerHandle, PluginWorkerManager, WorkerInvocationAuthority } from "../compat/paperclip/control-plane.js";
@@ -24,6 +26,7 @@ type Runtime = Owner & {
   policy: SpsPluginAuthorityRevision;
   configRevision: string | null;
   handle?: PluginWorkerHandle;
+  streamGeneration?: string;
   disposeServices(): void;
 };
 const factoryOwners = new WeakMap<PluginWorkerManager, object>();
@@ -67,6 +70,7 @@ export function createSpsWorkspacePluginWorkers(db: Db, manager: PluginWorkerMan
   localPluginDir: string;
   instanceInfo?: { instanceId: string; hostVersion: string };
   eventBus?: PluginEventBus;
+  streamBus?: PluginStreamBus;
   buildServices?: (plugin: PluginRecord, workspaceId: string) => Services | Promise<Services>;
   resolveEntrypoint?: typeof resolveSpsWorkspacePluginEntrypoint;
 }) {
@@ -116,6 +120,7 @@ export function createSpsWorkspacePluginWorkers(db: Db, manager: PluginWorkerMan
     // A stop failure retains the manager's exact child and these Host services.
     // Never replace an unconfirmed process or dispose services under live work.
     await manager.stopWorkspaceWorkers(runtime.workspaceId, runtime.pluginId);
+    if (runtime.streamGeneration) options.streamBus?.closeOwner(runtime.pluginId, runtime.workspaceId, runtime.streamGeneration);
     runtime.disposeServices();
     if (runtimes.get(key) === runtime) runtimes.delete(key);
   }
@@ -171,6 +176,17 @@ export function createSpsWorkspacePluginWorkers(db: Db, manager: PluginWorkerMan
           apiVersion: plugin.manifestJson.apiVersion, databaseNamespace: null, autoRestart: false,
           hostHandlers: createSpsWorkspacePluginHostHandlers({ workspaceId, pluginId,
             manifest: plugin.manifestJson, services, readConfig }),
+          onStreamNotification: options.streamBus ? async (method, params, generation, canPublish) => {
+            if (params.companyId !== workspaceId || runtimes.get(key) !== runtime
+              || (runtime.streamGeneration !== undefined && runtime.streamGeneration !== generation)) return;
+            runtime.streamGeneration ??= generation;
+            // A terminal close only removes this exact generation's channel. It
+            // must remain possible after stop/config invalidates call authority.
+            if (method !== "streams.close") await assertCurrent(runtime);
+            if (runtimes.get(key) !== runtime || runtime.streamGeneration !== generation
+              || (method !== "streams.close" && !canPublish?.())) return;
+            publishPluginStreamNotification(options.streamBus!, pluginId, method, params, generation);
+          } : undefined,
           // Workspace workers use brokered Host APIs. Do not forward the Host
           // worker's Agent/CLI environment or instance-wide configuration.
           env: { SPS_PLUGIN_WORKSPACE_ID: workspaceId },

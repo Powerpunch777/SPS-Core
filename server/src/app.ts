@@ -81,6 +81,7 @@ import { pluginLifecycleManager } from "./services/plugin-lifecycle.js";
 import { createPluginJobCoordinator } from "./services/plugin-job-coordinator.js";
 import { buildHostServices, flushPluginLogBuffer } from "./services/plugin-host-services.js";
 import { createPluginEventBus } from "./services/plugin-event-bus.js";
+import { createPluginStreamBus } from "./services/plugin-stream-bus.js";
 import { createCompanyMemoryProviderRuntime } from "./services/memory-provider-runtime.js";
 import { setPluginEventBus } from "./services/activity-log.js";
 import { createPluginDevWatcher } from "./services/plugin-dev-watcher.js";
@@ -254,10 +255,12 @@ export async function createApp(
   const hostServicesDisposers = new Map<string, () => void>();
   const workerManager = opts.pluginWorkerManager ?? createPluginWorkerManager();
   const eventBus = createPluginEventBus();
+  const streamBus = createPluginStreamBus();
   const workspacePluginWorkers = createSpsWorkspacePluginWorkers(db, workerManager, {
     localPluginDir: opts.localPluginDir ?? DEFAULT_LOCAL_PLUGIN_DIR,
     instanceInfo: { instanceId: opts.instanceId ?? "default", hostVersion: opts.hostVersion ?? "0.0.0" },
     eventBus,
+    streamBus,
   });
   const nativePluginRuntime = createSpsNativePluginRuntime(db, workerManager, {
     localPluginDir: opts.localPluginDir ?? DEFAULT_LOCAL_PLUGIN_DIR,
@@ -356,6 +359,7 @@ export async function createApp(
     {
       workerManager,
       eventBus,
+      streamBus,
       jobScheduler: scheduler,
       jobStore,
       toolDispatcher,
@@ -403,7 +407,7 @@ export async function createApp(
       { scheduler, jobStore },
       { workerManager },
       { toolDispatcher },
-      { workerManager, workspaceWorkers: workspacePluginWorkers },
+      { workerManager, workspaceWorkers: workspacePluginWorkers, streamBus, resolveSession: opts.resolveSession },
       { runtime: memoryProviderRuntime },
       {
         stagingRoot: opts.registryStagingDir
@@ -716,6 +720,7 @@ export async function createApp(
   const shutdownAppServices = () => {
     if (appServicesShutdown) return;
     appServicesShutdown = true;
+    streamBus.shutdown();
     disableFeedbackExportFlushes();
     stopPluginDiscovery();
     viteHtmlRenderer?.dispose();
@@ -727,6 +732,9 @@ export async function createApp(
   const shutdownPluginRuntime = () => {
     if (pluginRuntimeShutdown) return pluginRuntimeShutdown;
     pluginRuntimeStopping = true;
+    // Close idle and active SSE subscriptions before worker notifications or
+    // Host services can be disposed. The bus shutdown is synchronous/idempotent.
+    streamBus.shutdown();
     nativePluginRuntime.dispose();
     nativeNodeRuntime.dispose();
     stopPluginDiscovery();

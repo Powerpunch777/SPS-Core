@@ -118,6 +118,12 @@ class FakeNdjsonWorker extends EventEmitter {
       const invocationId = invocation?.id;
       this.writeToManager({
         jsonrpc: "2.0",
+        method: "streams.open",
+        params: { companyId: params.companyId, channel: "workspace-owner-test" },
+        ...(typeof invocationId === "string" ? { paperclipInvocationId: invocationId } : {}),
+      });
+      this.writeToManager({
+        jsonrpc: "2.0",
         method: "streams.emit",
         params: {
           companyId: params.companyId,
@@ -252,7 +258,13 @@ describe("PluginWorkerManager Workspace ownership", () => {
         workspaceAuthority(WORKSPACE_B));
       expect(resultA).toMatchObject({ initializedConfig: { label: "config-a" }, startupConfig: { selectedWorkspace: WORKSPACE_A, configLabel: "config-a" } });
       expect(resultB).toMatchObject({ initializedConfig: { label: "config-b" }, startupConfig: { selectedWorkspace: WORKSPACE_B, configLabel: "config-b" } });
-      expect(streamsA).toHaveBeenCalledWith("streams.emit", expect.objectContaining({ companyId: WORKSPACE_A }));
+      expect(streamsA).toHaveBeenCalledWith(
+        "streams.emit",
+        expect.objectContaining({ companyId: WORKSPACE_A }),
+        expect.any(String),
+        expect.any(Function),
+      );
+      expect(streamsA.mock.calls.map(([method]) => method)).toEqual(["streams.open", "streams.emit", "streams.close"]);
 
       const callsBeforeDenial = childA.received.filter((message) => message.method === "getData").length;
       await expect(manager.callWorkspaceWorker(WORKSPACE_A, PLUGIN_ID, "getData", dataParams(WORKSPACE_B), 1_000,
@@ -276,13 +288,14 @@ describe("PluginWorkerManager Workspace ownership", () => {
       await expect(pinnedCall).resolves.toMatchObject({ startupConfig: { selectedWorkspace: WORKSPACE_A } });
 
       const callsBeforeUnscoped = childA.received.filter((message) => message.method === "getData").length;
+      const streamCallsBeforeUnscoped = streamsA.mock.calls.length;
       childA.requestUnscopedHost("config.get", {}, "unscoped-config");
       await waitFor(() => childA.received.some((message) => message.id === "unscoped-config"));
       expect(childA.received.find((message) => message.id === "unscoped-config")?.error)
         .toMatchObject({ code: PLUGIN_RPC_ERROR_CODES.INVOCATION_SCOPE_DENIED });
       childA.notifyUnscopedHost("streams.emit", { companyId: WORKSPACE_A, channel: "unscoped", event: {} });
       await new Promise<void>((resolve) => setImmediate(resolve));
-      expect(streamsA).toHaveBeenCalledTimes(2);
+      expect(streamsA).toHaveBeenCalledTimes(streamCallsBeforeUnscoped);
       expect(childA.received.filter((message) => message.method === "getData")).toHaveLength(callsBeforeUnscoped);
 
       await manager.stopWorkspaceWorkers(WORKSPACE_A, PLUGIN_ID);

@@ -770,7 +770,12 @@ describe("plugin-worker-manager stderr failure context", () => {
         companyId: "company-1",
         params: { mode: "stream" },
       } as HostToWorkerMethods["getData"][0], undefined, authority)).resolves.toEqual({ ok: true });
-      expect(streamNotification).toHaveBeenCalledWith("streams.emit", expect.objectContaining({ companyId: "company-1" }));
+      expect(streamNotification).toHaveBeenCalledWith(
+        "streams.emit",
+        expect.objectContaining({ companyId: "company-1" }),
+        expect.any(String),
+        expect.any(Function),
+      );
       const opaqueInvocation = await handle.call("getData", {
         key: "probe",
         companyId: "company-1",
@@ -779,7 +784,7 @@ describe("plugin-worker-manager stderr failure context", () => {
       expect(opaqueInvocation).toEqual({
         invocationId: expect.stringMatching(/^sps-guarded:[0-9a-f-]{36}$/),
       });
-      expect(authority.assertCurrent).toHaveBeenCalledTimes(10);
+      expect(authority.assertCurrent).toHaveBeenCalledTimes(14);
 
       const denied = { assertCurrent: vi.fn(() => { throw new Error("private authority details"); }) };
       await expect(handle.call("getData", {
@@ -806,6 +811,99 @@ describe("plugin-worker-manager stderr failure context", () => {
       await handle.stop().catch(() => undefined);
     }
   });
+
+  it("exposes a synchronous publish fence after an asynchronous stream callback", async () => {
+    let entered!: () => void;
+    let release!: () => void;
+    const callbackEntered = new Promise<void>((resolve) => { entered = resolve; });
+    const callbackGate = new Promise<void>((resolve) => { release = resolve; });
+    const forwarded: string[] = [];
+    const handle = createPluginWorkerHandle("test.plugin", {
+      entrypointPath: INVOCATION_SCOPE_WORKER_ENTRYPOINT,
+      manifest: TEST_MANIFEST,
+      config: {},
+      instanceInfo: { instanceId: "instance-1", hostVersion: "1.0.0" },
+      apiVersion: 1,
+      hostHandlers: {},
+      onStreamNotification: async (method, _params, _generation, canPublish) => {
+        if (method === "streams.emit") {
+          entered();
+          await callbackGate;
+        }
+        if (canPublish()) forwarded.push(method);
+      },
+    });
+
+    try {
+      await handle.start();
+      let settled = false;
+      const call = handle.call("getData", {
+        key: "probe",
+        companyId: "company-1",
+        params: { mode: "stream-lifecycle" },
+      } as HostToWorkerMethods["getData"][0], undefined, {
+        assertCurrent: () => undefined,
+      }).finally(() => { settled = true; });
+      await callbackEntered;
+      await new Promise<void>((resolve) => setTimeout(resolve, 20));
+      expect(settled).toBe(false);
+      release();
+      await call;
+      expect(forwarded).toEqual(["streams.open", "streams.emit", "streams.close"]);
+    } finally {
+      release();
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
+  it("bounds queued stream notifications and drops a generation after overflow", async () => {
+    let unblockStream!: () => void;
+    let streamCallbackStarted!: () => void;
+    let responseReceived!: () => void;
+    const streamGate = new Promise<void>((resolve) => { unblockStream = resolve; });
+    const streamStarted = new Promise<void>((resolve) => { streamCallbackStarted = resolve; });
+    const responseArrived = new Promise<void>((resolve) => { responseReceived = resolve; });
+    const notifications: Array<{ method: string; canPublish: boolean }> = [];
+    const handle = createPluginWorkerHandle("test.plugin", {
+      entrypointPath: INVOCATION_SCOPE_WORKER_ENTRYPOINT,
+      manifest: TEST_MANIFEST,
+      config: {},
+      instanceInfo: { instanceId: "instance-1", hostVersion: "1.0.0" },
+      apiVersion: 1,
+      hostHandlers: {},
+      onStreamNotification: async (method, _params, _generation, canPublish) => {
+        if (method === "streams.open") {
+          streamCallbackStarted();
+          await streamGate;
+        }
+        notifications.push({ method, canPublish: canPublish() });
+      },
+    });
+
+    try {
+      await handle.start();
+      const call = handle.call("getData", {
+        key: "probe",
+        companyId: "company-1",
+        params: { mode: "stream-flood" },
+      } as HostToWorkerMethods["getData"][0], 10_000, {
+        assertCurrent: () => undefined,
+        onTerminal: (reason) => { if (reason === "response") responseReceived(); },
+      });
+      let settled = false;
+      void call.then(() => { settled = true; }, () => { settled = true; });
+      await streamStarted;
+      await responseArrived;
+      expect(settled).toBe(false);
+      unblockStream();
+      await call;
+      expect(notifications.map(({ method }) => method)).toEqual(["streams.open", "streams.close"]);
+      expect(notifications[0]?.canPublish).toBe(false);
+    } finally {
+      unblockStream();
+      await handle.stop().catch(() => undefined);
+    }
+  }, 10_000);
 
   it("binds a guarded worker dispatch to the captured Workspace authority", async () => {
     const workspaceA = "00000000-0000-4000-8000-000000000001";

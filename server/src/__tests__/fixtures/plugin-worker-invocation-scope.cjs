@@ -97,6 +97,12 @@ rl.on("line", (line) => {
     if (mode === "stream") {
       send({
         jsonrpc: "2.0",
+        method: "streams.open",
+        params: { channel: "guard-test", companyId: message.params?.companyId },
+        paperclipInvocationId: message.paperclipInvocation?.id,
+      });
+      send({
+        jsonrpc: "2.0",
         method: "streams.emit",
         params: {
           channel: "guard-test",
@@ -105,6 +111,34 @@ rl.on("line", (line) => {
         },
         paperclipInvocationId: message.paperclipInvocation?.id,
       });
+      setTimeout(() => send({ jsonrpc: "2.0", id: message.id, result: { ok: true } }), 10);
+      return;
+    }
+    if (mode === "stream-lifecycle") {
+      const invocationId = message.paperclipInvocation?.id;
+      const channel = "guard-test";
+      const companyId = message.params?.companyId;
+      const notification = (method, params) => send({
+        jsonrpc: "2.0", method, params, paperclipInvocationId: invocationId,
+      });
+      notification("streams.open", { channel, companyId });
+      notification("streams.emit", { channel, companyId, event: { type: "before-close" } });
+      notification("streams.close", { channel, companyId });
+      notification("streams.emit", { channel, companyId, event: { type: "after-close" } });
+      setTimeout(() => send({ jsonrpc: "2.0", id: message.id, result: { ok: true } }), 10);
+      return;
+    }
+    if (mode === "stream-flood") {
+      const invocationId = message.paperclipInvocation?.id;
+      const channel = "guard-test";
+      const companyId = message.params?.companyId;
+      const notification = (method, params) => send({
+        jsonrpc: "2.0", method, params, paperclipInvocationId: invocationId,
+      });
+      notification("streams.open", { channel, companyId });
+      for (let index = 0; index < 1_100; index++) {
+        notification("streams.emit", { channel, companyId, event: { index } });
+      }
       setTimeout(() => send({ jsonrpc: "2.0", id: message.id, result: { ok: true } }), 10);
       return;
     }

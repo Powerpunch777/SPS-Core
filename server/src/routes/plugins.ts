@@ -21,14 +21,15 @@
 
 import { access, readdir, readFile } from "node:fs/promises";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { Router } from "express";
 import type { Request, Response } from "express";
-import { and, desc, eq, gte } from "drizzle-orm";
+import { and, desc, eq, gte, isNull } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   agents,
+  boardApiKeys,
   companies,
   heartbeatRuns,
   pluginLogs,
@@ -84,6 +85,9 @@ import type { SpsWorkspacePluginWorkers } from "../services/sps-workspace-plugin
 import type { PluginStreamBus } from "../services/plugin-stream-bus.js";
 import type { PluginToolDispatcher } from "../services/plugin-tool-dispatcher.js";
 import type { PluginCanonicalDiagnostics } from "../services/plugin-canonical-diagnostics.js";
+import type { BetterAuthSessionResult } from "../auth/better-auth.js";
+import { getSpsWorkspaceExecutionControl, assertSpsWorkspaceExecutionActive } from "../services/sps-workspace-execution-control.js";
+import { readSpsPluginAuthorityRevision, sameSpsPluginAuthorityRevision } from "../services/sps-plugin-authority-revision.js";
 import type { ToolRunContext } from "@paperclipai/plugin-sdk";
 import { JsonRpcCallError, PLUGIN_RPC_ERROR_CODES } from "@paperclipai/plugin-sdk";
 import {
@@ -454,6 +458,8 @@ export interface PluginRouteBridgeDeps {
   workspaceWorkers?: Pick<SpsWorkspacePluginWorkers, "call">;
   /** Optional stream bus for SSE push from worker to UI. */
   streamBus?: PluginStreamBus;
+  /** Re-resolve a browser session for long-lived streams; request actor fields are only a snapshot. */
+  resolveSession?: (req: Request) => Promise<BetterAuthSessionResult | null>;
 }
 
 /** Optional Core-owned memory provider control-plane routes. */
@@ -2356,7 +2362,92 @@ export function pluginRoutes(
     }
 
     assertCompanyAccess(req, companyId);
+    if (plugin.status !== "ready") {
+      res.status(503).json({ error: "Plugin worker is unavailable" });
+      return;
+    }
     await assertCompanyPluginEnabled(plugin, companyId);
+
+    const capturedPolicy = await readSpsPluginAuthorityRevision(db, companyId);
+    const capturedExecution = await getSpsWorkspaceExecutionControl(db, companyId);
+    await assertSpsWorkspaceExecutionActive(db, companyId, capturedExecution.epoch);
+
+    const hasCurrentMembership = async (userId: string) => {
+      const membership = await accessSvc.getMembership(companyId, "user", userId);
+      return membership?.status === "active";
+    };
+    const assertFreshActor = async () => {
+      const actor = req.actor;
+      if (actor.type !== "board") throw forbidden("Current board access is required for plugin streams");
+      if (actor.source === "local_implicit") {
+        if (!hasSpsCoreHostAuthority(req)) throw forbidden("Current Host access is required for plugin streams");
+        return;
+      }
+      if (actor.source === "session") {
+        if (!actor.userId || !bridgeDeps.resolveSession) throw forbidden("Current session authority is unavailable for plugin streams");
+        const current = await bridgeDeps.resolveSession(req);
+        if (current?.user?.id !== actor.userId) throw forbidden("Current session authority is unavailable for plugin streams");
+      } else if (actor.source === "board_key" && actor.keyId && actor.userId) {
+        const [key] = await db.select({ userId: boardApiKeys.userId, expiresAt: boardApiKeys.expiresAt })
+          .from(boardApiKeys)
+          .where(and(eq(boardApiKeys.id, actor.keyId), eq(boardApiKeys.userId, actor.userId), isNull(boardApiKeys.revokedAt)))
+          .limit(1);
+        if (!key || (key.expiresAt && key.expiresAt.getTime() <= Date.now())) {
+          throw forbidden("Current board credential is unavailable for plugin streams");
+        }
+      } else if (actor.source === "cloud_tenant") {
+        const expected = process.env.PAPERCLIP_CLOUD_TENANT_SERVER_TOKEN?.trim() ?? "";
+        const provided = req.header("x-paperclip-cloud-tenant-token")?.trim() ?? "";
+        const expectedBytes = Buffer.from(expected);
+        const providedBytes = Buffer.from(provided);
+        if (!expected || expectedBytes.length !== providedBytes.length
+          || !timingSafeEqual(expectedBytes, providedBytes)) {
+          throw forbidden("Current cloud tenant authority is unavailable for plugin streams");
+        }
+      } else {
+        throw forbidden("Current authorization is unavailable for plugin streams");
+      }
+      // A current local Host proof or live instance-admin role keeps its
+      // existing access semantics. Other board actors need a current membership.
+      if (!hasSpsCoreHostAuthority(req) && (!actor.userId || !await hasCurrentMembership(actor.userId))) {
+        throw forbidden("Current Workspace membership is required for plugin streams");
+      }
+    };
+
+    const assertCurrentStreamAuthority = async () => {
+      if (res.destroyed || res.writableEnded || req.aborted) throw new Error("stream closed");
+      await assertFreshActor();
+      const currentPlugin = await resolvePlugin(registry, plugin.id);
+      if (!currentPlugin || currentPlugin.id !== plugin.id || currentPlugin.status !== "ready") {
+        throw new Error("plugin unavailable");
+      }
+      await assertCompanyPluginEnabled(currentPlugin, companyId);
+      await assertSpsWorkspaceExecutionActive(db, companyId, capturedExecution.epoch);
+      const beforePolicy = await readSpsPluginAuthorityRevision(db, companyId);
+      if (!sameSpsPluginAuthorityRevision(capturedPolicy, beforePolicy)) throw new Error("plugin authority changed");
+      const beforeExecution = await getSpsWorkspaceExecutionControl(db, companyId);
+      if (beforeExecution.epoch !== capturedExecution.epoch || beforeExecution.state === "stopped") {
+        throw new Error("Workspace execution stopped");
+      }
+      const afterPolicy = await readSpsPluginAuthorityRevision(db, companyId);
+      if (!sameSpsPluginAuthorityRevision(capturedPolicy, afterPolicy)) throw new Error("plugin authority changed");
+      const afterExecution = await getSpsWorkspaceExecutionControl(db, companyId);
+      if (afterExecution.epoch !== capturedExecution.epoch || afterExecution.state === "stopped") {
+        throw new Error("Workspace execution stopped");
+      }
+    };
+
+    let initialCheckTimer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        assertCurrentStreamAuthority(),
+        new Promise<never>((_resolve, reject) => {
+          initialCheckTimer = setTimeout(() => reject(new Error("stream authority check timed out")), 5_000);
+        }),
+      ]);
+    } finally {
+      if (initialCheckTimer) clearTimeout(initialCheckTimer);
+    }
 
     // Set SSE headers
     res.writeHead(200, {
@@ -2367,37 +2458,149 @@ export function pluginRoutes(
     });
     res.flushHeaders();
 
-    // Send initial comment to establish the connection
-    res.write(":ok\n\n");
+    // Bounded delivery prevents a slow client from retaining an unbounded event backlog.
+    const MAX_QUEUED_EVENTS = 64;
+    const MAX_QUEUED_BYTES = 512 * 1024;
+    const MAX_EVENT_BYTES = 256 * 1024;
+    type QueuedFrame = { frame: string; bytes: number; terminal: boolean; heartbeat?: boolean };
+    const queue: QueuedFrame[] = [];
+    let queuedBytes = 0;
+    let closed = false;
+    let draining = false;
+    let heartbeatCheckInFlight = false;
+    let authorityValidation: Promise<void> | undefined;
+    let unsubscribe = () => {};
+    const streamSocket = res.socket ?? req.socket;
+    const AUTHORITY_CHECK_TIMEOUT_MS = 5_000;
+    const DRAIN_TIMEOUT_MS = 5_000;
 
-    let unsubscribed = false;
-    const safeUnsubscribe = () => {
-      if (!unsubscribed) {
-        unsubscribed = true;
-        unsubscribe();
+    const cleanup = () => {
+      if (closed) return;
+      closed = true;
+      clearInterval(heartbeatTimer);
+      unsubscribe();
+      streamSocket?.off("close", cleanup);
+      queue.length = 0;
+      queuedBytes = 0;
+    };
+    const finishStream = (sendClose: boolean) => {
+      if (closed) return;
+      if (sendClose && res.writable && !res.writableEnded && !res.destroyed) {
+        try { res.write("event: close\ndata: {}\n\n"); } catch { /* A disconnected client needs no terminal frame. */ }
+      }
+      cleanup();
+      if (!res.writableEnded && !res.destroyed) res.end();
+    };
+    const validateCurrentAuthority = () => {
+      if (authorityValidation) return authorityValidation;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const checked = Promise.race([
+        assertCurrentStreamAuthority(),
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => reject(new Error("stream authority check timed out")), AUTHORITY_CHECK_TIMEOUT_MS);
+        }),
+      ]).finally(() => {
+        if (timer) clearTimeout(timer);
+        if (authorityValidation === checked) authorityValidation = undefined;
+      });
+      authorityValidation = checked;
+      void checked.catch(() => {});
+      return checked;
+    };
+    const waitForDrain = () => new Promise<boolean>(resolve => {
+      const timer = setTimeout(() => done(false), DRAIN_TIMEOUT_MS);
+      const done = (writable: boolean) => {
+        clearTimeout(timer);
+        res.off("drain", onDrain);
+        res.off("close", onClose);
+        res.off("error", onClose);
+        req.off("aborted", onClose);
+        resolve(writable);
+      };
+      const onDrain = () => done(true);
+      const onClose = () => done(false);
+      res.once("drain", onDrain);
+      res.once("close", onClose);
+      res.once("error", onClose);
+      req.once("aborted", onClose);
+    });
+    const heartbeatTimer = setInterval(() => {
+      if (closed || heartbeatCheckInFlight) return;
+      heartbeatCheckInFlight = true;
+      void validateCurrentAuthority().then(() => {
+        if (!closed && !draining && queue.length === 0 && res.writable && !res.destroyed) {
+          try {
+            if (!res.write(":heartbeat\n\n")) {
+              void waitForDrain().then(writable => { if (!writable) finishStream(false); });
+            }
+          } catch { finishStream(false); }
+        }
+      }).catch(() => finishStream(true)).finally(() => { heartbeatCheckInFlight = false; });
+    }, 15_000);
+    heartbeatTimer.unref?.();
+    const drain = async () => {
+      if (draining || closed) return;
+      draining = true;
+      try {
+        while (!closed && queue.length > 0) {
+          const item = queue.shift()!;
+          queuedBytes -= item.bytes;
+          await validateCurrentAuthority();
+          if (closed || res.destroyed || res.writableEnded || req.aborted) return;
+          let accepted: boolean;
+          try { accepted = res.write(item.frame); } catch { finishStream(false); return; }
+          if (!accepted && !await waitForDrain()) { finishStream(false); return; }
+          if (item.terminal) { finishStream(false); return; }
+        }
+      } catch {
+        finishStream(true);
+      } finally {
+        draining = false;
       }
     };
+    function enqueue(item: QueuedFrame) {
+      if (closed) return;
+      if (queue.length >= MAX_QUEUED_EVENTS || queuedBytes + item.bytes > MAX_QUEUED_BYTES) {
+        finishStream(true);
+        return;
+      }
+      queue.push(item);
+      queuedBytes += item.bytes;
+      void drain();
+    }
 
-    const unsubscribe = bridgeDeps.streamBus.subscribe(
-      plugin.id,
-      channel,
-      companyId,
-      (event, eventType) => {
-        if (unsubscribed || !res.writable) return;
-        try {
-          if (eventType !== "message") {
-            res.write(`event: ${eventType}\n`);
+    // Send a comment only after the subscription is active so the client is ready for events.
+    try {
+      unsubscribe = bridgeDeps.streamBus.subscribe(
+        plugin.id,
+        channel,
+        companyId,
+        (event, eventType) => {
+          if (closed || !res.writable || res.destroyed) return;
+          try {
+            const data = JSON.stringify(eventType === "error" ? { error: "plugin stream error" } : event);
+            if (data === undefined) throw new Error("invalid stream event");
+            const bytes = Buffer.byteLength(data, "utf8");
+            if (bytes > MAX_EVENT_BYTES) throw new Error("oversized stream event");
+            const frame = `${eventType !== "message" ? `event: ${eventType}\n` : ""}data: ${data}\n\n`;
+            enqueue({ frame, bytes, terminal: eventType === "close" });
+          } catch {
+            finishStream(true);
           }
-          res.write(`data: ${JSON.stringify(event)}\n\n`);
-        } catch {
-          // Connection closed or write error — stop delivering
-          safeUnsubscribe();
-        }
-      },
-    );
+        },
+        () => finishStream(true),
+      );
+    } catch {
+      finishStream(true);
+      return;
+    }
 
-    req.on("close", safeUnsubscribe);
-    res.on("error", safeUnsubscribe);
+    res.write(":ok\n\n");
+    req.on("aborted", () => finishStream(false));
+    res.on("close", cleanup);
+    streamSocket?.on("close", cleanup);
+    res.on("error", () => finishStream(false));
+    res.on("finish", cleanup);
   });
 
   router.use("/plugins/:pluginId/api", async (req, res) => {

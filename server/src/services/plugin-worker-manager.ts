@@ -85,6 +85,9 @@ const BACKOFF_MULTIPLIER = 2;
 
 /** Maximum number of consecutive crashes before giving up on auto-restart. */
 const MAX_CONSECUTIVE_CRASHES = 10;
+const MAX_STREAM_CHANNELS_PER_WORKER = 64;
+const MAX_STREAM_SELECTOR_LENGTH = 256;
+const MAX_QUEUED_STREAM_NOTIFICATIONS = 1_024;
 
 /** Time window in which crashes are considered consecutive (10 minutes). */
 const CRASH_WINDOW_MS = 10 * 60 * 1_000;
@@ -191,7 +194,12 @@ export interface WorkerStartOptions {
    * Callback for stream notifications from the worker (streams.open/emit/close).
    * The host wires this to the PluginStreamBus to fan out events to SSE clients.
    */
-  onStreamNotification?: (method: string, params: Record<string, unknown>) => void;
+  onStreamNotification?: (
+    method: string,
+    params: Record<string, unknown>,
+    ownerGeneration: string,
+    canPublish: () => boolean,
+  ) => void | Promise<void>;
 }
 
 interface WorkerOwner {
@@ -484,6 +492,11 @@ function createPluginWorkerHandleInternal(
   const pendingRequests = new Map<string | number, PendingRequest>();
   let nextRequestId = 1;
   const activeInvocations = new Map<string, ActiveInvocation>();
+  const streamNotificationQueues = new WeakMap<ChildProcess, {
+    tail: Promise<void>;
+    queued: number;
+    overflowed: boolean;
+  }>();
   const lateTerminalAcks = new Map<string | number, { invocationId: string; onTerminal: (reason: "response" | "worker_exit" | "not_dispatched") => void }>();
   // Optional methods reported by the worker during initialization
   let supportedMethods: string[] = [];
@@ -498,7 +511,10 @@ function createPluginWorkerHandleInternal(
 
   // Track stream subscriptions by the complete tenant/channel tuple so two
   // Workspaces using the same plugin channel cannot overwrite each other.
-  const openStreamChannels = new Map<string, { channel: string; companyId: string }>();
+  const openStreamChannels = new Map<string, { channel: string; companyId: string; invocationId?: string }>();
+  let streamOwnerGeneration: string | null = null;
+  const retiredStreamGenerations = new Set<string>();
+  const retiredStreamGenerationOrder: string[] = [];
 
   // Shutdown coordination
   let intentionalStop = false;
@@ -543,8 +559,9 @@ function createPluginWorkerHandleInternal(
   // Incoming message handling
   // -----------------------------------------------------------------------
 
-  function handleLine(line: string): void {
+  function handleLine(line: string, sourceChild: ChildProcess): void {
     if (!line.trim()) return;
+    if (childProcess !== sourceChild) return;
 
     let message: unknown;
     try {
@@ -559,13 +576,24 @@ function createPluginWorkerHandleInternal(
     }
 
     if (isJsonRpcResponse(message)) {
-      void handleResponse(message);
+      void handleResponse(message, sourceChild);
     } else if (isJsonRpcRequest(message)) {
       if (processExited) return;
       handleWorkerRequest(message as JsonRpcRequest);
     } else if (isJsonRpcNotification(message)) {
       if (processExited) return;
-      void handleWorkerNotification(message as JsonRpcNotification);
+      const notification = message as JsonRpcNotification;
+      if (notification.method === "streams.open" || notification.method === "streams.emit" || notification.method === "streams.close") {
+        const queue = streamQueueFor(sourceChild);
+        if (queue.overflowed) return;
+        if (queue.queued >= MAX_QUEUED_STREAM_NOTIFICATIONS) {
+          overflowStreamNotifications(sourceChild, queue);
+          return;
+        }
+        enqueueStreamTask(sourceChild, () => handleWorkerNotification(notification, sourceChild));
+      } else {
+        void handleWorkerNotification(notification, sourceChild);
+      }
     } else {
       log.warn("unknown message type from worker");
     }
@@ -574,7 +602,7 @@ function createPluginWorkerHandleInternal(
   /**
    * Handle a JSON-RPC response from the worker (matching a pending request).
    */
-  async function handleResponse(response: JsonRpcResponse): Promise<void> {
+  async function handleResponse(response: JsonRpcResponse, sourceChild: ChildProcess): Promise<void> {
     const id = response.id;
     if (id === null || id === undefined) {
       log.warn("received response with null/undefined id");
@@ -598,8 +626,14 @@ function createPluginWorkerHandleInternal(
 
     pending.responseReceived = true;
     notifyTerminal(pending, "response");
-
     const invocation = pending.invocationId ? activeInvocations.get(pending.invocationId) : undefined;
+
+    // Notifications and the matching RPC response share stdout ordering. Drain
+    // all earlier stream callbacks before settling the invocation they belong to.
+    // Mark receipt first so a later child exit preserves this buffered response.
+    await streamQueueFor(sourceChild).tail;
+    if (pendingRequests.get(id) !== pending) return;
+
     if (pending.deliveryCancelled) {
       pending.resolve(createErrorResponse(
         response.id,
@@ -763,8 +797,12 @@ function createPluginWorkerHandleInternal(
       entry.timer = setTimeout(() => {
         const current = activeInvocations.get(invocation.id);
         if (!current) return;
-        if (current.authority) current.invalidated = true;
-        else activeInvocations.delete(invocation.id);
+        if (current.authority) {
+          current.invalidated = true;
+          if (ownerWorkspaceId !== undefined) closeInvocationStreams(invocation.id);
+        } else {
+          activeInvocations.delete(invocation.id);
+        }
       }, ttlMs);
       if (entry.timer.unref) entry.timer.unref();
     }
@@ -774,9 +812,87 @@ function createPluginWorkerHandleInternal(
 
   function clearInvocation(invocation: PluginInvocationContext | null): void {
     if (!invocation) return;
+    if (ownerWorkspaceId !== undefined) closeInvocationStreams(invocation.id);
     const entry = activeInvocations.get(invocation.id);
     if (entry?.timer) clearTimeout(entry.timer);
     activeInvocations.delete(invocation.id);
+  }
+
+  function closeInvocationStreams(invocationId: string): void {
+    if (!options.onStreamNotification || !streamOwnerGeneration) return;
+    const generation = streamOwnerGeneration;
+    const child = childProcess;
+    if (!child) return;
+    for (const [key, stream] of openStreamChannels) {
+      if (stream.invocationId !== invocationId) continue;
+      openStreamChannels.delete(key);
+      enqueueStreamTask(child, () => Promise.resolve(options.onStreamNotification!(
+          "streams.close",
+          { channel: stream.channel, companyId: stream.companyId },
+          generation,
+          () => childProcess === child && streamOwnerGeneration === generation
+            && !openStreamChannels.has(key),
+        )).then(() => undefined));
+    }
+  }
+
+  function streamQueueFor(child: ChildProcess): { tail: Promise<void>; queued: number; overflowed: boolean } {
+    let queue = streamNotificationQueues.get(child);
+    if (!queue) {
+      queue = { tail: Promise.resolve(), queued: 0, overflowed: false };
+      streamNotificationQueues.set(child, queue);
+    }
+    return queue;
+  }
+
+  function enqueueStreamTask(child: ChildProcess, task: () => Promise<void> | void): void {
+    const queue = streamQueueFor(child);
+    queue.queued++;
+    queue.tail = queue.tail.then(task).catch(() => undefined).finally(() => { queue.queued--; });
+  }
+
+  function overflowStreamNotifications(
+    child: ChildProcess,
+    queue: { tail: Promise<void>; queued: number; overflowed: boolean },
+  ): void {
+    if (queue.overflowed) return;
+    queue.overflowed = true;
+    const generation = streamOwnerGeneration;
+    const streams = Array.from(openStreamChannels.entries());
+    for (const [key] of streams) openStreamChannels.delete(key);
+    if (!generation || !options.onStreamNotification) return;
+    for (const [key, stream] of streams) {
+      enqueueStreamTask(child, () => Promise.resolve(options.onStreamNotification!(
+        "streams.close",
+        { channel: stream.channel, companyId: stream.companyId },
+        generation,
+        () => childProcess === child && streamOwnerGeneration === generation && !openStreamChannels.has(key),
+      )).then(() => undefined));
+    }
+  }
+
+  function rememberRetiredStreamGeneration(generation: string): void {
+    if (retiredStreamGenerations.has(generation)) return;
+    retiredStreamGenerations.add(generation);
+    retiredStreamGenerationOrder.push(generation);
+    while (retiredStreamGenerationOrder.length > 64) {
+      const oldest = retiredStreamGenerationOrder.shift();
+      if (oldest) retiredStreamGenerations.delete(oldest);
+    }
+  }
+
+  function nativeConnectivityContext(invocationId: string, entry: ActiveInvocation): Pick<WorkerHostCallContext, "readNativeConnectivity"> {
+    if (!entry.authority?.readNativeConnectivity) return {};
+    return {
+      readNativeConnectivity: async () => {
+        if (activeInvocations.get(invocationId) !== entry) throw invocationDenied();
+        await assertInvocationCurrent(entry);
+        const result = await entry.authority!.readNativeConnectivity!();
+        await assertInvocationCurrent(entry);
+        if (activeInvocations.get(invocationId) !== entry) throw invocationDenied();
+        return result;
+      },
+    };
   }
 
   async function contextForWorkerMessage(message: JsonRpcRequest | JsonRpcNotification): Promise<WorkerHostCallContext> {
@@ -805,7 +921,7 @@ function createPluginWorkerHandleInternal(
       } catch {
         return { invalidInvocationScope: true };
       }
-      return { invocationScope: ownedEntry.scope };
+      return { invocationScope: ownedEntry.scope, ...nativeConnectivityContext(invocationId, ownedEntry) };
     }
 
     if (invocationId?.startsWith(GUARDED_INVOCATION_PREFIX) && !activeInvocations.get(invocationId)?.authority) {
@@ -825,16 +941,7 @@ function createPluginWorkerHandleInternal(
         return { invalidInvocationScope: true };
       }
     }
-    return { invocationScope: entry.scope,
-      ...(entry.authority?.readNativeConnectivity ? { readNativeConnectivity: async () => {
-        if (activeInvocations.get(invocationId) !== entry) throw invocationDenied();
-        await assertInvocationCurrent(entry);
-        const result = await entry.authority!.readNativeConnectivity!();
-        await assertInvocationCurrent(entry);
-        if (activeInvocations.get(invocationId) !== entry) throw invocationDenied();
-        return result;
-      } } : {}),
-    };
+    return { invocationScope: entry.scope, ...nativeConnectivityContext(invocationId, entry) };
   }
 
   /**
@@ -928,8 +1035,8 @@ function createPluginWorkerHandleInternal(
    * arrive here. We append structured plugin context (pluginId, timestamp,
    * level) so that every log entry is queryable per the spec (§26.1).
    */
-  async function handleWorkerNotification(notification: JsonRpcNotification): Promise<void> {
-    const notificationChild = childProcess;
+  async function handleWorkerNotification(notification: JsonRpcNotification, notificationChild: ChildProcess): Promise<void> {
+    const notificationGeneration = streamOwnerGeneration;
     if (!notificationChild || processExited) return;
     if (notification.method === "log") {
       const params = notification.params as {
@@ -970,18 +1077,25 @@ function createPluginWorkerHandleInternal(
       notification.method === "streams.emit" ||
       notification.method === "streams.close"
     ) {
+      if (streamQueueFor(notificationChild).overflowed) return;
       const params = (notification.params ?? {}) as Record<string, unknown>;
-      const companyId = String(params.companyId ?? "");
+      const companyId = typeof params.companyId === "string" ? params.companyId : "";
       const invocationId = readNonEmptyString(
         (notification as { paperclipInvocationId?: unknown }).paperclipInvocationId,
       );
       const context = await contextForWorkerMessage(notification);
-      if (childProcess !== notificationChild || processExited) return;
+      if (childProcess !== notificationChild || processExited || streamOwnerGeneration !== notificationGeneration
+        || streamQueueFor(notificationChild).overflowed) return;
       if (context.invalidInvocationScope) {
         // Do not log worker-controlled payload values for denied notifications.
         return;
       }
       const invocation = invocationId ? activeInvocations.get(invocationId) : undefined;
+      if (!notificationGeneration) return;
+      if (ownerWorkspaceId !== undefined
+        && (!invocationId || !invocation?.authority
+          || invocation.authority.boundWorkspaceId !== ownerWorkspaceId
+          || invocation.scope.companyId !== ownerWorkspaceId)) return;
       const allowedCompanyId = context.invocationScope?.companyId;
       if (allowedCompanyId && companyId !== allowedCompanyId) {
         log.warn(
@@ -991,19 +1105,62 @@ function createPluginWorkerHandleInternal(
         return;
       }
 
-      // Track open channels so we can emit synthetic close on crash
+      if (invocation) {
+        try {
+          await assertInvocationCurrent(invocation);
+        } catch {
+          return;
+        }
+      }
+      if (childProcess !== notificationChild || processExited
+        || streamOwnerGeneration !== notificationGeneration
+        || (invocationId !== null && activeInvocations.get(invocationId) !== invocation)) return;
+
+      const channel = typeof params.channel === "string" ? params.channel : "";
+      const validStreamSelector = (value: string): boolean => value.length > 0
+        && value.length <= MAX_STREAM_SELECTOR_LENGTH
+        && !/[\u0000-\u001f\u007f]/.test(value);
+      if (!validStreamSelector(channel) || !validStreamSelector(companyId)) return;
+      const streamKey = JSON.stringify([companyId, channel]);
+      const currentStream = openStreamChannels.get(streamKey);
       if (notification.method === "streams.open") {
-        const ch = String(params.channel ?? "");
-        if (ch) openStreamChannels.set(JSON.stringify([companyId, ch]), { channel: ch, companyId });
+        if (currentStream && currentStream.invocationId !== (ownerWorkspaceId !== undefined ? invocationId : undefined)) return;
+        if (!currentStream && openStreamChannels.size >= MAX_STREAM_CHANNELS_PER_WORKER) return;
+        openStreamChannels.set(streamKey, {
+          channel,
+          companyId,
+          ...(ownerWorkspaceId !== undefined && invocationId ? { invocationId } : {}),
+        });
+      } else if (!currentStream
+        || currentStream.invocationId !== (ownerWorkspaceId !== undefined ? invocationId : undefined)) {
+        return;
       } else if (notification.method === "streams.close") {
-        const ch = String(params.channel ?? "");
-        if (ch) openStreamChannels.delete(JSON.stringify([companyId, ch]));
+        openStreamChannels.delete(streamKey);
       }
 
       if (options.onStreamNotification) {
         try {
-          options.onStreamNotification(notification.method, params);
-          if (invocation?.authority) await assertInvocationCurrent(invocation);
+          const canPublish = (): boolean => {
+            if (notification.method === "streams.close") {
+              return streamOwnerGeneration === notificationGeneration
+                || retiredStreamGenerations.has(notificationGeneration);
+            }
+            const trackedStream = openStreamChannels.get(streamKey);
+            return childProcess === notificationChild && !processExited
+              && streamOwnerGeneration === notificationGeneration
+              && !streamQueueFor(notificationChild).overflowed
+              && trackedStream !== undefined
+              && trackedStream.invocationId === (ownerWorkspaceId !== undefined ? invocationId : undefined)
+              && (invocationId === null || (
+                activeInvocations.get(invocationId) === invocation
+                && !invocation?.invalidated
+                && !invocation?.authority?.signal?.aborted
+              ));
+          };
+          await options.onStreamNotification(notification.method, params, notificationGeneration, canPublish);
+          if (childProcess !== notificationChild || processExited || streamOwnerGeneration !== notificationGeneration) return;
+          if (invocation && activeInvocations.get(invocationId!) !== invocation) return;
+          if (invocation) await assertInvocationCurrent(invocation);
         } catch (err) {
           if (!invocation?.authority) {
             log.error(
@@ -1047,6 +1204,8 @@ function createPluginWorkerHandleInternal(
       detached: false,
     });
 
+    streamOwnerGeneration = randomUUID();
+
     return child;
   }
 
@@ -1054,7 +1213,7 @@ function createPluginWorkerHandleInternal(
     // Read NDJSON from stdout
     if (child.stdout) {
       readline = createInterface({ input: child.stdout });
-      readline.on("line", handleLine);
+      readline.on("line", (line: string) => handleLine(line, child));
     }
 
     // Capture stderr for logging
@@ -1151,10 +1310,17 @@ function createPluginWorkerHandleInternal(
       )),
     );
 
-    if (openStreamChannels.size > 0 && options.onStreamNotification) {
+    const closedGeneration = streamOwnerGeneration;
+    if (closedGeneration) rememberRetiredStreamGeneration(closedGeneration);
+    if (openStreamChannels.size > 0 && options.onStreamNotification && closedGeneration) {
       for (const { channel, companyId } of openStreamChannels.values()) {
         try {
-          options.onStreamNotification("streams.close", { channel, companyId });
+          void Promise.resolve(options.onStreamNotification(
+            "streams.close",
+            { channel, companyId },
+            closedGeneration,
+            () => streamOwnerGeneration === closedGeneration || retiredStreamGenerations.has(closedGeneration),
+          )).catch(() => undefined);
         } catch {
           // Best-effort cleanup — don't let it interfere with close handling
         }
@@ -1171,6 +1337,7 @@ function createPluginWorkerHandleInternal(
       stderrReadline = null;
     }
     childProcess = null;
+    streamOwnerGeneration = null;
     processExited = false;
     resolveProcessClose?.();
     resolveProcessClose = null;
@@ -1658,6 +1825,7 @@ function createPluginWorkerHandleInternal(
         if (pending.timedOut && pending.onTerminal && invocation?.id && !pending.terminalNotified) {
           const active = activeInvocations.get(invocation.id);
           if (active) active.invalidated = true;
+          if (ownerWorkspaceId !== undefined) closeInvocationStreams(invocation.id);
           lateTerminalAcks.set(id, { invocationId: invocation.id, onTerminal: pending.onTerminal });
         } else {
           clearInvocation(invocation);
@@ -1698,6 +1866,7 @@ function createPluginWorkerHandleInternal(
         const abort = () => {
           const active = invocation ? activeInvocations.get(invocation.id) : undefined;
           if (active) active.invalidated = true;
+          if (invocation && ownerWorkspaceId !== undefined) closeInvocationStreams(invocation.id);
           if (pending.deliveryCancelled) return;
           pending.deliveryCancelled = true;
         };
@@ -1706,6 +1875,7 @@ function createPluginWorkerHandleInternal(
         if (authority.signal.aborted) {
           const active = invocation ? activeInvocations.get(invocation.id) : undefined;
           if (active) active.invalidated = true;
+          if (invocation && ownerWorkspaceId !== undefined) closeInvocationStreams(invocation.id);
           pending.removeAbortListener?.();
           clearTimeout(timer);
           clearInvocation(invocation);

@@ -21,7 +21,9 @@ import {
   shouldHandleHostNavigationClick,
   usePluginData,
   useHostNavigation,
+  usePluginStream,
   type PluginBridgeContextValue,
+  type PluginStreamResult,
 } from "./bridge";
 import { initPluginBridge } from "./bridge-init";
 import { _createReactShimSourceForTests } from "./slots";
@@ -62,6 +64,174 @@ describe("plugin bridge registry globals", () => {
 function act(callback: () => void) {
   flushSync(callback);
 }
+
+class FakeEventSource {
+  static instances: FakeEventSource[] = [];
+  onopen: ((event: Event) => void) | null = null;
+  onmessage: ((event: MessageEvent<string>) => void) | null = null;
+  onerror: ((event: Event) => void) | null = null;
+  closed = false;
+  closeCalls = 0;
+  private listeners = new Map<string, Set<EventListenerOrEventListenerObject>>();
+
+  constructor(readonly url: string, readonly init?: EventSourceInit) {
+    FakeEventSource.instances.push(this);
+  }
+
+  close() {
+    this.closed = true;
+    this.closeCalls += 1;
+  }
+
+  addEventListener(type: string, listener: EventListenerOrEventListenerObject) {
+    const listeners = this.listeners.get(type) ?? new Set<EventListenerOrEventListenerObject>();
+    listeners.add(listener);
+    this.listeners.set(type, listeners);
+  }
+
+  emitOpen() { this.onopen?.(new Event("open")); }
+  emitMessage(data: string) { this.onmessage?.(new MessageEvent("message", { data })); }
+  emitError() { this.onerror?.(new Event("error")); }
+  emitClose() {
+    for (const listener of this.listeners.get("close") ?? []) {
+      if (typeof listener === "function") listener(new Event("close"));
+      else listener.handleEvent(new Event("close"));
+    }
+  }
+}
+
+function installFakeEventSource() {
+  const previous = Object.getOwnPropertyDescriptor(globalThis, "EventSource");
+  FakeEventSource.instances = [];
+  Object.defineProperty(globalThis, "EventSource", {
+    configurable: true,
+    writable: true,
+    value: FakeEventSource as unknown as typeof EventSource,
+  });
+  return () => {
+    if (previous) Object.defineProperty(globalThis, "EventSource", previous);
+    else delete (globalThis as { EventSource?: typeof EventSource }).EventSource;
+  };
+}
+
+function streamBridgeValue(companyId: string): PluginBridgeContextValue {
+  return {
+    pluginId: "test-plugin",
+    hostContext: { companyId, companyPrefix: "PAP", projectId: null, entityId: null, entityType: null, userId: null },
+  };
+}
+
+function renderStreamHook(companyId: string, onStream: (stream: PluginStreamResult<number>) => void) {
+  function Probe() {
+    onStream(usePluginStream<number>("updates"));
+    return null;
+  }
+  return React.createElement(PluginBridgeContext.Provider, { value: streamBridgeValue(companyId) }, React.createElement(Probe));
+}
+
+describe("usePluginStream lifecycle and bounds", () => {
+  (globalThis as unknown as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+
+  it("ignores old source callbacks after a scope change and retains only the newest 128 messages", () => {
+    const restoreEventSource = installFakeEventSource();
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    let stream!: PluginStreamResult<number>;
+    try {
+      act(() => root.render(renderStreamHook("workspace-a", value => { stream = value; })));
+      const sourceA = FakeEventSource.instances[0]!;
+      act(() => sourceA.emitOpen());
+      expect(stream.connected).toBe(true);
+
+      act(() => root.render(renderStreamHook("workspace-b", value => { stream = value; })));
+      const sourceB = FakeEventSource.instances[1]!;
+      expect(sourceA.closed).toBe(true);
+      expect(sourceB.url).toContain("companyId=workspace-b");
+
+      act(() => {
+        sourceA.emitOpen();
+        sourceA.emitMessage("1");
+        sourceA.emitError();
+        sourceA.emitClose();
+      });
+      expect(stream.events).toEqual([]);
+      expect(stream.lastEvent).toBeNull();
+      expect(stream.connected).toBe(false);
+      expect(stream.error).toBeNull();
+
+      act(() => {
+        sourceB.emitOpen();
+        for (let value = 0; value < 130; value += 1) sourceB.emitMessage(String(value));
+      });
+      expect(stream.events).toHaveLength(128);
+      expect(stream.events[0]).toBe(2);
+      expect(stream.events.at(-1)).toBe(129);
+      expect(stream.lastEvent).toBe(129);
+
+      act(() => {
+        sourceB.emitMessage("130");
+        sourceB.emitClose();
+      });
+      expect(stream.events).toHaveLength(128);
+      expect(stream.events[0]).toBe(3);
+      expect(stream.lastEvent).toBe(130);
+      expect(stream.connected).toBe(false);
+      expect(FakeEventSource.instances).toHaveLength(2);
+    } finally {
+      act(() => root.unmount());
+      container.remove();
+      restoreEventSource();
+    }
+  });
+
+  it("rejects messages above the UTF-8 byte limit and does not reconnect", () => {
+    const restoreEventSource = installFakeEventSource();
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    let stream!: PluginStreamResult<number>;
+    try {
+      act(() => root.render(renderStreamHook("workspace-a", value => { stream = value; })));
+      const source = FakeEventSource.instances[0]!;
+      act(() => {
+        source.emitOpen();
+        source.emitMessage("é".repeat(32 * 1024 + 1));
+      });
+      expect(source.closed).toBe(true);
+      expect(stream.connected).toBe(false);
+      expect(stream.error?.message).toMatch(/65536 byte limit/);
+      expect(FakeEventSource.instances).toHaveLength(1);
+    } finally {
+      act(() => root.unmount());
+      container.remove();
+      restoreEventSource();
+    }
+  });
+
+  it("closes the active source when explicitly closed or unmounted", () => {
+    const restoreEventSource = installFakeEventSource();
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    let stream!: PluginStreamResult<number>;
+    try {
+      act(() => root.render(renderStreamHook("workspace-a", value => { stream = value; })));
+      const source = FakeEventSource.instances[0]!;
+      act(() => stream.close());
+      expect(source.closed).toBe(true);
+      expect(stream.connecting).toBe(false);
+      act(() => source.emitMessage("1"));
+      expect(stream.events).toEqual([]);
+
+      act(() => root.unmount());
+      expect(source.closeCalls).toBeGreaterThan(0);
+    } finally {
+      container.remove();
+      restoreEventSource();
+    }
+  });
+});
 
 describe("plugin host navigation", () => {
   it("resolves plugin page routes into the active company prefix", () => {

@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PluginRecord } from "@paperclipai/shared";
 import { createPluginWorkerManager, type WorkerStartOptions } from "../services/plugin-worker-manager.js";
 import { createSpsWorkspacePluginWorkers, resolveSpsWorkspacePluginEntrypoint } from "../services/sps-workspace-plugin-workers.js";
+import { createPluginStreamBus } from "../services/plugin-stream-bus.js";
 
 const fakes = vi.hoisted(() => ({
   fork: vi.fn(),
@@ -300,6 +301,51 @@ describe("SPS Workspace Plugin worker factory", () => {
       await factory.shutdown();
       await manager.shutdown();
     }
+  });
+
+  it("binds stream publication and retirement to the owning Workspace, policy and live invocation", async () => {
+    const manager = createPluginWorkerManager();
+    const starts = new Map<string, WorkerStartOptions>();
+    const originalStart = manager.startWorkspaceWorker.bind(manager);
+    vi.spyOn(manager, "startWorkspaceWorker").mockImplementation((workspaceId, id, options) => {
+      starts.set(workspaceId, options);
+      return originalStart(workspaceId, id, options);
+    });
+    const bus = createPluginStreamBus();
+    const observedA: unknown[] = [], observedB: unknown[] = [];
+    bus.subscribe(pluginId, "progress", workspaceA, (event, kind) => observedA.push({ event, kind }));
+    bus.subscribe(pluginId, "progress", workspaceB, (event, kind) => observedB.push({ event, kind }));
+    const factory = createSpsWorkspacePluginWorkers({} as any, manager, {
+      localPluginDir: "/unused", resolveEntrypoint: async () => "/fixture/workspace-worker.js",
+      buildServices: () => ({ dispose: vi.fn() } as any), streamBus: bus,
+    });
+    const call = (workspaceId: string) => factory.call(workspaceId, pluginId, "getData", {
+      key: "fixture.data", companyId: workspaceId, params: {}, renderEnvironment: null,
+    } as any, 1_000, authority(workspaceId));
+    try {
+      await call(workspaceA); await call(workspaceB);
+      const streamA = starts.get(workspaceA)!.onStreamNotification!;
+      const streamB = starts.get(workspaceB)!.onStreamNotification!;
+      const selectedA = { channel: "progress", companyId: workspaceA };
+      const selectedB = { channel: "progress", companyId: workspaceB };
+      await streamA("streams.open", selectedB, "generation-a", () => true);
+      expect(observedB).toEqual([]);
+      await streamA("streams.open", selectedA, "generation-a", () => false);
+      expect(observedA).toEqual([]);
+      await streamA("streams.open", selectedA, "generation-a", () => true);
+      await streamB("streams.open", selectedB, "generation-b", () => true);
+      await streamA("streams.emit", { ...selectedA, event: { progress: 1 } }, "generation-a", () => true);
+      expect(observedA.at(-1)).toEqual({ kind: "message", event: { progress: 1 } });
+      fakes.policy.set(workspaceA, { policyId: "changed", revision: 2 });
+      await expect(streamA("streams.emit", { ...selectedA, event: { progress: 2 } }, "generation-a", () => true))
+        .rejects.toThrow();
+      expect(observedA).toHaveLength(2);
+      await fakes.stopHandler!(workspaceA, "stop", "2");
+      expect(bus.ownerChannelCount(pluginId, workspaceA)).toBe(0);
+      expect(bus.ownerChannelCount(pluginId, workspaceB)).toBe(1);
+      expect(observedA.at(-1)).toEqual({ kind: "close", event: selectedA });
+      expect(manager.getWorkspaceWorker(workspaceB, pluginId)?.status).toBe("running");
+    } finally { await factory.shutdown(); await manager.shutdown(); }
   });
 
   it("resolves only regular files inside the declared package entry and rejects traversal without fallback", async () => {
