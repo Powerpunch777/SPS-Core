@@ -653,9 +653,6 @@ export function createHostClientHandlers(
     params: unknown,
     context?: WorkerHostCallContext,
   ): void {
-    const requested = requestedCompanyScope(method, params);
-    if (requested.kind === "none") return;
-
     if (context?.invalidInvocationScope) {
       throw new InvocationScopeDeniedError(
         pluginId,
@@ -663,6 +660,9 @@ export function createHostClientHandlers(
         "the worker referenced a missing, expired, or unknown invocation scope",
       );
     }
+
+    const requested = requestedCompanyScope(method, params);
+    if (requested.kind === "none") return;
 
     const allowedCompanyId = readNonEmptyString(context?.invocationScope?.companyId);
     if (!allowedCompanyId) return;

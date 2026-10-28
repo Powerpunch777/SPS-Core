@@ -9,6 +9,41 @@ import {
 import { PLUGIN_RPC_ERROR_CODES } from "../src/protocol.js";
 
 describe("createHostClientHandlers invocation company scope", () => {
+  it("rejects invalid invocation scopes before unscoped Host handlers run", async () => {
+    const configGet = vi.fn(async () => ({ mode: "workspace" }));
+    const resolveSecret = vi.fn(async () => "secret-value");
+    const replaceDynamic = vi.fn(async () => ({ registered: 1 }));
+    const handlers = createHostClientHandlers({
+      pluginId: "paperclip.test",
+      capabilities: ["secrets.read-ref", "agent.tools.dynamic.register"],
+      services: {
+        config: { get: configGet },
+        secrets: { resolve: resolveSecret },
+        agentTools: { replaceDynamic },
+      } as unknown as HostServices,
+    });
+    const invalidScope = { invalidInvocationScope: true };
+
+    await expect(handlers["config.get"]({}, invalidScope)).rejects.toBeInstanceOf(InvocationScopeDeniedError);
+    await expect(handlers["secrets.resolve"]({ secretRef: "provider-key" }, invalidScope))
+      .rejects.toBeInstanceOf(InvocationScopeDeniedError);
+    await expect(handlers["agentTools.replaceDynamic"]({ tools: [] }, invalidScope))
+      .rejects.toBeInstanceOf(InvocationScopeDeniedError);
+    expect(configGet).not.toHaveBeenCalled();
+    expect(resolveSecret).not.toHaveBeenCalled();
+    expect(replaceDynamic).not.toHaveBeenCalled();
+
+    // A genuinely unscoped legacy Host context remains supported.
+    await expect(handlers["config.get"]({})).resolves.toEqual({ mode: "workspace" });
+    await expect(handlers["secrets.resolve"]({ secretRef: "provider-key" })).resolves.toBe("secret-value");
+
+    // An active Workspace invocation can still call handlers that need no selector.
+    await expect(handlers["agentTools.replaceDynamic"]({ tools: [] }, {
+      invocationScope: { companyId: "workspace-a" },
+    })).resolves.toEqual({ registered: 1 });
+    expect(replaceDynamic).toHaveBeenCalledOnce();
+  });
+
   it("gates Core memory lifecycle publication and preserves the invocation company", async () => {
     const publishLifecycle = vi.fn(async () => {});
     const services = { memory: { publishLifecycle } } as unknown as HostServices;

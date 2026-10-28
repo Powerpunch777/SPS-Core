@@ -92,6 +92,14 @@ and cannot write or register channels in a replacement generation. A child still
 alive after the bounded termination sequence makes shutdown fail, and Core exits
 nonzero rather than recording a clean shutdown. This is local lifecycle control,
 not physical two-PC, distributed cancellation, or arbitrary descendant proof.
+
+An explicitly invalid Worker invocation context fails closed for every Host RPC,
+including methods without Workspace selectors such as config and secret reads.
+The lack of a Workspace selector does not erase a missing, expired or unknown
+invocation. Genuine legacy Host calls with no invocation context retain their
+existing capability checks; this does not convert a shared Worker into a
+Workspace-owned process or a secret-isolation boundary.
+
 The reusable bulk stop also joins current startup and temporarily rejects new
 starts, then reopens admission after completion. Only the exact successfully
 stopped handles are removed; failed handles remain tracked and reject the call.
