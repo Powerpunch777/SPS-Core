@@ -420,7 +420,10 @@ export function createSpsNodeOperations(dbInput: NodeDatabase, { effectDb = dbIn
           signal: completion.signal ?? null, timedOut: completion.timedOut ? 1 : 0, error: cancellationRequested ? command.error ?? "Workspace execution was stopped." : completion.error ?? null,
           finishedAt: new Date(), updatedAt: new Date() }).where(and(eq(spsNodeCommands.id, command.id),
           inArray(spsNodeCommands.status, ["claimed", "running", "cancelling"]))).returning().then(rows => rows[0] ?? null);
-        if (!updated) return { updated: command, cancelled: false };
+        // Another signed completion request may have committed while this
+        // request waited for the execution-control lock. Do not return the
+        // stale pre-transaction snapshot as if it were still active.
+        if (!updated) return { updated: null, cancelled: false };
         if (!parent) return { updated, cancelled: false };
         const cancellationRequestedForParent = cancellationRequested || hasSpsSessionCancellation(parent);
         const parentContext = cancellationRequestedForParent && !hasSpsSessionCancellation(parent)
@@ -447,7 +450,11 @@ export function createSpsNodeOperations(dbInput: NodeDatabase, { effectDb = dbIn
         if (context.afterCommit) await context.afterCommit(effect);
         else await effect();
       }
-      return { status: 200, data: updated };
+      const current = updated ?? await db.select().from(spsNodeCommands)
+        .where(and(eq(spsNodeCommands.id, command.id), eq(spsNodeCommands.nodeId, node.id)))
+        .then(rows => rows[0] ?? null);
+      if (!current) throw notFound("SPS Node command not found");
+      return { status: 200, data: current };
     }
     if (input.operation === "claim-plugin-run") {
       if (node.status !== "active" || !node.keyVerifiedAt) throw forbidden("This SPS Node is not approved for plugin execution");
