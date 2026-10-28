@@ -63,6 +63,7 @@ import {
 import { listReadyAgentPlatformExtensions } from "../services/agent-platform-extensions.js";
 import { pluginLifecycleManager, type PluginLifecycleManager } from "../services/plugin-lifecycle.js";
 import { getCompletedSpsPluginRuntimeMutationResult, SpsPluginRuntimeCleanupPendingError } from "../services/sps-plugin-runtime-mutation.js";
+import { PluginPackageMaintenanceRequiredError } from "../services/sps-plugin-package-maintenance.js";
 import { spsWorkspaceSurfaceService } from "../services/sps-workspace-surfaces.js";
 import {
   getPluginUiContributionMetadata,
@@ -630,6 +631,10 @@ export function pluginRoutes(
   };
 
   const sendLifecycleCleanupPending = async (req: Request, res: Response, error: unknown): Promise<boolean> => {
+    if (error instanceof PluginPackageMaintenanceRequiredError) {
+      res.status(409).json({ error: error.message, code: error.code });
+      return true;
+    }
     if (!(error instanceof SpsPluginRuntimeCleanupPendingError)) return false;
     if (error.operationStarted) {
       publishGlobalLiveEvent({ type: "plugin.ui.updated", payload: { action: "runtime-cleanup-pending" } });

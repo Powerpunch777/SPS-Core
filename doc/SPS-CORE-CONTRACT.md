@@ -20,6 +20,20 @@ runtime configuration. The ownership, authorization, compatibility and cleanup
 contract is documented in [Workspace Plugin workers](SPS-WORKSPACE-PLUGIN-WORKERS.md).
 This separate process lane does not establish an OS sandbox.
 
+New npm Plugin installs and upgrades use separate UUID-owned artifact trees;
+their committed packagePath is authoritative. A missing explicit artifact must
+not silently load a different shared copy. Uninstall preserves caller-owned
+local checkouts and removes only a recognized owned staged tree. All artifact
+cleanup fences starts/restarts of that Plugin and requires its tracked workers
+to confirm close. The loader also requires a live Plugin-bound maintenance
+permit and rejects expired, mismatched or insufficient shared-cleanup authority.
+Legacy shared npm cleanup additionally requires a maintenance
+window with no other tracked workers or starts; Core returns the fixed
+`plugin_package_maintenance_required` conflict rather than stopping unrelated
+plugins. The maintenance action is joined by shutdown. These are graceful local
+coordination guarantees, not crash-atomic package journaling, descendant-process
+containment, or protection from arbitrary same-user filesystem access.
+
 Workspace-wide execution admission and cancellation are platform-owned. The
 durable pause/stop/resume contract, per-lane acknowledgement limits, Host-only
 mutation authority and compatibility requirements are specified in

@@ -9,6 +9,7 @@ import {
   type WorkerInvocationAuthority,
   type WorkerStartOptions,
 } from "../services/plugin-worker-manager.js";
+import { assertPluginPackageMutationPermit } from "../services/sps-plugin-package-maintenance.js";
 
 const childProcessMock = vi.hoisted(() => ({ fork: vi.fn() }));
 vi.mock("node:child_process", async (importOriginal) => ({
@@ -353,4 +354,131 @@ describe("PluginWorkerManager Workspace ownership", () => {
     expect(replacement.diagnostics().pid).not.toBe(child.pid);
     await manager.shutdown();
   }, 8_000);
+
+  it("fences one plugin through private cleanup while other plugin owners remain usable", async () => {
+    const manager = createPluginWorkerManager();
+    const target = await manager.startWorker(PLUGIN_ID, workerOptions({ label: "target" }));
+    const other = await manager.startWorkspaceWorker(WORKSPACE_B, "other-plugin", workerOptions({ label: "other" }));
+    const entered = deferred<void>();
+    const release = deferred<void>();
+    try {
+      const mutation = manager.withPluginPackageMutation(PLUGIN_ID, async (permit) => {
+        assertPluginPackageMutationPermit(permit, PLUGIN_ID, false);
+        expect(() => assertPluginPackageMutationPermit(permit, PLUGIN_ID, true)).toThrow();
+        entered.resolve();
+        await manager.stopWorker(PLUGIN_ID);
+        await expect(manager.startWorker(PLUGIN_ID, workerOptions({ label: "blocked-target" })))
+          .rejects.toMatchObject({ code: "plugin_package_maintenance_required" });
+        await expect(manager.startWorkspaceWorker(WORKSPACE_A, PLUGIN_ID, workerOptions({ label: "blocked-scope" })))
+          .rejects.toMatchObject({ code: "plugin_package_maintenance_required" });
+        await expect(manager.callWorkspaceWorker(WORKSPACE_B, "other-plugin", "getData", dataParams(WORKSPACE_B), 1_000,
+          workspaceAuthority(WORKSPACE_B))).resolves.toMatchObject({ pid: other.diagnostics().pid });
+        await release.promise;
+        throw new Error("simulated artifact cleanup failure");
+      });
+      await entered.promise;
+      release.resolve();
+      await expect(mutation).rejects.toThrow("simulated artifact cleanup failure");
+      expect(target.status).toBe("stopped");
+      expect(other.status).toBe("running");
+      await expect(manager.startWorker(PLUGIN_ID, workerOptions({ label: "after-release" }))).resolves.toBeDefined();
+    } finally {
+      release.resolve();
+      await manager.shutdown();
+    }
+  });
+
+  it("rejects shared cleanup before action if another owner exists, then fences starts globally", async () => {
+    const manager = createPluginWorkerManager();
+    const target = await manager.startWorker(PLUGIN_ID, workerOptions({ label: "target" }));
+    const other = await manager.startWorker("other-plugin", workerOptions({ label: "other" }));
+    const action = vi.fn(async () => undefined);
+    try {
+      await expect(manager.withExclusivePackageMutation(PLUGIN_ID, action))
+        .rejects.toMatchObject({ code: "plugin_package_maintenance_required" });
+      expect(action).not.toHaveBeenCalled();
+      expect(target.status).toBe("running");
+      expect(other.status).toBe("running");
+
+      await manager.stopWorker("other-plugin");
+      await manager.withExclusivePackageMutation(PLUGIN_ID, async (permit) => {
+        assertPluginPackageMutationPermit(permit, PLUGIN_ID, true);
+        await manager.stopWorker(PLUGIN_ID);
+        await expect(manager.startWorker("other-plugin", workerOptions({ label: "blocked-other" })))
+          .rejects.toMatchObject({ code: "plugin_package_maintenance_required" });
+        await expect(manager.startWorkspaceWorker(WORKSPACE_A, "other-plugin", workerOptions({ label: "blocked-other-scope" })))
+          .rejects.toMatchObject({ code: "plugin_package_maintenance_required" });
+      });
+      await expect(manager.startWorker("other-plugin", workerOptions({ label: "after-global-release" }))).resolves.toBeDefined();
+    } finally {
+      await manager.shutdown();
+    }
+  });
+
+  it("rejects shared cleanup while another plugin only has a pending startup lock", async () => {
+    const manager = createPluginWorkerManager();
+    const startupConfig = deferred<Record<string, unknown>>();
+    const options = workerOptions({ label: "pending-start" });
+    options.hostHandlers["config.get"] = async () => startupConfig.promise;
+    const starting = manager.startWorker("other-plugin", options);
+    const observedStart = starting.then(
+      () => ({ ok: true as const }),
+      (error: unknown) => ({ ok: false as const, error }),
+    );
+    const action = vi.fn(async () => undefined);
+    try {
+      await waitFor(() => manager.getWorker("other-plugin")?.status === "starting");
+      await expect(manager.withExclusivePackageMutation(PLUGIN_ID, action))
+        .rejects.toMatchObject({ code: "plugin_package_maintenance_required" });
+      expect(action).not.toHaveBeenCalled();
+      startupConfig.resolve({ selectedWorkspace: "legacy-host", configLabel: "pending-start" });
+      await expect(observedStart).resolves.toEqual({ ok: true });
+    } finally {
+      startupConfig.resolve({ selectedWorkspace: "legacy-host", configLabel: "pending-start" });
+      await manager.shutdown();
+    }
+  });
+
+  it("makes retained handles reject restart while their package fence is held", async () => {
+    const manager = createPluginWorkerManager();
+    const handle = await manager.startWorker(PLUGIN_ID, workerOptions({ label: "retained" }));
+    const childCount = children.length;
+    await manager.withPluginPackageMutation(PLUGIN_ID, async () => {
+      await expect(handle.restart()).rejects.toThrow(/shut down or stopping all workers/i);
+      expect(handle.status).toBe("running");
+      expect(children).toHaveLength(childCount);
+    });
+    expect(handle.status).toBe("running");
+    await manager.shutdown();
+  });
+
+  it("waits for package mutation before shutdown closes workers and rejects new starts", async () => {
+    const manager = createPluginWorkerManager();
+    const handle = await manager.startWorker(PLUGIN_ID, workerOptions({ label: "shutdown-join" }));
+    const entered = deferred<void>();
+    const release = deferred<void>();
+    let actionCompleted = false;
+    const mutation = manager.withPluginPackageMutation(PLUGIN_ID, async () => {
+      entered.resolve();
+      await release.promise;
+      actionCompleted = true;
+    });
+    void mutation.catch(() => undefined);
+    await entered.promise;
+
+    let shutdownCompleted = false;
+    const shutdown = manager.shutdown().then(() => { shutdownCompleted = true; });
+    await expect(manager.startWorker("late-plugin", workerOptions({ label: "late" })))
+      .rejects.toThrow(/shut down/i);
+    expect(shutdownCompleted).toBe(false);
+    expect(actionCompleted).toBe(false);
+    expect(handle.status).toBe("running");
+
+    release.resolve();
+    await mutation;
+    await shutdown;
+    expect(actionCompleted).toBe(true);
+    expect(shutdownCompleted).toBe(true);
+    expect(handle.status).toBe("stopped");
+  });
 });

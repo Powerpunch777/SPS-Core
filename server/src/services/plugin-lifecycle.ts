@@ -53,6 +53,10 @@ import type { PluginWorkerManager, WorkerStartOptions } from "./plugin-worker-ma
 import { badRequest, notFound } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { withSpsPluginRuntimeMutation, type SpsPluginRuntimeMutationCoordinator } from "./sps-plugin-runtime-mutation.js";
+import {
+  PluginPackageMaintenanceRequiredError,
+  type PluginPackageMutationPermit,
+} from "./sps-plugin-package-maintenance.js";
 
 // ---------------------------------------------------------------------------
 // Lifecycle state machine
@@ -489,6 +493,31 @@ export function pluginLifecycleManager(
     await stopWorkerIfRunning(pluginId, pluginKey);
   }
 
+  async function withArtifactCleanupFence<T>(
+    plugin: PluginRecord,
+    action: (permit: PluginPackageMutationPermit) => Promise<T>,
+  ): Promise<T> {
+    const classify = pluginLoaderInstance.requiresSharedPluginArtifactCleanup;
+    if (typeof classify !== "function" || !workerManager) {
+      throw new PluginPackageMaintenanceRequiredError();
+    }
+    if (classify.call(pluginLoaderInstance, plugin)) {
+      if (typeof workerManager.withExclusivePackageMutation !== "function") throw new PluginPackageMaintenanceRequiredError();
+      return workerManager.withExclusivePackageMutation(plugin.id, action);
+    }
+    if (typeof workerManager.withPluginPackageMutation !== "function") throw new PluginPackageMaintenanceRequiredError();
+    return workerManager.withPluginPackageMutation(plugin.id, action);
+  }
+
+  async function ensurePluginWorkerClosed(pluginId: string): Promise<void> {
+    if (!workerManager) throw new PluginPackageMaintenanceRequiredError();
+    // unloadSingle is intentionally best-effort for ordinary lifecycle paths.
+    // Package deletion needs a confirmed close, so retry through the manager
+    // and refuse to touch artifacts if its exact handle remains registered.
+    if (workerManager.getWorker(pluginId)) await workerManager.stopWorker(pluginId);
+    if (workerManager.getWorker(pluginId)) throw new PluginPackageMaintenanceRequiredError();
+  }
+
   async function restoreUpgradeSnapshot(
     snapshot: PluginRecord,
     reactivateReadyRuntime: boolean,
@@ -675,18 +704,22 @@ export function pluginLifecycleManager(
       // If already uninstalled and removeData, hard-delete
       if (plugin.status === "uninstalled") {
         if (removeData) {
-          await pluginLoaderInstance.cleanupInstallArtifacts(plugin);
-          const deleted = await registry.uninstall(pluginId, true);
-          log.info(
-            { pluginId, pluginKey: plugin.pluginKey },
-            "plugin lifecycle: hard-deleted already-uninstalled plugin",
-          );
-          emitDomain("plugin.unloaded", {
-            pluginId,
-            pluginKey: plugin.pluginKey,
-            removeData: true,
+          return withArtifactCleanupFence(plugin, async (permit) => {
+            await deactivatePluginRuntime(pluginId, plugin.pluginKey);
+            await ensurePluginWorkerClosed(pluginId);
+            await pluginLoaderInstance.cleanupInstallArtifacts(plugin, permit);
+            const deleted = await registry.uninstall(pluginId, true);
+            log.info(
+              { pluginId, pluginKey: plugin.pluginKey },
+              "plugin lifecycle: hard-deleted already-uninstalled plugin",
+            );
+            emitDomain("plugin.unloaded", {
+              pluginId,
+              pluginKey: plugin.pluginKey,
+              removeData: true,
+            });
+            return deleted as PluginRecord | null;
           });
-          return deleted as PluginRecord | null;
         }
         throw badRequest(
           `Plugin ${plugin.pluginKey} is already uninstalled. ` +
@@ -694,31 +727,34 @@ export function pluginLifecycleManager(
         );
       }
 
-      await deactivatePluginRuntime(pluginId, plugin.pluginKey);
-      await pluginLoaderInstance.cleanupInstallArtifacts(plugin);
+      return withArtifactCleanupFence(plugin, async (permit) => {
+        await deactivatePluginRuntime(pluginId, plugin.pluginKey);
+        await ensurePluginWorkerClosed(pluginId);
+        await pluginLoaderInstance.cleanupInstallArtifacts(plugin, permit);
 
-      // Perform the uninstall via registry (handles soft/hard delete)
-      const result = await registry.uninstall(pluginId, removeData);
+        // Perform the uninstall via registry (handles soft/hard delete)
+        const result = await registry.uninstall(pluginId, removeData);
 
-      log.info(
-        { pluginId, pluginKey: plugin.pluginKey, removeData },
-        `plugin lifecycle: ${plugin.status} → uninstalled${removeData ? " (hard delete)" : ""}`,
-      );
+        log.info(
+          { pluginId, pluginKey: plugin.pluginKey, removeData },
+          `plugin lifecycle: ${plugin.status} → uninstalled${removeData ? " (hard delete)" : ""}`,
+        );
 
-      emitter.emit("plugin.status_changed", {
-        pluginId,
-        pluginKey: plugin.pluginKey,
-        previousStatus: plugin.status,
-        newStatus: "uninstalled" as PluginStatus,
+        emitter.emit("plugin.status_changed", {
+          pluginId,
+          pluginKey: plugin.pluginKey,
+          previousStatus: plugin.status,
+          newStatus: "uninstalled" as PluginStatus,
+        });
+
+        emitDomain("plugin.unloaded", {
+          pluginId,
+          pluginKey: plugin.pluginKey,
+          removeData,
+        });
+
+        return result as PluginRecord | null;
       });
-
-      emitDomain("plugin.unloaded", {
-        pluginId,
-        pluginKey: plugin.pluginKey,
-        removeData,
-      });
-
-      return result as PluginRecord | null;
     },
 
     // -- markError --------------------------------------------------------

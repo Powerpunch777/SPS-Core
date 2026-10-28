@@ -54,6 +54,11 @@ import type {
 } from "@paperclipai/plugin-sdk";
 import { logger } from "../middleware/logger.js";
 import { describeSpsHostSupport } from "./sps-host-support.js";
+import {
+  PluginPackageMaintenanceRequiredError,
+  withPluginPackageMutationPermit,
+  type PluginPackageMutationPermit,
+} from "./sps-plugin-package-maintenance.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -388,6 +393,18 @@ export interface PluginWorkerManager {
 
   /** Stop matching Workspace workers, leaving other Workspaces untouched. */
   stopWorkspaceWorkers(workspaceId: string, pluginId?: string): Promise<void>;
+
+  /** Run shared-package file changes only while the target Host is the sole owner. */
+  withExclusivePackageMutation?<T>(
+    pluginId: string,
+    action: (permit: PluginPackageMutationPermit) => Promise<T>,
+  ): Promise<T>;
+
+  /** Fence one plugin's starts during private artifact cleanup; other plugins continue. */
+  withPluginPackageMutation?<T>(
+    pluginId: string,
+    action: (permit: PluginPackageMutationPermit) => Promise<T>,
+  ): Promise<T>;
 
   /**
    * Get the worker handle for a plugin.
@@ -2097,6 +2114,9 @@ export function createPluginWorkerManager(
   let shutdownPromise: Promise<void> | null = null;
   let stoppingAll = false;
   let stopAllPromise: Promise<void> | null = null;
+  let exclusivePackageMutationActive = false;
+  const packageMutationPlugins = new Set<string>();
+  const packageMutationPromises = new Set<Promise<unknown>>();
 
   const hostOwner = (pluginId: string): WorkerOwner => ({ workspaceId: null, pluginId });
   const workspaceOwner = (workspaceId: string, pluginId: string): WorkerOwner => ({ workspaceId, pluginId });
@@ -2105,7 +2125,8 @@ export function createPluginWorkerManager(
     pluginId: handle.pluginId,
   });
   const keyOf = (owner: WorkerOwner): string => workerOwnerKey(owner);
-  const canStartOwner = (owner: WorkerOwner): boolean => !closed && !stoppingAll
+  const canStartOwner = (owner: WorkerOwner): boolean => !closed && !stoppingAll && !exclusivePackageMutationActive
+    && !packageMutationPlugins.has(owner.pluginId)
     && !stoppingPlugins.has(owner.pluginId)
     && (owner.workspaceId === null || (!stoppingWorkspaceScopes.has(owner.workspaceId)
       && !stoppingWorkspacePlugins.has(keyOf(owner))));
@@ -2120,6 +2141,9 @@ export function createPluginWorkerManager(
     }
     if (closed) throw new Error("Plugin worker manager is shut down");
     if (stoppingAll) throw new Error("Plugin worker manager is stopping all workers");
+    if (exclusivePackageMutationActive || packageMutationPlugins.has(owner.pluginId)) {
+      throw new PluginPackageMaintenanceRequiredError();
+    }
     if (stoppingPlugins.has(owner.pluginId)) throw new Error(`Plugin worker manager is stopping plugin "${owner.pluginId}"`);
     if (owner.workspaceId !== null && stoppingWorkspaceScopes.has(owner.workspaceId)) {
       throw new Error(`Plugin worker manager is stopping Workspace "${owner.workspaceId}"`);
@@ -2198,6 +2222,71 @@ export function createPluginWorkerManager(
     }
   }
 
+  function decodeOwnerKey(key: string): WorkerOwner | undefined {
+    try {
+      const value: unknown = JSON.parse(key);
+      if (!Array.isArray(value) || value.length !== 2
+        || !(value[0] === null || typeof value[0] === "string") || typeof value[1] !== "string") return undefined;
+      return { workspaceId: value[0], pluginId: value[1] };
+    } catch { return undefined; }
+  }
+
+  function runPackageMutation<T>(
+    pluginId: string,
+    action: (permit: PluginPackageMutationPermit) => Promise<T>,
+    exclusive: boolean,
+  ): Promise<T> {
+    if (closed || !pluginId || typeof action !== "function" || packageMutationPlugins.has(pluginId)
+      || (exclusive ? exclusivePackageMutationActive || packageMutationPlugins.size > 0 : exclusivePackageMutationActive)
+      || stoppingAll || stopAllPromise) return Promise.reject(new PluginPackageMaintenanceRequiredError());
+
+    // Fence synchronously before checking ownership. The selected Host may be
+    // stopped by the lifecycle action, but scoped owners must already be drained.
+    packageMutationPlugins.add(pluginId);
+    if (exclusive) exclusivePackageMutationActive = true;
+    let operation!: Promise<T>;
+    operation = Promise.resolve().then(async () => {
+      try {
+        if (closed || stoppingAll) throw new PluginPackageMaintenanceRequiredError();
+        const targetHostKey = keyOf(hostOwner(pluginId));
+        const hasWorkspaceOwner = [...workers.values()].some(handle =>
+          handle.pluginId === pluginId && handle.workspaceId != null)
+          || [...startupLocks.keys()].some(key => {
+            const owner = decodeOwnerKey(key);
+            return owner?.pluginId === pluginId && owner.workspaceId !== null;
+          });
+        const hasOtherOwner = exclusive && [...workers.keys(), ...startupLocks.keys()]
+          .some(key => key !== targetHostKey);
+        if (hasWorkspaceOwner || hasOtherOwner) throw new PluginPackageMaintenanceRequiredError();
+        return await withPluginPackageMutationPermit(pluginId, exclusive, action);
+      } finally {
+        packageMutationPlugins.delete(pluginId);
+        if (exclusive) exclusivePackageMutationActive = false;
+      }
+    });
+    packageMutationPromises.add(operation);
+    void operation.then(
+      () => packageMutationPromises.delete(operation),
+      () => packageMutationPromises.delete(operation),
+    );
+    return operation;
+  }
+
+  function stopAllWorkers(): Promise<void> {
+    if (stopAllPromise) return stopAllPromise;
+    stoppingAll = true;
+    log.info({ count: workers.size }, "stopping all plugin workers");
+    const current = (async () => {
+      await Promise.allSettled([...packageMutationPromises]);
+      await stopMatchingWorkers(() => true);
+    })().finally(() => {
+      stoppingAll = false;
+      if (stopAllPromise === current) stopAllPromise = null;
+    });
+    stopAllPromise = current;
+    return current;
+  }
+
   return {
     async startWorker(pluginId: string, options: WorkerStartOptions): Promise<PluginWorkerHandle> {
       return startOwnedWorker(hostOwner(pluginId), options);
@@ -2206,6 +2295,20 @@ export function createPluginWorkerManager(
     async startWorkspaceWorker(workspaceId: string, pluginId: string, options: WorkerStartOptions): Promise<PluginWorkerHandle> {
       assertWorkspaceId(workspaceId);
       return startOwnedWorker(workspaceOwner(workspaceId, pluginId), options);
+    },
+
+    withPluginPackageMutation<T>(
+      pluginId: string,
+      action: (permit: PluginPackageMutationPermit) => Promise<T>,
+    ): Promise<T> {
+      return runPackageMutation(pluginId, action, false);
+    },
+
+    withExclusivePackageMutation<T>(
+      pluginId: string,
+      action: (permit: PluginPackageMutationPermit) => Promise<T>,
+    ): Promise<T> {
+      return runPackageMutation(pluginId, action, true);
     },
 
     stopWorker(pluginId: string): Promise<void> {
@@ -2252,17 +2355,7 @@ export function createPluginWorkerManager(
     },
 
     stopAll(): Promise<void> {
-      if (stopAllPromise) return stopAllPromise;
-      stoppingAll = true;
-      log.info({ count: workers.size }, "stopping all plugin workers");
-      const current = (async () => {
-        await stopMatchingWorkers(() => true);
-      })().finally(() => {
-        stoppingAll = false;
-        if (stopAllPromise === current) stopAllPromise = null;
-      });
-      stopAllPromise = current;
-      return current;
+      return stopAllWorkers();
     },
 
     shutdown(): Promise<void> {
@@ -2270,6 +2363,9 @@ export function createPluginWorkerManager(
 
       closed = true;
       const current = (async () => {
+        // Package actions may have stopped the target worker and be mutating
+        // its shared files. Wait before any remaining workers/DB owners close.
+        await Promise.allSettled([...packageMutationPromises]);
         // Terminal shutdown keeps its legacy startup-join behavior: callers
         // awaiting start() receive its normal completion/failure before the
         // shutdown promise settles, then every registered child is closed.

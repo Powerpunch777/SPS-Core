@@ -4524,8 +4524,11 @@ registry.registerPath({
   path: "/api/plugins/{pluginId}",
   tags: ["plugins"],
   summary: "Delete a plugin",
+  description: "Requires confirmed closure of this Plugin's workers before package cleanup. Legacy shared npm installs also require other Plugin workers and starts to be stopped; otherwise returns plugin_package_maintenance_required without uninstalling the package. Caller-owned local source files are preserved.",
   request: { params: z.object({ pluginId: z.string() }) },
-  responses: { 200: r.ok(), 401: r.unauthorized },
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound,
+    409: { description: "Dependency impact review or a package maintenance window is required." },
+    503: { description: "Workspace worker cleanup is unconfirmed; inspect operationStarted and operationCompleted before retrying." } },
 });
 
 registry.registerPath({

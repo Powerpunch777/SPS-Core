@@ -3,6 +3,7 @@ import request from "supertest";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { resolvePluginRecoveryState, type PluginRecoveryState } from "../services/sps-plugin-recovery.js";
 import { SpsPluginRuntimeCleanupPendingError, withSpsPluginRuntimeMutation } from "../services/sps-plugin-runtime-mutation.js";
+import { PluginPackageMaintenanceRequiredError } from "../services/sps-plugin-package-maintenance.js";
 
 const mockRegistry = vi.hoisted(() => ({
   getById: vi.fn(),
@@ -204,6 +205,13 @@ function readyPlugin() {
 }
 
 describe.sequential("plugin install and upgrade authz", () => {
+  beforeAll(async () => {
+    await Promise.all([
+      import("../routes/plugins.js"),
+      import("../middleware/index.js"),
+    ]);
+  }, 60_000);
+
   beforeEach(() => {
     vi.clearAllMocks();
     mockAccess.canUser.mockResolvedValue(false);
@@ -570,6 +578,27 @@ describe.sequential("plugin install and upgrade authz", () => {
     expect(response.status).toBe(400);
     expect(mockWorkspaceSurfaces.deleteInboxSummariesBySourcePluginKey).not.toHaveBeenCalled();
   });
+
+  it("returns an actionable maintenance conflict without claiming an uninstall or deleting history", async () => {
+    const plugin = {
+      id: pluginId, pluginKey: "sps.team-workplane", version: "1.0.0", status: "ready",
+      manifestJson: { id: "sps.team-workplane" },
+    };
+    mockRegistry.getById.mockResolvedValue(plugin);
+    mockLifecycle.unload.mockRejectedValueOnce(new PluginPackageMaintenanceRequiredError());
+    const { app } = await createApp(boardActor({ isInstanceAdmin: true }));
+
+    const response = await request(app).delete(`/api/plugins/${pluginId}?deleteInboxSummaries=true`);
+
+    expect(response.status).toBe(409);
+    expect(response.body).toEqual({
+      error: "This package requires a maintenance window. Stop other plugins before removing it, then refresh and retry.",
+      code: "plugin_package_maintenance_required",
+    });
+    expect(mockWorkspaceSurfaces.deleteInboxSummariesBySourcePluginKey).not.toHaveBeenCalled();
+    expect(mockLogActivity).not.toHaveBeenCalled();
+    expect(mockPublishGlobalLiveEvent).not.toHaveBeenCalled();
+  }, 20_000);
 
   it("audits a completed lifecycle change when cleanup is pending, without exposing worker details", async () => {
     const plugin = {
