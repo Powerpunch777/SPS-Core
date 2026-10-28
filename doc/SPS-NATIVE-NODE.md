@@ -66,12 +66,13 @@ and the Source transport public key cannot change during that refresh. These
 changes require an explicit new identity/approval path rather than reinterpreting
 existing grants or encrypted credentials.
 
-Native claims do not use the legacy ten-minute stale-claim requeue. Desktop
-stops on ambiguous transport/action failure and requires explicit reconnection.
-Reconnect uses the same protected Node identity to reconcile registration; it
-does not replay an accepted command. Interrupted claimed work requires a
-separate explicit resolution. Disconnecting the local controller is not a claim
-that the Host revoked its Node approval or undid external effects.
+Neither Native nor legacy Agent command claims are requeued based only on a
+ten-minute timeout. Desktop stops on ambiguous transport/action failure and
+requires explicit reconnection. Reconnect uses the same protected Node identity
+to reconcile registration; it does not replay an accepted command. Interrupted
+claimed work requires a separate explicit resolution. Disconnecting the local
+controller is not a claim that the Host revoked its Node approval or undid
+external effects.
 
 Desktop joins exact owned command cleanup for disconnect, account change,
 restore and shutdown. Cleanup failure must retain the handle, report unavailable

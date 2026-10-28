@@ -902,6 +902,23 @@ describeEmbeddedPostgres("SPS Node routes", () => {
     expect(claimed.body.id).toBe(queued.id);
     expect(claimed.body.status).toBe("claimed");
 
+    const old = new Date(Date.now() - 30 * 60 * 1000);
+    await db.update(spsNodeCommands).set({ claimedAt: old, startedAt: old, updatedAt: old })
+      .where(eq(spsNodeCommands.id, queued.id));
+    await request(app)
+      .post(`/api${claimPath}`)
+      .send(createSignedNodeRequest(registered.body.id, node.privateKey, claimPath, {}))
+      .expect(204);
+    expect((await db.select().from(spsNodeCommands).where(eq(spsNodeCommands.id, queued.id)))[0])
+      .toMatchObject({ status: "claimed", finishedAt: null });
+
+    const leasePath = `/sps-nodes/${registered.body.id}/commands/${queued.id}/lease`;
+    await request(app)
+      .post(`/api${leasePath}`)
+      .send(createSignedNodeRequest(registered.body.id, node.privateKey, leasePath, {}))
+      .expect(200)
+      .expect(({ body }) => expect(body).toMatchObject({ active: true, status: "claimed" }));
+
     const eventPath = `/sps-nodes/${registered.body.id}/commands/${queued.id}/events`;
     const event = await request(app)
       .post(`/api${eventPath}`)

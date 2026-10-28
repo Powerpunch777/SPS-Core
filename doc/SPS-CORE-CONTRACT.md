@@ -842,7 +842,7 @@ Plugin-scoped; they do not control Agent sessions or grant access to another
 plugin's executions. Lists are bounded, descending UUID pages, not chronological
 history. Existing get/events/artifact methods remain unchanged.
 
-### Neutral Plugin Execution Timeout and Node Ownership Guards
+### Node Execution Timeout and Ownership Guards
 
 Core validates an optional `timeoutMs` for neutral Plugin `dispatchRun` calls.
 When supplied and non-null it must be a positive safe integer; zero, negative,
@@ -856,11 +856,13 @@ handling.
 Before claiming a queued neutral Plugin run, Core validates the persisted
 timeout again. A corrupted or otherwise invalid queued value marks that run
 failed and claim processing skips it; invalid work is not sent to a process.
-Neutral Plugin claims are never silently requeued after 10 minutes without
-activity. Silence does not prove process termination: an old claim stays
-claimed, and an explicit cancellation stays `cancelling`, until the signed Node
-acknowledges completion. Uncertain process execution is not automatically
-retried. The legacy command lane's existing stale-claim behavior is unchanged.
+Neutral Plugin runs and legacy Agent commands are never silently requeued after
+10 minutes without activity. Silence does not prove process termination: an old
+claim stays claimed, and an explicit cancellation stays `cancelling`, until the
+signed Node acknowledges completion. Uncertain process execution is not
+automatically retried. Recovery that transfers ownership requires explicit
+termination evidence and a claim-generation fence; elapsed time alone is not
+such evidence. This policy adds no database migration or public SDK change.
 
 On the Local Node, an already-active command ID is rejected across all command
 lanes before it can replace the tracked entry, spawn another process, or emit a

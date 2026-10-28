@@ -40,6 +40,7 @@ export type SpsNodeOperationContext = Readonly<{
   logMutation(input: Mutation): Promise<void> | void;
   signatureMethod?: string;
   signaturePath?: string;
+  /** @deprecated Retained for compatibility; elapsed time is not termination evidence. */
   requeueStaleClaims?: boolean;
   syncRunnerGrants?: boolean;
   assertCurrent?(): void;
@@ -322,12 +323,7 @@ export function createSpsNodeOperations(dbInput: NodeDatabase, { effectDb = dbIn
     if (input.operation === "claim-command") {
       if (node.status !== "active" || !node.keyVerifiedAt) throw forbidden("This SPS Node is not approved for command execution");
       return await withWorkspaceExecutionAdmission(node.companyId, async (tx, workspaceExecutionEpoch) => {
-      const now = new Date(), staleBefore = new Date(now.getTime() - 10 * 60 * 1000);
-      if (context.requeueStaleClaims !== false) {
-        context.assertCurrent?.();
-        await tx.update(spsNodeCommands).set({ status: "queued", claimedAt: null, startedAt: null, updatedAt: now }).where(and(
-          eq(spsNodeCommands.nodeId, node.id), eq(spsNodeCommands.status, "claimed"), lt(spsNodeCommands.updatedAt, staleBefore)));
-      }
+      const now = new Date();
       while (true) {
         context.assertCurrent?.();
         const candidate = await tx.select().from(spsNodeCommands).where(and(eq(spsNodeCommands.nodeId, node.id), eq(spsNodeCommands.status, "queued")))
