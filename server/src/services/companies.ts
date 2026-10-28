@@ -36,6 +36,7 @@ import { heartbeatService } from "./heartbeat.js";
 import { logActivity } from "./activity-log.js";
 import { builtInAgentService } from "./built-in-agents.js";
 import { isSpsCoreBaselineModeEnabled } from "../ui-branding.js";
+import { assertSpsWorkspaceExecutionReadyForDeletion } from "./sps-workspace-execution-control.js";
 
 export interface CompanyActivityActor {
   actorType: "user" | "agent" | "system" | "plugin";
@@ -432,8 +433,13 @@ export function companyService(db: Db) {
       return result.company;
     },
 
-    remove: (id: string) =>
+    remove: (id: string, expectedExecution?: { epoch: string; revision: number }) =>
       db.transaction(async (tx) => {
+        // The route drains process-owned resources before removal. Recheck the
+        // durable stop token and all pending lanes under the same control-row
+        // lock as Workspace deletion so a concurrent resume cannot admit new
+        // work between the drain and the cascading delete.
+        if (expectedExecution) await assertSpsWorkspaceExecutionReadyForDeletion(tx, id, expectedExecution);
         // Delete from child tables in dependency order
         const companyRunIds = await tx
           .select({ id: heartbeatRuns.id })

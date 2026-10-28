@@ -28,11 +28,12 @@ function createApp(input: { scope?: "standard" | "marketplace_assistant" } = {})
   return app;
 }
 
-describe("Marketplace Assistant scope guard", () => {
-  it("allows only the matching company Core tool execution route", async () => {
-    const allowed = await request(createApp({ scope: "marketplace_assistant" }))
+describe("retired Marketplace Assistant scope guard", () => {
+  it("denies old scoped credentials on both the former tool route and ordinary API routes", async () => {
+    const retiredToolRoute = await request(createApp({ scope: "marketplace_assistant" }))
       .post(`/api/companies/${companyId}/marketplace/assistant/tools/search_marketplace_plugins`);
-    expect(allowed.status).toBe(200);
+    expect(retiredToolRoute.status).toBe(403);
+    expect(retiredToolRoute.body.code).toBe("marketplace_assistant_scope_denied");
 
     const wrongCompany = await request(createApp({ scope: "marketplace_assistant" }))
       .post("/api/companies/55555555-5555-4555-8555-555555555555/marketplace/assistant/tools/search_marketplace_plugins");

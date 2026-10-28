@@ -62,6 +62,7 @@ import {
 } from "../services/plugin-dependencies.js";
 import { listReadyAgentPlatformExtensions } from "../services/agent-platform-extensions.js";
 import { pluginLifecycleManager, type PluginLifecycleManager } from "../services/plugin-lifecycle.js";
+import { getCompletedSpsPluginRuntimeMutationResult, SpsPluginRuntimeCleanupPendingError } from "../services/sps-plugin-runtime-mutation.js";
 import { spsWorkspaceSurfaceService } from "../services/sps-workspace-surfaces.js";
 import {
   getPluginUiContributionMetadata,
@@ -454,8 +455,8 @@ export interface PluginRouteToolDeps {
 export interface PluginRouteBridgeDeps {
   /** The worker manager for dispatching getData/performAction RPC calls. */
   workerManager: PluginWorkerManager;
-  /** Optional owner-scoped caller for manifests declaring entrypoints.workspaceWorker. */
-  workspaceWorkers?: Pick<SpsWorkspacePluginWorkers, "call">;
+  /** Optional owner-scoped caller and policy reconciliation for Workspace workers. */
+  workspaceWorkers?: Pick<SpsWorkspacePluginWorkers, "call" | "reconcileWorkspacePolicy" | "reconcileCatalogPolicy">;
   /** Optional stream bus for SSE push from worker to UI. */
   streamBus?: PluginStreamBus;
   /** Re-resolve a browser session for long-lived streams; request actor fields are only a snapshot. */
@@ -603,6 +604,77 @@ export function pluginRoutes(
   const registryStages = registryStagingDeps
     ? registryStagingService(registryStagingDeps.stagingRoot)
     : null;
+
+  const reconcileWorkspacePolicy = async (companyId: string) => {
+    try {
+      await bridgeDeps?.workspaceWorkers?.reconcileWorkspacePolicy?.(companyId);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const reconcileCatalogPolicy = async () => {
+    try {
+      await bridgeDeps?.workspaceWorkers?.reconcileCatalogPolicy?.();
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const sendCommittedPolicyCleanupPending = (res: Response, stateKey: string, state: unknown) => {
+    res.status(503).json({
+      error: "The change was saved, but Workspace Plugin workers could not be confirmed stopped. Refresh before retrying.",
+      committed: true,
+      [stateKey]: state,
+    });
+  };
+
+  const sendLifecycleCleanupPending = async (req: Request, res: Response, error: unknown): Promise<boolean> => {
+    if (!(error instanceof SpsPluginRuntimeCleanupPendingError)) return false;
+    if (error.operationStarted) {
+      publishGlobalLiveEvent({ type: "plugin.ui.updated", payload: { action: "runtime-cleanup-pending" } });
+    }
+    if (error.operationCompleted) {
+      const result = getCompletedSpsPluginRuntimeMutationResult(error);
+      const record = result && typeof result === "object" ? result as Record<string, unknown> : {};
+      const requestPluginId = typeof req.params.pluginId === "string" ? req.params.pluginId : undefined;
+      const pluginId = typeof record.id === "string" ? record.id : requestPluginId;
+      if (pluginId) {
+        const path = req.path;
+        const action = req.method === "DELETE" ? "plugin.uninstalled"
+          : path.endsWith("/enable") ? (path.includes("/registry/") ? "plugin.registry.enabled" : "plugin.enabled")
+            : path.endsWith("/disable") ? "plugin.disabled"
+              : path.endsWith("/upgrade") ? "plugin.upgraded"
+                : path.endsWith("/worker/restart") ? "plugin.worker.restarted"
+                  : path === "/plugins/install" ? "plugin.installed"
+                    : path.endsWith("/config") ? "plugin.config.updated"
+                      : "plugin.runtime_cleanup_pending";
+        const details: Record<string, unknown> = { operationCompleted: true };
+        for (const key of ["pluginKey", "version", "packageName"] as const) {
+          if (typeof record[key] === "string") details[key] = record[key];
+        }
+        if (req.params.stageId) details.stageId = req.params.stageId;
+        if (req.method === "DELETE") {
+          details.purge = req.query.purge === "true";
+          details.deleteInboxSummaries = req.query.deleteInboxSummaries === "true";
+          details.deletedInboxSummaries = 0;
+        }
+        if (path.endsWith("/disable")) {
+          const reason = (req.body as { reason?: unknown } | undefined)?.reason;
+          if (typeof reason === "string") details.reason = reason;
+        }
+        try { await logPluginMutationActivity(req, action, pluginId, details); }
+        catch { /* Preserve the committed operation result and fixed cleanup response. */ }
+      }
+    }
+    res.status(503).json({
+      error: error.message,
+      operationStarted: error.operationStarted,
+      operationCompleted: error.operationCompleted,
+      ...(error.operationCompleted ? { committed: true } : {}),
+    });
+    return true;
+  };
 
   function matchScopedApiRoute(route: PluginApiRouteDeclaration, method: string, requestPath: string) {
     if (route.method !== method) return null;
@@ -1148,6 +1220,9 @@ export function pluginRoutes(
       return;
     }
     const activation = await setPluginCompanyActivation(registry, plugin, companyId, enabled);
+    // The setting is committed. Notify the UI before attempting to retire
+    // Workspace workers so a failed close cannot leave the visible choice stale.
+    publishGlobalLiveEvent({ type: "plugin.ui.updated", payload: { pluginId: plugin.id, companyId, action: "company-activation-updated" } });
     const actor = getActorInfo(req);
     await logActivity(db, {
       companyId,
@@ -1160,7 +1235,10 @@ export function pluginRoutes(
       entityId: plugin.id,
       details: { pluginId: plugin.id, pluginKey: plugin.pluginKey, enabled },
     });
-    publishGlobalLiveEvent({ type: "plugin.ui.updated", payload: { pluginId: plugin.id, companyId, action: "company-activation-updated" } });
+    if (!(await reconcileWorkspacePolicy(companyId))) {
+      sendCommittedPolicyCleanupPending(res, "activation", activation);
+      return;
+    }
     res.json({ activation });
   });
 
@@ -1636,6 +1714,7 @@ export function pluginRoutes(
       if (existingPlugin) {
         await lifecycle.load(existingPlugin.id);
         const updated = await registry.getById(existingPlugin.id);
+        publishGlobalLiveEvent({ type: "plugin.ui.updated", payload: { pluginId: existingPlugin.id, action: "installed" } });
         await logPluginMutationActivity(req, "plugin.installed", existingPlugin.id, {
           pluginId: existingPlugin.id,
           pluginKey: existingPlugin.pluginKey,
@@ -1643,13 +1722,17 @@ export function pluginRoutes(
           version: updated?.version ?? existingPlugin.version,
           source: isLocalPath ? "local_path" : "npm",
         });
-        publishGlobalLiveEvent({ type: "plugin.ui.updated", payload: { pluginId: existingPlugin.id, action: "installed" } });
+        if (!(await reconcileCatalogPolicy())) {
+          sendCommittedPolicyCleanupPending(res, "plugin", updated);
+          return;
+        }
         res.json(updated);
       } else {
         // This shouldn't happen since installPlugin already registers in the DB
         res.status(500).json({ error: "Plugin installed but not found in registry" });
       }
     } catch (err) {
+      if (await sendLifecycleCleanupPending(req, res, err)) return;
       const message = err instanceof Error ? err.message : String(err);
       res.status(400).json({ error: message });
     }
@@ -1779,6 +1862,7 @@ export function pluginRoutes(
         }
       }
 
+      publishGlobalLiveEvent({ type: "plugin.ui.updated", payload: { pluginId: plugin.id, action: operation } });
       await logPluginMutationActivity(req, "plugin.registry.enabled", plugin.id, {
         stageId: stage.stageId,
         pluginId: plugin.id,
@@ -1787,9 +1871,13 @@ export function pluginRoutes(
         operation,
         registryId: stage.source.registryId,
       });
-      publishGlobalLiveEvent({ type: "plugin.ui.updated", payload: { pluginId: plugin.id, action: operation } });
+      if (!(await reconcileCatalogPolicy())) {
+        sendCommittedPolicyCleanupPending(res, "result", { stage: registryStageResponse(updatedStage), plugin: result });
+        return;
+      }
       res.json({ stage: registryStageResponse(updatedStage), plugin: result });
     } catch (error) {
+      if (await sendLifecycleCleanupPending(req, res, error)) return;
       res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
     }
   });
@@ -2784,6 +2872,11 @@ export function pluginRoutes(
 
     try {
       const result = await lifecycle.unload(plugin.id, purge);
+      publishGlobalLiveEvent({ type: "plugin.ui.updated", payload: { pluginId: plugin.id, action: "uninstalled" } });
+      if (!(await reconcileCatalogPolicy())) {
+        sendCommittedPolicyCleanupPending(res, "plugin", result);
+        return;
+      }
       // Runtime teardown must finish first. For a hard purge the FK has
       // already cleared sourcePluginId, so deletion intentionally keys off
       // the immutable sourcePluginKey rather than the database id.
@@ -2797,9 +2890,9 @@ export function pluginRoutes(
         deleteInboxSummaries,
         deletedInboxSummaries,
       });
-      publishGlobalLiveEvent({ type: "plugin.ui.updated", payload: { pluginId: plugin.id, action: "uninstalled" } });
       res.json(result);
     } catch (err) {
+      if (await sendLifecycleCleanupPending(req, res, err)) return;
       const message = err instanceof Error ? err.message : String(err);
       res.status(400).json({ error: message });
     }
@@ -2827,14 +2920,19 @@ export function pluginRoutes(
 
     try {
       const result = await lifecycle.enable(plugin.id);
+      publishGlobalLiveEvent({ type: "plugin.ui.updated", payload: { pluginId: plugin.id, action: "enabled" } });
+      if (!(await reconcileCatalogPolicy())) {
+        sendCommittedPolicyCleanupPending(res, "plugin", result);
+        return;
+      }
       await logPluginMutationActivity(req, "plugin.enabled", plugin.id, {
         pluginId: plugin.id,
         pluginKey: plugin.pluginKey,
         version: result?.version ?? plugin.version,
       });
-      publishGlobalLiveEvent({ type: "plugin.ui.updated", payload: { pluginId: plugin.id, action: "enabled" } });
       res.json(result);
     } catch (err) {
+      if (await sendLifecycleCleanupPending(req, res, err)) return;
       const message = err instanceof Error ? err.message : String(err);
       res.status(400).json({ error: message });
     }
@@ -2873,14 +2971,19 @@ export function pluginRoutes(
 
     try {
       const result = await lifecycle.disable(plugin.id, reason);
+      publishGlobalLiveEvent({ type: "plugin.ui.updated", payload: { pluginId: plugin.id, action: "disabled" } });
+      if (!(await reconcileCatalogPolicy())) {
+        sendCommittedPolicyCleanupPending(res, "plugin", result);
+        return;
+      }
       await logPluginMutationActivity(req, "plugin.disabled", plugin.id, {
         pluginId: plugin.id,
         pluginKey: plugin.pluginKey,
         reason: reason ?? null,
       });
-      publishGlobalLiveEvent({ type: "plugin.ui.updated", payload: { pluginId: plugin.id, action: "disabled" } });
       res.json(result);
     } catch (err) {
+      if (await sendLifecycleCleanupPending(req, res, err)) return;
       const message = err instanceof Error ? err.message : String(err);
       res.status(400).json({ error: message });
     }
@@ -2907,6 +3010,7 @@ export function pluginRoutes(
       await lifecycle.restartWorker(plugin.id);
       res.json({ pluginId: plugin.id, restarted: true });
     } catch (err) {
+      if (await sendLifecycleCleanupPending(req, res, err)) return;
       const message = err instanceof Error ? err.message : String(err);
       res.status(400).json({ error: message });
     }
@@ -3203,6 +3307,8 @@ export function pluginRoutes(
             }
             : version,
       );
+      publishGlobalLiveEvent({ type: "plugin.ui.updated", payload: { pluginId: plugin.id, action: "upgraded" } });
+      const policyCleanupConfirmed = await reconcileCatalogPolicy();
       if (pendingStage && result.status === "ready") {
         await registryStages!.markRegistered(pendingStage.stageId);
       }
@@ -3216,9 +3322,13 @@ export function pluginRoutes(
         approvedCapabilityEscalation: body?.approvedCapabilityEscalation === true,
         approvedDataMigrationPlanHash: body?.approvedDataMigrationPlanHash ?? null,
       });
-      publishGlobalLiveEvent({ type: "plugin.ui.updated", payload: { pluginId: plugin.id, action: "upgraded" } });
+      if (!policyCleanupConfirmed) {
+        sendCommittedPolicyCleanupPending(res, "plugin", result);
+        return;
+      }
       res.json(result);
     } catch (err) {
+      if (await sendLifecycleCleanupPending(req, res, err)) return;
       const message = err instanceof Error ? err.message : String(err);
       res.status(400).json({ error: message });
     }
@@ -3319,6 +3429,7 @@ export function pluginRoutes(
       const result = await registry.upsertConfig(plugin.id, {
         configJson: body.configJson,
       });
+      publishGlobalLiveEvent({ type: "plugin.ui.updated", payload: { pluginId: plugin.id, action: "config-updated" } });
       await logPluginMutationActivity(req, "plugin.config.updated", plugin.id, {
         pluginId: plugin.id,
         pluginKey: plugin.pluginKey,
@@ -3353,8 +3464,13 @@ export function pluginRoutes(
         }
       }
 
+      if (!(await reconcileCatalogPolicy())) {
+        sendCommittedPolicyCleanupPending(res, "config", result);
+        return;
+      }
       res.json(result);
     } catch (err) {
+      if (await sendLifecycleCleanupPending(req, res, err)) return;
       const message = err instanceof Error ? err.message : String(err);
       res.status(400).json({ error: message });
     }

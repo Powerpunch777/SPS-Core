@@ -4,6 +4,13 @@ SPS Core is the private local-first runtime embedded by SPS Desktop. It provides
 the stable platform services that every SPS workflow can share while leaving
 workflow meaning to plugins.
 
+SPS runs reviewed and approved solutions produced through its own delivery
+business. Core remains technically extensible through the SDK and Runner
+contracts, but does not provide a public Plugin marketplace. Internal Registry,
+package verification, lifecycle and recovery remain supported without Plugin
+Builder. New Builder work and full untrusted-code OS containment are deferred;
+same-user Plugin processes must not be described as a security sandbox.
+
 AI is optional. Plugins may implement ordinary UI, storage and automation
 without Agent registration. Model APIs, process/CLI execution and external Agent
 sessions are separate optional execution paths; OCE management is a separate
@@ -14,8 +21,9 @@ runtime isolation. This Core remains private; the Plugin SDK remains public.
 The current source includes a mock-first model-request broker: Host-only
 connection/grant management, capability-bound `models.list/submit/get/cancel`,
 durable idempotent runs, revocation checks and a separate `model_request` history
-lane. Configuration UI and real-provider qualification are not included. See the
-Core contract for credential, recovery and cancellation limits.
+lane. Host connection/grant settings are available in the embedded Core UI;
+real-provider qualification remains incomplete. See the Core contract for
+credential, recovery and cancellation limits.
 
 This repository is not the public Plugin SDK and is not the SPS release channel.
 The public `SPS-Core-Compat` repository is an upstream-compatibility mirror only.
@@ -29,7 +37,7 @@ Core owns platform capabilities:
 - Node registration, signed command dispatch, runtime packs, and leases
 - Agent adapter registration and execution plumbing
 - plugin package verification, lifecycle, capabilities, jobs, and host services
-- Marketplace catalog search and the adapter-backed Marketplace Assistant
+- Internal Registry metadata and approved package management
 - backup and recovery primitives consumed by Desktop's empty-Host restore flow,
   plus update compatibility checks
 

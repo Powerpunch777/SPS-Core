@@ -2,6 +2,19 @@
 
 Status: current engineering contract
 
+Confirmed product scope (2026-10-28): SPS operates reviewed and approved packages
+from its own solution-delivery business, without public Plugin publishing,
+distribution, sales or discovery. Preserve the internal Registry, package
+verification, installation/update/rollback, SDK and Runner contracts. Plugin
+Builder is a separate future handoff and is not a Core completion prerequisite.
+Full untrusted-code OS containment is deferred; its research is retained. Existing
+capability/grant checks, Secret and file mediation, Workspace boundaries and
+truthful process ownership/recovery remain required. The execution computer
+(Runner) is distinct from an Agent or Target; retained Node protocol names are
+compatibility identifiers. Tailscale and SSH remain the supported network and
+remote-management direction. Older Marketplace feature statements are superseded
+by this policy and must not become release gates.
+
 Plugins may opt into a dedicated Workspace UI/action worker and per-Workspace
 runtime configuration. The ownership, authorization, compatibility and cleanup
 contract is documented in [Workspace Plugin workers](SPS-WORKSPACE-PLUGIN-WORKERS.md).
@@ -497,9 +510,10 @@ Core owns these cross-workflow contracts:
    slots, diagnostics, and rollback.
 6. Generic durable storage and events exposed through versioned plugin host
    services.
-7. Core Marketplace catalog search, plugin details, and the read-only,
-   adapter-backed Marketplace Assistant tool bridge. Desktop currently
-   materializes the trusted local catalog consumed by this service.
+7. Internal Registry metadata and Host-authorized approved package management.
+   Desktop materializes the trusted local catalog. Public discovery and
+   Marketplace Assistant execution are retired; old scoped credentials remain
+   rejected rather than gaining ordinary Core authority.
 8. Backup, update compatibility, and recovery primitives. SPS Desktop owns the
    complete transfer-bundle and empty-Host restore orchestration.
 
@@ -862,11 +876,11 @@ new compatible Core/SDK release is published.
    contributed by plugins.
 4. Installation, Source access, Node execution, restore, and updates require the
    explicit authority defined by Core. Plugins may request but cannot bypass it.
-5. Marketplace Assistant search and detail tools are read-only. Recommendation
-   does not silently install or activate a plugin.
+5. Internal catalog metadata never grants installation, activation or execution
+   authority. Retired Marketplace Assistant credentials remain fail closed.
 6. Every new public contract requires a version, compatibility behavior, tests,
    and an ownership declaration (Core or Plugin).
-7. A Marketplace `source.id` or trust label is presentation metadata, not proof
+7. A catalog `source.id` or trust label is presentation metadata, not proof
    of signature or freshness. Core must not accept a widened or remote catalog
    source until provenance, signature/hash, expiry, and fail-closed behavior are
    verified at the catalog boundary. The current local catalog path assumes

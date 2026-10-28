@@ -52,6 +52,7 @@ import { pluginDatabaseService } from "./plugin-database.js";
 import type { PluginWorkerManager, WorkerStartOptions } from "./plugin-worker-manager.js";
 import { badRequest, notFound } from "../errors.js";
 import { logger } from "../middleware/logger.js";
+import { withSpsPluginRuntimeMutation, type SpsPluginRuntimeMutationCoordinator } from "./sps-plugin-runtime-mutation.js";
 
 // ---------------------------------------------------------------------------
 // Lifecycle state machine
@@ -284,6 +285,8 @@ export interface PluginLifecycleManager {
  * Options for constructing a PluginLifecycleManager.
  */
 export interface PluginLifecycleManagerOptions {
+  /** Optional Core-owned Workspace process drain and policy reconciliation. */
+  workspaceRuntime?: SpsPluginRuntimeMutationCoordinator;
   /** Plugin loader instance. Falls back to the default if omitted. */
   loader?: PluginLoader;
 
@@ -338,6 +341,7 @@ export function pluginLifecycleManager(
   let workerManager: PluginWorkerManager | undefined;
   let migrationDb = db;
   let databaseBackupService: PluginLifecycleManagerOptions["databaseBackupService"];
+  let workspaceRuntime: SpsPluginRuntimeMutationCoordinator | undefined;
 
   if (options && typeof options === "object" && "discoverAll" in options) {
     // Legacy: second arg is a PluginLoader directly
@@ -348,6 +352,7 @@ export function pluginLifecycleManager(
     workerManager = opts.workerManager;
     migrationDb = opts.migrationDb ?? db;
     databaseBackupService = opts.databaseBackupService;
+    workspaceRuntime = opts.workspaceRuntime;
   }
 
   const registry = pluginRegistryService(db);
@@ -568,7 +573,7 @@ export function pluginLifecycleManager(
   // Public API
   // -----------------------------------------------------------------------
 
-  return {
+  const service: PluginLifecycleManager = {
     attachRuntimeLoader(loader: PluginLoader): void {
       if (pluginLoaderInstance === loader) return;
       if (runtimeLoaderAttached) {
@@ -1074,5 +1079,20 @@ export function pluginLifecycleManager(
     once(event, listener) {
       emitter.once(event, listener);
     },
+  };
+  if (!workspaceRuntime) return service;
+  const coordinate = <T>(pluginId: string, operation: () => Promise<T>) =>
+    withSpsPluginRuntimeMutation(workspaceRuntime!, pluginId, operation);
+  // Central coordination also covers development reloads and non-HTTP callers.
+  return {
+    ...service,
+    load: id => coordinate(id, () => service.load(id)),
+    enable: id => coordinate(id, () => service.enable(id)),
+    disable: (id, reason) => coordinate(id, () => service.disable(id, reason)),
+    unload: (id, removeData) => coordinate(id, () => service.unload(id, removeData)),
+    markError: (id, error) => coordinate(id, () => service.markError(id, error)),
+    markUpgradePending: id => coordinate(id, () => service.markUpgradePending(id)),
+    upgrade: (id, options) => coordinate(id, () => service.upgrade(id, options)),
+    restartWorker: id => coordinate(id, () => service.restartWorker(id)),
   };
 }

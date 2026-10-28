@@ -88,6 +88,31 @@ replacement. Pending Plugin counts include these owned resources, in addition to
 durable execution records. Shutdown remains closed to new calls; a failed cleanup
 attempt may be retried after the owned child can be closed.
 
+Policy mutations reconcile all captured runtimes within the actual revision
+scope: Workspace settings affect that Workspace's owned processes, while catalog
+mutations invalidate stale captures across the pool. A singleflight five-second
+sweep also catches non-route changes. Read failures retain ownership rather than
+pretending to confirm cleanup. Shutdown joins sweeps and in-flight mutations.
+
+Core lifecycle mutations drain the selected Plugin's Workspace workers before
+package/data mutation and keep new calls fenced until completion and policy
+reconciliation. The loader similarly fences all Workspace workers during install.
+This does not yet provide a manager-wide legacy Host admission fence for shared
+npm package writes. A cleanup-pending error distinguishes a mutation not started,
+a completed change, and a partially failed operation; callers refresh explicitly
+and must not automatically replay it. Completed results stay out of serialized
+errors, while management preserves activity/UI evidence.
+
+Workspace deletion fences the entire Workspace, drains only its owned startup
+and processes, then persists execution stop and joins cancellation. Pending work
+or failed cancellation keeps the Workspace intact with a fixed cleanup-pending
+response. The deletion transaction locks and verifies the exact stopped
+epoch/revision and durable pending counts before cascading data removal; a
+concurrent resume returns conflict. Worker authority also explicitly checks
+Workspace presence, so deletion cannot make an old epoch-zero capture current
+again when its execution-control row disappears. Successful absence is stale;
+a database read failure never proves absence or cleanup.
+
 These processes run under the Host's OS account. They are not a Windows filesystem,
 network or Vault sandbox. Process ownership and Host RPC checks alone do not
 qualify untrusted Plugin execution, physical Native LAN, or a production release.

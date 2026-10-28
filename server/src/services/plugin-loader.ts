@@ -44,6 +44,7 @@ import { pluginManifestValidator } from "./plugin-manifest-validator.js";
 import { pluginCapabilityValidator } from "./plugin-capability-validator.js";
 import { pluginRegistryService } from "./plugin-registry.js";
 import type { PluginWorkerManager, WorkerStartOptions, WorkerToHostHandlers } from "./plugin-worker-manager.js";
+import type { SpsWorkspacePluginWorkers } from "./sps-workspace-plugin-workers.js";
 import type { PluginEventBus } from "./plugin-event-bus.js";
 import type { PluginStreamBus } from "./plugin-stream-bus.js";
 import { publishPluginStreamNotification } from "./plugin-stream-notifications.js";
@@ -506,6 +507,8 @@ export interface PluginLoadOptions {
  * @see PLUGIN_SPEC.md §12 — Process Model
  */
 export interface PluginRuntimeServices {
+  /** Optional catalog-mutation fence for Workspace-owned plugin workers. */
+  workspaceRuntime?: Pick<SpsWorkspacePluginWorkers, "withCatalogMutation">;
   streamBus?: PluginStreamBus;
   /** Worker process manager for spawning and managing plugin workers. */
   workerManager: PluginWorkerManager;
@@ -2006,49 +2009,54 @@ export function pluginLoader(
 
     async installPlugin(installOptions: PluginInstallOptions): Promise<DiscoveredPlugin> {
       assertRuntimeAllowed("plugin installation");
-      const discovered = await fetchAndValidate(installOptions);
-      const manifest = discovered.manifest!;
+      const performInstall = async () => {
+        const discovered = await fetchAndValidate(installOptions);
+        const manifest = discovered.manifest!;
 
-      // Step 6: Persist install record and apply plugin-owned schema migrations
-      // in one database transaction. If migration validation fails, the plugin
-      // row, namespace record, migration ledger, and created schema all roll back.
-      const installDb = manifest.database ? migrationDb : db;
-      await installDb.transaction(async (tx) => {
-        const txDb = tx as unknown as Db;
-        const txRegistry = pluginRegistryService(txDb);
-        const installed = await txRegistry.install(
+        // Step 6: Persist install record and apply plugin-owned schema migrations
+        // in one database transaction. If migration validation fails, the plugin
+        // row, namespace record, migration ledger, and created schema all roll back.
+        const installDb = manifest.database ? migrationDb : db;
+        await installDb.transaction(async (tx) => {
+          const txDb = tx as unknown as Db;
+          const txRegistry = pluginRegistryService(txDb);
+          const installed = await txRegistry.install(
+            {
+              packageName: discovered.packageName,
+              packagePath: discovered.source === "local-filesystem" ? discovered.packagePath : undefined,
+            },
+            manifest,
+          );
+
+          if (!installed) {
+            throw new Error(`Plugin install did not return a registry row: ${manifest.id}`);
+          }
+
+          if (manifest.database) {
+            await pluginDatabaseService(txDb).applyMigrations(
+              installed.id,
+              manifest,
+              discovered.packagePath,
+              { persistFailure: false },
+            );
+          }
+        });
+
+        log.info(
           {
+            pluginId: manifest.id,
             packageName: discovered.packageName,
-            packagePath: discovered.source === "local-filesystem" ? discovered.packagePath : undefined,
+            version: discovered.version,
+            capabilities: manifest.capabilities,
           },
-          manifest,
+          "plugin-loader: plugin installed successfully",
         );
 
-        if (!installed) {
-          throw new Error(`Plugin install did not return a registry row: ${manifest.id}`);
-        }
-
-        if (manifest.database) {
-          await pluginDatabaseService(txDb).applyMigrations(
-            installed.id,
-            manifest,
-            discovered.packagePath,
-            { persistFailure: false },
-          );
-        }
-      });
-
-      log.info(
-        {
-          pluginId: manifest.id,
-          packageName: discovered.packageName,
-          version: discovered.version,
-          capabilities: manifest.capabilities,
-        },
-        "plugin-loader: plugin installed successfully",
-      );
-
-      return discovered;
+        return discovered;
+      };
+      return runtimeServices?.workspaceRuntime
+        ? await runtimeServices.workspaceRuntime.withCatalogMutation(performInstall)
+        : await performInstall();
     },
 
     async previewRegistryPluginEnable({ localPath, staticManifest }): Promise<DiscoveredPlugin> {

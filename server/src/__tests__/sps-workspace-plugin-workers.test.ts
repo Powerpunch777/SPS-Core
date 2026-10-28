@@ -15,8 +15,10 @@ const fakes = vi.hoisted(() => ({
   plugin: null as any,
   configs: new Map<string, any>(),
   policy: new Map<string, { policyId: string; revision: number }>(),
+  present: new Set<string>(),
   epochs: new Map<string, string>(),
   active: new Map<string, boolean>(),
+  policyReadHook: null as null | ((workspaceId: string) => Promise<void>),
   stopHandler: undefined as undefined | ((workspaceId: string, reason: string, stoppedEpoch: string) => Promise<void>),
   pendingObserver: null as null | ((workspaceId: string) => number),
 }));
@@ -28,10 +30,22 @@ vi.mock("../services/sps-workspace-plugin-config.js", async (importOriginal) => 
   createSpsWorkspacePluginConfigService: () => ({ get: async (workspaceId: string) => fakes.configs.get(workspaceId) }),
 }));
 vi.mock("../services/sps-plugin-authority-revision.js", () => ({
-  readSpsPluginAuthorityRevision: async (_db: unknown, workspaceId: string) => fakes.policy.get(workspaceId),
+  readSpsPluginAuthorityRevision: async (_db: unknown, workspaceId: string) => {
+    const policy = fakes.policy.get(workspaceId);
+    if (!policy) throw new Error("authority state unavailable");
+    await fakes.policyReadHook?.(workspaceId);
+    return policy;
+  },
   sameSpsPluginAuthorityRevision: (left: unknown, right: unknown) => JSON.stringify(left) === JSON.stringify(right),
 }));
+vi.mock("../services/sps-workspace-presence.js", () => ({
+  readSpsWorkspacePresence: async (_db: unknown, workspaceId: string) => fakes.present.has(workspaceId),
+}));
 vi.mock("../services/sps-workspace-execution-control.js", () => ({
+  getSpsWorkspaceExecutionControl: async (_db: unknown, workspaceId: string) => ({
+    state: fakes.active.get(workspaceId) ? "running" : "stopped",
+    epoch: fakes.epochs.get(workspaceId) ?? "0",
+  }),
   assertSpsWorkspaceExecutionActive: async (_db: unknown, workspaceId: string, epoch: string) => {
     if (!fakes.active.get(workspaceId) || fakes.epochs.get(workspaceId) !== epoch) throw new Error("execution inactive");
   },
@@ -152,9 +166,10 @@ const workerOptions = (label: string): WorkerStartOptions => ({
 
 describe("SPS Workspace Plugin worker factory", () => {
   beforeEach(() => {
-    fakes.fork.mockReset(); children.length = 0; fakes.policy.clear(); fakes.epochs.clear(); fakes.active.clear();
-    fakes.configs.clear(); fakes.stopHandler = undefined; fakes.pendingObserver = null; fakes.plugin = plugin;
+    fakes.fork.mockReset(); children.length = 0; fakes.policy.clear(); fakes.epochs.clear(); fakes.active.clear(); fakes.present.clear();
+    fakes.configs.clear(); fakes.stopHandler = undefined; fakes.pendingObserver = null; fakes.policyReadHook = null; fakes.plugin = plugin;
     for (const id of [workspaceA, workspaceB]) {
+      fakes.present.add(id);
       fakes.policy.set(id, { policyId: `policy-${id}`, revision: 1 }); fakes.epochs.set(id, "1"); fakes.active.set(id, true);
       fakes.configs.set(id, { configJson: { label: `config-${id === workspaceA ? "a" : "b"}` }, revision: `config-rev-${id}`, updatedAt: null });
     }
@@ -252,6 +267,449 @@ describe("SPS Workspace Plugin worker factory", () => {
       expect(manager.getWorkspaceWorker(workspaceA, pluginId)).toBe(fresh);
       expect(fresh?.status).toBe("running");
     } finally { await factory.shutdown(); await manager.shutdown(); }
+  });
+
+  it("reconciles a Workspace policy revision without stopping another Workspace or a current replacement", async () => {
+    const manager = createPluginWorkerManager();
+    const disposed: string[] = [];
+    const factory = createSpsWorkspacePluginWorkers({} as any, manager, {
+      localPluginDir: "/unused", resolveEntrypoint: async () => "/fixture/workspace-worker.js",
+      buildServices: (_record, workspaceId) => ({ dispose: () => disposed.push(workspaceId) } as any),
+    });
+    const host = await manager.startWorker(pluginId, workerOptions("host"));
+    const call = (workspaceId: string) => factory.call(workspaceId, pluginId, "getData", {
+      key: "fixture.data", companyId: workspaceId, params: {}, renderEnvironment: null,
+    } as any, 1_000, authority(workspaceId));
+    try {
+      await call(workspaceA); await call(workspaceB);
+      const priorA = manager.getWorkspaceWorker(workspaceA, pluginId);
+      const currentB = manager.getWorkspaceWorker(workspaceB, pluginId);
+      fakes.policy.set(workspaceA, { policyId: `policy-${workspaceA}`, revision: 2 });
+      await factory.reconcileWorkspacePolicy(workspaceA);
+      expect(manager.getWorkspaceWorker(workspaceA, pluginId)).toBeUndefined();
+      expect(manager.getWorkspaceWorker(workspaceB, pluginId)).toBe(currentB);
+      expect(manager.getWorker(pluginId)).toBe(host);
+      expect(priorA?.status).toBe("stopped");
+      expect(disposed).toEqual([workspaceA]);
+
+      const replacement = await call(workspaceA);
+      expect((replacement as any).pid).not.toBe((await call(workspaceB) as any).pid);
+      const currentA = manager.getWorkspaceWorker(workspaceA, pluginId);
+      await factory.reconcileWorkspacePolicy(workspaceA);
+      expect(manager.getWorkspaceWorker(workspaceA, pluginId)).toBe(currentA);
+      expect(manager.getWorkspaceWorker(workspaceB, pluginId)).toBe(currentB);
+    } finally { await factory.shutdown(); await manager.shutdown(); }
+  });
+
+  it("reconciles catalog changes across all owned Workspaces when the plugin record was removed", async () => {
+    const manager = createPluginWorkerManager();
+    const factory = createSpsWorkspacePluginWorkers({} as any, manager, {
+      localPluginDir: "/unused", resolveEntrypoint: async () => "/fixture/workspace-worker.js",
+      buildServices: () => ({ dispose: vi.fn() } as any),
+    });
+    const host = await manager.startWorker(pluginId, workerOptions("host"));
+    try {
+      await factory.call(workspaceA, pluginId, "getData", {
+        key: "fixture.data", companyId: workspaceA, params: {}, renderEnvironment: null,
+      } as any, 1_000, authority(workspaceA));
+      await factory.call(workspaceB, pluginId, "getData", {
+        key: "fixture.data", companyId: workspaceB, params: {}, renderEnvironment: null,
+      } as any, 1_000, authority(workspaceB));
+      fakes.policy.set(workspaceA, { policyId: `catalog-${workspaceA}`, revision: 2 });
+      fakes.policy.set(workspaceB, { policyId: `catalog-${workspaceB}`, revision: 2 });
+      fakes.plugin = null;
+      await factory.reconcileCatalogPolicy();
+      expect(manager.getWorkspaceWorker(workspaceA, pluginId)).toBeUndefined();
+      expect(manager.getWorkspaceWorker(workspaceB, pluginId)).toBeUndefined();
+      expect(manager.getWorker(pluginId)).toBe(host);
+      expect(host.status).toBe("running");
+    } finally { await factory.shutdown(); await manager.shutdown(); }
+  });
+
+  it("retains the exact runtime and services when policy reconciliation cannot confirm stop", async () => {
+    const manager = createPluginWorkerManager();
+    const disposed = vi.fn();
+    const factory = createSpsWorkspacePluginWorkers({} as any, manager, {
+      localPluginDir: "/unused", resolveEntrypoint: async () => "/fixture/workspace-worker.js",
+      buildServices: () => ({ dispose: disposed } as any),
+    });
+    try {
+      await factory.call(workspaceA, pluginId, "getData", {
+        key: "fixture.data", companyId: workspaceA, params: {}, renderEnvironment: null,
+      } as any, 1_000, authority(workspaceA));
+      const handle = manager.getWorkspaceWorker(workspaceA, pluginId)!;
+      fakes.policy.delete(workspaceA);
+      await expect(factory.reconcileWorkspacePolicy(workspaceA)).rejects.toThrow("Workspace Plugin runtime is unavailable.");
+      expect(manager.getWorkspaceWorker(workspaceA, pluginId)).toBe(handle);
+      expect(handle.status).toBe("running");
+      expect(disposed).not.toHaveBeenCalled();
+      fakes.policy.set(workspaceA, { policyId: `policy-${workspaceA}`, revision: 2 });
+      const stopWorkspaceWorkers = vi.spyOn(manager, "stopWorkspaceWorkers").mockRejectedValueOnce(new Error("not confirmed"));
+      await expect(factory.reconcileWorkspacePolicy(workspaceA)).rejects.toThrow("Workspace Plugin runtime is unavailable.");
+      expect(manager.getWorkspaceWorker(workspaceA, pluginId)).toBe(handle);
+      expect(handle.status).toBe("running");
+      expect(disposed).not.toHaveBeenCalled();
+
+      await factory.reconcileWorkspacePolicy(workspaceA);
+      expect(stopWorkspaceWorkers).toHaveBeenCalledTimes(2);
+      expect(manager.getWorkspaceWorker(workspaceA, pluginId)).toBeUndefined();
+      expect(disposed).toHaveBeenCalledTimes(1);
+    } finally { await factory.shutdown(); await manager.shutdown(); }
+  });
+
+  it("drains every owned Workspace before a plugin mutation and blocks calls until it finishes", async () => {
+    const manager = createPluginWorkerManager();
+    const factory = createSpsWorkspacePluginWorkers({} as any, manager, {
+      localPluginDir: "/unused", resolveEntrypoint: async () => "/fixture/workspace-worker.js",
+      buildServices: () => ({ dispose: vi.fn() } as any),
+    });
+    const host = await manager.startWorker(pluginId, workerOptions("host"));
+    const call = (workspaceId: string) => factory.call(workspaceId, pluginId, "getData", {
+      key: "fixture.data", companyId: workspaceId, params: {}, renderEnvironment: null,
+    } as any, 1_000, authority(workspaceId));
+    try {
+      await call(workspaceA); await call(workspaceB);
+      const handleA = manager.getWorkspaceWorker(workspaceA, pluginId)!;
+      const handleB = manager.getWorkspaceWorker(workspaceB, pluginId)!;
+      const action = vi.fn(async () => {
+        expect(manager.getWorkspaceWorker(workspaceA, pluginId)).toBeUndefined();
+        expect(manager.getWorkspaceWorker(workspaceB, pluginId)).toBeUndefined();
+        expect(manager.getWorker(pluginId)).toBe(host);
+        await expect(call(workspaceA)).rejects.toMatchObject({ code: "sps_workspace_plugin_runtime_unavailable" });
+        return "updated";
+      });
+
+      await expect(factory.withPluginMutation(pluginId, action)).resolves.toBe("updated");
+      expect(action).toHaveBeenCalledOnce();
+      expect(handleA.status).toBe("stopped");
+      expect(handleB.status).toBe("stopped");
+      expect(host.status).toBe("running");
+      expect((await call(workspaceA) as any).pid).not.toBe(handleA.pid);
+    } finally { await factory.shutdown(); await manager.shutdown(); }
+  });
+
+  it("does not run a plugin mutation until every selected child is confirmed closed", async () => {
+    const manager = createPluginWorkerManager();
+    const disposed = vi.fn();
+    const factory = createSpsWorkspacePluginWorkers({} as any, manager, {
+      localPluginDir: "/unused", resolveEntrypoint: async () => "/fixture/workspace-worker.js",
+      buildServices: () => ({ dispose: disposed } as any),
+    });
+    const call = () => factory.call(workspaceA, pluginId, "getData", {
+      key: "fixture.data", companyId: workspaceA, params: {}, renderEnvironment: null,
+    } as any, 1_000, authority(workspaceA));
+    try {
+      await call();
+      const handle = manager.getWorkspaceWorker(workspaceA, pluginId)!;
+      const stop = vi.spyOn(manager, "stopWorkspaceWorkers").mockRejectedValueOnce(new Error("not confirmed"));
+      const action = vi.fn(async () => "must not run");
+      await expect(factory.withPluginMutation(pluginId, action)).rejects.toMatchObject({
+        code: "sps_workspace_plugin_runtime_unavailable",
+      });
+      expect(action).not.toHaveBeenCalled();
+      expect(manager.getWorkspaceWorker(workspaceA, pluginId)).toBe(handle);
+      expect(handle.status).toBe("running");
+      expect(disposed).not.toHaveBeenCalled();
+
+      await expect(factory.withPluginMutation(pluginId, action)).resolves.toBe("must not run");
+      expect(action).toHaveBeenCalledOnce();
+      expect(stop).toHaveBeenCalledTimes(2);
+      expect(manager.getWorkspaceWorker(workspaceA, pluginId)).toBeUndefined();
+      expect(disposed).toHaveBeenCalledOnce();
+    } finally { await factory.shutdown(); await manager.shutdown(); }
+  });
+
+  it("drains every Workspace before a catalog mutation and blocks both mutation lanes", async () => {
+    const manager = createPluginWorkerManager();
+    const factory = createSpsWorkspacePluginWorkers({} as any, manager, {
+      localPluginDir: "/unused", resolveEntrypoint: async () => "/fixture/workspace-worker.js",
+      buildServices: () => ({ dispose: vi.fn() } as any),
+    });
+    const call = (workspaceId: string) => factory.call(workspaceId, pluginId, "getData", {
+      key: "fixture.data", companyId: workspaceId, params: {}, renderEnvironment: null,
+    } as any, 1_000, authority(workspaceId));
+    let entered!: () => void;
+    let release!: () => void;
+    const actionEntered = new Promise<void>(resolve => { entered = resolve; });
+    const actionGate = new Promise<void>(resolve => { release = resolve; });
+    const action = vi.fn(async () => { entered(); await actionGate; return "catalog-updated"; });
+    try {
+      await call(workspaceA); await call(workspaceB);
+      const handleA = manager.getWorkspaceWorker(workspaceA, pluginId)!;
+      const handleB = manager.getWorkspaceWorker(workspaceB, pluginId)!;
+      const mutation = factory.withCatalogMutation(action);
+      await actionEntered;
+      expect(manager.getWorkspaceWorker(workspaceA, pluginId)).toBeUndefined();
+      expect(manager.getWorkspaceWorker(workspaceB, pluginId)).toBeUndefined();
+      expect(handleA.status).toBe("stopped");
+      expect(handleB.status).toBe("stopped");
+      await expect(call(workspaceA)).rejects.toMatchObject({ code: "sps_workspace_plugin_runtime_unavailable" });
+      await expect(factory.withPluginMutation(pluginId, async () => "must not run"))
+        .rejects.toMatchObject({ code: "sps_workspace_plugin_runtime_unavailable" });
+      expect(action).toHaveBeenCalledOnce();
+      release();
+      await expect(mutation).resolves.toBe("catalog-updated");
+      await expect(call(workspaceB)).resolves.toHaveProperty("pid");
+    } finally { release?.(); await factory.shutdown(); await manager.shutdown(); }
+  });
+
+  it("joins an active catalog mutation before shutdown finishes", async () => {
+    const manager = createPluginWorkerManager();
+    const factory = createSpsWorkspacePluginWorkers({} as any, manager, { localPluginDir: "/unused" });
+    let entered!: () => void;
+    let release!: () => void;
+    const actionEntered = new Promise<void>(resolve => { entered = resolve; });
+    const actionGate = new Promise<void>(resolve => { release = resolve; });
+    try {
+      const mutation = factory.withCatalogMutation(async () => { entered(); await actionGate; return "done"; });
+      await actionEntered;
+      const shutdown = factory.shutdown();
+      let shutdownSettled = false;
+      void shutdown.then(() => { shutdownSettled = true; }, () => { shutdownSettled = true; });
+      await new Promise(resolve => setTimeout(resolve, 0));
+      expect(shutdownSettled).toBe(false);
+      release();
+      await expect(mutation).resolves.toBe("done");
+      await shutdown;
+      expect(shutdownSettled).toBe(true);
+    } finally { release?.(); await factory.shutdown(); await manager.shutdown(); }
+  });
+
+  it("joins an in-flight Workspace startup before running a plugin mutation", async () => {
+    const manager = createPluginWorkerManager();
+    let signalBuildStarted!: () => void;
+    let releaseBuild!: (services: any) => void;
+    const buildStarted = new Promise<void>(resolve => { signalBuildStarted = resolve; });
+    const buildGate = new Promise<any>(resolve => { releaseBuild = resolve; });
+    const disposed = vi.fn();
+    const factory = createSpsWorkspacePluginWorkers({} as any, manager, {
+      localPluginDir: "/unused", resolveEntrypoint: async () => "/fixture/workspace-worker.js",
+      buildServices: () => { signalBuildStarted(); return buildGate; },
+    });
+    const startup = factory.call(workspaceA, pluginId, "getData", {
+      key: "fixture.data", companyId: workspaceA, params: {}, renderEnvironment: null,
+    } as any, 1_000, authority(workspaceA));
+    try {
+      await buildStarted;
+      let actionObservedClosedChild = false;
+      const action = vi.fn(async () => {
+        expect(manager.getWorkspaceWorker(workspaceA, pluginId)).toBeUndefined();
+        actionObservedClosedChild = true;
+        return "mutated";
+      });
+      const mutation = factory.withPluginMutation(pluginId, action);
+      expect(action).not.toHaveBeenCalled();
+      releaseBuild({ dispose: disposed } as any);
+
+      const [startupResult, mutationResult] = await Promise.allSettled([startup, mutation]);
+      expect(startupResult.status).toBe("rejected");
+      expect(mutationResult).toMatchObject({ status: "fulfilled", value: "mutated" });
+      expect(actionObservedClosedChild).toBe(true);
+      expect(action).toHaveBeenCalledOnce();
+      expect(disposed).toHaveBeenCalledOnce();
+      expect(manager.getWorkspaceWorker(workspaceA, pluginId)).toBeUndefined();
+    } finally {
+      releaseBuild({ dispose: disposed } as any);
+      await factory.shutdown(); await manager.shutdown();
+    }
+  });
+
+  it("periodically retires a worker after a catalog policy change and clears its sweep at shutdown", async () => {
+    const manager = createPluginWorkerManager();
+    const onPolicyReconcileError = vi.fn();
+    const factory = createSpsWorkspacePluginWorkers({} as any, manager, {
+      localPluginDir: "/unused", policyReconcileIntervalMs: 10, onPolicyReconcileError,
+      resolveEntrypoint: async () => "/fixture/workspace-worker.js",
+      buildServices: () => ({ dispose: vi.fn() } as any),
+    });
+    try {
+      await factory.call(workspaceA, pluginId, "getData", {
+        key: "fixture.data", companyId: workspaceA, params: {}, renderEnvironment: null,
+      } as any, 1_000, authority(workspaceA));
+      const handle = manager.getWorkspaceWorker(workspaceA, pluginId)!;
+      fakes.policy.set(workspaceA, { policyId: `catalog-${workspaceA}`, revision: 2 });
+      await vi.waitFor(() => expect(manager.getWorkspaceWorker(workspaceA, pluginId)).toBeUndefined(), {
+        timeout: 2_000, interval: 10,
+      });
+      expect(handle.status).toBe("stopped");
+      expect(onPolicyReconcileError).not.toHaveBeenCalled();
+
+      await factory.shutdown();
+      await expect(factory.reconcileCatalogPolicy()).rejects.toMatchObject({ code: "sps_workspace_plugin_runtime_unavailable" });
+    } finally {
+      await factory.shutdown(); await manager.shutdown();
+    }
+  });
+
+  it("runs a fresh policy pass when reconciliation is requested during an older sweep", async () => {
+    const manager = createPluginWorkerManager();
+    const factory = createSpsWorkspacePluginWorkers({} as any, manager, {
+      localPluginDir: "/unused", policyReconcileIntervalMs: 0,
+      resolveEntrypoint: async () => "/fixture/workspace-worker.js",
+      buildServices: () => ({ dispose: vi.fn() } as any),
+    });
+    let signalFirstRead!: () => void;
+    let releaseFirstRead!: () => void;
+    let signalSecondRead!: () => void;
+    let releaseSecondRead!: () => void;
+    const firstReadStarted = new Promise<void>(resolve => { signalFirstRead = resolve; });
+    const firstReadGate = new Promise<void>(resolve => { releaseFirstRead = resolve; });
+    const secondReadStarted = new Promise<void>(resolve => { signalSecondRead = resolve; });
+    const secondReadGate = new Promise<void>(resolve => { releaseSecondRead = resolve; });
+    let workspaceReads = 0;
+    try {
+      await factory.call(workspaceB, pluginId, "getData", {
+        key: "fixture.data", companyId: workspaceB, params: {}, renderEnvironment: null,
+      } as any, 1_000, authority(workspaceB));
+      const handle = manager.getWorkspaceWorker(workspaceB, pluginId)!;
+      fakes.policyReadHook = async workspaceId => {
+        if (workspaceId !== workspaceB) return;
+        workspaceReads += 1;
+        if (workspaceReads === 1) { signalFirstRead(); await firstReadGate; }
+        else if (workspaceReads === 2) { signalSecondRead(); await secondReadGate; }
+      };
+
+      const olderSweep = factory.reconcileCatalogPolicy();
+      await firstReadStarted;
+      fakes.policy.set(workspaceB, { policyId: `catalog-${workspaceB}`, revision: 2 });
+      let postMutationSweepSettled = false;
+      const postMutationSweep = factory.reconcileCatalogPolicy().then(
+        () => { postMutationSweepSettled = true; },
+        error => { postMutationSweepSettled = true; throw error; },
+      );
+
+      releaseFirstRead();
+      await secondReadStarted;
+      expect(postMutationSweepSettled).toBe(false);
+      expect(manager.getWorkspaceWorker(workspaceB, pluginId)).toBe(handle);
+      releaseSecondRead();
+
+      await Promise.all([olderSweep, postMutationSweep]);
+      expect(postMutationSweepSettled).toBe(true);
+      expect(manager.getWorkspaceWorker(workspaceB, pluginId)).toBeUndefined();
+      expect(handle.status).toBe("stopped");
+      expect(workspaceReads).toBe(2);
+    } finally {
+      releaseFirstRead?.(); releaseSecondRead?.();
+      fakes.policyReadHook = null;
+      await factory.shutdown(); await manager.shutdown();
+    }
+  });
+
+  it("fences and drains only one Workspace during company mutation", async () => {
+    const manager = createPluginWorkerManager();
+    const factory = createSpsWorkspacePluginWorkers({} as any, manager, {
+      localPluginDir: "/unused", policyReconcileIntervalMs: 0,
+      resolveEntrypoint: async () => "/fixture/workspace-worker.js",
+      buildServices: () => ({ dispose: vi.fn() } as any),
+    });
+    const call = (workspaceId: string) => factory.call(workspaceId, pluginId, "getData", {
+      key: "fixture.data", companyId: workspaceId, params: {}, renderEnvironment: null,
+    } as any, 1_000, authority(workspaceId));
+    let signalAction!: () => void;
+    let releaseAction!: () => void;
+    const actionStarted = new Promise<void>(resolve => { signalAction = resolve; });
+    const actionGate = new Promise<void>(resolve => { releaseAction = resolve; });
+    try {
+      const host = await manager.startWorker(pluginId, workerOptions("host"));
+      await Promise.all([call(workspaceA), call(workspaceB)]);
+      const workerA = manager.getWorkspaceWorker(workspaceA, pluginId)!;
+      const workerB = manager.getWorkspaceWorker(workspaceB, pluginId)!;
+      const mutation = factory.withWorkspaceMutation(workspaceA, async () => {
+        expect(manager.getWorkspaceWorker(workspaceA, pluginId)).toBeUndefined();
+        expect(manager.getWorkspaceWorker(workspaceB, pluginId)).toBe(workerB);
+        expect(manager.getWorker(pluginId)).toBe(host);
+        signalAction();
+        await actionGate;
+      });
+      await actionStarted;
+      await expect(call(workspaceA)).rejects.toMatchObject({ code: "sps_workspace_plugin_runtime_unavailable" });
+      await expect(factory.withWorkspaceMutation(workspaceA, async () => undefined))
+        .rejects.toMatchObject({ code: "sps_workspace_plugin_runtime_unavailable" });
+      await call(workspaceB);
+      expect(manager.getWorkspaceWorker(workspaceB, pluginId)).toBe(workerB);
+      expect(manager.getWorker(pluginId)).toBe(host);
+      expect(workerA.status).toBe("stopped");
+      releaseAction();
+      await mutation;
+      await call(workspaceA);
+      expect(manager.getWorkspaceWorker(workspaceA, pluginId)).not.toBe(workerA);
+    } finally {
+      releaseAction();
+      await factory.shutdown(); await manager.shutdown();
+    }
+  });
+
+  it("retires a missing Workspace owner before trusting default epoch zero", async () => {
+    const manager = createPluginWorkerManager();
+    const factory = createSpsWorkspacePluginWorkers({} as any, manager, {
+      localPluginDir: "/unused", policyReconcileIntervalMs: 0,
+      resolveEntrypoint: async () => "/fixture/workspace-worker.js",
+      buildServices: () => ({ dispose: vi.fn() } as any),
+    });
+    const missingWorkspace = "44444444-4444-4444-8444-444444444444";
+    fakes.active.set(missingWorkspace, true);
+    fakes.epochs.set(missingWorkspace, "0");
+    try {
+      await expect(factory.call(missingWorkspace, pluginId, "getData", {
+        key: "fixture.data", companyId: missingWorkspace, params: {}, renderEnvironment: null,
+      } as any, 1_000, authority(missingWorkspace)))
+        .rejects.toMatchObject({ code: "sps_workspace_plugin_runtime_unavailable" });
+      expect(fakes.fork).not.toHaveBeenCalled();
+
+      await factory.call(workspaceA, pluginId, "getData", {
+        key: "fixture.data", companyId: workspaceA, params: {}, renderEnvironment: null,
+      } as any, 1_000, authority(workspaceA));
+      const existing = manager.getWorkspaceWorker(workspaceA, pluginId)!;
+      fakes.present.delete(workspaceA);
+      await expect(factory.call(workspaceA, pluginId, "getData", {
+        key: "fixture.data", companyId: workspaceA, params: {}, renderEnvironment: null,
+      } as any, 1_000, authority(workspaceA)))
+        .rejects.toMatchObject({ code: "sps_workspace_plugin_runtime_unavailable" });
+      await factory.reconcileWorkspacePolicy(workspaceA);
+      expect(existing.status).toBe("stopped");
+      expect(manager.getWorkspaceWorker(workspaceA, pluginId)).toBeUndefined();
+    } finally {
+      await factory.shutdown(); await manager.shutdown();
+    }
+  });
+
+  it("joins an in-flight policy sweep before shutdown drains workers", async () => {
+    const manager = createPluginWorkerManager();
+    const factory = createSpsWorkspacePluginWorkers({} as any, manager, {
+      localPluginDir: "/unused", policyReconcileIntervalMs: 10,
+      resolveEntrypoint: async () => "/fixture/workspace-worker.js",
+      buildServices: () => ({ dispose: vi.fn() } as any),
+    });
+    let signalPolicyRead!: () => void;
+    let releasePolicyRead!: () => void;
+    const policyReadStarted = new Promise<void>(resolve => { signalPolicyRead = resolve; });
+    const policyReadGate = new Promise<void>(resolve => { releasePolicyRead = resolve; });
+    try {
+      await factory.call(workspaceA, pluginId, "getData", {
+        key: "fixture.data", companyId: workspaceA, params: {}, renderEnvironment: null,
+      } as any, 1_000, authority(workspaceA));
+      const handle = manager.getWorkspaceWorker(workspaceA, pluginId)!;
+      fakes.policy.set(workspaceA, { policyId: `catalog-${workspaceA}`, revision: 2 });
+      fakes.policyReadHook = async () => { signalPolicyRead(); await policyReadGate; };
+      await policyReadStarted;
+
+      let shutdownFinished = false;
+      const shutdown = factory.shutdown().then(() => { shutdownFinished = true; });
+      await Promise.resolve();
+      expect(shutdownFinished).toBe(false);
+      expect(handle.status).toBe("running");
+
+      releasePolicyRead();
+      await shutdown;
+      expect(shutdownFinished).toBe(true);
+      expect(handle.status).toBe("stopped");
+      expect(manager.getWorkspaceWorker(workspaceA, pluginId)).toBeUndefined();
+    } finally {
+      releasePolicyRead();
+      fakes.policyReadHook = null;
+      await factory.shutdown(); await manager.shutdown();
+    }
   });
 
   it("allows a later shutdown retry after an unconfirmed stop while retaining ownership until closure", async () => {

@@ -59,6 +59,40 @@ function makeWorkerManagerStub() {
 }
 
 describe("pluginLifecycleManager.restartWorker", () => {
+  it("does not reload package code until the Workspace runtime coordinator admits the mutation", async () => {
+    mockRegistry.getById.mockResolvedValue(pluginRecord);
+    const { handle, workerManager } = makeWorkerManagerStub();
+    const reconcileCatalogPolicy = vi.fn(async () => {});
+    const withPluginMutation = vi.fn(async () => { throw new Error("owned closure unconfirmed"); });
+    const lifecycle = pluginLifecycleManager({} as never, {
+      loader: { hasRuntimeServices: () => false } as PluginLoader,
+      workerManager,
+      workspaceRuntime: { withPluginMutation, reconcileCatalogPolicy },
+    });
+    await expect(lifecycle.restartWorker("plugin-1")).rejects.toMatchObject({
+      code: "SPS_PLUGIN_RUNTIME_CLEANUP_PENDING", operationStarted: false,
+    });
+    expect(handle.restart).not.toHaveBeenCalled();
+    expect(reconcileCatalogPolicy).not.toHaveBeenCalled();
+  });
+
+  it("coordinates non-HTTP reloads and reconciles their policy before returning", async () => {
+    mockRegistry.getById.mockResolvedValue(pluginRecord);
+    const { handle, workerManager } = makeWorkerManagerStub();
+    const events: string[] = [];
+    handle.restart.mockImplementation(async () => { events.push("reload"); });
+    const lifecycle = pluginLifecycleManager({} as never, {
+      loader: { hasRuntimeServices: () => false } as PluginLoader,
+      workerManager,
+      workspaceRuntime: {
+        withPluginMutation: async (_id, action) => { events.push("drain"); return action(); },
+        reconcileCatalogPolicy: async () => { events.push("reconcile"); },
+      },
+    });
+    await lifecycle.restartWorker("plugin-1");
+    expect(events).toEqual(["drain", "reload", "reconcile"]);
+  });
+
   it("does a full deactivate+reactivate cycle when the loader has runtime services", async () => {
     mockRegistry.getById.mockResolvedValue(pluginRecord);
     mockRegistry.updateStatus.mockResolvedValue(pluginRecord);

@@ -14,11 +14,16 @@ import { readSpsPluginAuthorityRevision, sameSpsPluginAuthorityRevision,
   type SpsPluginAuthorityRevision } from "./sps-plugin-authority-revision.js";
 import { createSpsWorkspacePluginConfigService, validateSpsWorkspacePluginConfig } from "./sps-workspace-plugin-config.js";
 import { createSpsWorkspacePluginHostHandlers } from "./sps-workspace-plugin-host.js";
-import { assertSpsWorkspaceExecutionActive, registerSpsWorkspaceExecutionStopHandler,
+import { assertSpsWorkspaceExecutionActive, getSpsWorkspaceExecutionControl, registerSpsWorkspaceExecutionStopHandler,
   withSpsWorkspaceExecutionAdmission } from "./sps-workspace-execution-control.js";
+import { readSpsWorkspacePresence } from "./sps-workspace-presence.js";
 
 const UUID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/;
-const unavailable = () => new Error("Workspace Plugin runtime is unavailable.");
+export class SpsWorkspacePluginRuntimeUnavailableError extends Error {
+  readonly code = "sps_workspace_plugin_runtime_unavailable";
+  constructor() { super("Workspace Plugin runtime is unavailable."); this.name = "SpsWorkspacePluginRuntimeUnavailableError"; }
+}
+const unavailable = () => new SpsWorkspacePluginRuntimeUnavailableError();
 type Services = HostServices & { dispose(): void };
 type Owner = Readonly<{ workspaceId: string; pluginId: string }>;
 type Runtime = Owner & {
@@ -73,6 +78,8 @@ export function createSpsWorkspacePluginWorkers(db: Db, manager: PluginWorkerMan
   streamBus?: PluginStreamBus;
   buildServices?: (plugin: PluginRecord, workspaceId: string) => Services | Promise<Services>;
   resolveEntrypoint?: typeof resolveSpsWorkspacePluginEntrypoint;
+  policyReconcileIntervalMs?: number;
+  onPolicyReconcileError?: () => void;
 }) {
   // A second private factory must not silently adopt another factory's scoped
   // handles or overwrite its stop callback. Reuse one factory in a composition.
@@ -84,8 +91,21 @@ export function createSpsWorkspacePluginWorkers(db: Db, manager: PluginWorkerMan
   const owners = new Map<string, Owner>();
   const runtimes = new Map<string, Runtime>();
   const locks = new Map<string, Promise<void>>();
+  const mutatingPlugins = new Set<string>();
+  const mutatingWorkspaces = new Set<string>();
+  const mutationPromises = new Set<Promise<unknown>>();
   let closed = false;
+  let catalogMutationActive = false;
   let shutdownPromise: Promise<void> | undefined;
+  let policySweepPromise: Promise<void> | undefined;
+  let policySweepRequestedGeneration = 0;
+  let policySweepCompletedGeneration = 0;
+  const policySweepWaiters: Array<{
+    generation: number;
+    resolve(): void;
+    reject(error: unknown): void;
+  }> = [];
+  let policySweepTimer: NodeJS.Timeout | undefined;
 
   function keyFor(workspaceId: string, pluginId: string) {
     if (!UUID.test(workspaceId) || !UUID.test(pluginId)) throw unavailable();
@@ -111,6 +131,7 @@ export function createSpsWorkspacePluginWorkers(db: Db, manager: PluginWorkerMan
 
   async function assertCurrent(runtime: Runtime) {
     if (closed || runtimes.get(JSON.stringify([runtime.workspaceId, runtime.pluginId])) !== runtime) throw unavailable();
+    if (!await readSpsWorkspacePresence(db, runtime.workspaceId)) throw unavailable();
     await assertSpsWorkspaceExecutionActive(db, runtime.workspaceId, runtime.epoch);
     const current = await readSpsPluginAuthorityRevision(db, runtime.workspaceId);
     if (!sameSpsPluginAuthorityRevision(runtime.policy, current)) throw unavailable();
@@ -125,10 +146,135 @@ export function createSpsWorkspacePluginWorkers(db: Db, manager: PluginWorkerMan
     if (runtimes.get(key) === runtime) runtimes.delete(key);
   }
 
+  async function policyIsStale(runtime: Runtime): Promise<boolean> {
+    // Complete every read before stopping anything. A transient DB failure is
+    // not evidence that the captured owner is stale and must retain its child.
+    if (!await readSpsWorkspacePresence(db, runtime.workspaceId)) return true;
+    const [execution, policy, plugin] = await Promise.all([
+      getSpsWorkspaceExecutionControl(db, runtime.workspaceId),
+      readSpsPluginAuthorityRevision(db, runtime.workspaceId),
+      registry.getById(runtime.pluginId) as Promise<PluginRecord | null>,
+    ]);
+    return execution.state === "stopped"
+      || execution.epoch !== runtime.epoch
+      || !sameSpsPluginAuthorityRevision(runtime.policy, policy)
+      || !plugin
+      || plugin.status !== "ready"
+      || !plugin.manifestJson.entrypoints.workspaceWorker;
+  }
+
+  async function reconcileOwnerKeys(selectedKeys: string[]): Promise<void> {
+    const results = await Promise.allSettled(selectedKeys.map(key => locked(key, async () => {
+      const runtime = runtimes.get(key);
+      if (!runtime) return;
+      if (await policyIsStale(runtime)) await retire(key, runtime);
+    })));
+    if (results.some(result => result.status === "rejected")) throw unavailable();
+  }
+
+  function settlePolicySweepWaiters(generation: number, failed: boolean, error?: unknown): void {
+    for (let index = policySweepWaiters.length - 1; index >= 0; index -= 1) {
+      const waiter = policySweepWaiters[index]!;
+      if (waiter.generation > generation) continue;
+      policySweepWaiters.splice(index, 1);
+      if (failed) waiter.reject(error);
+      else waiter.resolve();
+    }
+  }
+
+  function startCatalogPolicySweepLoop(): void {
+    if (policySweepPromise) return;
+    const attempt = (async () => {
+      while (policySweepCompletedGeneration < policySweepRequestedGeneration) {
+        // Requests received during this pass require a fresh read after it.
+        // Coalesce them into the next pass, but never let an old snapshot
+        // satisfy a reconcile requested after a catalog mutation committed.
+        const generation = policySweepRequestedGeneration;
+        let failed = false;
+        let failure: unknown;
+        try { await reconcileOwnerKeys([...owners.keys()]); }
+        catch (error) { failed = true; failure = error; }
+        policySweepCompletedGeneration = generation;
+        settlePolicySweepWaiters(generation, failed, failure);
+      }
+    })();
+    policySweepPromise = attempt;
+    const finish = () => {
+      if (policySweepPromise === attempt) policySweepPromise = undefined;
+      // A request can arrive after the loop's final condition but before this
+      // completion callback clears the single-flight promise.
+      if (policySweepCompletedGeneration < policySweepRequestedGeneration) {
+        startCatalogPolicySweepLoop();
+      }
+    };
+    void attempt.then(finish, error => {
+      // Do not leave callers waiting if an unexpected error escapes the loop.
+      const failedGeneration = policySweepRequestedGeneration;
+      policySweepCompletedGeneration = failedGeneration;
+      settlePolicySweepWaiters(failedGeneration, true, error);
+      finish();
+    });
+  }
+
+  async function joinCatalogPolicySweeps(): Promise<void> {
+    while (policySweepPromise || policySweepCompletedGeneration < policySweepRequestedGeneration) {
+      if (!policySweepPromise) startCatalogPolicySweepLoop();
+      const active = policySweepPromise;
+      if (active) await active.catch(() => undefined);
+    }
+  }
+
+  function runCatalogPolicySweep(): Promise<void> {
+    if (closed) return Promise.reject(unavailable());
+    const generation = ++policySweepRequestedGeneration;
+    const result = new Promise<void>((resolve, reject) => {
+      policySweepWaiters.push({ generation, resolve, reject });
+    });
+    startCatalogPolicySweepLoop();
+    return result;
+  }
+
+  const reconcileInterval = options.policyReconcileIntervalMs ?? 5_000;
+  if (Number.isFinite(reconcileInterval) && reconcileInterval > 0) {
+    policySweepTimer = setInterval(() => {
+      if (closed || owners.size === 0 || policySweepPromise) return;
+      void runCatalogPolicySweep().catch(() => {
+        try { options.onPolicyReconcileError?.(); } catch { /* Keep the background sweep isolated. */ }
+      });
+    }, reconcileInterval);
+    policySweepTimer.unref?.();
+  }
+
+  async function drainOwnerKeys(selectedKeys: string[]): Promise<void> {
+    const results = await Promise.allSettled(selectedKeys.map(key => locked(key, async () => {
+      const owner = owners.get(key);
+      if (!owner) return;
+      const runtime = runtimes.get(key);
+      if (runtime) {
+        await retire(key, runtime);
+        return;
+      }
+      // A manager-owned child without a factory record is still selected by
+      // this factory's owner key; confirm its process and stdio close as well.
+      if (manager.getWorkspaceWorker(owner.workspaceId, owner.pluginId)) {
+        await manager.stopWorkspaceWorkers(owner.workspaceId, owner.pluginId);
+      }
+    })));
+    if (results.some(result => result.status === "rejected")) throw unavailable();
+  }
+
+  function trackMutation<T>(action: () => Promise<T>): Promise<T> {
+    const attempt = Promise.resolve().then(action);
+    mutationPromises.add(attempt);
+    void attempt.then(() => mutationPromises.delete(attempt), () => mutationPromises.delete(attempt));
+    return attempt;
+  }
+
   async function ensure(workspaceId: string, pluginId: string, epoch: string): Promise<Runtime> {
     const key = keyFor(workspaceId, pluginId);
     return locked(key, async () => {
-      if (closed) throw unavailable();
+      if (closed || catalogMutationActive || mutatingPlugins.has(pluginId) || mutatingWorkspaces.has(workspaceId)) throw unavailable();
+      if (!await readSpsWorkspacePresence(db, workspaceId)) throw unavailable();
       await assertSpsWorkspaceExecutionActive(db, workspaceId, epoch);
       const policy = await readSpsPluginAuthorityRevision(db, workspaceId);
       const existing = runtimes.get(key);
@@ -222,11 +368,15 @@ export function createSpsWorkspacePluginWorkers(db: Db, manager: PluginWorkerMan
   return Object.freeze({
     async call<M extends "getData" | "performAction">(workspaceId: string, pluginId: string, method: M,
       params: HostToWorkerMethods[M][0], timeoutMs: number, authority: WorkerInvocationAuthority): Promise<HostToWorkerMethods[M][1]> {
-      if (closed || authority.signal?.aborted || authority.boundWorkspaceId !== workspaceId) throw unavailable();
+      if (closed || catalogMutationActive || mutatingPlugins.has(pluginId) || mutatingWorkspaces.has(workspaceId)
+        || authority.signal?.aborted || authority.boundWorkspaceId !== workspaceId) throw unavailable();
       await authority.assertCurrent();
+      if (closed || catalogMutationActive || mutatingPlugins.has(pluginId) || mutatingWorkspaces.has(workspaceId)) throw unavailable();
       const epoch = await withSpsWorkspaceExecutionAdmission(db, workspaceId, async (_tx, admittedEpoch) => admittedEpoch);
-      if (authority.signal?.aborted) throw unavailable();
+      if (closed || catalogMutationActive || mutatingPlugins.has(pluginId) || mutatingWorkspaces.has(workspaceId)
+        || authority.signal?.aborted) throw unavailable();
       const runtime = await ensure(workspaceId, pluginId, epoch);
+      if (closed || catalogMutationActive || mutatingPlugins.has(pluginId) || mutatingWorkspaces.has(workspaceId)) throw unavailable();
       const guarded = Object.freeze({ ...authority, boundWorkspaceId: workspaceId,
         assertCurrent: async () => { await authority.assertCurrent(); await assertCurrent(runtime); } });
       return manager.callWorkspaceWorker(workspaceId, pluginId, method, params, timeoutMs, guarded);
@@ -238,19 +388,90 @@ export function createSpsWorkspacePluginWorkers(db: Db, manager: PluginWorkerMan
         if (runtime && runtime.configRevision === previousRevision) await retire(key, runtime);
       });
     },
+    async reconcileWorkspacePolicy(workspaceId: string) {
+      if (closed || !UUID.test(workspaceId)) throw unavailable();
+      const keys = [...owners].filter(([, owner]) => owner.workspaceId === workspaceId).map(([key]) => key);
+      try { await reconcileOwnerKeys(keys); }
+      catch { throw unavailable(); }
+    },
+    async reconcileCatalogPolicy() {
+      if (closed) throw unavailable();
+      try { await runCatalogPolicySweep(); }
+      catch { throw unavailable(); }
+    },
+    async withPluginMutation<T>(pluginId: string, action: () => Promise<T>): Promise<T> {
+      if (closed || catalogMutationActive || mutatingWorkspaces.size > 0 || !UUID.test(pluginId)
+        || typeof action !== "function" || mutatingPlugins.has(pluginId)) throw unavailable();
+      mutatingPlugins.add(pluginId);
+      return trackMutation(async () => {
+        try {
+          const keys = [...new Set([...owners.keys(), ...locks.keys()])]
+            .filter(key => owners.get(key)?.pluginId === pluginId);
+          try { await drainOwnerKeys(keys); }
+          catch { throw unavailable(); }
+          if (closed || catalogMutationActive || mutatingWorkspaces.size > 0) throw unavailable();
+          return await action();
+        } finally {
+          mutatingPlugins.delete(pluginId);
+        }
+      });
+    },
+    withCatalogMutation<T>(action: () => Promise<T>): Promise<T> {
+      if (closed || catalogMutationActive || mutatingPlugins.size > 0 || mutatingWorkspaces.size > 0 || typeof action !== "function") {
+        return Promise.reject(unavailable());
+      }
+      catalogMutationActive = true;
+      return trackMutation(async () => {
+        try {
+          const keys = [...new Set([...owners.keys(), ...locks.keys()])];
+          try { await drainOwnerKeys(keys); }
+          catch { throw unavailable(); }
+          if (closed) throw unavailable();
+          return await action();
+        } finally {
+          catalogMutationActive = false;
+        }
+      });
+    },
+    withWorkspaceMutation<T>(workspaceId: string, action: () => Promise<T>): Promise<T> {
+      if (closed || catalogMutationActive || mutatingPlugins.size > 0 || !UUID.test(workspaceId)
+        || typeof action !== "function" || mutatingWorkspaces.has(workspaceId)) return Promise.reject(unavailable());
+      // Fence this owner synchronously before yielding, so no new A call/start
+      // can slip between the company delete request and the exact-child drain.
+      mutatingWorkspaces.add(workspaceId);
+      return trackMutation(async () => {
+        try {
+          const keys = [...new Set([...owners.keys(), ...locks.keys()])]
+            .filter(key => owners.get(key)?.workspaceId === workspaceId);
+          try { await drainOwnerKeys(keys); }
+          catch { throw unavailable(); }
+          if (closed || catalogMutationActive || mutatingPlugins.size > 0) throw unavailable();
+          return await action();
+        } finally {
+          mutatingWorkspaces.delete(workspaceId);
+        }
+      });
+    },
     closeAdmission() { closed = true; },
     shutdown(): Promise<void> {
       if (shutdownPromise) return shutdownPromise;
       closed = true;
-      const selected = new Set([...runtimes.keys(), ...locks.keys()]);
-      const attempt = Promise.allSettled([...selected].map(key => locked(key, async () => {
-        const runtime = runtimes.get(key);
-        if (runtime) await retire(key, runtime);
-      }))).then(results => {
+      if (policySweepTimer) clearInterval(policySweepTimer);
+      policySweepTimer = undefined;
+      const attempt = (async () => {
+        await Promise.allSettled([...mutationPromises]);
+        // An already-running policy read may be needed to prove a runtime is
+        // stale. Join it before shutdown drains every remaining exact child.
+        await joinCatalogPolicySweeps();
+        const selected = new Set([...runtimes.keys(), ...locks.keys(), ...owners.keys()]);
+        const results = await Promise.allSettled([...selected].map(key => locked(key, async () => {
+          const runtime = runtimes.get(key);
+          if (runtime) await retire(key, runtime);
+        })));
         if (results.some(result => result.status === "rejected")) throw unavailable();
         unregisterStop();
         if (factoryOwners.get(manager) === factoryOwner) factoryOwners.delete(manager);
-      });
+      })();
       shutdownPromise = attempt;
       // Keep callers of this attempt joined, but let a later shutdown call retry
       // exact retained handles after a stop failure. Admission remains closed.

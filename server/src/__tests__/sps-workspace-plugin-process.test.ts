@@ -9,6 +9,7 @@ import { createSpsWorkspacePluginWorkers } from "../services/sps-workspace-plugi
 const fakes = vi.hoisted(() => ({
   plugin: null as any,
   configs: new Map<string, any>(),
+  present: new Set<string>(),
   policy: new Map<string, { policyId: string; revision: number }>(),
   epochs: new Map<string, string>(),
   active: new Map<string, boolean>(),
@@ -23,6 +24,9 @@ vi.mock("../services/sps-workspace-plugin-config.js", async (importOriginal) => 
 vi.mock("../services/sps-plugin-authority-revision.js", () => ({
   readSpsPluginAuthorityRevision: async (_db: unknown, workspaceId: string) => fakes.policy.get(workspaceId),
   sameSpsPluginAuthorityRevision: (left: unknown, right: unknown) => JSON.stringify(left) === JSON.stringify(right),
+}));
+vi.mock("../services/sps-workspace-presence.js", () => ({
+  readSpsWorkspacePresence: async (_db: unknown, workspaceId: string) => fakes.present.has(workspaceId),
 }));
 vi.mock("../services/sps-workspace-execution-control.js", () => ({
   assertSpsWorkspaceExecutionActive: async (_db: unknown, workspaceId: string, epoch: string) => {
@@ -112,9 +116,10 @@ rl.on("line", (line) => {
 
 describe("SPS Workspace Plugin real process lifecycle", () => {
   beforeEach(() => {
-    fakes.plugin = plugin; fakes.configs.clear(); fakes.policy.clear(); fakes.epochs.clear(); fakes.active.clear();
+    fakes.plugin = plugin; fakes.configs.clear(); fakes.present.clear(); fakes.policy.clear(); fakes.epochs.clear(); fakes.active.clear();
     fakes.stopHandler = undefined;
     for (const [id, label] of [[workspaceA, "a"], [workspaceB, "b"]] as const) {
+      fakes.present.add(id);
       fakes.configs.set(id, { configJson: { label: `workspace-${label}` }, revision: `revision-${label}`, updatedAt: null });
       fakes.policy.set(id, { policyId: `policy-${label}`, revision: 1 });
       fakes.epochs.set(id, "1"); fakes.active.set(id, true);

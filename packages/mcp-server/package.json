@@ -14,16 +14,14 @@
   },
   "type": "module",
   "bin": {
-    "sps-mcp-server": "./dist/stdio.js",
-    "sps-marketplace-assistant-mcp": "./dist/marketplace-assistant-stdio.js"
+    "sps-mcp-server": "./dist/stdio.js"
   },
   "exports": {
     ".": "./src/index.ts"
   },
   "publishConfig": {
     "bin": {
-      "sps-mcp-server": "./dist/stdio.js",
-      "sps-marketplace-assistant-mcp": "./dist/marketplace-assistant-stdio.js"
+      "sps-mcp-server": "./dist/stdio.js"
     },
     "exports": {
       ".": {

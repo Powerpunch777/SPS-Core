@@ -47,7 +47,6 @@ const apiPrefixes: Record<string, string> = {
   "sidebar-badges.ts": "/api",
   "sidebar-preferences.ts": "/api",
   "sps-executions.ts": "/api",
-  "sps-marketplace.ts": "/api",
   "sps-model-connections.ts": "/api",
   "sps-member-devices.ts": "/api",
   "sps-native-pairings.ts": "/api",
@@ -155,6 +154,24 @@ function loadSpecRoutes() {
 }
 
 describe("openapi routes", () => {
+  it("retires public Marketplace routes while preserving internal package management", () => {
+    const { spec } = loadSpecRoutes();
+    expect(Object.keys(spec.paths).some(path => path.includes("/marketplace/"))).toBe(false);
+    expect(spec.paths["/api/plugins/install"].post).toBeDefined();
+    expect(spec.paths["/api/plugins/registry/stages"].get).toBeDefined();
+    expect(spec.paths["/api/plugins/{pluginId}/upgrade"].post).toBeDefined();
+  });
+
+  it("documents the pending-cleanup and concurrent-resume barriers to Workspace deletion", () => {
+    const { spec } = loadSpecRoutes();
+    const operation = spec.paths["/api/companies/{companyId}"].delete;
+    expect(operation.responses["403"]).toBeDefined();
+    expect(operation.responses["409"]).toBeDefined();
+    expect(operation.responses["503"]).toBeDefined();
+    expect(operation.description).toContain("preserves the Workspace");
+    expect(operation.description).toContain("epoch/revision under lock");
+  });
+
   it("serves the generated OpenAPI document", async () => {
     const res = await request(createApp()).get("/api/openapi.json");
 

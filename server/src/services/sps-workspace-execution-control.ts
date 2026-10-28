@@ -10,6 +10,13 @@ export type SpsWorkspaceExecutionState = "running" | "paused" | "stopped";
 export type SpsWorkspaceExecutionSnapshot = Readonly<{
   state: SpsWorkspaceExecutionState; epoch: string; revision: number; updatedAt: string | null;
 }>;
+export class SpsWorkspaceExecutionCleanupPendingError extends Error {
+  readonly code = "workspace_execution_cleanup_pending";
+  constructor() {
+    super("Workspace execution cleanup is still pending.");
+    this.name = "SpsWorkspaceExecutionCleanupPendingError";
+  }
+}
 type StopHandler = (companyId: string, reason: string, stoppedEpoch: string) => Promise<void>;
 type PluginPendingObserver = (companyId: string) => number;
 const stopHandlers = new WeakMap<object, Map<string, StopHandler>>();
@@ -158,6 +165,18 @@ export async function getSpsWorkspaceExecutionPending(db: SpsWorkspaceExecutionD
   return Object.freeze({ agents: Number(agents[0]?.value ?? 0), jobs: Number(jobs[0]?.value ?? 0),
     models: Number(models[0]?.value ?? 0), commands: Number(commands[0]?.value ?? 0),
     plugins: Number(plugins[0]?.value ?? 0) + getSpsWorkspaceExecutionLocalPluginPending(db, companyId) });
+}
+
+/** Guard destructive Workspace removal against a concurrent resume or new work. */
+export async function assertSpsWorkspaceExecutionReadyForDeletion(
+  db: SpsWorkspaceExecutionDb, companyId: string, expected: Pick<SpsWorkspaceExecutionSnapshot, "epoch" | "revision">,
+) {
+  const current = await lockSpsWorkspaceExecutionControl(db, companyId);
+  if (current.state !== "stopped" || current.epoch !== expected.epoch || current.revision !== expected.revision) {
+    throw conflict("Workspace execution state changed. Refresh before retrying.");
+  }
+  const pending = await getSpsWorkspaceExecutionPending(db, companyId);
+  if (Object.values(pending).some(value => value !== 0)) throw new SpsWorkspaceExecutionCleanupPendingError();
 }
 
 export function spsWorkspaceExecutionControlService(db: Db) {

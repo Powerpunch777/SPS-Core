@@ -61,7 +61,6 @@ import { spsNativePairingRoutes } from "./routes/sps-native-pairings.js";
 import type { SpsNativeHostManagement } from "./services/sps-native-host-management.js";
 import { getSpsModelBroker } from "./services/sps-model-broker.js";
 import { spsWorkspaceSourceRoutes } from "./routes/sps-workspace-sources.js";
-import { spsMarketplaceRoutes } from "./routes/sps-marketplace.js";
 import { pluginRoutes } from "./routes/plugins.js";
 import { adapterRoutes } from "./routes/adapters.js";
 import { pluginUiStaticRoutes } from "./routes/plugin-ui-static.js";
@@ -242,6 +241,8 @@ export async function createApp(
       resolveSession: opts.resolveSession,
     }),
   );
+  // Retain restrictions on legacy Assistant credentials after public discovery
+  // retirement; removing the scope fence must not widen old credentials.
   app.use(marketplaceAssistantScopeGuard());
   app.use("/api/auth", authRoutes(db));
   if (opts.spsIdentityHandler) {
@@ -283,7 +284,7 @@ export async function createApp(
     }),
   );
   api.use(openApiRoutes());
-  api.use("/companies", companyRoutes(db, opts.storageService));
+  api.use("/companies", companyRoutes(db, opts.storageService, { workspaceWorkers: workspacePluginWorkers }));
   api.use(llmRoutes(db));
   api.use(companySkillRoutes(db));
   api.use(builtInAgentRoutes(db));
@@ -324,6 +325,7 @@ export async function createApp(
   const jobStore = pluginJobStore(db);
   const lifecycle = pluginLifecycleManager(db, {
     workerManager,
+    workspaceRuntime: workspacePluginWorkers,
     migrationDb: opts.pluginMigrationDb ?? db,
     databaseBackupService: opts.databaseBackupService,
   });
@@ -360,6 +362,7 @@ export async function createApp(
       workerManager,
       eventBus,
       streamBus,
+      workspaceRuntime: workspacePluginWorkers,
       jobScheduler: scheduler,
       jobStore,
       toolDispatcher,
@@ -440,7 +443,6 @@ export async function createApp(
   }
   getSpsModelBroker(db); // Recovery never replays inputs or starts a provider request.
   api.use(spsWorkspaceSourceRoutes(db));
-  api.use(spsMarketplaceRoutes(db, workerManager));
   api.use(
     accessRoutes(db, {
       deploymentMode: opts.deploymentMode,
