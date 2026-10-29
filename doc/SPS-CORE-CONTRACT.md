@@ -47,6 +47,11 @@ receipts with Desktop's encrypted claim/launch journal. Entered or uncertain
 work is never automatically replayed. See
 [Node claim recovery](SPS-NODE-CLAIM-RECOVERY.md).
 
+Optional adapter process-session input publishes complete frames in receive
+order. Failed input cannot become a successful normal EOF, and stop joins
+pending uploads before session cleanup. See [Process-session input ordering](SPS-PROCESS-SESSION-INPUT-ORDER.md)
+for the guarantees, provider limits, and separate Linux integration evidence.
+
 ## Goal
 
 SPS Core is the durable, workflow-neutral runtime embedded by SPS Desktop. A
