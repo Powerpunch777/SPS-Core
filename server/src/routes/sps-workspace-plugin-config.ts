@@ -1,5 +1,5 @@
 import { Router, type Response } from "express";
-import { z } from "zod";
+import { z } from "zod/v3";
 import type { Db } from "../compat/paperclip/db.js";
 import { validate } from "../middleware/validate.js";
 import { createSpsWorkspacePluginConfigService } from "../services/sps-workspace-plugin-config.js";

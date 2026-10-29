@@ -20,15 +20,17 @@ function recursiveIssueCount(value: unknown, seen = new Set<object>()): number {
 }
 
 const badElements = Array.from({ length: 10_000 }, () => ({ invalid: true }));
+// Deliberately violate the static contract to exercise runtime function guards.
+const invalidStringArray = badElements as unknown as string[];
 
-function trackedArray(length: number) {
+function trackedArray(length: number, value: unknown = "valid") {
   let elementReads = 0;
   const input = new Proxy([], {
     get(target, property, receiver) {
       if (property === "length") return length;
       if (typeof property === "string" && /^\d+$/.test(property)) {
-        elementReads++;
-        return "valid";
+        if (++elementReads > 1024) throw new Error("Invalid collection traversal exceeded its bound");
+        return value;
       }
       return Reflect.get(target, property, receiver);
     },
@@ -46,6 +48,36 @@ class TrackedSet<T> extends Set<T> {
 }
 
 describe("patched Zod v3 validation issue budget", () => {
+  it("stops invalid unbounded collection work without rejecting valid union alternatives", async () => {
+    for (const runtime of [z, commonJsZod.z]) {
+      for (const async of [false, true]) {
+        const tracked = trackedArray(100_000_000, async ? "bad" : 1);
+        const schema = runtime.array(async ? runtime.string().refine(async () => false) : runtime.string());
+        const result = async ? await schema.safeParseAsync(tracked.input) : schema.safeParse(tracked.input);
+        expect(result.success).toBe(false);
+        expect(tracked.elementReads()).toBeLessThanOrEqual(async ? 128 : 100);
+        let setReads = 0, mapReads = 0;
+        class CountingSet extends Set<number> {
+          override *values() { for (const value of super.values()) { setReads++; yield value; } return undefined; }
+        }
+        class CountingMap extends Map<number, number> {
+          override *entries() { for (const pair of super.entries()) { mapReads++; yield pair; } return undefined; }
+        }
+        const set = new CountingSet(Array.from({ length: 250 }, (_, index) => index));
+        const map = new CountingMap(Array.from({ length: 250 }, (_, index) => [index, index] as [number, number]));
+        const element = async ? runtime.string().refine(async () => false) : runtime.string();
+        const setSchema = runtime.set(element), mapSchema = runtime.map(element, element);
+        expect((async ? await setSchema.safeParseAsync(set) : setSchema.safeParse(set)).success).toBe(false);
+        expect((async ? await mapSchema.safeParseAsync(map) : mapSchema.safeParse(map)).success).toBe(false);
+        expect(setReads).toBeLessThanOrEqual(128);
+        expect(mapReads).toBeLessThanOrEqual(128);
+        const numbers = Array.from({ length: 250 }, (_, index) => index);
+        const alternatives = runtime.array(runtime.union([runtime.string(), runtime.number()]));
+        expect(async ? await alternatives.parseAsync(numbers) : alternatives.parse(numbers)).toEqual(numbers);
+      }
+    }
+  });
+
   it("bounds issues across an unbounded array while keeping the parse invalid", () => {
     const result = z.array(z.string()).safeParse(badElements);
     expect(result.success).toBe(false);
@@ -209,12 +241,12 @@ describe("patched Zod v3 validation issue budget", () => {
     const argumentsValidator = z.function().args(z.array(z.string())).returns(z.array(z.string()))
       .implement(value => value);
     let argumentError: unknown;
-    try { argumentsValidator(badElements); } catch (error) { argumentError = error; }
+    try { argumentsValidator(invalidStringArray); } catch (error) { argumentError = error; }
     expect(argumentError).toBeInstanceOf(z.ZodError);
     expect(recursiveIssueCount(argumentError)).toBe(ISSUE_LIMIT);
 
     const returnsValidator = z.function().args(z.array(z.string())).returns(z.array(z.string()))
-      .implement(() => badElements);
+      .implement(() => invalidStringArray);
     let returnError: unknown;
     try { returnsValidator(["valid"]); } catch (error) { returnError = error; }
     expect(returnError).toBeInstanceOf(z.ZodError);
@@ -226,7 +258,7 @@ describe("patched Zod v3 validation issue budget", () => {
       .implement(value => value);
     for (let call = 0; call < 105; call++) {
       let error: unknown;
-      try { syncFunction(badElements); } catch (caught) { error = caught; }
+      try { syncFunction(invalidStringArray); } catch (caught) { error = caught; }
       expect(error).toBeInstanceOf(z.ZodError);
       expect(recursiveIssueCount(error)).toBeLessThanOrEqual(ISSUE_LIMIT);
       expect(recursiveIssueCount(error)).toBeGreaterThan(0);
@@ -237,7 +269,7 @@ describe("patched Zod v3 validation issue budget", () => {
       .implement(async value => value);
     for (let call = 0; call < 3; call++) {
       let error: unknown;
-      try { await asyncFunction(badElements); } catch (caught) { error = caught; }
+      try { await asyncFunction(invalidStringArray); } catch (caught) { error = caught; }
       expect(error).toBeInstanceOf(z.ZodError);
       expect(recursiveIssueCount(error)).toBeLessThanOrEqual(ISSUE_LIMIT);
       expect(recursiveIssueCount(error)).toBeGreaterThan(0);
@@ -261,5 +293,50 @@ describe("patched Zod v3 validation issue budget", () => {
     const oversizedSet = commonJsZod.z.set(commonJsZod.z.string()).max(2).safeParse(trackedSet);
     expect(oversizedSet.success).toBe(false);
     expect(trackedSet.iterations).toBe(0);
+  });
+
+  it("keeps return validation diagnostics after successful noisy arguments", async () => {
+    for (const runtime of [z, commonJsZod.z]) {
+      const argumentsSchema = runtime.array(runtime.union([runtime.string(), runtime.number()]));
+      const values = Array.from({ length: 250 }, () => 1);
+      const fn = runtime.function().args(argumentsSchema).returns(runtime.string()).implement(() => 42 as never);
+      let error: unknown;
+      try { fn(values); } catch (caught) { error = caught; }
+      expect(error).toBeInstanceOf(runtime.ZodError);
+      const issues = (error as InstanceType<typeof runtime.ZodError>).issues;
+      expect(issues[0]?.code).toBe("invalid_return_type");
+      expect(recursiveIssueCount(error)).toBe(2);
+
+      const asyncFn = runtime.function().args(argumentsSchema).returns(runtime.promise(runtime.string()))
+        .implement(async () => 42 as never);
+      let asyncError: unknown;
+      try { await asyncFn(values); } catch (caught) { asyncError = caught; }
+      expect(asyncError).toBeInstanceOf(runtime.ZodError);
+      expect(recursiveIssueCount(asyncError)).toBe(2);
+    }
+  });
+
+  it("does not traverse values appended by collection callbacks", async () => {
+    for (const runtime of [z, commonJsZod.z]) {
+      for (const async of [false, true]) {
+        for (const kind of ["array", "set", "map"] as const) {
+          const input = kind === "array" ? ["first"] : kind === "set" ? new Set(["first"]) : new Map([["first", "first"]]);
+          let calls = 0;
+          const append = (value: string) => {
+            if (++calls > 3) throw new Error("Unexpected traversal of appended values");
+            if (Array.isArray(input)) input.push(`next-${calls}`);
+            else if (input instanceof Set) input.add(`next-${calls}`);
+            else input.set(`next-${calls}`, `next-${calls}`);
+            return value;
+          };
+          const element = runtime.string().transform(async ? async value => append(value) : append);
+          const schema = kind === "array" ? runtime.array(element) : kind === "set" ? runtime.set(element)
+            : runtime.map(runtime.string(), element);
+          const result = async ? await schema.parseAsync(input) : schema.parse(input);
+          expect(Array.isArray(result) ? result.length : result.size).toBe(1);
+          expect(calls).toBe(1);
+        }
+      }
+    }
   });
 });

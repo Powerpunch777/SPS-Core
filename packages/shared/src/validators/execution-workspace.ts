@@ -1,4 +1,4 @@
-import { z } from "zod";
+import { z } from "zod/v3";
 import {
   WORKSPACE_OVERVIEW_DEFAULT_LIMIT,
   WORKSPACE_OVERVIEW_MAX_LIMIT,

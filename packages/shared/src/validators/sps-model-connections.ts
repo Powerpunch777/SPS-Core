@@ -1,4 +1,4 @@
-import { z } from "zod";
+import { z } from "zod/v3";
 
 export const createSpsModelConnectionSchema = z.object({
   displayName: z.string().trim().min(1).max(160),

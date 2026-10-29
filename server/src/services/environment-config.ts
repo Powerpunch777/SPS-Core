@@ -1,4 +1,4 @@
-import { z } from "zod";
+import { z } from "zod/v3";
 import { randomUUID } from "node:crypto";
 import type { Db } from "@paperclipai/db";
 import type {

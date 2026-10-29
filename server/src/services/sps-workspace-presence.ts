@@ -1,5 +1,5 @@
 import { eq } from "drizzle-orm";
-import { z } from "zod";
+import { z } from "zod/v3";
 import type { Db } from "../compat/paperclip/db.js";
 import { companies } from "../compat/paperclip/db.js";
 

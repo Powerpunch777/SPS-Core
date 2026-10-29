@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { Router, type Request } from "express";
 import { and, count as countFn, eq } from "drizzle-orm";
-import { z } from "zod";
+import { z } from "zod/v3";
 import type { Db } from "@paperclipai/db";
 import { agents as agentsTable } from "@paperclipai/db";
 import {

@@ -1,4 +1,4 @@
-import { z } from "zod";
+import { z } from "zod/v3";
 
 // This is the public, capability-only contract between the Hub and SPS
 // Desktop. Keep it shared so the Node management screen cannot offer a grant

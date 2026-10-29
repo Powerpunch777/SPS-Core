@@ -1,4 +1,4 @@
-import { z } from "zod";
+import { z } from "zod/v3";
 import {
   ISSUE_PRIORITIES,
   ROUTINE_CATCH_UP_POLICIES,

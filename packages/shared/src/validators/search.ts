@@ -1,4 +1,4 @@
-import { z } from "zod";
+import { z } from "zod/v3";
 import { ISSUE_PRIORITIES, ISSUE_STATUSES } from "../constants.js";
 import { isUuidLike } from "../agent-url-key.js";
 import { COMPANY_SEARCH_SCOPES, COMPANY_SEARCH_SORTS } from "../types/search.js";

@@ -29,7 +29,7 @@ overrides:
   picomatch: 4.0.5
   qs: 6.16.1
   undici: 7.30.1
-  '@hono/node-server': 1.19.15
+  '@hono/node-server': 2.1.3
   esbuild: 0.28.1
   browserslist: 4.28.7
   baseline-browser-mapping: 2.11.0
@@ -54,7 +54,7 @@ overrides:
 patchedDependencies:
   '@embedded-postgres/windows-x64@18.1.0-beta.16': 243b29700ff2e4ad70674643bca4ac0a1f109c9b68924aea162dde2754b93d46
   embedded-postgres@18.1.0-beta.16: c0e3c29f95071a5acc66594982bcb6df3f424f696fa5d101ef6e4669c1062ff9
-  zod@3.25.76: 82d58282a08d684b253417bf277f6fef5ca2eed4e0dddce73a0c37ccf1fac79d
+  zod@4.6.6: 0f6c388d940b44540cf653714b80c96e7e472af6045ea0528016bbd8f629e719
 
 importers:
 
@@ -145,8 +145,8 @@ importers:
         specifier: ^4.22.4
         version: 4.22.4
       zod:
-        specifier: ^3.24.2
-        version: 3.25.76(patch_hash=82d58282a08d684b253417bf277f6fef5ca2eed4e0dddce73a0c37ccf1fac79d)
+        specifier: 4.6.6
+        version: 4.6.6(patch_hash=0f6c388d940b44540cf653714b80c96e7e472af6045ea0528016bbd8f629e719)
     devDependencies:
       '@types/node':
         specifier: ^22.19.21
@@ -175,7 +175,7 @@ importers:
     dependencies:
       '@agentclientprotocol/claude-agent-acp':
         specifier: ^0.52.0
-        version: 0.52.0(@anthropic-ai/sdk@0.116.0(zod@4.6.6))(@modelcontextprotocol/sdk@1.32.0(zod@4.6.6))
+        version: 0.52.0(@anthropic-ai/sdk@0.116.0(zod@4.6.6(patch_hash=0f6c388d940b44540cf653714b80c96e7e472af6045ea0528016bbd8f629e719)))(@modelcontextprotocol/sdk@1.32.0(zod@4.6.6(patch_hash=0f6c388d940b44540cf653714b80c96e7e472af6045ea0528016bbd8f629e719)))
       '@paperclipai/adapter-utils':
         specifier: workspace:*
         version: link:../../adapter-utils
@@ -213,7 +213,7 @@ importers:
     dependencies:
       '@cursor/sdk':
         specifier: 1.0.40
-        version: 1.0.40(zod@4.6.6)
+        version: 1.0.40(zod@4.6.6(patch_hash=0f6c388d940b44540cf653714b80c96e7e472af6045ea0528016bbd8f629e719))
       '@paperclipai/adapter-utils':
         specifier: workspace:*
         version: link:../../adapter-utils
@@ -400,13 +400,13 @@ importers:
     dependencies:
       '@modelcontextprotocol/sdk':
         specifier: 1.32.0
-        version: 1.32.0(zod@3.25.76(patch_hash=82d58282a08d684b253417bf277f6fef5ca2eed4e0dddce73a0c37ccf1fac79d))
+        version: 1.32.0(zod@4.6.6(patch_hash=0f6c388d940b44540cf653714b80c96e7e472af6045ea0528016bbd8f629e719))
       '@paperclipai/shared':
         specifier: workspace:*
         version: link:../shared
       zod:
-        specifier: ^3.24.2
-        version: 3.25.76(patch_hash=82d58282a08d684b253417bf277f6fef5ca2eed4e0dddce73a0c37ccf1fac79d)
+        specifier: 4.6.6
+        version: 4.6.6(patch_hash=0f6c388d940b44540cf653714b80c96e7e472af6045ea0528016bbd8f629e719)
     devDependencies:
       '@types/node':
         specifier: ^22.19.21
@@ -633,13 +633,13 @@ importers:
     dependencies:
       '@modelcontextprotocol/sdk':
         specifier: 1.32.0
-        version: 1.32.0(zod@3.25.76(patch_hash=82d58282a08d684b253417bf277f6fef5ca2eed4e0dddce73a0c37ccf1fac79d))
+        version: 1.32.0(zod@4.6.6(patch_hash=0f6c388d940b44540cf653714b80c96e7e472af6045ea0528016bbd8f629e719))
       '@paperclipai/plugin-sdk':
         specifier: workspace:*
         version: link:../sdk
       zod:
-        specifier: ^3.24.2
-        version: 3.25.76(patch_hash=82d58282a08d684b253417bf277f6fef5ca2eed4e0dddce73a0c37ccf1fac79d)
+        specifier: 4.6.6
+        version: 4.6.6(patch_hash=0f6c388d940b44540cf653714b80c96e7e472af6045ea0528016bbd8f629e719)
     devDependencies:
       '@types/node':
         specifier: ^22.19.21
@@ -694,8 +694,8 @@ importers:
         specifier: ^19.2.7
         version: 19.2.7
       zod:
-        specifier: ^3.24.2
-        version: 3.25.76(patch_hash=82d58282a08d684b253417bf277f6fef5ca2eed4e0dddce73a0c37ccf1fac79d)
+        specifier: 4.6.6
+        version: 4.6.6(patch_hash=0f6c388d940b44540cf653714b80c96e7e472af6045ea0528016bbd8f629e719)
     devDependencies:
       '@types/node':
         specifier: ^22.19.21
@@ -710,8 +710,8 @@ importers:
   packages/shared:
     dependencies:
       zod:
-        specifier: ^3.24.2
-        version: 3.25.76(patch_hash=82d58282a08d684b253417bf277f6fef5ca2eed4e0dddce73a0c37ccf1fac79d)
+        specifier: 4.6.6
+        version: 4.6.6(patch_hash=0f6c388d940b44540cf653714b80c96e7e472af6045ea0528016bbd8f629e719)
     devDependencies:
       '@types/node':
         specifier: ^22.19.21
@@ -850,8 +850,8 @@ importers:
         specifier: 8.21.0
         version: 8.21.0
       zod:
-        specifier: ^3.24.2
-        version: 3.25.76(patch_hash=82d58282a08d684b253417bf277f6fef5ca2eed4e0dddce73a0c37ccf1fac79d)
+        specifier: 4.6.6
+        version: 4.6.6(patch_hash=0f6c388d940b44540cf653714b80c96e7e472af6045ea0528016bbd8f629e719)
     devDependencies:
       '@types/express':
         specifier: ^5.0.0
@@ -2027,9 +2027,9 @@ packages:
   '@gar/promisify@1.1.3':
     resolution: {integrity: sha512-k2Ty1JcVojjJFwrg/ThKi2ujJ7XNLYaFGNB/bWT9wGR+oSMJHMa5w+CUq6p/pVrKeNNgA7pCqEcjSnHVoqJQFw==}
 
-  '@hono/node-server@1.19.15':
-    resolution: {integrity: sha512-Za2ai6TLdKjUvnur+eenO6nuYYipVAEhyCAdaV8IRvmU9kK8crOZUSYvIXn72E4f8fJqyAbpcJuTsYYmZp9Deg==}
-    engines: {node: '>=18.14.1'}
+  '@hono/node-server@2.1.3':
+    resolution: {integrity: sha512-TA//nWMqPhbfdfneACk6t5a9eqbS9lABEPyKn0/xZTah3H3U2XaVg85rJFl0/Fyit0I552YDHgXGVSf3GwqbUw==}
+    engines: {node: '>=20'}
     peerDependencies:
       hono: 4.13.11
 
@@ -7708,9 +7708,6 @@ packages:
     peerDependencies:
       zod: 4.6.6
 
-  zod@3.25.76:
-    resolution: {integrity: sha512-gzUt/qt81nXsFGKIFcC3YnfEAx5NkunCfnDlvuBSSFS02bcXu4Lmea0AFIUwbLWxWPx3d9p8S5QoaujKcNQxcQ==}
-
   zod@4.6.6:
     resolution: {integrity: sha512-4UmzQUF5fxvfcYHlbjBmejU+w+hbDnWFx4aS8kBx7nPBHcO2SqPbpAG8snbdg+Xse4pRefR98hgjFgIMCI/UhA==}
 
@@ -7741,31 +7738,31 @@ snapshots:
 
   '@adobe/css-tools@4.5.0': {}
 
-  '@agentclientprotocol/claude-agent-acp@0.52.0(@anthropic-ai/sdk@0.116.0(zod@4.6.6))(@modelcontextprotocol/sdk@1.32.0(zod@4.6.6))':
+  '@agentclientprotocol/claude-agent-acp@0.52.0(@anthropic-ai/sdk@0.116.0(zod@4.6.6(patch_hash=0f6c388d940b44540cf653714b80c96e7e472af6045ea0528016bbd8f629e719)))(@modelcontextprotocol/sdk@1.32.0(zod@4.6.6(patch_hash=0f6c388d940b44540cf653714b80c96e7e472af6045ea0528016bbd8f629e719)))':
     dependencies:
-      '@agentclientprotocol/sdk': 1.0.0(zod@4.6.6)
-      '@anthropic-ai/claude-agent-sdk': 0.3.191(@anthropic-ai/sdk@0.116.0(zod@4.6.6))(@modelcontextprotocol/sdk@1.32.0(zod@4.6.6))(zod@4.6.6)
-      zod: 4.6.6
+      '@agentclientprotocol/sdk': 1.0.0(zod@4.6.6(patch_hash=0f6c388d940b44540cf653714b80c96e7e472af6045ea0528016bbd8f629e719))
+      '@anthropic-ai/claude-agent-sdk': 0.3.191(@anthropic-ai/sdk@0.116.0(zod@4.6.6(patch_hash=0f6c388d940b44540cf653714b80c96e7e472af6045ea0528016bbd8f629e719)))(@modelcontextprotocol/sdk@1.32.0(zod@4.6.6(patch_hash=0f6c388d940b44540cf653714b80c96e7e472af6045ea0528016bbd8f629e719)))(zod@4.6.6(patch_hash=0f6c388d940b44540cf653714b80c96e7e472af6045ea0528016bbd8f629e719))
+      zod: 4.6.6(patch_hash=0f6c388d940b44540cf653714b80c96e7e472af6045ea0528016bbd8f629e719)
     transitivePeerDependencies:
       - '@anthropic-ai/sdk'
       - '@modelcontextprotocol/sdk'
 
   '@agentclientprotocol/codex-acp@1.1.4':
     dependencies:
-      '@agentclientprotocol/sdk': 1.2.1(zod@4.6.6)
+      '@agentclientprotocol/sdk': 1.2.1(zod@4.6.6(patch_hash=0f6c388d940b44540cf653714b80c96e7e472af6045ea0528016bbd8f629e719))
       '@openai/codex': 0.144.5
       diff: 9.0.0
       open: 11.0.0
       vscode-jsonrpc: 9.0.1
-      zod: 4.6.6
+      zod: 4.6.6(patch_hash=0f6c388d940b44540cf653714b80c96e7e472af6045ea0528016bbd8f629e719)
 
-  '@agentclientprotocol/sdk@1.0.0(zod@4.6.6)':
+  '@agentclientprotocol/sdk@1.0.0(zod@4.6.6(patch_hash=0f6c388d940b44540cf653714b80c96e7e472af6045ea0528016bbd8f629e719))':
     dependencies:
-      zod: 4.6.6
+      zod: 4.6.6(patch_hash=0f6c388d940b44540cf653714b80c96e7e472af6045ea0528016bbd8f629e719)
 
-  '@agentclientprotocol/sdk@1.2.1(zod@4.6.6)':
+  '@agentclientprotocol/sdk@1.2.1(zod@4.6.6(patch_hash=0f6c388d940b44540cf653714b80c96e7e472af6045ea0528016bbd8f629e719))':
     dependencies:
-      zod: 4.6.6
+      zod: 4.6.6(patch_hash=0f6c388d940b44540cf653714b80c96e7e472af6045ea0528016bbd8f629e719)
 
   '@antfu/install-pkg@1.1.0':
     dependencies:
@@ -7796,11 +7793,11 @@ snapshots:
   '@anthropic-ai/claude-agent-sdk-win32-x64@0.3.191':
     optional: true
 
-  '@anthropic-ai/claude-agent-sdk@0.3.191(@anthropic-ai/sdk@0.116.0(zod@4.6.6))(@modelcontextprotocol/sdk@1.32.0(zod@4.6.6))(zod@4.6.6)':
+  '@anthropic-ai/claude-agent-sdk@0.3.191(@anthropic-ai/sdk@0.116.0(zod@4.6.6(patch_hash=0f6c388d940b44540cf653714b80c96e7e472af6045ea0528016bbd8f629e719)))(@modelcontextprotocol/sdk@1.32.0(zod@4.6.6(patch_hash=0f6c388d940b44540cf653714b80c96e7e472af6045ea0528016bbd8f629e719)))(zod@4.6.6(patch_hash=0f6c388d940b44540cf653714b80c96e7e472af6045ea0528016bbd8f629e719))':
     dependencies:
-      '@anthropic-ai/sdk': 0.116.0(zod@4.6.6)
-      '@modelcontextprotocol/sdk': 1.32.0(zod@4.6.6)
-      zod: 4.6.6
+      '@anthropic-ai/sdk': 0.116.0(zod@4.6.6(patch_hash=0f6c388d940b44540cf653714b80c96e7e472af6045ea0528016bbd8f629e719))
+      '@modelcontextprotocol/sdk': 1.32.0(zod@4.6.6(patch_hash=0f6c388d940b44540cf653714b80c96e7e472af6045ea0528016bbd8f629e719))
+      zod: 4.6.6(patch_hash=0f6c388d940b44540cf653714b80c96e7e472af6045ea0528016bbd8f629e719)
     optionalDependencies:
       '@anthropic-ai/claude-agent-sdk-darwin-arm64': 0.3.191
       '@anthropic-ai/claude-agent-sdk-darwin-x64': 0.3.191
@@ -7811,12 +7808,12 @@ snapshots:
       '@anthropic-ai/claude-agent-sdk-win32-arm64': 0.3.191
       '@anthropic-ai/claude-agent-sdk-win32-x64': 0.3.191
 
-  '@anthropic-ai/sdk@0.116.0(zod@4.6.6)':
+  '@anthropic-ai/sdk@0.116.0(zod@4.6.6(patch_hash=0f6c388d940b44540cf653714b80c96e7e472af6045ea0528016bbd8f629e719))':
     dependencies:
       json-schema-to-ts: 3.1.1
       standardwebhooks: 1.0.0
     optionalDependencies:
-      zod: 4.6.6
+      zod: 4.6.6(patch_hash=0f6c388d940b44540cf653714b80c96e7e472af6045ea0528016bbd8f629e719)
 
   '@asamuzakjp/css-color@5.0.1':
     dependencies:
@@ -7870,7 +7867,7 @@ snapshots:
       react-dom: 19.2.7(react@19.2.7)
       react-textarea-autosize: 8.5.9(@types/react@19.2.17)(react@19.2.7)
       safe-content-frame: 0.0.20
-      zod: 4.6.6
+      zod: 4.6.6(patch_hash=0f6c388d940b44540cf653714b80c96e7e472af6045ea0528016bbd8f629e719)
       zustand: 5.0.14(@types/react@19.2.17)(react@19.2.7)(use-sync-external-store@1.6.0(react@19.2.7))
     optionalDependencies:
       '@types/react': 19.2.17
@@ -8252,50 +8249,50 @@ snapshots:
       '@babel/helper-string-parser': 7.29.7
       '@babel/helper-validator-identifier': 7.29.7
 
-  '@better-auth/core@1.7.7(@better-auth/utils@0.4.2)(@better-fetch/fetch@1.3.2)(better-call@1.4.0(zod@4.6.6))(jose@6.2.3)(kysely@0.29.2)(nanostores@1.3.0)':
+  '@better-auth/core@1.7.7(@better-auth/utils@0.4.2)(@better-fetch/fetch@1.3.2)(better-call@1.4.0(zod@4.6.6(patch_hash=0f6c388d940b44540cf653714b80c96e7e472af6045ea0528016bbd8f629e719)))(jose@6.2.3)(kysely@0.29.2)(nanostores@1.3.0)':
     dependencies:
       '@better-auth/utils': 0.4.2
       '@better-fetch/fetch': 1.3.2
       '@opentelemetry/semantic-conventions': 1.41.1
       '@standard-schema/spec': 1.1.0
-      better-call: 1.4.0(zod@4.6.6)
+      better-call: 1.4.0(zod@4.6.6(patch_hash=0f6c388d940b44540cf653714b80c96e7e472af6045ea0528016bbd8f629e719))
       jose: 6.2.3
       kysely: 0.29.2
       nanostores: 1.3.0
-      zod: 4.6.6
+      zod: 4.6.6(patch_hash=0f6c388d940b44540cf653714b80c96e7e472af6045ea0528016bbd8f629e719)
 
-  '@better-auth/drizzle-adapter@1.7.7(@better-auth/core@1.7.7(@better-auth/utils@0.4.2)(@better-fetch/fetch@1.3.2)(better-call@1.4.0(zod@4.6.6))(jose@6.2.3)(kysely@0.29.2)(nanostores@1.3.0))(@better-auth/utils@0.4.2)(drizzle-orm@0.45.2(@electric-sql/pglite@0.3.15)(kysely@0.29.2)(pg@8.18.0)(postgres@3.4.9)(sqlite3@5.1.7))':
+  '@better-auth/drizzle-adapter@1.7.7(@better-auth/core@1.7.7(@better-auth/utils@0.4.2)(@better-fetch/fetch@1.3.2)(better-call@1.4.0(zod@4.6.6(patch_hash=0f6c388d940b44540cf653714b80c96e7e472af6045ea0528016bbd8f629e719)))(jose@6.2.3)(kysely@0.29.2)(nanostores@1.3.0))(@better-auth/utils@0.4.2)(drizzle-orm@0.45.2(@electric-sql/pglite@0.3.15)(kysely@0.29.2)(pg@8.18.0)(postgres@3.4.9)(sqlite3@5.1.7))':
     dependencies:
-      '@better-auth/core': 1.7.7(@better-auth/utils@0.4.2)(@better-fetch/fetch@1.3.2)(better-call@1.4.0(zod@4.6.6))(jose@6.2.3)(kysely@0.29.2)(nanostores@1.3.0)
+      '@better-auth/core': 1.7.7(@better-auth/utils@0.4.2)(@better-fetch/fetch@1.3.2)(better-call@1.4.0(zod@4.6.6(patch_hash=0f6c388d940b44540cf653714b80c96e7e472af6045ea0528016bbd8f629e719)))(jose@6.2.3)(kysely@0.29.2)(nanostores@1.3.0)
       '@better-auth/utils': 0.4.2
     optionalDependencies:
       drizzle-orm: 0.45.2(@electric-sql/pglite@0.3.15)(kysely@0.29.2)(pg@8.18.0)(postgres@3.4.9)(sqlite3@5.1.7)
 
-  '@better-auth/kysely-adapter@1.7.7(@better-auth/core@1.7.7(@better-auth/utils@0.4.2)(@better-fetch/fetch@1.3.2)(better-call@1.4.0(zod@4.6.6))(jose@6.2.3)(kysely@0.29.2)(nanostores@1.3.0))(@better-auth/utils@0.4.2)(kysely@0.29.2)':
+  '@better-auth/kysely-adapter@1.7.7(@better-auth/core@1.7.7(@better-auth/utils@0.4.2)(@better-fetch/fetch@1.3.2)(better-call@1.4.0(zod@4.6.6(patch_hash=0f6c388d940b44540cf653714b80c96e7e472af6045ea0528016bbd8f629e719)))(jose@6.2.3)(kysely@0.29.2)(nanostores@1.3.0))(@better-auth/utils@0.4.2)(kysely@0.29.2)':
     dependencies:
-      '@better-auth/core': 1.7.7(@better-auth/utils@0.4.2)(@better-fetch/fetch@1.3.2)(better-call@1.4.0(zod@4.6.6))(jose@6.2.3)(kysely@0.29.2)(nanostores@1.3.0)
+      '@better-auth/core': 1.7.7(@better-auth/utils@0.4.2)(@better-fetch/fetch@1.3.2)(better-call@1.4.0(zod@4.6.6(patch_hash=0f6c388d940b44540cf653714b80c96e7e472af6045ea0528016bbd8f629e719)))(jose@6.2.3)(kysely@0.29.2)(nanostores@1.3.0)
       '@better-auth/utils': 0.4.2
     optionalDependencies:
       kysely: 0.29.2
 
-  '@better-auth/memory-adapter@1.7.7(@better-auth/core@1.7.7(@better-auth/utils@0.4.2)(@better-fetch/fetch@1.3.2)(better-call@1.4.0(zod@4.6.6))(jose@6.2.3)(kysely@0.29.2)(nanostores@1.3.0))(@better-auth/utils@0.4.2)':
+  '@better-auth/memory-adapter@1.7.7(@better-auth/core@1.7.7(@better-auth/utils@0.4.2)(@better-fetch/fetch@1.3.2)(better-call@1.4.0(zod@4.6.6(patch_hash=0f6c388d940b44540cf653714b80c96e7e472af6045ea0528016bbd8f629e719)))(jose@6.2.3)(kysely@0.29.2)(nanostores@1.3.0))(@better-auth/utils@0.4.2)':
     dependencies:
-      '@better-auth/core': 1.7.7(@better-auth/utils@0.4.2)(@better-fetch/fetch@1.3.2)(better-call@1.4.0(zod@4.6.6))(jose@6.2.3)(kysely@0.29.2)(nanostores@1.3.0)
+      '@better-auth/core': 1.7.7(@better-auth/utils@0.4.2)(@better-fetch/fetch@1.3.2)(better-call@1.4.0(zod@4.6.6(patch_hash=0f6c388d940b44540cf653714b80c96e7e472af6045ea0528016bbd8f629e719)))(jose@6.2.3)(kysely@0.29.2)(nanostores@1.3.0)
       '@better-auth/utils': 0.4.2
 
-  '@better-auth/mongo-adapter@1.7.7(@better-auth/core@1.7.7(@better-auth/utils@0.4.2)(@better-fetch/fetch@1.3.2)(better-call@1.4.0(zod@4.6.6))(jose@6.2.3)(kysely@0.29.2)(nanostores@1.3.0))(@better-auth/utils@0.4.2)':
+  '@better-auth/mongo-adapter@1.7.7(@better-auth/core@1.7.7(@better-auth/utils@0.4.2)(@better-fetch/fetch@1.3.2)(better-call@1.4.0(zod@4.6.6(patch_hash=0f6c388d940b44540cf653714b80c96e7e472af6045ea0528016bbd8f629e719)))(jose@6.2.3)(kysely@0.29.2)(nanostores@1.3.0))(@better-auth/utils@0.4.2)':
     dependencies:
-      '@better-auth/core': 1.7.7(@better-auth/utils@0.4.2)(@better-fetch/fetch@1.3.2)(better-call@1.4.0(zod@4.6.6))(jose@6.2.3)(kysely@0.29.2)(nanostores@1.3.0)
+      '@better-auth/core': 1.7.7(@better-auth/utils@0.4.2)(@better-fetch/fetch@1.3.2)(better-call@1.4.0(zod@4.6.6(patch_hash=0f6c388d940b44540cf653714b80c96e7e472af6045ea0528016bbd8f629e719)))(jose@6.2.3)(kysely@0.29.2)(nanostores@1.3.0)
       '@better-auth/utils': 0.4.2
 
-  '@better-auth/prisma-adapter@1.7.7(@better-auth/core@1.7.7(@better-auth/utils@0.4.2)(@better-fetch/fetch@1.3.2)(better-call@1.4.0(zod@4.6.6))(jose@6.2.3)(kysely@0.29.2)(nanostores@1.3.0))(@better-auth/utils@0.4.2)':
+  '@better-auth/prisma-adapter@1.7.7(@better-auth/core@1.7.7(@better-auth/utils@0.4.2)(@better-fetch/fetch@1.3.2)(better-call@1.4.0(zod@4.6.6(patch_hash=0f6c388d940b44540cf653714b80c96e7e472af6045ea0528016bbd8f629e719)))(jose@6.2.3)(kysely@0.29.2)(nanostores@1.3.0))(@better-auth/utils@0.4.2)':
     dependencies:
-      '@better-auth/core': 1.7.7(@better-auth/utils@0.4.2)(@better-fetch/fetch@1.3.2)(better-call@1.4.0(zod@4.6.6))(jose@6.2.3)(kysely@0.29.2)(nanostores@1.3.0)
+      '@better-auth/core': 1.7.7(@better-auth/utils@0.4.2)(@better-fetch/fetch@1.3.2)(better-call@1.4.0(zod@4.6.6(patch_hash=0f6c388d940b44540cf653714b80c96e7e472af6045ea0528016bbd8f629e719)))(jose@6.2.3)(kysely@0.29.2)(nanostores@1.3.0)
       '@better-auth/utils': 0.4.2
 
-  '@better-auth/telemetry@1.7.7(@better-auth/core@1.7.7(@better-auth/utils@0.4.2)(@better-fetch/fetch@1.3.2)(better-call@1.4.0(zod@4.6.6))(jose@6.2.3)(kysely@0.29.2)(nanostores@1.3.0))(@better-auth/utils@0.4.2)(@better-fetch/fetch@1.3.2)':
+  '@better-auth/telemetry@1.7.7(@better-auth/core@1.7.7(@better-auth/utils@0.4.2)(@better-fetch/fetch@1.3.2)(better-call@1.4.0(zod@4.6.6(patch_hash=0f6c388d940b44540cf653714b80c96e7e472af6045ea0528016bbd8f629e719)))(jose@6.2.3)(kysely@0.29.2)(nanostores@1.3.0))(@better-auth/utils@0.4.2)(@better-fetch/fetch@1.3.2)':
     dependencies:
-      '@better-auth/core': 1.7.7(@better-auth/utils@0.4.2)(@better-fetch/fetch@1.3.2)(better-call@1.4.0(zod@4.6.6))(jose@6.2.3)(kysely@0.29.2)(nanostores@1.3.0)
+      '@better-auth/core': 1.7.7(@better-auth/utils@0.4.2)(@better-fetch/fetch@1.3.2)(better-call@1.4.0(zod@4.6.6(patch_hash=0f6c388d940b44540cf653714b80c96e7e472af6045ea0528016bbd8f629e719)))(jose@6.2.3)(kysely@0.29.2)(nanostores@1.3.0)
       '@better-auth/utils': 0.4.2
       '@better-fetch/fetch': 1.3.2
 
@@ -8709,13 +8706,13 @@ snapshots:
   '@cursor/sdk-win32-x64@1.0.40':
     optional: true
 
-  '@cursor/sdk@1.0.40(zod@4.6.6)':
+  '@cursor/sdk@1.0.40(zod@4.6.6(patch_hash=0f6c388d940b44540cf653714b80c96e7e472af6045ea0528016bbd8f629e719))':
     dependencies:
       '@bufbuild/protobuf': 1.10.0
       '@connectrpc/connect': 1.7.0(@bufbuild/protobuf@1.10.0)
       '@connectrpc/connect-web': 1.7.0(@bufbuild/protobuf@1.10.0)(@connectrpc/connect@1.7.0(@bufbuild/protobuf@1.10.0))
       '@statsig/js-client': 3.31.0
-      zod: 4.6.6
+      zod: 4.6.6(patch_hash=0f6c388d940b44540cf653714b80c96e7e472af6045ea0528016bbd8f629e719)
     optionalDependencies:
       '@cursor/sdk-darwin-arm64': 1.0.40
       '@cursor/sdk-darwin-x64': 1.0.40
@@ -8936,7 +8933,7 @@ snapshots:
   '@gar/promisify@1.1.3':
     optional: true
 
-  '@hono/node-server@1.19.15(hono@4.13.11)':
+  '@hono/node-server@2.1.3(hono@4.13.11)':
     dependencies:
       hono: 4.13.11
 
@@ -9490,9 +9487,9 @@ snapshots:
     dependencies:
       '@chevrotain/types': 11.1.2
 
-  '@modelcontextprotocol/sdk@1.32.0(zod@3.25.76(patch_hash=82d58282a08d684b253417bf277f6fef5ca2eed4e0dddce73a0c37ccf1fac79d))':
+  '@modelcontextprotocol/sdk@1.32.0(zod@4.6.6(patch_hash=0f6c388d940b44540cf653714b80c96e7e472af6045ea0528016bbd8f629e719))':
     dependencies:
-      '@hono/node-server': 1.19.15(hono@4.13.11)
+      '@hono/node-server': 2.1.3(hono@4.13.11)
       ajv: 8.20.0
       ajv-formats: 3.0.1(ajv@8.20.0)
       content-type: 1.0.5
@@ -9507,30 +9504,8 @@ snapshots:
       json-schema-typed: 8.0.2
       pkce-challenge: 5.0.1
       raw-body: 3.0.2
-      zod: 3.25.76(patch_hash=82d58282a08d684b253417bf277f6fef5ca2eed4e0dddce73a0c37ccf1fac79d)
-      zod-to-json-schema: 3.25.2(zod@3.25.76(patch_hash=82d58282a08d684b253417bf277f6fef5ca2eed4e0dddce73a0c37ccf1fac79d))
-    transitivePeerDependencies:
-      - supports-color
-
-  '@modelcontextprotocol/sdk@1.32.0(zod@4.6.6)':
-    dependencies:
-      '@hono/node-server': 1.19.15(hono@4.13.11)
-      ajv: 8.20.0
-      ajv-formats: 3.0.1(ajv@8.20.0)
-      content-type: 1.0.5
-      cors: 2.8.6
-      cross-spawn: 7.0.6
-      eventsource: 3.0.7
-      eventsource-parser: 3.0.6
-      express: 5.2.1
-      express-rate-limit: 8.3.2(express@5.2.1)
-      hono: 4.13.11
-      jose: 6.2.3
-      json-schema-typed: 8.0.2
-      pkce-challenge: 5.0.1
-      raw-body: 3.0.2
-      zod: 4.6.6
-      zod-to-json-schema: 3.25.2(zod@4.6.6)
+      zod: 4.6.6(patch_hash=0f6c388d940b44540cf653714b80c96e7e472af6045ea0528016bbd8f629e719)
+      zod-to-json-schema: 3.25.2(zod@4.6.6(patch_hash=0f6c388d940b44540cf653714b80c96e7e472af6045ea0528016bbd8f629e719))
     transitivePeerDependencies:
       - supports-color
 
@@ -11491,11 +11466,11 @@ snapshots:
 
   acpx@0.12.0:
     dependencies:
-      '@agentclientprotocol/sdk': 1.2.1(zod@4.6.6)
+      '@agentclientprotocol/sdk': 1.2.1(zod@4.6.6(patch_hash=0f6c388d940b44540cf653714b80c96e7e472af6045ea0528016bbd8f629e719))
       commander: 15.0.0
       skillflag: 0.2.0
       tsx: 4.23.0
-      zod: 4.6.6
+      zod: 4.6.6(patch_hash=0f6c388d940b44540cf653714b80c96e7e472af6045ea0528016bbd8f629e719)
     transitivePeerDependencies:
       - bare-abort-controller
       - bare-buffer
@@ -11641,23 +11616,23 @@ snapshots:
 
   better-auth@1.7.7(drizzle-kit@0.31.10)(drizzle-orm@0.45.2(@electric-sql/pglite@0.3.15)(kysely@0.29.2)(pg@8.18.0)(postgres@3.4.9)(sqlite3@5.1.7))(pg@8.18.0)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)(vitest@4.1.12(@types/node@22.19.21)(jsdom@28.1.0(@noble/hashes@2.2.0))(vite@7.3.7(@types/node@22.19.21)(jiti@2.7.0)(lightningcss@1.32.0)(tsx@4.22.4))):
     dependencies:
-      '@better-auth/core': 1.7.7(@better-auth/utils@0.4.2)(@better-fetch/fetch@1.3.2)(better-call@1.4.0(zod@4.6.6))(jose@6.2.3)(kysely@0.29.2)(nanostores@1.3.0)
-      '@better-auth/drizzle-adapter': 1.7.7(@better-auth/core@1.7.7(@better-auth/utils@0.4.2)(@better-fetch/fetch@1.3.2)(better-call@1.4.0(zod@4.6.6))(jose@6.2.3)(kysely@0.29.2)(nanostores@1.3.0))(@better-auth/utils@0.4.2)(drizzle-orm@0.45.2(@electric-sql/pglite@0.3.15)(kysely@0.29.2)(pg@8.18.0)(postgres@3.4.9)(sqlite3@5.1.7))
-      '@better-auth/kysely-adapter': 1.7.7(@better-auth/core@1.7.7(@better-auth/utils@0.4.2)(@better-fetch/fetch@1.3.2)(better-call@1.4.0(zod@4.6.6))(jose@6.2.3)(kysely@0.29.2)(nanostores@1.3.0))(@better-auth/utils@0.4.2)(kysely@0.29.2)
-      '@better-auth/memory-adapter': 1.7.7(@better-auth/core@1.7.7(@better-auth/utils@0.4.2)(@better-fetch/fetch@1.3.2)(better-call@1.4.0(zod@4.6.6))(jose@6.2.3)(kysely@0.29.2)(nanostores@1.3.0))(@better-auth/utils@0.4.2)
-      '@better-auth/mongo-adapter': 1.7.7(@better-auth/core@1.7.7(@better-auth/utils@0.4.2)(@better-fetch/fetch@1.3.2)(better-call@1.4.0(zod@4.6.6))(jose@6.2.3)(kysely@0.29.2)(nanostores@1.3.0))(@better-auth/utils@0.4.2)
-      '@better-auth/prisma-adapter': 1.7.7(@better-auth/core@1.7.7(@better-auth/utils@0.4.2)(@better-fetch/fetch@1.3.2)(better-call@1.4.0(zod@4.6.6))(jose@6.2.3)(kysely@0.29.2)(nanostores@1.3.0))(@better-auth/utils@0.4.2)
-      '@better-auth/telemetry': 1.7.7(@better-auth/core@1.7.7(@better-auth/utils@0.4.2)(@better-fetch/fetch@1.3.2)(better-call@1.4.0(zod@4.6.6))(jose@6.2.3)(kysely@0.29.2)(nanostores@1.3.0))(@better-auth/utils@0.4.2)(@better-fetch/fetch@1.3.2)
+      '@better-auth/core': 1.7.7(@better-auth/utils@0.4.2)(@better-fetch/fetch@1.3.2)(better-call@1.4.0(zod@4.6.6(patch_hash=0f6c388d940b44540cf653714b80c96e7e472af6045ea0528016bbd8f629e719)))(jose@6.2.3)(kysely@0.29.2)(nanostores@1.3.0)
+      '@better-auth/drizzle-adapter': 1.7.7(@better-auth/core@1.7.7(@better-auth/utils@0.4.2)(@better-fetch/fetch@1.3.2)(better-call@1.4.0(zod@4.6.6(patch_hash=0f6c388d940b44540cf653714b80c96e7e472af6045ea0528016bbd8f629e719)))(jose@6.2.3)(kysely@0.29.2)(nanostores@1.3.0))(@better-auth/utils@0.4.2)(drizzle-orm@0.45.2(@electric-sql/pglite@0.3.15)(kysely@0.29.2)(pg@8.18.0)(postgres@3.4.9)(sqlite3@5.1.7))
+      '@better-auth/kysely-adapter': 1.7.7(@better-auth/core@1.7.7(@better-auth/utils@0.4.2)(@better-fetch/fetch@1.3.2)(better-call@1.4.0(zod@4.6.6(patch_hash=0f6c388d940b44540cf653714b80c96e7e472af6045ea0528016bbd8f629e719)))(jose@6.2.3)(kysely@0.29.2)(nanostores@1.3.0))(@better-auth/utils@0.4.2)(kysely@0.29.2)
+      '@better-auth/memory-adapter': 1.7.7(@better-auth/core@1.7.7(@better-auth/utils@0.4.2)(@better-fetch/fetch@1.3.2)(better-call@1.4.0(zod@4.6.6(patch_hash=0f6c388d940b44540cf653714b80c96e7e472af6045ea0528016bbd8f629e719)))(jose@6.2.3)(kysely@0.29.2)(nanostores@1.3.0))(@better-auth/utils@0.4.2)
+      '@better-auth/mongo-adapter': 1.7.7(@better-auth/core@1.7.7(@better-auth/utils@0.4.2)(@better-fetch/fetch@1.3.2)(better-call@1.4.0(zod@4.6.6(patch_hash=0f6c388d940b44540cf653714b80c96e7e472af6045ea0528016bbd8f629e719)))(jose@6.2.3)(kysely@0.29.2)(nanostores@1.3.0))(@better-auth/utils@0.4.2)
+      '@better-auth/prisma-adapter': 1.7.7(@better-auth/core@1.7.7(@better-auth/utils@0.4.2)(@better-fetch/fetch@1.3.2)(better-call@1.4.0(zod@4.6.6(patch_hash=0f6c388d940b44540cf653714b80c96e7e472af6045ea0528016bbd8f629e719)))(jose@6.2.3)(kysely@0.29.2)(nanostores@1.3.0))(@better-auth/utils@0.4.2)
+      '@better-auth/telemetry': 1.7.7(@better-auth/core@1.7.7(@better-auth/utils@0.4.2)(@better-fetch/fetch@1.3.2)(better-call@1.4.0(zod@4.6.6(patch_hash=0f6c388d940b44540cf653714b80c96e7e472af6045ea0528016bbd8f629e719)))(jose@6.2.3)(kysely@0.29.2)(nanostores@1.3.0))(@better-auth/utils@0.4.2)(@better-fetch/fetch@1.3.2)
       '@better-auth/utils': 0.4.2
       '@better-fetch/fetch': 1.3.2
       '@noble/ciphers': 2.2.0
       '@noble/hashes': 2.2.0
-      better-call: 1.4.0(zod@4.6.6)
+      better-call: 1.4.0(zod@4.6.6(patch_hash=0f6c388d940b44540cf653714b80c96e7e472af6045ea0528016bbd8f629e719))
       defu: 6.1.7
       jose: 6.2.3
       kysely: 0.29.2
       nanostores: 1.3.0
-      zod: 4.6.6
+      zod: 4.6.6(patch_hash=0f6c388d940b44540cf653714b80c96e7e472af6045ea0528016bbd8f629e719)
     optionalDependencies:
       drizzle-kit: 0.31.10
       drizzle-orm: 0.45.2(@electric-sql/pglite@0.3.15)(kysely@0.29.2)(pg@8.18.0)(postgres@3.4.9)(sqlite3@5.1.7)
@@ -11668,14 +11643,14 @@ snapshots:
     transitivePeerDependencies:
       - '@opentelemetry/api'
 
-  better-call@1.4.0(zod@4.6.6):
+  better-call@1.4.0(zod@4.6.6(patch_hash=0f6c388d940b44540cf653714b80c96e7e472af6045ea0528016bbd8f629e719)):
     dependencies:
       '@better-auth/utils': 0.5.1
       '@better-fetch/fetch': 1.3.1
       rou3: 0.9.2
       set-cookie-parser: 3.2.1
     optionalDependencies:
-      zod: 4.6.6
+      zod: 4.6.6(patch_hash=0f6c388d940b44540cf653714b80c96e7e472af6045ea0528016bbd8f629e719)
 
   bidi-js@1.0.3:
     dependencies:
@@ -15244,17 +15219,11 @@ snapshots:
     dependencies:
       lib0: 0.2.117
 
-  zod-to-json-schema@3.25.2(zod@3.25.76(patch_hash=82d58282a08d684b253417bf277f6fef5ca2eed4e0dddce73a0c37ccf1fac79d)):
+  zod-to-json-schema@3.25.2(zod@4.6.6(patch_hash=0f6c388d940b44540cf653714b80c96e7e472af6045ea0528016bbd8f629e719)):
     dependencies:
-      zod: 3.25.76(patch_hash=82d58282a08d684b253417bf277f6fef5ca2eed4e0dddce73a0c37ccf1fac79d)
+      zod: 4.6.6(patch_hash=0f6c388d940b44540cf653714b80c96e7e472af6045ea0528016bbd8f629e719)
 
-  zod-to-json-schema@3.25.2(zod@4.6.6):
-    dependencies:
-      zod: 4.6.6
-
-  zod@3.25.76(patch_hash=82d58282a08d684b253417bf277f6fef5ca2eed4e0dddce73a0c37ccf1fac79d): {}
-
-  zod@4.6.6: {}
+  zod@4.6.6(patch_hash=0f6c388d940b44540cf653714b80c96e7e472af6045ea0528016bbd8f629e719): {}
 
   zustand@5.0.14(@types/react@19.2.17)(react@19.2.7)(use-sync-external-store@1.6.0(react@19.2.7)):
     optionalDependencies:

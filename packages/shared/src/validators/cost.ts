@@ -1,4 +1,4 @@
-import { z } from "zod";
+import { z } from "zod/v3";
 import { BILLING_TYPES } from "../constants.js";
 
 export const createCostEventSchema = z.object({

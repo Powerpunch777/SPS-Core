@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { z } from "zod";
+import { z } from "zod/v3";
 import { spsWorkspaceExecutionActionSchema, type SpsWorkspaceExecutionAction } from "../compat/paperclip/shared.js";
 import type { Db } from "../compat/paperclip/db.js";
 import { validate } from "../middleware/validate.js";

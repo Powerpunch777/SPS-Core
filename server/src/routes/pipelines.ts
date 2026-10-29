@@ -1,5 +1,5 @@
 import { Router, type Request } from "express";
-import { z } from "zod";
+import { z } from "zod/v3";
 import { and, asc, desc, eq, ilike, inArray, isNotNull, isNull, ne, or, sql } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import type { Db } from "@paperclipai/db";
