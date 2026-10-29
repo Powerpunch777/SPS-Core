@@ -40,6 +40,13 @@ mutation authority and compatibility requirements are specified in
 [Workspace execution control](SPS-WORKSPACE-EXECUTION-CONTROL.md). A returned stop
 request or a database cancellation status is not process/provider exit evidence.
 
+Node claim retries can opt into durable request/result receipts while legacy
+claim callers retain their current responses. Receipt replay never grants new
+execution authority or proves launch/exit. Restart recovery combines these
+receipts with Desktop's encrypted claim/launch journal. Entered or uncertain
+work is never automatically replayed. See
+[Node claim recovery](SPS-NODE-CLAIM-RECOVERY.md).
+
 ## Goal
 
 SPS Core is the durable, workflow-neutral runtime embedded by SPS Desktop. A

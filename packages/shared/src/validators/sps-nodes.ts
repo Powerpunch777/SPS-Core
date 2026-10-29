@@ -129,6 +129,11 @@ export const spsNodeSignedRequestSchema = z.object({
   signature: z.string().regex(/^[A-Za-z0-9+/]+={0,2}$/).min(64).max(2048),
 });
 
+export const SPS_NODE_CLAIM_REQUEST_ID_PATTERN = "^v1:([1-9][0-9]{12}):[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$";
+export const spsNodeClaimRequestSchema = spsNodeSignedRequestSchema.extend({
+  claimRequestId: z.string().max(80).regex(new RegExp(SPS_NODE_CLAIM_REQUEST_ID_PATTERN)).optional(),
+});
+
 export const spsNodeCommandEventSchema = z.object({
   sequence: z.number().int().positive(),
   stream: z.enum(["stdout", "stderr"]),

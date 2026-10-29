@@ -5,6 +5,7 @@ export {
   agentWakeupRequests,
   pluginJobRuns,
   spsWorkspaceExecutionControl,
+  spsNodeClaimReceipts,
   companyMemberships,
   companySecretBindings,
   companySecretProviderConfigs,

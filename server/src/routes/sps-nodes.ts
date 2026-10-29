@@ -58,7 +58,7 @@ export function spsNodeRoutes(db: Db) {
     return {
       userId: actorUserId(req) ?? "",
       authorizeWorkspace(companyId) { assertBoard(req); assertCompanyAccess(req, companyId); },
-      authorizeNode(node) { return assertSpsNodeOwner(req, node); },
+      authorizeNode(node, transactionDb) { return assertSpsNodeOwner(req, node, transactionDb as Db | undefined); },
       async logMutation(input) { await logNodeMutation(req, input); },
       signatureMethod: req.method,
       signaturePath: req.path,
@@ -152,7 +152,7 @@ export function spsNodeRoutes(db: Db) {
     return project;
   }
 
-  async function assertSpsNodeOwner(req: Request, node: typeof spsNodes.$inferSelect) {
+  async function assertSpsNodeOwner(req: Request, node: typeof spsNodes.$inferSelect, transactionDb?: Db) {
     assertBoard(req);
     if (req.actor.source !== "local_implicit" && req.actor.userId !== node.ownerUserId) {
       throw forbidden("Only the computer owner may use this SPS Node");
@@ -162,7 +162,7 @@ export function spsNodeRoutes(db: Db) {
     // to re-enroll its Node. Emit a narrow machine-readable signal after
     // confirming the caller owns this exact Node.
     if (req.actor.source !== "local_implicit" && req.actor.userId) {
-      const membership = await access.getMembership(node.companyId, "user", req.actor.userId);
+      const membership = await (transactionDb ? accessService(transactionDb) : access).getMembership(node.companyId, "user", req.actor.userId);
       if (membership?.status === "archived") {
         throw forbidden("This SPS technical Member has been removed", {
           code: "sps_technical_member_removed",
@@ -1322,6 +1322,11 @@ export function spsNodeRoutes(db: Db) {
 
   router.post("/sps-nodes/:nodeId/commands/claim-next", async (req, res) => {
     const result = await nodeOperations.invoke({ operation: "claim-command", nodeId: req.params.nodeId as string,
+      resourceId: null, payload: req.body }, operationContext(req));
+    sendOperationResult(res, result);
+  });
+  router.post("/sps-nodes/:nodeId/claim-protocol", async (req, res) => {
+    const result = await nodeOperations.invoke({ operation: "claim-protocol", nodeId: req.params.nodeId as string,
       resourceId: null, payload: req.body }, operationContext(req));
     sendOperationResult(res, result);
   });

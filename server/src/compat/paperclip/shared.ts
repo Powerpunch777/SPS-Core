@@ -23,6 +23,8 @@ export {
   spsNodeHeartbeatSchema,
   spsNodeSignedRequestMessage,
   spsNodeSignedRequestSchema,
+  spsNodeClaimRequestSchema,
+  SPS_NODE_CLAIM_REQUEST_ID_PATTERN,
   spsNodeSupportsAdapter,
   updateSpsWorkspaceSourceSchema,
   upsertSpsHostProjectShareSchema,

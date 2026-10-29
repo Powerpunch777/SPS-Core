@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { z } from "zod";
 import {
+  spsNodeClaimRequestSchema,
   // Agent
   createAgentSchema,
   createAgentHireSchema,
@@ -5791,6 +5792,7 @@ for (const route of [
   ["delete", "/api/projects/{projectId}/sps-host-share/nodes/{nodeId}", "Revoke an SPS Node project host share grant"],
   ["post", "/api/sps-nodes/{nodeId}/workspace-sources/{sourceId}/claim-route", "Claim an SPS workspace source route"],
   ["post", "/api/sps-nodes/{nodeId}/commands/claim-next", "Claim the next SPS Node command"],
+  ["post", "/api/sps-nodes/{nodeId}/claim-protocol", "Read signed Node claim recovery protocol support without claiming work"],
   ["post", "/api/sps-nodes/{nodeId}/commands/{commandId}/lease", "Renew an SPS Node command lease"],
   ["post", "/api/sps-nodes/{nodeId}/commands/{commandId}/events", "Append SPS Node command events"],
   ["post", "/api/sps-nodes/{nodeId}/commands/{commandId}/complete", "Complete an SPS Node command"],
@@ -5799,7 +5801,16 @@ for (const route of [
   ["post", "/api/sps-nodes/{nodeId}/plugin-runs/{runId}/events", "Append SPS Node plugin-run events"],
   ["post", "/api/sps-nodes/{nodeId}/plugin-runs/{runId}/complete", "Complete an SPS Node plugin run"],
 ] as const) {
-  registerCurrentRoute({ method: route[0], path: route[1], tags: ["sps-nodes"], summary: route[2] });
+  const resumableClaim = route[1].endsWith("/claim-next");
+  registerCurrentRoute({ method: route[0], path: route[1], tags: ["sps-nodes"], summary: route[2],
+    ...(resumableClaim ? {
+      body: spsNodeClaimRequestSchema,
+      description: "Without claimRequestId, preserves the legacy task/204 contract. A signed v1:<created-ms>:<uuid-v4> id opts into a durable 24-hour receipt: HTTP 200 {schemaVersion:1,claimRequestId,kind,work}, including work:null for an empty claim. Retry with the same id and a fresh signature nonce. A receipt does not authorize replay of entered work or bypass current execution grants.",
+      responses: { 200: r.ok(), 204: { description: "Legacy claim only: no queued work" },
+        400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound,
+        409: { description: "Claim expired, input conflicted, Workspace stopped or claimed work is no longer recoverable" } },
+    } : {}),
+  });
 }
 
 for (const route of [

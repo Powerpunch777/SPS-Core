@@ -16,6 +16,7 @@ import {
   spsAgentNodeBindings,
   spsHostProjectShareNodeGrants,
   spsHostProjectShares,
+  spsNodeClaimReceipts,
   spsNodeCommandEvents,
   spsNodeCommands,
   spsNodeAgentGrants,
@@ -48,6 +49,7 @@ import type { PluginSpsExecutionCursor, PluginSpsExecutionPage } from "../compat
 import { plugins } from "@paperclipai/db";
 import { spsExecutionRoutes } from "../routes/sps-executions.js";
 import { createSpsNodeCompletionReceiptDigest } from "../services/sps-node-completion-receipt.js";
+import { spsNodeRoutes } from "../routes/sps-nodes.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -75,7 +77,6 @@ function boardActor(
 }
 
 async function createApp(db: Db, actor: ReturnType<typeof boardActor>) {
-  const { spsNodeRoutes } = await import("../routes/sps-nodes.js");
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => {
@@ -123,6 +124,35 @@ async function createCompanyFixture(db: Db) {
     .returning()
     .then((rows) => rows[0]!);
   return { company, ownerUserId, operatorUserId, agent };
+}
+
+async function createClaimableAgentNode(db: Db, fixture: Awaited<ReturnType<typeof createCompanyFixture>>) {
+  const app = await createApp(db, boardActor(fixture.company.id, fixture.ownerUserId, "owner"));
+  const node = createNodePayload();
+  const registered = await request(app).post(`/api/companies/${fixture.company.id}/sps-nodes`).send(node.payload).expect(201);
+  const nodeId = registered.body.id as string;
+  await request(app).post(`/api/sps-nodes/${nodeId}/heartbeat`).send(createSignedHeartbeat(nodeId, node.privateKey)).expect(200);
+  await request(app).post(`/api/sps-nodes/${nodeId}/approve`).send({}).expect(200);
+  await request(app).put(`/api/sps-nodes/${nodeId}/agent-grants/${fixture.agent.id}`).send({}).expect(200);
+  await request(app).put(`/api/agents/${fixture.agent.id}/sps-node-binding`).send({ nodeId }).expect(200);
+  return { app, node, nodeId, claimPath: `/sps-nodes/${nodeId}/commands/claim-next` };
+}
+
+async function createClaimablePluginNode(db: Db, fixture: Awaited<ReturnType<typeof createCompanyFixture>>) {
+  const app = await createApp(db, boardActor(fixture.company.id, fixture.ownerUserId, "owner"));
+  const node = createNodePayload();
+  const registered = await request(app).post(`/api/companies/${fixture.company.id}/sps-nodes`).send(node.payload).expect(201);
+  const nodeId = registered.body.id as string;
+  await request(app).post(`/api/sps-nodes/${nodeId}/heartbeat`).send(createSignedHeartbeat(nodeId, node.privateKey)).expect(200);
+  await request(app).post(`/api/sps-nodes/${nodeId}/approve`).send({}).expect(200);
+  const runner = await db.select().from(spsNodeRunnerProfiles).where(eq(spsNodeRunnerProfiles.nodeId, nodeId))
+    .then(rows => rows.find(row => row.kind === "codex_cli") ?? null);
+  expect(runner).not.toBeNull();
+  const grant = await db.insert(spsPluginExecutionGrants).values({
+    companyId: fixture.company.id, pluginKey: "sps.example-workplane", subjectKey: "worker:claim-receipt",
+    nodeId, runnerProfileId: runner!.id,
+  }).returning().then(rows => rows[0]!);
+  return { app, node, nodeId, runner: runner!, grant, claimPath: `/sps-nodes/${nodeId}/plugin-runs/claim-next` };
 }
 
 function createNodePayload() {
@@ -206,6 +236,7 @@ describeEmbeddedPostgres("SPS Node routes", () => {
     await db.delete(spsPluginNodeRunEvents);
     await db.delete(spsPluginNodeRuns);
     await db.delete(spsPluginExecutionGrants);
+    await db.delete(spsNodeClaimReceipts);
     await db.delete(spsNodeCommandEvents);
     await db.delete(spsNodeCommands);
     await db.delete(spsNodeAgentRunnerGrants);
@@ -2038,5 +2069,120 @@ describeEmbeddedPostgres("SPS Node routes", () => {
       .then((rows) => rows[0]!);
     expect(failed.status).toBe("failed");
     expect(failed.error).toContain("no longer has access");
+  });
+
+  it("replays an Agent claim receipt across fresh signatures, concurrent requests, and app recreation", async () => {
+    const fixture = await createCompanyFixture(db);
+    const { app, node, nodeId, claimPath } = await createClaimableAgentNode(db, fixture);
+    const protocolPath = `/sps-nodes/${nodeId}/claim-protocol`;
+    const protocol = await request(app).post(`/api${protocolPath}`)
+      .send(createSignedNodeRequest(nodeId, node.privateKey, protocolPath, {})).expect(200);
+    expect(protocol.body).toEqual({ schemaVersion: 1, requestIdVersion: "v1", maxRecoveryAgeMs: 86_400_000 });
+    expect(await db.select().from(spsNodeClaimReceipts)).toHaveLength(0);
+    const firstQueued = await db.insert(spsNodeCommands).values({
+      companyId: fixture.company.id, nodeId, agentId: fixture.agent.id, command: "codex", args: ["exec", "first"], env: {},
+    }).returning().then(rows => rows[0]!);
+    const claimRequestId = `v1:${Date.now()}:${randomUUID()}`;
+    const claim = (targetApp: Awaited<ReturnType<typeof createApp>> = app) => request(targetApp)
+      .post(`/api${claimPath}`).send(createSignedNodeRequest(nodeId, node.privateKey, claimPath, { claimRequestId }));
+
+    const first = await claim().expect(200);
+    expect(first.body).toMatchObject({ schemaVersion: 1, claimRequestId, kind: "agent-command", work: { id: firstQueued.id } });
+    const secondQueued = await db.insert(spsNodeCommands).values({
+      companyId: fixture.company.id, nodeId, agentId: fixture.agent.id, command: "codex", args: ["exec", "second"], env: {},
+    }).returning().then(rows => rows[0]!);
+    // More simultaneous requests than the default SQL pool size must not hold
+    // the admission connection while waiting for a second pooled connection.
+    const concurrent = await Promise.all(Array.from({ length: 12 }, () => claim()));
+    for (const response of concurrent) {
+      expect(response.status).toBe(200);
+      expect(response.body).toEqual(first.body);
+    }
+    const restartedApp = await createApp(db, boardActor(fixture.company.id, fixture.ownerUserId, "owner"));
+    const restarted = await claim(restartedApp).expect(200);
+    expect(restarted.body).toEqual(first.body);
+    expect((await db.select().from(spsNodeCommands).where(eq(spsNodeCommands.id, secondQueued.id)))[0]?.status).toBe("queued");
+    expect(await db.select().from(spsNodeClaimReceipts)).toHaveLength(1);
+    // A replay must not silently adopt a new task payload under the same ID.
+    await db.update(spsNodeCommands).set({ args: ["exec", "changed-after-claim"] }).where(eq(spsNodeCommands.id, firstQueued.id));
+    await claim(restartedApp).expect(409);
+    expect((await db.select().from(spsNodeCommands).where(eq(spsNodeCommands.id, secondQueued.id)))[0]?.status).toBe("queued");
+  });
+
+  it("keeps an empty Agent claim receipt after work is enqueued and rejects cross-lane reuse", async () => {
+    const fixture = await createCompanyFixture(db);
+    const { app, node, nodeId, claimPath } = await createClaimableAgentNode(db, fixture);
+    const claimRequestId = `v1:${Date.now()}:${randomUUID()}`;
+    const claim = (targetApp: Awaited<ReturnType<typeof createApp>> = app) => request(targetApp)
+      .post(`/api${claimPath}`).send(createSignedNodeRequest(nodeId, node.privateKey, claimPath, { claimRequestId }));
+    const empty = await claim().expect(200);
+    expect(empty.body).toEqual({ schemaVersion: 1, claimRequestId, kind: "agent-command", work: null });
+
+    const queued = await db.insert(spsNodeCommands).values({
+      companyId: fixture.company.id, nodeId, agentId: fixture.agent.id, command: "codex", args: ["exec"], env: {},
+    }).returning().then(rows => rows[0]!);
+    const restartedApp = await createApp(db, boardActor(fixture.company.id, fixture.ownerUserId, "owner"));
+    const replayedEmpty = await claim(restartedApp).expect(200);
+    expect(replayedEmpty.body).toEqual(empty.body);
+
+    const pluginPath = `/sps-nodes/${nodeId}/plugin-runs/claim-next`;
+    await request(restartedApp).post(`/api${pluginPath}`)
+      .send(createSignedNodeRequest(nodeId, node.privateKey, pluginPath, { claimRequestId })).expect(409);
+    const newRequestId = `v1:${Date.now()}:${randomUUID()}`;
+    const newClaim = await request(restartedApp).post(`/api${claimPath}`)
+      .send(createSignedNodeRequest(nodeId, node.privateKey, claimPath, { claimRequestId: newRequestId })).expect(200);
+    expect(newClaim.body).toMatchObject({ schemaVersion: 1, claimRequestId: newRequestId, kind: "agent-command", work: { id: queued.id } });
+    expect(await db.select().from(spsNodeClaimReceipts)).toHaveLength(2);
+    const control = spsWorkspaceExecutionControlService(db);
+    const stopped = await control.transition(fixture.company.id, "stop", fixture.ownerUserId, 0);
+    await claim(restartedApp).expect(409);
+    await control.transition(fixture.company.id, "resume", fixture.ownerUserId, stopped.revision);
+    await claim(restartedApp).expect(409);
+  });
+
+  it("does not replay claimed work after the Agent grant is revoked", async () => {
+    const fixture = await createCompanyFixture(db);
+    const { app, node, nodeId, claimPath } = await createClaimableAgentNode(db, fixture);
+    const firstQueued = await db.insert(spsNodeCommands).values({
+      companyId: fixture.company.id, nodeId, agentId: fixture.agent.id, command: "codex", args: ["exec", "first"], env: {},
+    }).returning().then(rows => rows[0]!);
+    const claimRequestId = `v1:${Date.now()}:${randomUUID()}`;
+    const first = await request(app).post(`/api${claimPath}`)
+      .send(createSignedNodeRequest(nodeId, node.privateKey, claimPath, { claimRequestId })).expect(200);
+    expect(first.body.work.id).toBe(firstQueued.id);
+    const secondQueued = await db.insert(spsNodeCommands).values({
+      companyId: fixture.company.id, nodeId, agentId: fixture.agent.id, command: "codex", args: ["exec", "second"], env: {},
+    }).returning().then(rows => rows[0]!);
+
+    await request(app).delete(`/api/sps-nodes/${nodeId}/agent-grants/${fixture.agent.id}`).send({});
+    const replay = await request(app).post(`/api${claimPath}`)
+      .send(createSignedNodeRequest(nodeId, node.privateKey, claimPath, { claimRequestId }));
+    expect([403, 409]).toContain(replay.status);
+    expect((await db.select().from(spsNodeCommands).where(eq(spsNodeCommands.id, secondQueued.id)))[0]?.status).not.toBe("claimed");
+  });
+
+  it("replays a Plugin claim receipt and rejects an expired claim ID", async () => {
+    const fixture = await createCompanyFixture(db);
+    const { app, node, nodeId, runner, grant, claimPath } = await createClaimablePluginNode(db, fixture);
+    const firstQueued = await db.insert(spsPluginNodeRuns).values({
+      companyId: fixture.company.id, pluginKey: grant.pluginKey, subjectKey: grant.subjectKey, executionGrantId: grant.id,
+      nodeId, runnerProfileId: runner.id, command: "codex", args: ["exec", "first"], env: {},
+    }).returning().then(rows => rows[0]!);
+    const claimRequestId = `v1:${Date.now()}:${randomUUID()}`;
+    const claim = (id: string) => request(app).post(`/api${claimPath}`)
+      .send(createSignedNodeRequest(nodeId, node.privateKey, claimPath, { claimRequestId: id }));
+    const first = await claim(claimRequestId).expect(200);
+    expect(first.body).toMatchObject({ schemaVersion: 1, claimRequestId, kind: "plugin-run", work: { id: firstQueued.id } });
+
+    const secondQueued = await db.insert(spsPluginNodeRuns).values({
+      companyId: fixture.company.id, pluginKey: grant.pluginKey, subjectKey: grant.subjectKey, executionGrantId: grant.id,
+      nodeId, runnerProfileId: runner.id, command: "codex", args: ["exec", "second"], env: {},
+    }).returning().then(rows => rows[0]!);
+    const replay = await claim(claimRequestId).expect(200);
+    expect(replay.body).toEqual(first.body);
+    const expiredId = `v1:${Date.now() - 25 * 60 * 60 * 1000}:${randomUUID()}`;
+    await claim(expiredId).expect(409);
+    expect((await db.select().from(spsPluginNodeRuns).where(eq(spsPluginNodeRuns.id, secondQueued.id)))[0]?.status).toBe("queued");
+    expect(await db.select().from(spsNodeClaimReceipts)).toHaveLength(1);
   });
 });

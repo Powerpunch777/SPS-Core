@@ -1219,6 +1219,13 @@
       "when": 1793235040778,
       "tag": "0175_sps_node_completion_reports",
       "breakpoints": true
+    },
+    {
+      "idx": 176,
+      "version": "7",
+      "when": 1793244560054,
+      "tag": "0176_sps_node_claim_receipts",
+      "breakpoints": true
     }
   ]
 }
