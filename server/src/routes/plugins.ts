@@ -895,6 +895,7 @@ export function pluginRoutes(
     actionFence?: { actor: PluginUiActionActor; requestedPermissions: ReturnType<typeof pluginUiActionAuthority.requestedPermissions>; actorContext: unknown },
   ) {
     if (!plugin.manifestJson.entrypoints.workspaceWorker) {
+      await loader.waitForInitialLoad?.(plugin.id);
       return bridgeDeps!.workerManager.call(plugin.id, method, params as never);
     }
     const workspaceWorkers = bridgeDeps?.workspaceWorkers;
@@ -2530,6 +2531,7 @@ export function pluginRoutes(
       }
     };
 
+    const AUTHORITY_CHECK_TIMEOUT_MS = 5_000;
     let initialCheckTimer: ReturnType<typeof setTimeout> | undefined;
     try {
       await Promise.race([
@@ -2541,6 +2543,44 @@ export function pluginRoutes(
     } finally {
       if (initialCheckTimer) clearTimeout(initialCheckTimer);
     }
+
+    // A Host worker can still be in detached process startup after HTTP begins
+    // listening. Join only this plugin's initial activation before committing
+    // to the stream response; Workspace workers use their own lifecycle path.
+    if (!plugin.manifestJson.entrypoints.workspaceWorker) {
+      await loader.waitForInitialLoad?.(plugin.id);
+    }
+    if (res.destroyed || res.writableEnded || req.aborted) return;
+
+    // Startup can take long enough for access or the Workspace execution
+    // epoch to change. Recheck the captured authority before committing to SSE.
+    if (!plugin.manifestJson.entrypoints.workspaceWorker) {
+      const currentPlugin = await resolvePlugin(registry, plugin.id);
+      const hostWorkerRunning = typeof bridgeDeps.workerManager.isRunning === "function"
+        ? bridgeDeps.workerManager.isRunning(plugin.id)
+        : true;
+      if (!currentPlugin || currentPlugin.status !== "ready" || !hostWorkerRunning) {
+        res.status(503).json({ error: "Plugin worker is unavailable" });
+        return;
+      }
+      let startupAuthorityTimer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          assertCurrentStreamAuthority(),
+          new Promise<never>((_resolve, reject) => {
+            startupAuthorityTimer = setTimeout(() => reject(new Error("stream authority check timed out")), AUTHORITY_CHECK_TIMEOUT_MS);
+          }),
+        ]);
+      } catch {
+        if (!res.destroyed && !res.writableEnded && !req.aborted) {
+          res.status(403).json({ error: "Current plugin stream authority is unavailable" });
+        }
+        return;
+      } finally {
+        if (startupAuthorityTimer) clearTimeout(startupAuthorityTimer);
+      }
+    }
+    if (res.destroyed || res.writableEnded || req.aborted) return;
 
     // Set SSE headers
     res.writeHead(200, {
@@ -2564,7 +2604,6 @@ export function pluginRoutes(
     let authorityValidation: Promise<void> | undefined;
     let unsubscribe = () => {};
     const streamSocket = res.socket ?? req.socket;
-    const AUTHORITY_CHECK_TIMEOUT_MS = 5_000;
     const DRAIN_TIMEOUT_MS = 5_000;
 
     const cleanup = () => {

@@ -92,6 +92,7 @@ export const spsPluginNodeRuns = pgTable(
     timedOut: integer("timed_out").notNull().default(0),
     error: text("error"),
     usageJson: jsonb("usage_json").$type<Record<string, unknown>>(),
+    completionReceiptDigest: text("completion_receipt_digest"),
     lastEventSeq: integer("last_event_seq").notNull().default(0),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

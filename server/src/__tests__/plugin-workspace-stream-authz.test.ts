@@ -128,7 +128,8 @@ async function waitFor(predicate: () => boolean) {
 }
 
 async function createApp(bus: ReturnType<typeof makeBus>, resolveSession: (req: express.Request) => Promise<{ user: { id: string } | null } | null>,
-  actorOverrides: Record<string, unknown> = {}, beforeRoute?: (response: express.Response) => void) {
+  actorOverrides: Record<string, unknown> = {}, beforeRoute?: (response: express.Response) => void,
+  loader: Record<string, unknown> = {}) {
   const app = express();
   app.use((req, res, next) => {
     beforeRoute?.(res);
@@ -139,8 +140,8 @@ async function createApp(bus: ReturnType<typeof makeBus>, resolveSession: (req: 
     };
     next();
   });
-  app.use("/api", pluginRoutes({} as never, {} as never, undefined, undefined, undefined, {
-    workerManager: {} as never,
+  app.use("/api", pluginRoutes({} as never, loader as never, undefined, undefined, undefined, {
+    workerManager: { isRunning: () => true } as never,
     streamBus: bus as never,
     resolveSession: resolveSession as never,
   }));
@@ -187,6 +188,49 @@ describe("Workspace plugin stream authorization", () => {
     expect(fixture.access.getMembership).toHaveBeenCalledWith(workspaceId, "user", userId);
     expect(bus.unsubscribe).toHaveBeenCalledOnce();
     await stream.close();
+  });
+
+  it("waits for a Host worker's initial activation before opening its stream", async () => {
+    fixture.plugin.manifestJson.entrypoints.workspaceWorker = undefined;
+    let releaseStartup!: () => void;
+    const startup = new Promise<void>(resolve => { releaseStartup = resolve; });
+    const waitForInitialLoad = vi.fn(() => startup);
+    const bus = makeBus(() => undefined);
+    const app = await createApp(bus, async () => ({ user: { id: userId } }), {}, undefined, { waitForInitialLoad });
+
+    const opening = openStream(app, bus);
+    await vi.waitFor(() => expect(waitForInitialLoad).toHaveBeenCalledWith(pluginId));
+    expect(bus.subscribe).not.toHaveBeenCalled();
+    releaseStartup();
+
+    const stream = await opening;
+    expect(stream.statusCode).toBe(200);
+    expect(bus.subscribe).toHaveBeenCalledOnce();
+    await stream.close();
+  });
+
+  it("rechecks captured Host stream authority after waiting for startup", async () => {
+    fixture.plugin.manifestJson.entrypoints.workspaceWorker = undefined;
+    let releaseStartup!: () => void;
+    const startup = new Promise<void>(resolve => { releaseStartup = resolve; });
+    const waitForInitialLoad = vi.fn(() => startup);
+    const bus = makeBus(() => undefined);
+    const app = await createApp(bus, async () => ({ user: { id: userId } }), {}, undefined, { waitForInitialLoad });
+
+    const opening = openStream(app, bus);
+    const earlyResponse = await Promise.race([
+      opening.then(response => response.statusCode),
+      new Promise<"pending">(resolve => setTimeout(() => resolve("pending"), 100)),
+    ]);
+    expect(earlyResponse).toBe("pending");
+    await waitFor(() => waitForInitialLoad.mock.calls.some(([id]) => id === pluginId));
+    fixture.policy = { ...fixture.policy, workspaceRevision: "workspace-after-startup" };
+    releaseStartup();
+
+    const response = await opening;
+    expect(response.statusCode).toBe(403);
+    expect(bus.subscribe).not.toHaveBeenCalled();
+    await response.close();
   });
 
   it("closes when the session resolver no longer returns the connected user", async () => {

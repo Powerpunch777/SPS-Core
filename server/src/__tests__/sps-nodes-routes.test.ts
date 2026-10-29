@@ -47,6 +47,7 @@ import { createSpsExecutionUsageReceipt } from "../services/sps-execution-usage-
 import type { PluginSpsExecutionCursor, PluginSpsExecutionPage } from "../compat/paperclip/plugin-sdk.js";
 import { plugins } from "@paperclipai/db";
 import { spsExecutionRoutes } from "../routes/sps-executions.js";
+import { createSpsNodeCompletionReceiptDigest } from "../services/sps-node-completion-receipt.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -941,6 +942,40 @@ describeEmbeddedPostgres("SPS Node routes", () => {
       }));
     expect(complete.status, JSON.stringify(complete.body)).toBe(200);
     expect(complete.body.status).toBe("succeeded");
+    const successfulReport = { status: "succeeded" as const, exitCode: 0, signal: null, timedOut: false, error: null };
+    expect(complete.body.completionReceiptDigest).toBe(createSpsNodeCompletionReceiptDigest({
+      kind: "agent-command", nodeId: registered.body.id, commandId: queued.id, completion: successfulReport,
+    }));
+
+    // Discard the first response, reconstruct the service over the same real
+    // database and retry with a fresh signed nonce, as a restarted Node does.
+    const restartedApp = await createApp(db, boardActor(fixture.company.id, fixture.ownerUserId, "owner"));
+    const retried = await request(restartedApp).post(`/api${completePath}`)
+      .send(createSignedNodeRequest(registered.body.id, node.privateKey, completePath, successfulReport))
+      .expect(200);
+    expect(retried.body).toEqual(complete.body);
+
+    const cancelling = await db.insert(spsNodeCommands).values({
+      companyId: fixture.company.id, nodeId: registered.body.id, agentId: fixture.agent.id,
+      command: "codex", args: ["exec"], env: {}, status: "cancelling", claimedAt: new Date(),
+      error: "User requested cancellation.",
+    }).returning().then(rows => rows[0]!);
+    expect(cancelling.completionReceiptDigest).toBeNull();
+    const stoppedReport = { status: "failed" as const, exitCode: 143, signal: "SIGTERM", timedOut: false, error: "local stop completed" };
+    const stoppedPath = `/sps-nodes/${registered.body.id}/commands/${cancelling.id}/complete`;
+    const stopped = await request(app).post(`/api${stoppedPath}`)
+      .send(createSignedNodeRequest(registered.body.id, node.privateKey, stoppedPath, stoppedReport))
+      .expect(200);
+    expect(stopped.body).toMatchObject({ status: "cancelled", error: "User requested cancellation.", exitCode: 143 });
+    expect(stopped.body.completionReceiptDigest).toBe(createSpsNodeCompletionReceiptDigest({
+      kind: "agent-command", nodeId: registered.body.id, commandId: cancelling.id, completion: stoppedReport,
+    }));
+    const stored = await db.select().from(spsNodeCommands).where(eq(spsNodeCommands.id, cancelling.id)).then(rows => rows[0]!);
+    expect(stored.completionReceiptDigest).toBe(stopped.body.completionReceiptDigest);
+    const stoppedRetry = await request(restartedApp).post(`/api${stoppedPath}`)
+      .send(createSignedNodeRequest(registered.body.id, node.privateKey, stoppedPath, stoppedReport)).expect(200);
+    expect(stoppedRetry.body).toEqual(stopped.body);
+    expect((await db.select().from(spsNodeCommands).where(eq(spsNodeCommands.id, cancelling.id)))[0]!.updatedAt).toEqual(stored.updatedAt);
   });
 
   it("rechecks legacy Host Project Share routes per command and preserves sibling commands", async () => {

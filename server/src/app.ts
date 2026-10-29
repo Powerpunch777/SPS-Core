@@ -693,8 +693,12 @@ export async function createApp(
     }, { installMissing: false });
   };
   let pluginRuntimeStopping = false;
-  const pluginStartup = runPluginStartupUnlessRecovering(pluginRecoveryState, () =>
-    ensureBundledKubernetesPlugin()
+  const pluginStartup = runPluginStartupUnlessRecovering(pluginRecoveryState, () => {
+    // HTTP may begin serving before these bundled-plugin checks finish. Arm
+    // the per-plugin barrier synchronously so bridge calls arriving in that
+    // window can join their plugin's activation instead of racing a missing worker.
+    const releaseInitialLoad = loader.prepareInitialLoad?.();
+    return ensureBundledKubernetesPlugin()
       .then(() => ensureConfiguredBundledPlugins())
       .then(() => refreshConfiguredBundledPlugins())
       .then(() => loader.loadAll())
@@ -705,8 +709,9 @@ export async function createApp(
             devWatcher.watch(loaded.plugin.id, loaded.plugin.packagePath);
           }
         }
-      }),
-  );
+      })
+      .finally(() => releaseInitialLoad?.());
+  });
   void pluginStartup?.catch((err) => {
     logger.error({ err }, "Failed to load ready plugins on startup");
   });

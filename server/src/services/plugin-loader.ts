@@ -43,6 +43,7 @@ import { logger } from "../middleware/logger.js";
 import { pluginManifestValidator } from "./plugin-manifest-validator.js";
 import { pluginCapabilityValidator } from "./plugin-capability-validator.js";
 import { pluginRegistryService } from "./plugin-registry.js";
+import { createPluginInitialLoadReadiness } from "./plugin-initial-load-readiness.js";
 import type { PluginWorkerManager, WorkerStartOptions, WorkerToHostHandlers } from "./plugin-worker-manager.js";
 import type { SpsWorkspacePluginWorkers } from "./sps-workspace-plugin-workers.js";
 import type { PluginEventBus } from "./plugin-event-bus.js";
@@ -775,6 +776,20 @@ export interface PluginLoader {
   loadAll(): Promise<PluginLoadAllResult>;
 
   /**
+   * Arm the initial-load barrier while startup preparation runs before loadAll.
+   * The returned release function unblocks waiters if preparation aborts.
+   * @internal
+   */
+  prepareInitialLoad?(): () => void;
+
+  /**
+   * Wait for this plugin's initial startup activation, if loadAll has begun.
+   * Does not wait for unrelated plugins and is a no-op before initial loading.
+   * @internal
+   */
+  waitForInitialLoad?(pluginId: string): Promise<void>;
+
+  /**
    * Activate a single plugin that is in `installed` or `ready` status.
    *
    * Used after a fresh install (POST /api/plugins/install) or after
@@ -1333,6 +1348,7 @@ export function pluginLoader(
   const manifestValidator = pluginManifestValidator();
   const capabilityValidator = pluginCapabilityValidator();
   const log = logger.child({ service: "plugin-loader" });
+  const initialLoadReadiness = createPluginInitialLoadReadiness();
   const hostVersion = runtimeServices?.instanceInfo.hostVersion;
 
   async function assertPageRoutePathsAvailable(manifest: PaperclipPluginManifestV1): Promise<void> {
@@ -2029,7 +2045,7 @@ export function pluginLoader(
         const stagingRoot = ownsStagingRoot
           ? path.join(localPluginDir, ".install-staging", randomUUID())
           : null;
-        let committed = false;
+        let commitMayHaveBeenAttempted = false;
         try {
           if (stagingRoot) await mkdir(stagingRoot, { recursive: true });
           const discovered = await fetchAndValidate(stagingRoot
@@ -2064,8 +2080,11 @@ export function pluginLoader(
                 { persistFailure: false },
               );
             }
+            // The driver sends COMMIT only after this callback resolves. A
+            // later rejection can mean the commit response was lost, so it
+            // cannot prove that the registry did not adopt this package.
+            commitMayHaveBeenAttempted = true;
           });
-          committed = true;
 
           log.info(
             {
@@ -2079,9 +2098,10 @@ export function pluginLoader(
 
           return discovered;
         } catch (error) {
-          // A successful transaction owns the staging tree now, even if later
-          // logging or a catalog-fence finalizer throws.
-          if (stagingRoot && !committed) {
+          // Clean only failures before COMMIT can have been attempted. Keep an
+          // uncertain artifact available for recovery rather than deleting a
+          // package that the registry may already reference.
+          if (stagingRoot && !commitMayHaveBeenAttempted) {
             await rm(stagingRoot, { recursive: true, force: true });
           }
           throw error;
@@ -2135,20 +2155,16 @@ export function pluginLoader(
         );
       }
 
-      let committed = false;
-      try {
-        await registry.update(pluginId, {
-          packageName: prepared.discovered.packageName,
-          packagePath: prepared.discovered.packagePath,
-          version: prepared.discovered.version,
-          manifest: prepared.newManifest,
-        });
-        committed = true;
-        return prepared;
-      } catch (error) {
-        if (!committed) await removeOwnedStagedArtifact(prepared.discovered.packagePath, prepared.discovered.packageName, localPluginDir);
-        throw error;
-      }
+      // This write is autocommitted. A rejected response does not establish
+      // that it rolled back; preserve the candidate in either outcome so a
+      // committed registry pointer never references an artifact we removed.
+      await registry.update(pluginId, {
+        packageName: prepared.discovered.packageName,
+        packagePath: prepared.discovered.packagePath,
+        version: prepared.discovered.version,
+        manifest: prepared.newManifest,
+      });
+      return prepared;
     },
 
     async prepareUpgrade(
@@ -2276,6 +2292,9 @@ export function pluginLoader(
     // loadAll
     // -----------------------------------------------------------------------
 
+    prepareInitialLoad: initialLoadReadiness.prepare,
+    waitForInitialLoad: initialLoadReadiness.wait,
+
     /**
      * loadAll — Loads and activates all plugins that are currently in 'ready' status.
      *
@@ -2294,10 +2313,28 @@ export function pluginLoader(
         );
       }
 
-      log.info("plugin-loader: loading all ready plugins");
+      const tracksInitialLoad = initialLoadReadiness.begin();
 
-      // Fetch all plugins in ready status, ordered by installOrder
-      const readyPlugins = (await registry.listByStatus("ready")) as PluginRecord[];
+      let readyPlugins: PluginRecord[];
+      let activationPromises: Promise<PluginLoadResult>[];
+      try {
+        log.info("plugin-loader: loading all ready plugins");
+
+        // Fetch all plugins in ready status, ordered by installOrder
+        readyPlugins = (await registry.listByStatus("ready")) as PluginRecord[];
+
+        // Publish each target promise before yielding, so a route that arrives
+        // during startup can join only its plugin's activation, not its siblings.
+        activationPromises = readyPlugins.map(plugin => {
+          const activation = activatePlugin(plugin);
+          if (tracksInitialLoad) initialLoadReadiness.register(plugin.id, activation);
+          return activation;
+        });
+      } catch (error) {
+        if (tracksInitialLoad) initialLoadReadiness.publish();
+        throw error;
+      }
+      if (tracksInitialLoad) initialLoadReadiness.publish();
 
       if (readyPlugins.length === 0) {
         log.info("plugin-loader: no ready plugins to load");
@@ -2311,7 +2348,7 @@ export function pluginLoader(
 
       // Load plugins in parallel
       const results = await Promise.allSettled(
-        readyPlugins.map((plugin) => activatePlugin(plugin))
+        activationPromises
       );
 
       const loadResults = results.map((r, i) => {

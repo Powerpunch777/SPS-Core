@@ -1103,6 +1103,29 @@ describe.sequential("plugin tool and bridge authz", () => {
     });
   });
 
+  it("joins only the target Host worker's initial startup before bridge calls", async () => {
+    readyPlugin();
+    mockAccess.canUser.mockResolvedValue(true);
+    mockAccess.getMembership.mockResolvedValue({ status: "active" });
+    let releaseStartup!: () => void;
+    const startup = new Promise<void>(resolve => { releaseStartup = resolve; });
+    const waitForInitialLoad = vi.fn(() => startup);
+    const call = vi.fn().mockResolvedValue({ ok: true });
+    const { app } = await createApp(boardActor(), { waitForInitialLoad }, {
+      bridgeDeps: { workerManager: { call } },
+    });
+
+    const response = request(app).post(`/api/plugins/${pluginId}/data/health`)
+      .send({ companyId: companyA, params: {} }).then(result => result);
+    await vi.waitFor(() => expect(waitForInitialLoad).toHaveBeenCalledWith(pluginId));
+    expect(call).not.toHaveBeenCalled();
+    releaseStartup();
+
+    const res = await response;
+    expect(res.status).toBe(200);
+    expect(call).toHaveBeenCalledOnce();
+  });
+
   it.each([
     ["legacy data", `/api/plugins/${pluginId}/bridge/data`, { key: "health", params: {} }, "getData"],
     ["legacy action", `/api/plugins/${pluginId}/bridge/action`, { key: "sync", params: {} }, "performAction"],
@@ -1117,7 +1140,9 @@ describe.sequential("plugin tool and bridge authz", () => {
       return { ok: true };
     });
     const hostCall = vi.fn();
-    const { app } = await createApp(boardActor(), {}, {
+    const waitForInitialLoad = vi.fn();
+    mockAccess.getMembership.mockResolvedValue({ status: "active" });
+    const { app } = await createApp(boardActor(), { waitForInitialLoad }, {
       bridgeDeps: { workerManager: { call: hostCall }, workspaceWorkers: { call } },
     });
     const res = await request(app).post(path).send({ ...body, companyId: companyA,
@@ -1128,6 +1153,7 @@ describe.sequential("plugin tool and bridge authz", () => {
       key: method === "getData" ? "health" : "sync",
     }), 30_000, expect.objectContaining({ boundWorkspaceId: companyA, assertCurrent: expect.any(Function) }));
     expect(hostCall).not.toHaveBeenCalled();
+    expect(waitForInitialLoad).not.toHaveBeenCalled();
     if (method === "performAction") {
       expect(call.mock.calls[0]?.[3]).toMatchObject({
         params: { companyId: companyA },

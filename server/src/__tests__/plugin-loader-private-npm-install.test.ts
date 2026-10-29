@@ -192,6 +192,42 @@ describe("pluginLoader private npm artifacts", () => {
     expect((installedRows[0]!.input as Record<string, unknown>).packagePath).toBe(installed[0]!.packageRoot);
   });
 
+  it("preserves the registry's package when the transaction response is lost after its callback", async () => {
+    const installed = createNpmRunner();
+    const loader = createLoader();
+    db.transaction.mockImplementationOnce(async (callback: (tx: unknown) => Promise<unknown>) => {
+      await callback({});
+      // A driver rejection after the callback can follow a committed write.
+      // The caller has no rollback evidence and must retain the exact files.
+      throw new Error("transaction commit response lost");
+    });
+
+    await expect(loader.installPlugin({ packageName: "@sps/private-npm-uncertain" }))
+      .rejects.toThrow("transaction commit response lost");
+
+    expect(installed).toHaveLength(1);
+    expect(installedRows).toHaveLength(1);
+    const referencedPath = (installedRows[0]!.input as Record<string, unknown>).packagePath as string;
+    expect(referencedPath).toBe(installed[0]!.packageRoot);
+    expect(await readFile(path.join(referencedPath, "artifact-marker.txt"), "utf8"))
+      .toBe("@sps/private-npm-uncertain@1.0.0");
+    expect(resolvePluginPackageRoot({ packagePath: referencedPath } as never, localPluginDir)).toBe(referencedPath);
+  });
+
+  it("still cleans a private install when the transaction callback rejects before COMMIT", async () => {
+    const installed = createNpmRunner();
+    const loader = createLoader();
+    registry.install.mockRejectedValueOnce(new Error("registry write rejected inside transaction"));
+
+    await expect(loader.installPlugin({ packageName: "@sps/private-npm-rejected" }))
+      .rejects.toThrow("registry write rejected inside transaction");
+
+    expect(installed).toHaveLength(1);
+    expect(await readdir(path.join(localPluginDir, ".install-staging"))).toEqual([]);
+    expect(await readFile(path.join(localPluginDir, "node_modules", "@sps", "private-npm-a", "active-marker.txt"), "utf8"))
+      .toBe("root-active-copy");
+  });
+
   it("cleans only the exact owned staging root and skips shared npm uninstall", async () => {
     const loader = createLoader();
     const stagingRoot = path.join(localPluginDir, ".install-staging", "ad3f981a-2e83-48af-bc63-782aee7c9bb8");
@@ -320,6 +356,24 @@ describe("pluginLoader private npm artifacts", () => {
       packagePath: upgraded.discovered.packagePath,
       version: "2.1.0",
     }));
+  });
+
+  it("preserves an autocommitted upgrade candidate when its write response is lost", async () => {
+    const installed = createNpmRunner();
+    const loader = createLoader();
+    let adoptedPath: string | undefined;
+    registry.update.mockImplementationOnce(async (_id: string, update: { packagePath: string }) => {
+      adoptedPath = update.packagePath;
+      throw new Error("upgrade commit response lost");
+    });
+
+    await expect(loader.upgradePlugin(pluginId, { version: "2.2.0" }))
+      .rejects.toThrow("upgrade commit response lost");
+
+    expect(installed).toHaveLength(1);
+    expect(adoptedPath).toBe(installed[0]!.packageRoot);
+    expect(await readFile(path.join(adoptedPath!, "artifact-marker.txt"), "utf8"))
+      .toBe("@sps/private-npm-upgrade@2.2.0");
   });
 
   it("removes its staged npm upgrade candidate when capability escalation is rejected", async () => {

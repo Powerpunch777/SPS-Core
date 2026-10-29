@@ -1205,6 +1205,13 @@
       "when": 1793161107505,
       "tag": "0173_sps_workspace_plugin_runtime_configs",
       "breakpoints": true
+    },
+    {
+      "idx": 174,
+      "version": "7",
+      "when": 1793232734963,
+      "tag": "0174_sps_node_completion_receipts",
+      "breakpoints": true
     }
   ]
 }

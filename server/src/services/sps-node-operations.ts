@@ -20,6 +20,7 @@ import {
 import { badRequest, forbidden, notFound } from "../errors.js";
 import { hasSpsSessionCancellation, } from "../services/sps-agent-session-runs.js";
 import { createSpsNodeUsageReceipt } from "../services/sps-node-usage.js";
+import { createSpsNodeCompletionReceiptDigest } from "../services/sps-node-completion-receipt.js";
 import { normalizeSpsPluginExecutionTimeout } from "../services/sps-execution-timeout.js";
 import { assertSpsWorkspaceExecutionActive, lockSpsWorkspaceExecutionControl, withSpsWorkspaceExecutionAdmission } from "../services/sps-workspace-execution-control.js";
 import { heartbeatService } from "../compat/paperclip/control-plane.js";
@@ -418,7 +419,10 @@ export function createSpsNodeOperations(dbInput: NodeDatabase, { effectDb = dbIn
         const parent = command.heartbeatRunId ? await tx.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, command.heartbeatRunId)).for("update").then(rows => rows[0]) : null;
         const updated = await tx.update(spsNodeCommands).set({ status: cancellationRequested ? "cancelled" : completion.status, exitCode: completion.exitCode,
           signal: completion.signal ?? null, timedOut: completion.timedOut ? 1 : 0, error: cancellationRequested ? command.error ?? "Workspace execution was stopped." : completion.error ?? null,
+          completionReceiptDigest: createSpsNodeCompletionReceiptDigest({ kind: "agent-command", nodeId: command.nodeId,
+            commandId: command.id, completion }),
           finishedAt: new Date(), updatedAt: new Date() }).where(and(eq(spsNodeCommands.id, command.id),
+          eq(spsNodeCommands.nodeId, node.id),
           inArray(spsNodeCommands.status, ["claimed", "running", "cancelling"]))).returning().then(rows => rows[0] ?? null);
         // Another signed completion request may have committed while this
         // request waited for the execution-control lock. Do not return the
@@ -565,11 +569,17 @@ export function createSpsNodeOperations(dbInput: NodeDatabase, { effectDb = dbIn
           status: cancellationRequested ? "cancelled" : completion.status,
           exitCode: completion.exitCode, signal: completion.signal ?? null, timedOut: completion.timedOut ? 1 : 0,
           error: cancellationRequested ? run.error ?? "Workspace execution was stopped." : completion.error ?? null,
-          usageJson, finishedAt: new Date(), updatedAt: new Date(),
-        }).where(and(eq(spsPluginNodeRuns.id, run.id), inArray(spsPluginNodeRuns.status, ["claimed", "running", "cancelling"])))
+          usageJson, completionReceiptDigest: createSpsNodeCompletionReceiptDigest({ kind: "plugin-run", nodeId: run.nodeId,
+            commandId: run.id, completion }), finishedAt: new Date(), updatedAt: new Date(),
+        }).where(and(eq(spsPluginNodeRuns.id, run.id), eq(spsPluginNodeRuns.nodeId, node.id),
+          inArray(spsPluginNodeRuns.status, ["claimed", "running", "cancelling"])))
           .returning().then(rows => rows[0] ?? null);
       });
-      return { status: 200, data: updated ?? await db.select().from(spsPluginNodeRuns).where(eq(spsPluginNodeRuns.id, run.id)).then(rows => rows[0]) };
+      const current = updated ?? await db.select().from(spsPluginNodeRuns)
+        .where(and(eq(spsPluginNodeRuns.id, run.id), eq(spsPluginNodeRuns.nodeId, node.id)))
+        .then(rows => rows[0] ?? null);
+      if (!current) throw notFound("SPS plugin run not found");
+      return { status: 200, data: current };
     }
     throw badRequest("Unknown SPS Node operation");
   }
