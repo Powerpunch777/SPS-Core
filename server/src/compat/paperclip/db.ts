@@ -6,6 +6,7 @@ export {
   pluginJobRuns,
   spsWorkspaceExecutionControl,
   spsNodeClaimReceipts,
+  spsPluginPackageOperations,
   companyMemberships,
   companySecretBindings,
   companySecretProviderConfigs,

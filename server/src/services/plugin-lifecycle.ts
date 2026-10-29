@@ -50,7 +50,7 @@ import {
 } from "./plugin-loader.js";
 import { pluginDatabaseService } from "./plugin-database.js";
 import type { PluginWorkerManager, WorkerStartOptions } from "./plugin-worker-manager.js";
-import { badRequest, notFound } from "../errors.js";
+import { badRequest, conflict, notFound } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { withSpsPluginRuntimeMutation, type SpsPluginRuntimeMutationCoordinator } from "./sps-plugin-runtime-mutation.js";
 import {
@@ -1044,6 +1044,7 @@ export function pluginLifecycleManager(
         }
         let attemptedReadyRuntimeTeardown = false;
         let candidateRuntimeMayBeActive = false;
+        let candidateActivationEntered = false;
         let mutationStarted = false;
         try {
           const result = await withPluginWorkerStartFence(pluginId, async () => {
@@ -1070,6 +1071,7 @@ export function pluginLifecycleManager(
             candidateRuntimeMayBeActive = true;
             return transitioned;
           });
+          candidateActivationEntered = true;
           await activateReadyPlugin(
             pluginId,
             migrationPlan?.requiresHostApproval ? migrationPlan.reviewHash : undefined,
@@ -1087,6 +1089,23 @@ export function pluginLifecycleManager(
           return result;
         } catch (error) {
           if (!mutationStarted) throw error;
+          if (candidateActivationEntered && migrationPlan && migrationPlan.pendingMigrations.length > 0) {
+            // applyMigrations commits before worker startup. A rejected
+            // activation cannot prove its SQL rolled back. Keep the package
+            // matching that schema; never reactivate the old code against it.
+            const message = "Plugin update requires data recovery review. Database changes may have completed; the new package was preserved.";
+            try {
+              await registry.updateStatus(pluginId, { status: "error", lastError: message });
+              await withPluginWorkerStartFence(pluginId, async () => {
+                await ensurePluginWorkerClosed(pluginId);
+                await deactivatePluginRuntime(pluginId, plugin.pluginKey);
+                await ensurePluginWorkerClosed(pluginId);
+              });
+            } catch (recoveryError) {
+              log.error({ pluginId, error, recoveryError }, "plugin lifecycle: migrated upgrade cleanup remains unconfirmed");
+            }
+            throw conflict(message, { code: "plugin_upgrade_data_recovery_required" });
+          }
           return await failUpgradeWithRollback(
             error,
             originalPlugin,

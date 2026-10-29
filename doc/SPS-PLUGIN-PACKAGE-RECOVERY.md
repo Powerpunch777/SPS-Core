@@ -92,3 +92,28 @@ Earlier setup failures are not counted as passes. No installed customer DB was u
 
 Exact-candidate CI and rebuilt packaged Windows acceptance remain pending. These
 source and synthetic-DB results do not establish all Core or release completion.
+
+## Upgrade migration failure guard
+
+Declared plugin migrations commit before worker startup. An activation failure
+after entering a pending-migration upgrade does not prove those SQL changes
+rolled back. Lifecycle therefore preserves the new package pointer, records an
+error status and tries the existing exact-close/runtime cleanup fence. It returns
+`plugin_upgrade_data_recovery_required` instead of automatically restoring and
+restarting old code against a possibly newer schema. Unconfirmed cleanup never
+authorizes old-code reactivation. Artifacts and the approved pre-migration Host
+backup remain available; this guard does not automatically restore that backup.
+
+Failures before entering candidate activation, or upgrades with no pending
+migrations, keep the existing package rollback. Seventeen upgrade safety tests
+passed, including4new controlled cases for this boundary. These are lifecycle
+tests with a migration-plan fake, not proof of a real schema downgrade. Durable
+upgrade phase/snapshot recovery and installed rollback qualification remain open.
+
+The first Source0285ff7 compatibility CI blocked direct legacy imports in the new
+SPS-owned journal service. The follow-up routes those imports through the existing
+explicit compatibility facade; the rule and its assertions are retained.
+The boundary check and its3regression tests passed; the combined lifecycle
+removal/upgrade selection passed28/28, and final server `tsc --noEmit` passed.
+Source0285ff7 Linux serialized3/4 job123349007577 also ran the real PostgreSQL
+journal suite:6/6passed with no skips. Other exact-candidate gates remain separate.

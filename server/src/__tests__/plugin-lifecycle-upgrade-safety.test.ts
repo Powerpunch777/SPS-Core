@@ -19,9 +19,15 @@ const mockRegistry = vi.hoisted(() => ({
   update: vi.fn(),
   updateStatus: vi.fn(),
 }));
+const mockPluginDatabase = vi.hoisted(() => ({
+  inspectMigrations: vi.fn(),
+}));
 
 vi.mock("../services/plugin-registry.js", () => ({
   pluginRegistryService: () => mockRegistry,
+}));
+vi.mock("../services/plugin-database.js", () => ({
+  pluginDatabaseService: () => mockPluginDatabase,
 }));
 
 import { pluginLifecycleManager } from "../services/plugin-lifecycle.js";
@@ -105,14 +111,44 @@ function makeWorkerManager(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function createLifecycle(loader: PluginLoader, workerManager = makeWorkerManager()) {
-  return pluginLifecycleManager({} as never, { loader, workerManager: workerManager as never });
+function createLifecycle(
+  loader: PluginLoader,
+  workerManager = makeWorkerManager(),
+  options: { migrationDb?: unknown; databaseBackupService?: { runManualBackup: ReturnType<typeof vi.fn> } } = {},
+) {
+  return pluginLifecycleManager({} as never, {
+    loader,
+    workerManager: workerManager as never,
+    ...(options.migrationDb === undefined ? {} : { migrationDb: options.migrationDb as never }),
+    ...(options.databaseBackupService === undefined ? {} : { databaseBackupService: options.databaseBackupService }),
+  });
+}
+
+function approvedDatabaseUpgrade() {
+  const manifest = { ...candidateManifest, database: { migrationsDir: "./migrations" } };
+  const plan = {
+    pluginId,
+    pluginKey: "example.plugin",
+    targetVersion: "1.1.0",
+    namespaceName: "plugin_example",
+    hasAppliedMigrations: true,
+    requiresHostApproval: true,
+    reviewHash: "approved-migration-plan-hash",
+    pendingMigrations: [{ migrationKey: "001_add_table.sql", checksum: "abc", statementCount: 1, operationKinds: ["create"] }],
+  };
+  mockPluginDatabase.inspectMigrations.mockResolvedValue(plan);
+  return { manifest, plan };
+}
+
+function approvedDatabaseUpgradeInput() {
+  return { version: "1.1.0", approvedDataMigrationPlanHash: "approved-migration-plan-hash" };
 }
 
 describe("pluginLifecycleManager.upgrade failure safety", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     resetPlugin();
+    mockPluginDatabase.inspectMigrations.mockReset();
   });
 
   it("does not unload handlers or disable the plugin while its worker remains", async () => {
@@ -395,6 +431,127 @@ describe("pluginLifecycleManager.upgrade failure safety", () => {
       packagePath: "C:\\plugins\\.upgrade-staging\\candidate",
       version: "1.0.0",
       manifestJson: sameVersionArtifact,
+    });
+  });
+
+  it("preserves an approved migration candidate when failed activation may have committed its schema", async () => {
+    const { manifest } = approvedDatabaseUpgrade();
+    const backup = { runManualBackup: vi.fn().mockResolvedValue({ backupFile: "C:\\backups\\before-upgrade.sql.gz" }) };
+    const loadSingle = vi.fn().mockResolvedValue({ success: false, plugin: currentPlugin, error: "candidate worker failed after migration" });
+    const loader = makeLoader({
+      prepareUpgrade: vi.fn().mockResolvedValue(preparedUpgrade(manifest)),
+      loadSingle,
+    });
+    const lifecycle = createLifecycle(loader, makeWorkerManager(), { migrationDb: {}, databaseBackupService: backup });
+
+    await expect(lifecycle.upgrade(pluginId, approvedDatabaseUpgradeInput())).rejects.toMatchObject({
+      details: { code: "plugin_upgrade_data_recovery_required" },
+    });
+
+    expect(mockPluginDatabase.inspectMigrations).toHaveBeenCalledWith(pluginId, manifest, "C:\\plugins\\.upgrade-staging\\candidate");
+    expect(backup.runManualBackup).toHaveBeenCalledOnce();
+    expect(loader.loadSingle).toHaveBeenCalledOnce();
+    expect(loader.loadSingle).toHaveBeenCalledWith(pluginId, { approvedMigrationPlanHash: "approved-migration-plan-hash" });
+    expect(mockRegistry.update).not.toHaveBeenCalled();
+    expect(mockRegistry.updateStatus).toHaveBeenCalledWith(pluginId, expect.objectContaining({ status: "error" }));
+    expect(currentPlugin).toMatchObject({
+      status: "error",
+      packagePath: "C:\\plugins\\.upgrade-staging\\candidate",
+      version: "1.1.0",
+      manifestJson: manifest,
+    });
+  });
+
+  it("does not restore or reactivate old code when a migrated candidate cannot be confirmed closed", async () => {
+    const { manifest } = approvedDatabaseUpgrade();
+    const backup = { runManualBackup: vi.fn().mockResolvedValue({ backupFile: "C:\\backups\\before-upgrade.sql.gz" }) };
+    let candidateStarted = false;
+    const retainedCandidateWorker = { status: "running" };
+    const workerManager = makeWorkerManager({
+      getWorker: vi.fn(() => candidateStarted ? retainedCandidateWorker : undefined),
+      stopWorker: vi.fn().mockResolvedValue(undefined),
+    });
+    const loadSingle = vi.fn().mockImplementation(async () => {
+      candidateStarted = true;
+      return { success: false, plugin: currentPlugin, error: "candidate worker failed after migration" };
+    });
+    const loader = makeLoader({
+      prepareUpgrade: vi.fn().mockResolvedValue(preparedUpgrade(manifest)),
+      loadSingle,
+    });
+    const lifecycle = createLifecycle(loader, workerManager, { migrationDb: {}, databaseBackupService: backup });
+
+    await expect(lifecycle.upgrade(pluginId, approvedDatabaseUpgradeInput())).rejects.toMatchObject({
+      details: { code: "plugin_upgrade_data_recovery_required" },
+    });
+
+    expect(workerManager.stopWorker).toHaveBeenCalledWith(pluginId);
+    expect(mockRegistry.update).not.toHaveBeenCalled();
+    expect(loadSingle).toHaveBeenCalledOnce();
+    expect(currentPlugin).toMatchObject({
+      status: "error",
+      packagePath: "C:\\plugins\\.upgrade-staging\\candidate",
+      manifestJson: manifest,
+    });
+  });
+
+  it("retains the ordinary rollback for a database candidate with no pending migrations", async () => {
+    const manifest = { ...candidateManifest, database: { migrationsDir: "./migrations" } };
+    mockPluginDatabase.inspectMigrations.mockResolvedValue({
+      pluginId,
+      pluginKey: "example.plugin",
+      targetVersion: "1.1.0",
+      namespaceName: "plugin_example",
+      hasAppliedMigrations: true,
+      requiresHostApproval: false,
+      reviewHash: "empty-migration-plan-hash",
+      pendingMigrations: [],
+    });
+    const loadSingle = vi.fn()
+      .mockResolvedValueOnce({ success: false, plugin: currentPlugin, error: "candidate activation failed" })
+      .mockResolvedValueOnce({ success: true, plugin: currentPlugin, registered: {} });
+    const loader = makeLoader({ prepareUpgrade: vi.fn().mockResolvedValue(preparedUpgrade(manifest)), loadSingle });
+    const lifecycle = createLifecycle(loader, makeWorkerManager(), { migrationDb: {} });
+
+    await expect(lifecycle.upgrade(pluginId, "1.1.0")).rejects.toThrow("candidate activation failed");
+
+    expect(loader.loadSingle).toHaveBeenCalledTimes(2);
+    expect(mockRegistry.update).toHaveBeenCalledWith(pluginId, expect.objectContaining({
+      packagePath: "C:\\plugins\\example-1.0.0",
+      version: "1.0.0",
+      manifest: oldManifest,
+    }));
+    expect(currentPlugin).toMatchObject({
+      status: "ready",
+      packagePath: "C:\\plugins\\example-1.0.0",
+      version: "1.0.0",
+      manifestJson: oldManifest,
+    });
+  });
+
+  it("keeps the old rollback when candidate commit fails before activation despite pending migrations", async () => {
+    const { manifest } = approvedDatabaseUpgrade();
+    const backup = { runManualBackup: vi.fn().mockResolvedValue({ backupFile: "C:\\backups\\before-upgrade.sql.gz" }) };
+    const loader = makeLoader({
+      prepareUpgrade: vi.fn().mockResolvedValue(preparedUpgrade(manifest)),
+      commitPreparedUpgrade: vi.fn().mockRejectedValue(new Error("candidate commit failed")),
+    });
+    const lifecycle = createLifecycle(loader, makeWorkerManager(), { migrationDb: {}, databaseBackupService: backup });
+
+    await expect(lifecycle.upgrade(pluginId, approvedDatabaseUpgradeInput())).rejects.toThrow("candidate commit failed");
+
+    expect(backup.runManualBackup).toHaveBeenCalledOnce();
+    expect(loader.loadSingle).toHaveBeenCalledOnce();
+    expect(mockRegistry.update).toHaveBeenCalledWith(pluginId, expect.objectContaining({
+      packagePath: "C:\\plugins\\example-1.0.0",
+      version: "1.0.0",
+      manifest: oldManifest,
+    }));
+    expect(currentPlugin).toMatchObject({
+      status: "ready",
+      packagePath: "C:\\plugins\\example-1.0.0",
+      version: "1.0.0",
+      manifestJson: oldManifest,
     });
   });
 });

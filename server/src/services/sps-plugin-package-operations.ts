@@ -1,8 +1,8 @@
 import { and, eq, isNull } from "drizzle-orm";
 import { isDeepStrictEqual } from "node:util";
 import { z } from "zod/v3";
-import { pluginManifestV1Schema, type PluginRecord } from "@paperclipai/shared";
-import { plugins, spsPluginPackageOperations, type Db } from "@paperclipai/db";
+import { pluginManifestV1Schema, type PluginRecord } from "../compat/paperclip/shared.js";
+import { plugins, spsPluginPackageOperations, type Db } from "../compat/paperclip/db.js";
 import { conflict } from "../errors.js";
 
 const pendingMessage = "Plugin package removal requires recovery before it can run or change again.";
