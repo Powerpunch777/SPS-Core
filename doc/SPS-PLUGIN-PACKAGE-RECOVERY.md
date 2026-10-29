@@ -1,4 +1,4 @@
-# Plugin package removal recovery
+# Plugin package lifecycle recovery
 
 Status: implementation under verification. This document does not certify Core
 completion, installer qualification or all package-operation crash recovery.
@@ -26,10 +26,12 @@ pending intent for the manifest key before committing a new install.
 
 ## Restart and retry
 
-Normal product startup reconciles pending removal before bundle installation,
+Normal product startup reconciles pending package operations before bundle installation,
 refresh and `loadAll`. It does not run package recovery in all-disabled Core
 recovery mode. An invalid or unreadable journal prevents ordinary startup work.
-An individually blocked removal stays pending while unrelated plugins can load.
+An individually blocked operation stays pending while unrelated plugins can load.
+Recovery rereads the pending record inside its process-mutation fence; a completed
+or restore-cancelled intent captured by an older startup scan cannot run again.
 
 Recovery compares current package identity, path, version and manifest with the
 recorded snapshot. A replacement plugin, a changed path, or an invalid record
@@ -62,13 +64,76 @@ restored backup cannot replay deletion against another machine's paths. The
 plugin's non-running status remains; the Host must review it before another
 explicit lifecycle action. Completed history is not changed by this sanitizer.
 
-This increment records removal intent. Installation-stage recovery, upgrade
-snapshot/activation recovery, previous-artifact retirement and runtime-cache
-power-loss recovery remain separate required work. Existing uncertain-commit
-artifact preservation is not a durable upgrade journal. Windows Job ownership
-and physical installed-app qualification require their own evidence.
+Removal and approved-upgrade intent use the same table. Installation-stage
+recovery, the capability-approval-pending upgrade branch, candidate retirement,
+previous-artifact retirement
+and runtime-cache power-loss recovery remain separate required work. Windows
+Job ownership and physical installed-app qualification need their own evidence.
 
-## Verification for this increment
+## Durable upgrade phases
+
+After validating the candidate and satisfying existing capability/data approval
+and backup requirements, Core persists both previous/candidate snapshots,
+migration-plan hash, backup reference and `prepared` phase. This transaction
+also makes the plugin non-running. It precedes old runtime teardown and pointer
+replacement; it is not exit evidence. The full product shares one store between
+lifecycle, loader and Workspace workers.
+
+Core then records `committing` before changing the pointer, `committed` afterwards,
+and `activation_entered` before calling candidate activation. Normal phase skips
+and rewinds are rejected. A Core decision to roll back is first persisted as
+`rollback_required`, before restoring old metadata. This preserves the known-safe
+decision even when the activation-phase write or rollback completion response
+is lost. The data-migration activation-failure guard below never makes that
+old-code rollback decision after it has entered a pending-migration activation.
+
+Only the exact active Core operation can pass its own pending-operation guard.
+The context is private, not an SDK/API token or an approval grant. It expires at
+the end of the awaited operation, including for late asynchronous continuations.
+Unrelated operations remain blocked. Completion response loss quarantines the
+current artifact and attempts exact-close cleanup; it does not invoke another
+rollback after successful activation or leave an unconfirmed rollback ready.
+
+At startup, Core compares the latest pointer with the recorded old/candidate
+identities, quarantines and confirms closure before changing metadata. Before
+activation, or after a recorded safe rollback decision, it restores previous
+metadata/status. Normal startup subsequently validates and loads that artifact;
+reconciliation itself never executes it. An entered activation with possible
+DB changes instead retains the candidate in error, records `review_required`,
+and closes the intent after cleanup is confirmed. This is a reconciled failure,
+not a successful upgrade. A fresh authorized Host action can retry the candidate
+through existing lifecycle and migration-approval checks. Core does not replay
+stored approval automatically, retry unknown side effects, downgrade a changed
+schema or automatically restore a whole Host backup.
+
+Unknown package identity, missing rows, failed status writes or unconfirmed
+closure preserve the journal and both artifacts. The Workspace lane independently
+checks pending-operation admission, including cached workers. A known pending
+intent retires its owned worker; an unreadable journal denies new calls while
+retaining ownership rather than recording a fictional close.
+
+## Approved-upgrade verification
+
+- Upgrade recovery14/14 plus existing upgrade-safety17/17 and cleanup3/3 passed
+  in one selected run (34/34). Cases include ambiguous commit/completion,
+  migration-entry review, rollback marker persistence failure, failed cleanup,
+  changed pointers and stale recovery scans.
+- Real PostgreSQL13/13 and existing removal recovery11/11 passed in a serialized
+  selected run (24/24), including fresh initialization/all migrations, actual
+  client reconnects, expiring private contexts, phase ordering, rollback markers
+  and restore cancellation. No tests were skipped and owned cleanup succeeded.
+- Workspace worker21/21 passed, including pending-operation admission, cached
+  worker retirement and ownership retention when journal reads fail.
+- Final server typecheck and SPS compatibility boundary check passed.
+
+The first concurrent PostgreSQL run exceeded its unchanged90second setup
+allowance and skipped all13 test bodies. It is not counted as passing evidence.
+The serialized run above passed with the same90second setup,30second cleanup
+and assertion limits. Test allowances do not alter product deadlines. Current
+candidate CI is recorded with the candidate review; these local results alone
+do not certify installed-app behavior.
+
+## Removal increment verification (committed baseline)
 
 - New lifecycle recovery tests passed11/11; existing cleanup/startup tests
   passed10/10. They retain exact closure, permit and normal startup assertions.

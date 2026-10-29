@@ -80,6 +80,8 @@ export function createSpsWorkspacePluginWorkers(db: Db, manager: PluginWorkerMan
   resolveEntrypoint?: typeof resolveSpsWorkspacePluginEntrypoint;
   policyReconcileIntervalMs?: number;
   onPolicyReconcileError?: () => void;
+  /** Product composition denies admission while package reconciliation is pending. */
+  assertPackageOperationClear?: (pluginId: string) => Promise<void>;
 }) {
   // A second private factory must not silently adopt another factory's scoped
   // handles or overwrite its stop callback. Reuse one factory in a composition.
@@ -149,6 +151,11 @@ export function createSpsWorkspacePluginWorkers(db: Db, manager: PluginWorkerMan
   async function policyIsStale(runtime: Runtime): Promise<boolean> {
     // Complete every read before stopping anything. A transient DB failure is
     // not evidence that the captured owner is stale and must retain its child.
+    try { await options.assertPackageOperationClear?.(runtime.pluginId); }
+    catch (error) {
+      if ((error as { details?: { code?: string } })?.details?.code === "sps_plugin_package_recovery_required") return true;
+      throw error;
+    }
     if (!await readSpsWorkspacePresence(db, runtime.workspaceId)) return true;
     const [execution, policy, plugin] = await Promise.all([
       getSpsWorkspaceExecutionControl(db, runtime.workspaceId),
@@ -274,6 +281,7 @@ export function createSpsWorkspacePluginWorkers(db: Db, manager: PluginWorkerMan
     const key = keyFor(workspaceId, pluginId);
     return locked(key, async () => {
       if (closed || catalogMutationActive || mutatingPlugins.has(pluginId) || mutatingWorkspaces.has(workspaceId)) throw unavailable();
+      await options.assertPackageOperationClear?.(pluginId);
       if (!await readSpsWorkspacePresence(db, workspaceId)) throw unavailable();
       await assertSpsWorkspaceExecutionActive(db, workspaceId, epoch);
       const policy = await readSpsPluginAuthorityRevision(db, workspaceId);
@@ -302,6 +310,7 @@ export function createSpsWorkspacePluginWorkers(db: Db, manager: PluginWorkerMan
       // Building adapters may await module loading. Do not start a process with
       // configuration invalidated during that interval.
       try {
+        await options.assertPackageOperationClear?.(pluginId);
         if (closed || !sameSpsPluginAuthorityRevision(policy, await readSpsPluginAuthorityRevision(db, workspaceId))) throw unavailable();
         await assertSpsWorkspaceExecutionActive(db, workspaceId, epoch);
       } catch {

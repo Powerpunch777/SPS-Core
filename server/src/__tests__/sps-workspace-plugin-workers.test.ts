@@ -182,6 +182,68 @@ describe("SPS Workspace Plugin worker factory", () => {
   });
   afterEach(() => vi.clearAllMocks());
 
+  it("denies Workspace startup when a package journal blocks an otherwise ready plugin", async () => {
+    const manager = createPluginWorkerManager();
+    const pending = Object.assign(new Error("package recovery pending"), { details: { code: "sps_plugin_package_recovery_required" } });
+    const factory = createSpsWorkspacePluginWorkers({} as any, manager, {
+      localPluginDir: "/unused", assertPackageOperationClear: async () => { throw pending; },
+      resolveEntrypoint: async () => "/fixture/workspace-worker.js",
+      buildServices: () => ({ dispose: vi.fn() } as any),
+    });
+    try {
+      await expect(factory.call(workspaceA, pluginId, "getData", { key: "fixture.data", companyId: workspaceA } as any,
+        1_000, authority(workspaceA))).rejects.toThrow("package recovery pending");
+      expect(fakes.fork).not.toHaveBeenCalled();
+    } finally { await factory.shutdown(); await manager.shutdown(); }
+  });
+
+  it("blocks cached Workspace admission and retires its exact worker when recovery becomes pending", async () => {
+    const manager = createPluginWorkerManager();
+    const disposed = vi.fn();
+    let pending = false;
+    const factory = createSpsWorkspacePluginWorkers({} as any, manager, {
+      localPluginDir: "/unused",
+      assertPackageOperationClear: async () => {
+        if (pending) throw Object.assign(new Error("package recovery pending"), { details: { code: "sps_plugin_package_recovery_required" } });
+      },
+      resolveEntrypoint: async () => "/fixture/workspace-worker.js",
+      buildServices: () => ({ dispose: disposed } as any),
+    });
+    const call = () => factory.call(workspaceA, pluginId, "getData", { key: "fixture.data", companyId: workspaceA } as any,
+      1_000, authority(workspaceA));
+    try {
+      await call();
+      expect(manager.getWorkspaceWorker(workspaceA, pluginId)?.status).toBe("running");
+      pending = true;
+      await expect(call()).rejects.toThrow("package recovery pending");
+      expect(fakes.fork).toHaveBeenCalledOnce();
+      await factory.reconcileCatalogPolicy();
+      expect(manager.getWorkspaceWorker(workspaceA, pluginId)).toBeUndefined();
+      expect(disposed).toHaveBeenCalledOnce();
+    } finally { await factory.shutdown(); await manager.shutdown(); }
+  });
+
+  it("denies admission but retains ownership when journal availability is unknown", async () => {
+    const manager = createPluginWorkerManager();
+    let unavailable = false;
+    const disposed = vi.fn();
+    const factory = createSpsWorkspacePluginWorkers({} as any, manager, {
+      localPluginDir: "/unused", assertPackageOperationClear: async () => { if (unavailable) throw new Error("journal read failed"); },
+      resolveEntrypoint: async () => "/fixture/workspace-worker.js", buildServices: () => ({ dispose: disposed } as any),
+    });
+    const call = () => factory.call(workspaceA, pluginId, "getData", { key: "fixture.data", companyId: workspaceA } as any,
+      1_000, authority(workspaceA));
+    try {
+      await call();
+      const retained = manager.getWorkspaceWorker(workspaceA, pluginId);
+      unavailable = true;
+      await expect(call()).rejects.toThrow("journal read failed");
+      await expect(factory.reconcileCatalogPolicy()).rejects.toMatchObject({ code: "sps_workspace_plugin_runtime_unavailable" });
+      expect(manager.getWorkspaceWorker(workspaceA, pluginId)).toBe(retained);
+      expect(disposed).not.toHaveBeenCalled();
+    } finally { await factory.shutdown(); await manager.shutdown(); }
+  });
+
   it("starts one worker per Workspace with current config, routes owned calls, and stops only the selected owner", async () => {
     const manager = createPluginWorkerManager();
     const disposed: string[] = [];

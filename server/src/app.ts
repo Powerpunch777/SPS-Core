@@ -200,6 +200,7 @@ export async function createApp(
     throw new TypeError("Native Host management binding mismatch.");
   }
   const pluginRecoveryState = resolvePluginRecoveryState();
+  const packageOperations = createSpsPluginPackageOperations(db);
   const app = express();
   app.locals.paperclipDb = db;
   const captureRawBody = (req: express.Request, _res: express.Response, buf: Buffer) => {
@@ -259,6 +260,7 @@ export async function createApp(
   const eventBus = createPluginEventBus();
   const streamBus = createPluginStreamBus();
   const workspacePluginWorkers = createSpsWorkspacePluginWorkers(db, workerManager, {
+    assertPackageOperationClear: pluginId => packageOperations.assertClear(pluginId),
     localPluginDir: opts.localPluginDir ?? DEFAULT_LOCAL_PLUGIN_DIR,
     instanceInfo: { instanceId: opts.instanceId ?? "default", hostVersion: opts.hostVersion ?? "0.0.0" },
     eventBus,
@@ -322,7 +324,6 @@ export async function createApp(
     api.use(instanceDatabaseBackupRoutes(opts.databaseBackupService));
   }
   const pluginRegistry = pluginRegistryService(db);
-  const packageOperations = createSpsPluginPackageOperations(db);
   setPluginEventBus(eventBus);
   const jobStore = pluginJobStore(db);
   const lifecycle = pluginLifecycleManager(db, {
