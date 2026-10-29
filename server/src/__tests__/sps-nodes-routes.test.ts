@@ -39,7 +39,7 @@ import { resolveSpsNodeExecutionTarget } from "../services/sps-node-execution.js
 import { spsPluginExecutionService } from "../services/sps-plugin-execution.js";
 import { spsAgentSessionRunService } from "../services/sps-agent-session-runs.js";
 import { heartbeatService } from "../services/heartbeat.js";
-import { spsWorkspaceExecutionControlService } from "../services/sps-workspace-execution-control.js";
+import { getSpsWorkspaceExecutionPending, spsWorkspaceExecutionControlService } from "../services/sps-workspace-execution-control.js";
 import { registerSpsWorkspaceExecutionStopHandler } from "../services/sps-workspace-execution-control.js";
 import { spsExecutionHistoryService } from "../services/sps-execution-history.js";
 import { buildSpsUsageEvidence } from "../services/sps-execution-observation.js";
@@ -1018,6 +1018,24 @@ describeEmbeddedPostgres("SPS Node routes", () => {
       .send(createSignedNodeRequest(nodeId, node.privateKey, firstLeasePath, {})).expect(200);
     expect(firstLease.body).toMatchObject({ active: false, status: "failed" });
 
+    const policyFailed = await db.select().from(spsNodeCommands).where(eq(spsNodeCommands.id, firstCommand.id)).then(rows => rows[0]!);
+    expect(policyFailed.completionReceiptDigest).toBeNull();
+    expect((await getSpsWorkspaceExecutionPending(db, fixture.company.id)).commands).toBe(2);
+    const lateReport = { status: "failed" as const, exitCode: 143, signal: "SIGTERM", timedOut: false, error: "local process closure confirmed" };
+    const latePath = `/sps-nodes/${nodeId}/commands/${firstCommand.id}/complete`;
+    const late = await request(app).post(`/api${latePath}`)
+      .send(createSignedNodeRequest(nodeId, node.privateKey, latePath, lateReport)).expect(200);
+    expect(late.body).toMatchObject({ status: "failed", error: policyFailed.error,
+      finishedAt: policyFailed.finishedAt!.toISOString(), completionReportJson: lateReport });
+    expect(late.body.completionReceiptDigest).toBe(createSpsNodeCompletionReceiptDigest({
+      kind: "agent-command", nodeId, commandId: firstCommand.id, completion: lateReport,
+    }));
+    const restartedApp = await createApp(db, boardActor(fixture.company.id, fixture.ownerUserId, "owner"));
+    const duplicate = await request(restartedApp).post(`/api${latePath}`)
+      .send(createSignedNodeRequest(nodeId, node.privateKey, latePath, lateReport)).expect(200);
+    expect(duplicate.body).toEqual(late.body);
+    expect((await getSpsWorkspaceExecutionPending(db, fixture.company.id)).commands).toBe(1);
+
     const siblingLeasePath = `/sps-nodes/${nodeId}/commands/${siblingCommand.id}/lease`;
     const siblingLease = await request(app).post(`/api${siblingLeasePath}`)
       .send(createSignedNodeRequest(nodeId, node.privateKey, siblingLeasePath, {})).expect(200);
@@ -1028,6 +1046,7 @@ describeEmbeddedPostgres("SPS Node routes", () => {
     const badCredentialLease = await request(app).post(`/api${siblingLeasePath}`)
       .send(createSignedNodeRequest(nodeId, node.privateKey, siblingLeasePath, {})).expect(200);
     expect(badCredentialLease.body).toMatchObject({ active: false, status: "failed" });
+    expect((await getSpsWorkspaceExecutionPending(db, fixture.company.id)).commands).toBe(1);
     expect((await db.select().from(spsHostProjectShareNodeGrants).where(eq(spsHostProjectShareNodeGrants.id, siblingGrant.id)))[0]!.revokedAt)
       .toBeNull();
     expect((await db.select().from(spsHostProjectShareNodeGrants).where(eq(spsHostProjectShareNodeGrants.id, grant.id)))[0]!.revokedAt)
@@ -1086,6 +1105,34 @@ describeEmbeddedPostgres("SPS Node routes", () => {
     expect((await request(app).post(`/api${nextCompletePath}`).send(createSignedNodeRequest(registered.body.id, node.privateKey, nextCompletePath, completion))).status).toBe(200);
     const laterCancel = spsAgentSessionRunService(db, pluginKey, async runId => { await db.update(heartbeatRuns).set({ status: "cancelled" }).where(eq(heartbeatRuns.id, runId)); });
     expect(await laterCancel.cancel({ ...params, runId: next.id })).toMatchObject({ cancellationRequested: true, termination: "confirmed" });
+
+    // An older optimistic parent flag cannot hide a policy-failed Node whose
+    // remote process has not yet acknowledged closure.
+    const legacyParent = await db.insert(heartbeatRuns).values({ companyId: fixture.company.id, agentId: fixture.agent.id, status: "cancelled",
+      contextSnapshot: { taskKey, spsPluginConversation: { pluginKey, sessionId: session.id },
+        spsSessionCancellationRequested: true, spsSessionCancellationTermination: "confirmed" },
+    }).returning().then(rows => rows[0]!);
+    const legacyCommand = await db.insert(spsNodeCommands).values({ companyId: fixture.company.id, nodeId: registered.body.id,
+      agentId: fixture.agent.id, heartbeatRunId: legacyParent.id, command: "codex", status: "failed",
+      claimedAt: new Date(), startedAt: new Date(), finishedAt: new Date(), error: "Access revoked before closure report",
+    }).returning().then(rows => rows[0]!);
+    const legacyScope = { ...params, runId: legacyParent.id };
+    expect(await scoped.getRun(legacyScope)).toMatchObject({ status: "cancelled", termination: "pending" });
+    expect(await scoped.cancel(legacyScope)).toMatchObject({ status: "cancelled", termination: "pending" });
+    const legacyPath = `/sps-nodes/${registered.body.id}/commands/${legacyCommand.id}/complete`;
+    const legacyReport = { status: "failed", exitCode: 143, signal: "SIGTERM", timedOut: false, error: "actual local closure" };
+    await request(app).post(`/api${legacyPath}`)
+      .send(createSignedNodeRequest(registered.body.id, node.privateKey, legacyPath, legacyReport)).expect(200);
+    expect(await scoped.getRun(legacyScope)).toMatchObject({ status: "cancelled", termination: "confirmed" });
+    // Read-only liveness evidence must also override an optimistic stored flag
+    // for a recorded local process. This path never calls the cancel effect.
+    const liveLocalParent = await db.insert(heartbeatRuns).values({ companyId: fixture.company.id, agentId: fixture.agent.id,
+      status: "cancelled", processPid: process.pid,
+      contextSnapshot: { taskKey, spsPluginConversation: { pluginKey, sessionId: session.id },
+        spsSessionCancellationRequested: true, spsSessionCancellationTermination: "confirmed" },
+    }).returning().then(rows => rows[0]!);
+    expect(await scoped.getRun({ ...params, runId: liveLocalParent.id })).toMatchObject({ termination: "pending" });
+    expect(await scoped.cancel({ ...params, runId: liveLocalParent.id })).toMatchObject({ termination: "pending" });
   });
 
   it("blocks Node enqueue while paused and keeps stopped commands pending until signed cancellation completion", async () => {

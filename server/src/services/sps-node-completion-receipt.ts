@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-type Completion = Readonly<{
+export type SpsNodeCompletionReport = Readonly<{
   status: "succeeded" | "failed";
   exitCode: number | null;
   signal?: string | null;
@@ -8,6 +8,18 @@ type Completion = Readonly<{
   error?: string | null;
   usageReport?: Readonly<Record<string, unknown>>;
 }>;
+
+/** Store only the parsed completion fields that participate in the v1 receipt. */
+export function normalizeSpsNodeCompletionReport(input: SpsNodeCompletionReport): SpsNodeCompletionReport {
+  return Object.freeze({
+    status: input.status,
+    exitCode: input.exitCode,
+    signal: input.signal ?? null,
+    timedOut: input.timedOut ?? false,
+    error: input.error ?? null,
+    ...(input.usageReport === undefined ? {} : { usageReport: Object.freeze({ ...input.usageReport }) }),
+  });
+}
 
 function canonicalJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
@@ -28,16 +40,9 @@ export function createSpsNodeCompletionReceiptDigest(input: Readonly<{
   kind: "agent-command" | "plugin-run";
   nodeId: string;
   commandId: string;
-  completion: Completion;
+  completion: SpsNodeCompletionReport;
 }>): string {
-  const completion = {
-    status: input.completion.status,
-    exitCode: input.completion.exitCode,
-    signal: input.completion.signal ?? null,
-    timedOut: input.completion.timedOut ?? false,
-    error: input.completion.error ?? null,
-    ...(input.completion.usageReport === undefined ? {} : { usageReport: input.completion.usageReport }),
-  };
+  const completion = normalizeSpsNodeCompletionReport(input.completion);
   const canonical = canonicalJson({
     version: 1,
     kind: input.kind,

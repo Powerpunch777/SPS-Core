@@ -2,13 +2,14 @@ import { randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { activityLog, agents, companies, createDb, heartbeatRuns, pluginJobRuns, pluginJobs, plugins, spsModelConnections,
-  spsModelRuns, spsNodeCommands, spsNodes, type Db } from "@paperclipai/db";
+  spsModelRuns, spsNodeCommands, spsNodeRunnerProfiles, spsPluginExecutionGrants, spsPluginNodeRuns, spsNodes, type Db } from "@paperclipai/db";
 import {
-  assertSpsWorkspaceExecutionActive, getSpsWorkspaceExecutionControl,
+  assertSpsWorkspaceExecutionActive, assertSpsWorkspaceExecutionReadyForDeletion, getSpsWorkspaceExecutionControl, getSpsWorkspaceExecutionPending,
   registerSpsWorkspaceExecutionStopHandler, spsWorkspaceExecutionControlService,
   withSpsWorkspaceExecutionAdmission,
 } from "../services/sps-workspace-execution-control.js";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
+import { createSpsNodeCompletionReceiptDigest } from "../services/sps-node-completion-receipt.js";
 
 const support = await getEmbeddedPostgresTestSupport();
 const databaseSuite = support.supported ? describe : describe.skip;
@@ -69,6 +70,49 @@ databaseSuite("durable Workspace execution admission", () => {
     const retry = await service.transition(a, "stop", "fixture-owner", stopped.revision);
     expect(retry.epoch).toBe(stopped.epoch);
     expect(retry.revision).toBe(stopped.revision);
+  });
+
+  it("keeps policy-failed claimed Node work pending until closure evidence and preserves legacy completed work", async () => {
+    const a = await workspace(), b = await workspace(), now = new Date();
+    const [agent] = await db.insert(agents).values({ companyId: a, name: "Closure fixture" }).returning();
+    const [node] = await db.insert(spsNodes).values({ companyId: a, ownerUserId: "fixture-owner", displayName: "Closure Node",
+      publicKey: "closure-fixture-key", platform: "win32", status: "active", keyVerifiedAt: now }).returning();
+    const [runner] = await db.insert(spsNodeRunnerProfiles).values({ companyId: a, nodeId: node.id,
+      runnerKey: "closure-fixture", kind: "agy", label: "Closure fixture" }).returning();
+    const pluginKey = "sps.closure-fixture", subjectKey = "closure-fixture";
+    const [grant] = await db.insert(spsPluginExecutionGrants).values({ companyId: a, pluginKey, subjectKey,
+      nodeId: node.id, runnerProfileId: runner.id }).returning();
+    const [command, startOnly, legacy, neverStarted] = await db.insert(spsNodeCommands).values([
+      { companyId: a, nodeId: node.id, agentId: agent.id, command: "agy", status: "failed", claimedAt: now, startedAt: now, finishedAt: now, error: "Access revoked" },
+      { companyId: a, nodeId: node.id, agentId: agent.id, command: "agy", status: "failed", startedAt: now, finishedAt: now, error: "Legacy unknown claim marker" },
+      { companyId: a, nodeId: node.id, agentId: agent.id, command: "agy", status: "failed", claimedAt: now, startedAt: now, finishedAt: now, exitCode: 1 },
+      { companyId: a, nodeId: node.id, agentId: agent.id, command: "agy", status: "cancelled", finishedAt: now },
+    ]).returning();
+    const [pluginRun] = await db.insert(spsPluginNodeRuns).values({ companyId: a, pluginKey, subjectKey,
+      nodeId: node.id, runnerProfileId: runner.id, executionGrantId: grant.id, command: "agy", status: "failed",
+      claimedAt: now, startedAt: now, finishedAt: now, error: "Grant revoked" }).returning();
+    expect(legacy.completionReceiptDigest).toBeNull();
+    expect(neverStarted.claimedAt).toBeNull();
+
+    const stopped = await spsWorkspaceExecutionControlService(db).transition(a, "stop", "fixture-owner", 0);
+    expect(stopped.pending).toMatchObject({ commands: 2, plugins: 1 });
+    await expect(db.transaction(tx => assertSpsWorkspaceExecutionReadyForDeletion(tx, a, stopped)))
+      .rejects.toMatchObject({ code: "workspace_execution_cleanup_pending" });
+    expect(await getSpsWorkspaceExecutionPending(db, b)).toMatchObject({ commands: 0, plugins: 0 });
+
+    const completion = { status: "failed" as const, exitCode: 143, signal: "SIGTERM", timedOut: false, error: "local termination confirmed" };
+    for (const row of [command, startOnly]) {
+      await db.update(spsNodeCommands).set({ completionReceiptDigest: createSpsNodeCompletionReceiptDigest({
+        kind: "agent-command", nodeId: node.id, commandId: row.id, completion,
+      }) }).where(eq(spsNodeCommands.id, row.id));
+    }
+    expect(await getSpsWorkspaceExecutionPending(db, a)).toMatchObject({ commands: 0, plugins: 1 });
+    await db.update(spsPluginNodeRuns).set({ completionReceiptDigest: createSpsNodeCompletionReceiptDigest({
+      kind: "plugin-run", nodeId: node.id, commandId: pluginRun.id, completion,
+    }) }).where(eq(spsPluginNodeRuns.id, pluginRun.id));
+    await expect(db.transaction(tx => assertSpsWorkspaceExecutionReadyForDeletion(tx, a, stopped))).resolves.toBeUndefined();
+    expect((await db.select().from(spsNodeCommands).where(eq(spsNodeCommands.id, command.id)))[0])
+      .toMatchObject({ status: "failed", error: "Access revoked" });
   });
 
   it("serializes stop with admitted transactions without blocking another Workspace", async () => {

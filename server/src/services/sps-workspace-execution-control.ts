@@ -1,4 +1,4 @@
-import { and, count, eq, inArray, or, sql } from "drizzle-orm";
+import { and, count, eq, inArray, isNotNull, isNull, not, or, sql, type SQL } from "drizzle-orm";
 import {
   activityLog, agentWakeupRequests, companies, heartbeatRuns, pluginJobRuns, spsModelRuns, spsNodeCommands,
   spsPluginNodeRuns, spsWorkspaceExecutionControl, type Db,
@@ -150,7 +150,31 @@ async function persistStopIntent(tx: SpsWorkspaceExecutionDb, companyId: string,
     .where(and(eq(agentWakeupRequests.companyId, companyId), inArray(agentWakeupRequests.status, ["queued", "deferred_issue_execution"])));
 }
 
+function needsNodeClosure(table: typeof spsNodeCommands | typeof spsPluginNodeRuns, parentReceipt?: SQL) {
+  // Keep aligned with the JS rule in sps-node-closure-evidence.ts. Each term
+  // stays boolean for legacy NULL digests, avoiding NOT(NULL) dropping a row.
+  return not(and(
+    inArray(table.status, ["succeeded", "failed", "cancelled"]),
+    isNotNull(table.finishedAt),
+    or(
+      and(isNull(table.claimedAt), isNull(table.startedAt)),
+      and(isNotNull(table.completionReceiptDigest), sql`${table.completionReceiptDigest} ~ '^[0-9a-f]{64}$'`),
+      eq(table.status, "succeeded"),
+      isNotNull(table.exitCode),
+      isNotNull(table.signal),
+      eq(table.timedOut, 1),
+      parentReceipt,
+    ),
+  )!);
+}
+
 export async function getSpsWorkspaceExecutionPending(db: SpsWorkspaceExecutionDb, companyId: string) {
+  const parentReceipt = sql`exists (
+    select 1 from ${heartbeatRuns}
+    where ${heartbeatRuns.id} = ${spsNodeCommands.heartbeatRunId}
+      and ${heartbeatRuns.companyId} = ${spsNodeCommands.companyId}
+      and ${heartbeatRuns.contextSnapshot}->'spsNodeCompletionReceipts'->(${spsNodeCommands.id}::text) = 'true'::jsonb
+  )`;
   const [agents, jobs, models, commands, plugins] = await Promise.all([
     db.select({ value: count() }).from(heartbeatRuns).where(and(eq(heartbeatRuns.companyId, companyId), or(
       inArray(heartbeatRuns.status, ["queued", "running", "cancelling"]),
@@ -159,8 +183,8 @@ export async function getSpsWorkspaceExecutionPending(db: SpsWorkspaceExecutionD
     ))),
     db.select({ value: count() }).from(pluginJobRuns).where(and(eq(pluginJobRuns.companyId, companyId), inArray(pluginJobRuns.status, ["pending", "queued", "running", "cancelling"]))),
     db.select({ value: count() }).from(spsModelRuns).where(and(eq(spsModelRuns.companyId, companyId), eq(spsModelRuns.resourcePending, true))),
-    db.select({ value: count() }).from(spsNodeCommands).where(and(eq(spsNodeCommands.companyId, companyId), inArray(spsNodeCommands.status, ["queued", "claimed", "running", "cancelling"]))),
-    db.select({ value: count() }).from(spsPluginNodeRuns).where(and(eq(spsPluginNodeRuns.companyId, companyId), inArray(spsPluginNodeRuns.status, ["queued", "claimed", "running", "cancelling"]))),
+    db.select({ value: count() }).from(spsNodeCommands).where(and(eq(spsNodeCommands.companyId, companyId), needsNodeClosure(spsNodeCommands, parentReceipt))),
+    db.select({ value: count() }).from(spsPluginNodeRuns).where(and(eq(spsPluginNodeRuns.companyId, companyId), needsNodeClosure(spsPluginNodeRuns))),
   ]);
   return Object.freeze({ agents: Number(agents[0]?.value ?? 0), jobs: Number(jobs[0]?.value ?? 0),
     models: Number(models[0]?.value ?? 0), commands: Number(commands[0]?.value ?? 0),

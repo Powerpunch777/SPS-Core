@@ -322,6 +322,7 @@ export const spsNodeCommands = pgTable(
     timedOut: integer("timed_out").notNull().default(0),
     error: text("error"),
     completionReceiptDigest: text("completion_receipt_digest"),
+    completionReportJson: jsonb("completion_report_json").$type<Record<string, unknown> | null>(),
     lastEventSeq: integer("last_event_seq").notNull().default(0),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

@@ -4,6 +4,7 @@ import type { AgentSessionRunState } from "../compat/paperclip/plugin-sdk.js";
 import { notFound } from "../errors.js";
 import { observeSpsAgentRun } from "./sps-execution-observation.js";
 import { lockSpsWorkspaceExecutionControl } from "./sps-workspace-execution-control.js";
+import { hasSpsNodeClosureEvidence } from "./sps-node-closure-evidence.js";
 
 const terminal = new Set(["succeeded", "failed", "cancelled", "interrupted", "timed_out"]);
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -59,16 +60,33 @@ export function spsAgentSessionRunService(db: Db, pluginKey: string, cancelRun: 
   }
   async function getRun(input: Scope) {
     const run = await owned(input);
-    if (hasSpsSessionCancellation(run) && terminal.has(run.status) && run.contextSnapshot?.spsSessionCancellationTermination !== "confirmed"
-      && pidHasExited(run.processPid, run.processGroupId)) {
-      await db.update(heartbeatRuns).set({ contextSnapshot: sql`coalesce(${heartbeatRuns.contextSnapshot}, '{}'::jsonb) || '{"spsSessionCancellationTermination":"confirmed"}'::jsonb` }).where(eq(heartbeatRuns.id, run.id));
-      return snapshot(await owned(input));
+    if (hasSpsSessionCancellation(run) && terminal.has(run.status)) {
+      const commands = await db.select().from(spsNodeCommands).where(and(
+        eq(spsNodeCommands.companyId, input.companyId), eq(spsNodeCommands.heartbeatRunId, run.id),
+      ));
+      const receipts = run.contextSnapshot?.spsNodeCompletionReceipts as Record<string, unknown> | undefined;
+      if (commands.some(command => !hasSpsNodeClosureEvidence(command, receipts?.[command.id] === true))) {
+        // Older terminal policy decisions may carry an optimistic parent flag.
+        // Expose current remote evidence without rewriting that audit history.
+        return snapshot({ ...run, contextSnapshot: { ...run.contextSnapshot, spsSessionCancellationTermination: "pending" } });
+      }
+      const localProcessKnownExited = pidHasExited(run.processPid, run.processGroupId);
+      const noLocalProcessRecorded = !run.processPid && !run.processGroupId;
+      if (!noLocalProcessRecorded && !localProcessKnownExited) {
+        return snapshot({ ...run, contextSnapshot: { ...run.contextSnapshot, spsSessionCancellationTermination: "pending" } });
+      }
+      if (run.contextSnapshot?.spsSessionCancellationTermination === "confirmed") return snapshot(run);
+      if ((commands.length > 0 ? noLocalProcessRecorded || localProcessKnownExited : localProcessKnownExited)
+        && commands.every(command => hasSpsNodeClosureEvidence(command, receipts?.[command.id] === true))) {
+        await db.update(heartbeatRuns).set({ contextSnapshot: sql`coalesce(${heartbeatRuns.contextSnapshot}, '{}'::jsonb) || '{"spsSessionCancellationTermination":"confirmed"}'::jsonb` }).where(eq(heartbeatRuns.id, run.id));
+        return snapshot(await owned(input));
+      }
     }
     return snapshot(run);
   }
   async function cancelInternal(input: Scope) {
     const original = await owned(input);
-    if (terminal.has(original.status)) return snapshot(original);
+    if (terminal.has(original.status)) return getRun(input);
     // Serialize the cancellation marker with remote dispatch. Neither a queued
     // command nor a late adapter may start after this durable request.
     await db.transaction(async tx => {
@@ -77,18 +95,20 @@ export function spsAgentSessionRunService(db: Db, pluginKey: string, cancelRun: 
       if (terminal.has(run.status) || hasSpsSessionCancellation(run)) return false;
       await tx.update(heartbeatRuns).set({ contextSnapshot: { ...run.contextSnapshot, spsSessionCancellationRequested: true, spsSessionCancellationTermination: "pending", spsSessionCancellationWasQueued: run.status === "queued" } }).where(eq(heartbeatRuns.id, run.id));
       await tx.update(spsNodeCommands).set({ status: "failed", error: "Session run cancelled before dispatch", finishedAt: new Date(), updatedAt: new Date() })
-        .where(and(eq(spsNodeCommands.heartbeatRunId, run.id), eq(spsNodeCommands.status, "queued")));
+        .where(and(eq(spsNodeCommands.companyId, input.companyId), eq(spsNodeCommands.heartbeatRunId, run.id), eq(spsNodeCommands.status, "queued")));
       return true;
     });
     const current = await owned(input);
     if (!hasSpsSessionCancellation(current)) return snapshot(current);
-    const commands = await db.select().from(spsNodeCommands).where(eq(spsNodeCommands.heartbeatRunId, current.id));
+    const commands = await db.select().from(spsNodeCommands).where(and(
+      eq(spsNodeCommands.companyId, input.companyId), eq(spsNodeCommands.heartbeatRunId, current.id),
+    ));
     // Remote cancellation completes only when a signed Node completion arrives.
-    if (commands.some(command => ["claimed", "running"].includes(command.status))) return snapshot(current);
-    await cancelRun(current.id);
     const receipts = current.contextSnapshot?.spsNodeCompletionReceipts as Record<string, unknown> | undefined;
+    if (commands.some(command => !hasSpsNodeClosureEvidence(command, receipts?.[command.id] === true))) return snapshot(current);
+    await cancelRun(current.id);
     if (current.contextSnapshot?.spsSessionCancellationWasQueued === true || pidHasExited(original.processPid, original.processGroupId)
-      || (commands.length > 0 && commands.every(command => (!command.claimedAt && command.finishedAt) || receipts?.[command.id] === true))) {
+      || (commands.length > 0 && commands.every(command => hasSpsNodeClosureEvidence(command, receipts?.[command.id] === true)))) {
       await db.update(heartbeatRuns).set({ contextSnapshot: sql`coalesce(${heartbeatRuns.contextSnapshot}, '{}'::jsonb) || '{"spsSessionCancellationTermination":"confirmed"}'::jsonb` }).where(eq(heartbeatRuns.id, current.id));
     }
     return getRun(input);

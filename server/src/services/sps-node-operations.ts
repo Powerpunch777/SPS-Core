@@ -1,5 +1,5 @@
 import { createHash, createPublicKey, verify } from "node:crypto";
-import { and, desc, eq, inArray, isNull, lt, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull, isNull, lt, or, sql } from "drizzle-orm";
 import type { Db } from "../compat/paperclip/db.js";
 import {
   agents, heartbeatRuns, projects, spsAgentNodeBindings, spsHostProjectShareNodeGrants,
@@ -19,8 +19,9 @@ import {
 } from "../compat/paperclip/shared.js";
 import { badRequest, forbidden, notFound } from "../errors.js";
 import { hasSpsSessionCancellation, } from "../services/sps-agent-session-runs.js";
+import { hasSpsNodeClosureEvidence } from "../services/sps-node-closure-evidence.js";
 import { createSpsNodeUsageReceipt } from "../services/sps-node-usage.js";
-import { createSpsNodeCompletionReceiptDigest } from "../services/sps-node-completion-receipt.js";
+import { createSpsNodeCompletionReceiptDigest, normalizeSpsNodeCompletionReport } from "../services/sps-node-completion-receipt.js";
 import { normalizeSpsPluginExecutionTimeout } from "../services/sps-execution-timeout.js";
 import { assertSpsWorkspaceExecutionActive, lockSpsWorkspaceExecutionControl, withSpsWorkspaceExecutionAdmission } from "../services/sps-workspace-execution-control.js";
 import { heartbeatService } from "../compat/paperclip/control-plane.js";
@@ -184,6 +185,151 @@ export function createSpsNodeOperations(dbInput: NodeDatabase, { effectDb = dbIn
     const now = new Date();
     await db.update(spsPluginNodeRuns).set({ status: "failed", error: input.reason, finishedAt: now, updatedAt: now })
       .where(and(eq(spsPluginNodeRuns.id, input.runId), inArray(spsPluginNodeRuns.status, ["claimed", "running"] as const)));
+  }
+
+  async function recordParentCompletionReceipt(tx: NodeDatabase, command: Command, parent: typeof heartbeatRuns.$inferSelect,
+    forceCancellation = false) {
+    if (parent.companyId !== command.companyId) return false;
+    const cancellationRequestedForParent = forceCancellation || hasSpsSessionCancellation(parent);
+      const parentContext = cancellationRequestedForParent && parent.contextSnapshot?.spsSessionCancellationRequested !== true
+      ? { ...parent.contextSnapshot, spsSessionCancellationRequested: true,
+          spsSessionCancellationTermination: "pending", spsSessionCancellationWasQueued: parent.status === "queued" }
+      : parent.contextSnapshot;
+    const existingReceipts = parentContext?.spsNodeCompletionReceipts as Record<string, unknown> | undefined;
+    if (parentContext?.spsSessionCancellationTermination === "confirmed" && existingReceipts?.[command.id] === true) return false;
+    const receipts = { ...existingReceipts, [command.id]: true };
+    let terminationConfirmed = false;
+    if (cancellationRequestedForParent) {
+      const parentCommands = await tx.select({ id: spsNodeCommands.id, status: spsNodeCommands.status,
+        claimedAt: spsNodeCommands.claimedAt, startedAt: spsNodeCommands.startedAt, finishedAt: spsNodeCommands.finishedAt,
+        completionReceiptDigest: spsNodeCommands.completionReceiptDigest, exitCode: spsNodeCommands.exitCode,
+        signal: spsNodeCommands.signal, timedOut: spsNodeCommands.timedOut }).from(spsNodeCommands).where(and(
+        eq(spsNodeCommands.companyId, parent.companyId), eq(spsNodeCommands.heartbeatRunId, parent.id),
+      ));
+      terminationConfirmed = parentCommands.some(sibling => sibling.id === command.id) && parentCommands.every(sibling =>
+        hasSpsNodeClosureEvidence(sibling, receipts[sibling.id] === true));
+    }
+    const newlyConfirmed = terminationConfirmed && parentContext?.spsSessionCancellationTermination !== "confirmed";
+    await tx.update(heartbeatRuns).set({ contextSnapshot: {
+      ...parentContext,
+      spsNodeCompletionReceipts: receipts,
+      ...(terminationConfirmed ? { spsSessionCancellationTermination: "confirmed" } : {}),
+    } }).where(and(eq(heartbeatRuns.id, parent.id), eq(heartbeatRuns.companyId, command.companyId)));
+    return newlyConfirmed;
+  }
+
+  async function adoptTerminalCommandReport(command: Command, node: Node, completion: ReturnType<typeof normalizeSpsNodeCompletionReport>) {
+    if (node.status !== "active" || !node.keyVerifiedAt || (!command.claimedAt && !command.startedAt)) {
+      return { command, newlyConfirmed: false };
+    }
+    const digest = createSpsNodeCompletionReceiptDigest({ kind: "agent-command", nodeId: command.nodeId,
+      commandId: command.id, completion });
+    return transaction(async tx => {
+      await lockSpsWorkspaceExecutionControl(tx, node.companyId);
+      const parent = command.heartbeatRunId ? await tx.select().from(heartbeatRuns).where(and(
+        eq(heartbeatRuns.id, command.heartbeatRunId), eq(heartbeatRuns.companyId, node.companyId),
+      )).for("update").then(rows => rows[0] ?? null) : null;
+      const current = await tx.select().from(spsNodeCommands).where(and(
+        eq(spsNodeCommands.id, command.id), eq(spsNodeCommands.nodeId, node.id), eq(spsNodeCommands.companyId, node.companyId),
+      )).for("update").then(rows => rows[0] ?? null);
+      if (!current || current.id !== command.id || current.nodeId !== node.id || current.companyId !== node.companyId) {
+        throw notFound("SPS Node command not found");
+      }
+      if (!["succeeded", "failed", "cancelled"].includes(current.status)
+        || (!current.claimedAt && !current.startedAt)) {
+        return { command: current, newlyConfirmed: false };
+      }
+      if (current.completionReceiptDigest !== null && current.completionReceiptDigest !== digest) {
+        return { command: current, newlyConfirmed: false };
+      }
+      if (current.completionReportJson !== null && current.completionReceiptDigest === digest) {
+        try {
+          const storedDigest = createSpsNodeCompletionReceiptDigest({ kind: "agent-command", nodeId: current.nodeId,
+            commandId: current.id, completion: normalizeSpsNodeCompletionReport(current.completionReportJson as Parameters<typeof normalizeSpsNodeCompletionReport>[0]) });
+          if (storedDigest !== digest) return { command: current, newlyConfirmed: false };
+        } catch { return { command: current, newlyConfirmed: false }; }
+      }
+      if (current.completionReportJson !== null && current.completionReceiptDigest === null) {
+        return { command: current, newlyConfirmed: false };
+      }
+      if (current.completionReceiptDigest === null || current.completionReportJson === null) {
+        const set = current.completionReceiptDigest === null
+          ? { completionReceiptDigest: digest, completionReportJson: completion, updatedAt: new Date() }
+          : { completionReportJson: completion, updatedAt: new Date() };
+        const predicates = [eq(spsNodeCommands.id, current.id), eq(spsNodeCommands.nodeId, node.id), eq(spsNodeCommands.companyId, node.companyId),
+          inArray(spsNodeCommands.status, ["succeeded", "failed", "cancelled"]),
+          or(isNotNull(spsNodeCommands.claimedAt), isNotNull(spsNodeCommands.startedAt)), isNull(spsNodeCommands.completionReportJson),
+          current.completionReceiptDigest === null ? isNull(spsNodeCommands.completionReceiptDigest)
+            : eq(spsNodeCommands.completionReceiptDigest, digest)];
+        const adopted = await tx.update(spsNodeCommands).set(set).where(and(...predicates)).returning().then(rows => rows[0] ?? null);
+        if (!adopted) {
+          const latest = await tx.select().from(spsNodeCommands).where(and(
+            eq(spsNodeCommands.id, current.id), eq(spsNodeCommands.nodeId, node.id), eq(spsNodeCommands.companyId, node.companyId),
+          )).then(rows => rows[0] ?? null);
+          if (!latest || latest.id !== command.id || latest.nodeId !== node.id || latest.companyId !== node.companyId) {
+            throw notFound("SPS Node command not found");
+          }
+          return { command: latest, newlyConfirmed: false };
+        }
+        const newlyConfirmed = parent ? await recordParentCompletionReceipt(tx, adopted, parent) : false;
+        return { command: adopted, newlyConfirmed };
+      }
+      const newlyConfirmed = parent ? await recordParentCompletionReceipt(tx, current, parent) : false;
+      return { command: current, newlyConfirmed };
+    });
+  }
+
+  async function adoptTerminalPluginRunReport(run: PluginRun, node: Node, completion: ReturnType<typeof normalizeSpsNodeCompletionReport>) {
+    if (node.status !== "active" || !node.keyVerifiedAt || (!run.claimedAt && !run.startedAt)) return run;
+    const digest = createSpsNodeCompletionReceiptDigest({ kind: "plugin-run", nodeId: run.nodeId,
+      commandId: run.id, completion });
+    return transaction(async tx => {
+      await lockSpsWorkspaceExecutionControl(tx, node.companyId);
+      const current = await tx.select().from(spsPluginNodeRuns).where(and(
+        eq(spsPluginNodeRuns.id, run.id), eq(spsPluginNodeRuns.nodeId, node.id), eq(spsPluginNodeRuns.companyId, node.companyId),
+      )).for("update").then(rows => rows[0] ?? null);
+      if (!current || current.id !== run.id || current.nodeId !== node.id || current.companyId !== node.companyId) {
+        throw notFound("SPS plugin run not found");
+      }
+      if (!["succeeded", "failed", "cancelled"].includes(current.status)
+        || (!current.claimedAt && !current.startedAt)) return current;
+      if (current.completionReceiptDigest !== null && current.completionReceiptDigest !== digest) return current;
+      if (current.completionReportJson !== null && current.completionReceiptDigest === digest) {
+        try {
+          const storedDigest = createSpsNodeCompletionReceiptDigest({ kind: "plugin-run", nodeId: current.nodeId,
+            commandId: current.id, completion: normalizeSpsNodeCompletionReport(current.completionReportJson as Parameters<typeof normalizeSpsNodeCompletionReport>[0]) });
+          if (storedDigest !== digest) return current;
+        } catch { return current; }
+      }
+      if (current.completionReportJson !== null && current.completionReceiptDigest === null) return current;
+      if (current.completionReceiptDigest === null || current.completionReportJson === null) {
+        const set = current.completionReceiptDigest === null
+          ? { completionReceiptDigest: digest, completionReportJson: completion, updatedAt: new Date() }
+          : { completionReportJson: completion, updatedAt: new Date() };
+        const predicates = [eq(spsPluginNodeRuns.id, current.id), eq(spsPluginNodeRuns.nodeId, node.id), eq(spsPluginNodeRuns.companyId, node.companyId),
+          inArray(spsPluginNodeRuns.status, ["succeeded", "failed", "cancelled"]),
+          or(isNotNull(spsPluginNodeRuns.claimedAt), isNotNull(spsPluginNodeRuns.startedAt)), isNull(spsPluginNodeRuns.completionReportJson),
+          current.completionReceiptDigest === null ? isNull(spsPluginNodeRuns.completionReceiptDigest)
+            : eq(spsPluginNodeRuns.completionReceiptDigest, digest)];
+        const adopted = await tx.update(spsPluginNodeRuns).set(set).where(and(...predicates)).returning().then(rows => rows[0] ?? null);
+        if (adopted) return adopted;
+        const latest = await tx.select().from(spsPluginNodeRuns).where(and(
+          eq(spsPluginNodeRuns.id, current.id), eq(spsPluginNodeRuns.nodeId, node.id), eq(spsPluginNodeRuns.companyId, node.companyId),
+        )).then(rows => rows[0] ?? null);
+        if (!latest || latest.id !== run.id || latest.nodeId !== node.id || latest.companyId !== node.companyId) {
+          throw notFound("SPS plugin run not found");
+        }
+        return latest;
+      }
+      return current;
+    });
+  }
+
+  async function scheduleParentCancellation(runId: string | null, newlyConfirmed: boolean, context: SpsNodeOperationContext) {
+    if (!runId || !newlyConfirmed) return;
+    const effect = () => heartbeatService(effectDb).cancelRun(runId);
+    if (context.afterCommit) await context.afterCommit(effect);
+    else await effect();
   }
 
   async function register(input: { workspaceId: string; payload: unknown }, context: SpsNodeOperationContext): Promise<SpsNodeOperationResult> {
@@ -401,14 +547,22 @@ export function createSpsNodeOperations(dbInput: NodeDatabase, { effectDb = dbIn
     }
     if (input.operation === "command-complete") {
       const completion = spsNodeCommandCompleteSchema.parse(body), commandId = input.resourceId!;
+      const completionReport = normalizeSpsNodeCompletionReport(completion);
       const command = await db.select().from(spsNodeCommands).where(and(eq(spsNodeCommands.id, commandId), eq(spsNodeCommands.nodeId, node.id))).then(rows => rows[0] ?? null);
       if (!command) throw notFound("SPS Node command not found");
-      if (["succeeded", "failed", "cancelled"].includes(command.status)) return { status: 200, data: command };
+      if (["succeeded", "failed", "cancelled"].includes(command.status)) {
+        const adopted = await adoptTerminalCommandReport(command, node, completionReport);
+        await scheduleParentCancellation(command.heartbeatRunId, adopted.newlyConfirmed, context);
+        return { status: 200, data: adopted.command };
+      }
       if (command.status !== "claimed" && command.status !== "running" && command.status !== "cancelling") throw forbidden("SPS Node command is not active");
       if (command.status !== "cancelling" && !await commandHasCurrentAuthority(node, command)) {
         await failActiveNodeCommand({ commandId: command.id, reason: "SPS Node access was revoked or reassigned while this command was running." });
-        const failed = await db.select().from(spsNodeCommands).where(eq(spsNodeCommands.id, command.id)).then(rows => rows[0]!);
-        return { status: 200, data: failed };
+        const failed = await db.select().from(spsNodeCommands).where(and(eq(spsNodeCommands.id, command.id), eq(spsNodeCommands.nodeId, node.id))).then(rows => rows[0] ?? null);
+        if (!failed) throw notFound("SPS Node command not found");
+        const adopted = await adoptTerminalCommandReport(failed, node, completionReport);
+        await scheduleParentCancellation(failed.heartbeatRunId, adopted.newlyConfirmed, context);
+        return { status: 200, data: adopted.command };
       }
       const { updated, cancelled } = await transaction(async tx => {
         const control = await lockSpsWorkspaceExecutionControl(tx, node.companyId);
@@ -416,11 +570,14 @@ export function createSpsNodeOperations(dbInput: NodeDatabase, { effectDb = dbIn
         if (commandEpoch > currentEpoch) throw forbidden("SPS Node command generation is invalid");
         const cancellationRequested = command.status === "cancelling" || commandEpoch < currentEpoch || control.state === "stopped";
         if (!cancellationRequested) await assertSpsWorkspaceExecutionActive(tx, node.companyId, command.workspaceExecutionEpoch);
-        const parent = command.heartbeatRunId ? await tx.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, command.heartbeatRunId)).for("update").then(rows => rows[0]) : null;
+        const parent = command.heartbeatRunId ? await tx.select().from(heartbeatRuns).where(and(
+          eq(heartbeatRuns.id, command.heartbeatRunId), eq(heartbeatRuns.companyId, node.companyId),
+        )).for("update").then(rows => rows[0]) : null;
         const updated = await tx.update(spsNodeCommands).set({ status: cancellationRequested ? "cancelled" : completion.status, exitCode: completion.exitCode,
           signal: completion.signal ?? null, timedOut: completion.timedOut ? 1 : 0, error: cancellationRequested ? command.error ?? "Workspace execution was stopped." : completion.error ?? null,
           completionReceiptDigest: createSpsNodeCompletionReceiptDigest({ kind: "agent-command", nodeId: command.nodeId,
             commandId: command.id, completion }),
+          completionReportJson: completionReport,
           finishedAt: new Date(), updatedAt: new Date() }).where(and(eq(spsNodeCommands.id, command.id),
           eq(spsNodeCommands.nodeId, node.id),
           inArray(spsNodeCommands.status, ["claimed", "running", "cancelling"]))).returning().then(rows => rows[0] ?? null);
@@ -429,31 +586,10 @@ export function createSpsNodeOperations(dbInput: NodeDatabase, { effectDb = dbIn
         // stale pre-transaction snapshot as if it were still active.
         if (!updated) return { updated: null, cancelled: false };
         if (!parent) return { updated, cancelled: false };
-        const cancellationRequestedForParent = cancellationRequested || hasSpsSessionCancellation(parent);
-        const parentContext = cancellationRequestedForParent && !hasSpsSessionCancellation(parent)
-          ? { ...parent.contextSnapshot, spsSessionCancellationRequested: true,
-              spsSessionCancellationTermination: "pending", spsSessionCancellationWasQueued: parent.status === "queued" }
-          : parent.contextSnapshot;
-        const receipts = { ...(parentContext?.spsNodeCompletionReceipts as Record<string, unknown> | undefined), [command.id]: true };
-        let terminationConfirmed = false;
-        if (cancellationRequestedForParent) {
-          const others = await tx.select({ id: spsNodeCommands.id }).from(spsNodeCommands).where(and(
-            eq(spsNodeCommands.heartbeatRunId, parent.id), inArray(spsNodeCommands.status, ["claimed", "running", "cancelling"]),
-          )).limit(1);
-          terminationConfirmed = others.length === 0;
-        }
-        await tx.update(heartbeatRuns).set({ contextSnapshot: {
-          ...parentContext,
-          spsNodeCompletionReceipts: receipts,
-          ...(terminationConfirmed ? { spsSessionCancellationTermination: "confirmed" } : {}),
-        } }).where(eq(heartbeatRuns.id, parent.id));
-        return { updated, cancelled: terminationConfirmed };
+        const newlyConfirmed = await recordParentCompletionReceipt(tx, updated, parent, cancellationRequested);
+        return { updated, cancelled: newlyConfirmed };
       });
-      if (cancelled && command.heartbeatRunId) {
-        const effect = () => heartbeatService(effectDb).cancelRun(command.heartbeatRunId!);
-        if (context.afterCommit) await context.afterCommit(effect);
-        else await effect();
-      }
+      await scheduleParentCancellation(command.heartbeatRunId, cancelled, context);
       const current = updated ?? await db.select().from(spsNodeCommands)
         .where(and(eq(spsNodeCommands.id, command.id), eq(spsNodeCommands.nodeId, node.id)))
         .then(rows => rows[0] ?? null);
@@ -544,15 +680,28 @@ export function createSpsNodeOperations(dbInput: NodeDatabase, { effectDb = dbIn
       const parsed = spsPluginNodeRunCompleteSchema.safeParse(body);
       if (!parsed.success) throw badRequest("Invalid SPS plugin completion report");
       const completion = parsed.data;
+      const completionReport = normalizeSpsNodeCompletionReport(completion);
       const run = await db.select().from(spsPluginNodeRuns).where(and(eq(spsPluginNodeRuns.id, input.resourceId!), eq(spsPluginNodeRuns.nodeId, node.id))).then(rows => rows[0] ?? null);
       if (!run) throw notFound("SPS plugin run not found");
-      if (["succeeded", "failed", "cancelled"].includes(run.status)) return { status: 200, data: run };
+      if (["succeeded", "failed", "cancelled"].includes(run.status)) {
+        if (completion.usageReport !== undefined) {
+          try { createSpsNodeUsageReceipt(run, completion.usageReport); }
+          catch { throw badRequest("SPS usage report does not match this execution"); }
+        }
+        const adopted = await adoptTerminalPluginRunReport(run, node, completionReport);
+        return { status: 200, data: adopted };
+      }
       if (!["claimed", "running", "cancelling"].includes(run.status)) throw forbidden("SPS plugin run is not active");
       if (run.status !== "cancelling" && !await pluginRunHasCurrentAuthority(node, run)) {
         const reason = "SPS plugin execution access was revoked or changed while this run was active.";
         await failActivePluginRun({ runId: run.id, reason });
-        const failed = await db.select().from(spsPluginNodeRuns).where(eq(spsPluginNodeRuns.id, run.id)).then(rows => rows[0]!);
-        return { status: 200, data: failed };
+        const failed = await db.select().from(spsPluginNodeRuns).where(and(eq(spsPluginNodeRuns.id, run.id), eq(spsPluginNodeRuns.nodeId, node.id))).then(rows => rows[0] ?? null);
+        if (!failed) throw notFound("SPS plugin run not found");
+        if (completion.usageReport !== undefined) {
+          try { createSpsNodeUsageReceipt(failed, completion.usageReport); }
+          catch { throw badRequest("SPS usage report does not match this execution"); }
+        }
+        return { status: 200, data: await adoptTerminalPluginRunReport(failed, node, completionReport) };
       }
       let usageJson: Record<string, unknown> | null = null;
       if (completion.usageReport !== undefined) {
@@ -571,6 +720,7 @@ export function createSpsNodeOperations(dbInput: NodeDatabase, { effectDb = dbIn
           error: cancellationRequested ? run.error ?? "Workspace execution was stopped." : completion.error ?? null,
           usageJson, completionReceiptDigest: createSpsNodeCompletionReceiptDigest({ kind: "plugin-run", nodeId: run.nodeId,
             commandId: run.id, completion }), finishedAt: new Date(), updatedAt: new Date(),
+          completionReportJson: completionReport,
         }).where(and(eq(spsPluginNodeRuns.id, run.id), eq(spsPluginNodeRuns.nodeId, node.id),
           inArray(spsPluginNodeRuns.status, ["claimed", "running", "cancelling"])))
           .returning().then(rows => rows[0] ?? null);
