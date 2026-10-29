@@ -64,11 +64,23 @@ restored backup cannot replay deletion against another machine's paths. The
 plugin's non-running status remains; the Host must review it before another
 explicit lifecycle action. Completed history is not changed by this sanitizer.
 
-Removal and approved-upgrade intent use the same table. Installation-stage
-recovery, the capability-approval-pending upgrade branch, candidate retirement,
-previous-artifact retirement
-and runtime-cache power-loss recovery remain separate required work. Windows
-Job ownership and physical installed-app qualification need their own evidence.
+Removal and approved-upgrade intent use the same table. An approval-pending
+upgrade does not replace the old package pointer or manifest: it closes the
+runtime and sets `upgrade_pending`. Startup only activates `ready` packages;
+direct enable cannot bypass update review. This branch is not an unjournaled
+pointer replacement.
+
+Initial install commits package metadata and plugin DB migrations in one
+transaction. Uncertain commit responses retain the artifact. If the Host stops
+after commit but before initial activation, the installed record remains visible
+and an explicit Host enable can retry it through the normal loader checks. It
+does not automatically execute every installed package at startup.
+
+A crash during preparation can still leave an unreferenced UUID staging tree.
+Automatic retirement of those candidates and previous artifacts is not
+implemented. No age-based or unreferenced-path sweep is authorized. Runtime-cache
+power-loss recovery, Windows Job ownership and physical installed-app
+qualification require their own evidence.
 
 ## Durable upgrade phases
 
@@ -113,6 +125,12 @@ intent retires its owned worker; an unreadable journal denies new calls while
 retaining ownership rather than recording a fictional close.
 
 ## Approved-upgrade verification
+
+The subsequent explicit-enable correction passed8/8 selected lifecycle tests:
+installed/disabled/error activation, rejection of other states, pending-package
+denial and unconfirmed Workspace cleanup. It restores the existing UI Enable
+action for interrupted initial activation without automatic startup or bypassing
+pending update approval.
 
 - Upgrade recovery14/14 plus existing upgrade-safety17/17 and cleanup3/3 passed
   in one selected run (34/34). Cases include ambiguous commit/completion,

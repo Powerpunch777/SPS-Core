@@ -173,7 +173,8 @@ export interface PluginLifecycleManager {
   load(pluginId: string): Promise<PluginRecord>;
 
   /**
-   * Enable a plugin that is in `disabled`, `error`, or `upgrade_pending` state.
+   * Enable an installed, disabled, or errored plugin. Updates waiting for
+   * approval must be reviewed through upgrade instead.
    * Transitions → `ready`.
    */
   enable(pluginId: string): Promise<PluginRecord>;
@@ -768,10 +769,11 @@ export function pluginLifecycleManager(
 
     // -- enable -----------------------------------------------------------
     /**
-     * enable — Re-enables a plugin that was previously in an error or upgrade state.
+     * enable — Starts an installed plugin or re-enables a disabled/errored plugin.
      *
      * Similar to load(), this method transitions the plugin to 'ready' and starts
-     * its worker, but it specifically targets plugins that are currently disabled.
+     * its worker. An explicit enable can resume installation interrupted before
+     * initial activation; it does not approve a pending package update.
      *
      * @param pluginId - The UUID of the plugin to enable.
      * @returns The updated plugin record.
@@ -784,9 +786,9 @@ export function pluginLifecycleManager(
           "Plugin update is waiting for review. Re-run the upgrade with the required approval instead of enabling it directly.",
         );
       }
-      if (plugin.status !== "disabled" && plugin.status !== "error") {
+      if (plugin.status !== "installed" && plugin.status !== "disabled" && plugin.status !== "error") {
         throw badRequest(
-          `Cannot enable plugin in status '${plugin.status}'. Plugin must be in 'disabled' or 'error' status to be enabled.`,
+          `Cannot enable plugin in status '${plugin.status}'. Plugin must be in 'installed', 'disabled', or 'error' status to be enabled.`,
         );
       }
 

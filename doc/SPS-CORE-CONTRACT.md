@@ -34,11 +34,15 @@ plugins. The maintenance action is joined by shutdown. These are graceful local
 coordination guarantees, not crash-atomic package journaling, descendant-process
 containment, or protection from arbitrary same-user filesystem access.
 
-The product composition additionally persists removal intent before deleting
-package artifacts and reconciles it before normal plugin startup. Pending
-removal denies reactivation and retains its exact package/data policy. Its
-scope, rollback constraints and outstanding install/upgrade journal work are
-specified in [Plugin package removal recovery](SPS-PLUGIN-PACKAGE-RECOVERY.md).
+The product composition additionally persists removal and approved-upgrade
+intents before destructive package mutations, and reconciles them before normal
+plugin startup. Pending operations deny unrelated activation/replacement.
+Upgrade phases preserve both artifacts and avoid old-code rollback after an
+entered activation may have changed the database. An explicit Host enable may
+resume an installed package whose initial activation was interrupted, using
+normal loader validation. Approval-pending updates still cannot be enabled.
+See [Plugin package lifecycle recovery](SPS-PLUGIN-PACKAGE-RECOVERY.md) for scope,
+rollback constraints, retained staging artifacts and outstanding qualification.
 
 Workspace-wide execution admission and cancellation are platform-owned. The
 durable pause/stop/resume contract, per-lane acknowledgement limits, Host-only
