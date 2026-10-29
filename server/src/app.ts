@@ -69,6 +69,7 @@ import { resolveStaticUiDist } from "./static-ui-dist.js";
 import { applyUiBranding } from "./ui-branding.js";
 import { logger } from "./middleware/logger.js";
 import { DEFAULT_LOCAL_PLUGIN_DIR, pluginLoader } from "./services/plugin-loader.js";
+import { createSpsPluginPackageOperations } from "./services/sps-plugin-package-operations.js";
 import { createPluginWorkerManager, type PluginWorkerManager } from "./services/plugin-worker-manager.js";
 import { createSpsNativePluginRuntime } from "./services/sps-native-plugin-runtime.js";
 import { createSpsWorkspacePluginWorkers } from "./services/sps-workspace-plugin-workers.js";
@@ -321,9 +322,11 @@ export async function createApp(
     api.use(instanceDatabaseBackupRoutes(opts.databaseBackupService));
   }
   const pluginRegistry = pluginRegistryService(db);
+  const packageOperations = createSpsPluginPackageOperations(db);
   setPluginEventBus(eventBus);
   const jobStore = pluginJobStore(db);
   const lifecycle = pluginLifecycleManager(db, {
+    packageOperations,
     workerManager,
     workspaceRuntime: workspacePluginWorkers,
     migrationDb: opts.pluginMigrationDb ?? db,
@@ -357,6 +360,7 @@ export async function createApp(
       localPluginDir: opts.localPluginDir ?? DEFAULT_LOCAL_PLUGIN_DIR,
       migrationDb: opts.pluginMigrationDb,
       recoveryState: pluginRecoveryState,
+      packageOperations,
     },
     {
       workerManager,
@@ -698,7 +702,9 @@ export async function createApp(
     // the per-plugin barrier synchronously so bridge calls arriving in that
     // window can join their plugin's activation instead of racing a missing worker.
     const releaseInitialLoad = loader.prepareInitialLoad?.();
-    return ensureBundledKubernetesPlugin()
+    return Promise.resolve()
+      .then(() => lifecycle.recoverPackageOperations?.())
+      .then(() => ensureBundledKubernetesPlugin())
       .then(() => ensureConfiguredBundledPlugins())
       .then(() => refreshConfiguredBundledPlugins())
       .then(() => loader.loadAll())

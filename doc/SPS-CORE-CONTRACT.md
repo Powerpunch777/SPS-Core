@@ -34,6 +34,12 @@ plugins. The maintenance action is joined by shutdown. These are graceful local
 coordination guarantees, not crash-atomic package journaling, descendant-process
 containment, or protection from arbitrary same-user filesystem access.
 
+The product composition additionally persists removal intent before deleting
+package artifacts and reconciles it before normal plugin startup. Pending
+removal denies reactivation and retains its exact package/data policy. Its
+scope, rollback constraints and outstanding install/upgrade journal work are
+specified in [Plugin package removal recovery](SPS-PLUGIN-PACKAGE-RECOVERY.md).
+
 Workspace-wide execution admission and cancellation are platform-owned. The
 durable pause/stop/resume contract, per-lane acknowledgement limits, Host-only
 mutation authority and compatibility requirements are specified in

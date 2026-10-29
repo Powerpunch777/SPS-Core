@@ -44,6 +44,25 @@ function run(executor: ReturnType<typeof fakeExecutor>) {
 }
 
 describe("sanitizePostRestoreDatabaseWithExecutor", () => {
+  it("retires pending package deletions after restore while preserving intent history", async () => {
+    const executor = fakeExecutor({
+      tables: ["sps_plugin_package_operations"],
+      columnsByTable: { sps_plugin_package_operations: ["kind", "active_plugin_id", "completed_at", "updated_at"] },
+    });
+    await run(executor);
+    const update = executor.calls.find(query => query.startsWith('UPDATE "sps_plugin_package_operations"'));
+    expect(update).toContain('"kind" = \'cancelled_after_restore\'');
+    expect(update).toContain('"active_plugin_id" = NULL');
+    expect(update).toContain('"completed_at" = NOW()');
+    expect(update).toContain('WHERE "completed_at" IS NULL');
+    expect(update).not.toMatch(/snapshot_json|package_path/);
+    expect(executor.calls).not.toContain('DELETE FROM "sps_plugin_package_operations"');
+    expect(executor.calls.indexOf(update!)).toBeGreaterThan(executor.calls.indexOf("BEGIN"));
+    expect(executor.calls.indexOf(update!)).toBeLessThan(executor.calls.indexOf("COMMIT"));
+    const legacy = fakeExecutor({ tables: ["account"] });
+    await run(legacy);
+    expect(legacy.calls.some(query => query.includes('"sps_plugin_package_operations"'))).toBe(false);
+  });
   it("deletes FK children before parents", async () => {
     const executor = fakeExecutor({
       tables: [

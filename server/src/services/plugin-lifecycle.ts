@@ -57,6 +57,7 @@ import {
   PluginPackageMaintenanceRequiredError,
   type PluginPackageMutationPermit,
 } from "./sps-plugin-package-maintenance.js";
+import { samePluginPackageArtifact, type SpsPluginPackageOperation, type SpsPluginPackageOperations } from "./sps-plugin-package-operations.js";
 
 // ---------------------------------------------------------------------------
 // Lifecycle state machine
@@ -152,6 +153,8 @@ type LifecycleEventPayload<K extends LifecycleEventName> = PluginLifecycleEvents
 // ---------------------------------------------------------------------------
 
 export interface PluginLifecycleManager {
+  /** Resume durable removal intents before normal startup admission. */
+  recoverPackageOperations?(): Promise<void>;
   /**
    * Attach the runtime-capable loader after the lifecycle and loader finish
    * their circular server composition. This may be called only once unless the
@@ -289,6 +292,8 @@ export interface PluginLifecycleManager {
  * Options for constructing a PluginLifecycleManager.
  */
 export interface PluginLifecycleManagerOptions {
+  /** Core composition supplies the durable Host package-operation store. */
+  packageOperations?: SpsPluginPackageOperations;
   /** Optional Core-owned Workspace process drain and policy reconciliation. */
   workspaceRuntime?: SpsPluginRuntimeMutationCoordinator;
   /** Plugin loader instance. Falls back to the default if omitted. */
@@ -347,6 +352,7 @@ export function pluginLifecycleManager(
   let migrationDb = db;
   let databaseBackupService: PluginLifecycleManagerOptions["databaseBackupService"];
   let workspaceRuntime: SpsPluginRuntimeMutationCoordinator | undefined;
+  let packageOperations: SpsPluginPackageOperations | undefined;
 
   if (options && typeof options === "object" && "discoverAll" in options) {
     // Legacy: second arg is a PluginLoader directly
@@ -358,6 +364,7 @@ export function pluginLifecycleManager(
     migrationDb = opts.migrationDb ?? db;
     databaseBackupService = opts.databaseBackupService;
     workspaceRuntime = opts.workspaceRuntime;
+    packageOperations = opts.packageOperations;
   }
 
   const registry = pluginRegistryService(db);
@@ -505,6 +512,28 @@ export function pluginLifecycleManager(
     return workerManager.withPluginPackageMutation(plugin.id, action);
   }
 
+  async function finishDurableUninstall(operation: SpsPluginPackageOperation): Promise<PluginRecord | null> {
+    const snapshot = operation.snapshot;
+    return withArtifactCleanupFence(snapshot, async permit => {
+      const current = await registry.getById(snapshot.id) as PluginRecord | null;
+      const sameKey = current ? current : await registry.getByKey(snapshot.pluginKey) as PluginRecord | null;
+      if ((sameKey && !samePluginPackageArtifact(sameKey, snapshot)) || (!current && !operation.removeData)) {
+        throw new Error("Plugin package changed during removal recovery; artifacts were preserved.");
+      }
+      await deactivatePluginRuntime(snapshot.id, snapshot.pluginKey);
+      await ensurePluginWorkerClosed(snapshot.id);
+      // Reuse the exact live maintenance permit and path classifier. A journal
+      // is never authority to bypass closure or delete an arbitrary local path.
+      await pluginLoaderInstance.cleanupInstallArtifacts(snapshot, permit);
+      const result = current ? await registry.uninstall(snapshot.id, operation.removeData) as PluginRecord | null : null;
+      await packageOperations!.complete(operation.id);
+      emitter.emit("plugin.status_changed", { pluginId: snapshot.id, pluginKey: snapshot.pluginKey,
+        previousStatus: snapshot.status, newStatus: "uninstalled" as PluginStatus });
+      emitDomain("plugin.unloaded", { pluginId: snapshot.id, pluginKey: snapshot.pluginKey, removeData: operation.removeData });
+      return result;
+    });
+  }
+
   async function ensurePluginWorkerClosed(pluginId: string): Promise<void> {
     if (!workerManager) {
       // Preserve the documented metadata-only mode. A runtime-backed loader
@@ -631,6 +660,21 @@ export function pluginLifecycleManager(
   // -----------------------------------------------------------------------
 
   const service: PluginLifecycleManager = {
+    async recoverPackageOperations() {
+      if (!packageOperations) return;
+      // An invalid/unreadable journal fails startup before loadAll. Individual
+      // blocked removals stay quarantined and do not stop unrelated plugins.
+      for (const operation of await packageOperations.listPending()) {
+        try {
+          const resume = () => finishDurableUninstall(operation);
+          if (workspaceRuntime) await withSpsPluginRuntimeMutation(workspaceRuntime, operation.pluginId, resume);
+          else await resume();
+        } catch (error) {
+          log.error({ pluginId: operation.pluginId, operationId: operation.id, error },
+            "plugin lifecycle: package removal recovery remains pending");
+        }
+      }
+    },
     attachRuntimeLoader(loader: PluginLoader): void {
       if (pluginLoaderInstance === loader) return;
       if (runtimeLoaderAttached) {
@@ -730,6 +774,29 @@ export function pluginLifecycleManager(
       pluginId: string,
       removeData = false,
     ): Promise<PluginRecord | null> {
+      if (packageOperations) {
+        const pending = await packageOperations.pendingForPlugin(pluginId);
+        if (pending) {
+          if (pending.removeData !== removeData) throw badRequest("Resume the existing package removal before changing its data policy.");
+          return finishDurableUninstall(pending);
+        }
+        const snapshot = await requirePlugin(pluginId);
+        if (snapshot.status === "uninstalled" && !removeData) throw badRequest("Plugin is already uninstalled.");
+        // Close inside the existing admission fence before writing durable
+        // intent. Failure to persist intent cannot authorize artifact deletion.
+        return withArtifactCleanupFence(snapshot, async permit => {
+          await deactivatePluginRuntime(pluginId, snapshot.pluginKey);
+          await ensurePluginWorkerClosed(pluginId);
+          const operation = await packageOperations!.beginUninstall(snapshot, removeData);
+          await pluginLoaderInstance.cleanupInstallArtifacts(snapshot, permit);
+          const result = await registry.uninstall(pluginId, removeData) as PluginRecord | null;
+          await packageOperations!.complete(operation.id);
+          emitter.emit("plugin.status_changed", { pluginId, pluginKey: snapshot.pluginKey,
+            previousStatus: snapshot.status, newStatus: "uninstalled" as PluginStatus });
+          emitDomain("plugin.unloaded", { pluginId, pluginKey: snapshot.pluginKey, removeData });
+          return result;
+        });
+      }
       const plugin = await requirePlugin(pluginId);
 
       // If already uninstalled and removeData, hard-delete
@@ -1184,19 +1251,25 @@ export function pluginLifecycleManager(
       emitter.once(event, listener);
     },
   };
-  if (!workspaceRuntime) return service;
-  const coordinate = <T>(pluginId: string, operation: () => Promise<T>) =>
-    withSpsPluginRuntimeMutation(workspaceRuntime!, pluginId, operation);
+  if (!workspaceRuntime && !packageOperations) return service;
+  const coordinate = <T>(pluginId: string, operation: () => Promise<T>, resumeRemoval = false) => {
+    const guarded = async () => {
+      if (!resumeRemoval) await packageOperations?.assertClear(pluginId);
+      return operation();
+    };
+    return workspaceRuntime ? withSpsPluginRuntimeMutation(workspaceRuntime, pluginId, guarded) : guarded();
+  };
   // Central coordination also covers development reloads and non-HTTP callers.
   return {
     ...service,
     load: id => coordinate(id, () => service.load(id)),
     enable: id => coordinate(id, () => service.enable(id)),
     disable: (id, reason) => coordinate(id, () => service.disable(id, reason)),
-    unload: (id, removeData) => coordinate(id, () => service.unload(id, removeData)),
+    unload: (id, removeData) => coordinate(id, () => service.unload(id, removeData), true),
     markError: (id, error) => coordinate(id, () => service.markError(id, error)),
     markUpgradePending: id => coordinate(id, () => service.markUpgradePending(id)),
     upgrade: (id, options) => coordinate(id, () => service.upgrade(id, options)),
     restartWorker: id => coordinate(id, () => service.restartWorker(id)),
+    startWorker: (id, options) => coordinate(id, () => service.startWorker(id, options)),
   };
 }

@@ -22,6 +22,7 @@ vi.mock("../services/plugin-registry.js", () => ({
 
 import { pluginLoader, resolvePluginPackageRoot, requiresSharedPluginArtifactCleanup } from "../services/plugin-loader.js";
 import { withPluginPackageMutationPermit } from "../services/sps-plugin-package-maintenance.js";
+import type { SpsPluginPackageOperations } from "../services/sps-plugin-package-operations.js";
 
 const pluginId = "a7f19aec-4724-4bca-9ddf-7358b5bdbdd1";
 const activeManifest = {
@@ -114,14 +115,41 @@ describe("pluginLoader private npm artifacts", () => {
     cleanupRoots.clear();
   });
 
-  function createLoader(workspaceRuntime?: { withCatalogMutation: (action: () => Promise<unknown>) => Promise<unknown> }) {
+  function createLoader(workspaceRuntime?: { withCatalogMutation: (action: () => Promise<unknown>) => Promise<unknown> },
+    packageOperations?: SpsPluginPackageOperations) {
     const runtimeServices = { instanceInfo: { hostVersion: "1.0.0" }, ...(workspaceRuntime ? { workspaceRuntime } : {}) };
     return pluginLoader(db as never, {
       localPluginDir,
       enableLocalFilesystem: false,
       enableNpmDiscovery: false,
+      packageOperations,
     }, runtimeServices as never);
   }
+
+  it("rejects reinstall of a key with pending removal before registry commit and cleans only its new stage", async () => {
+    const installed = createNpmRunner();
+    const assertClear = vi.fn(async () => { throw new Error("package removal recovery required"); });
+    const loader = createLoader(undefined, { assertClear } as unknown as SpsPluginPackageOperations);
+    await expect(loader.installPlugin({ packageName: "@sps/private-npm-pending" }))
+      .rejects.toThrow("package removal recovery required");
+    expect(assertClear).toHaveBeenCalledWith(undefined, "sps.private-npm-pending");
+    expect(registry.install).not.toHaveBeenCalled();
+    expect(db.transaction).not.toHaveBeenCalled();
+    expect(installed).toHaveLength(1);
+    expect(await readdir(path.join(localPluginDir, ".install-staging"))).toEqual([]);
+    expect(await readFile(path.join(localPluginDir, "node_modules", "@sps", "private-npm-a", "active-marker.txt"), "utf8"))
+      .toBe("root-active-copy");
+  });
+
+  it("rejects preparation and prepared commit while removal recovery is pending", async () => {
+    const assertClear = vi.fn(async () => { throw new Error("package removal recovery required"); });
+    const loader = createLoader(undefined, { assertClear } as unknown as SpsPluginPackageOperations);
+    await expect(loader.prepareUpgrade(pluginId, { version: "2.0.0" })).rejects.toThrow("package removal recovery required");
+    await expect(loader.commitPreparedUpgrade(pluginId, {} as never)).rejects.toThrow("package removal recovery required");
+    expect(assertClear).toHaveBeenCalledTimes(2);
+    expect(registry.update).not.toHaveBeenCalled();
+    expect(execFileMock).not.toHaveBeenCalled();
+  });
 
   it("installs separate npm packages under immutable UUID-owned prefixes and persists exact paths", async () => {
     const installed = createNpmRunner();

@@ -28,6 +28,7 @@ const mocks = vi.hoisted(() => {
     },
     lifecycle: {
       attachRuntimeLoader: vi.fn(),
+      recoverPackageOperations: vi.fn(async () => { calls.push("package-recovery"); }),
       load: vi.fn(),
     },
     eventBus: {
@@ -231,6 +232,7 @@ describe("createApp plugin recovery startup contract", () => {
       "coordinator-start",
       "scheduler-start",
       "tools-initialize",
+      "package-recovery",
       "bundle-install",
       "bundle-refresh",
       "load-all",

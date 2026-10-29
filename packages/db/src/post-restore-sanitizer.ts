@@ -52,6 +52,15 @@ type UpdatePlan = {
 
 const UPDATE_PLANS: UpdatePlan[] = [
   {
+    // Package paths belong to the original Host. Restoring a backup must not
+    // replay a deletion against a different machine's filesystem. Preserve
+    // intent history while retiring its automatic execution authority.
+    table: "sps_plugin_package_operations",
+    assignments: { kind: "'cancelled_after_restore'", active_plugin_id: "NULL", completed_at: "NOW()", updated_at: "NOW()" },
+    requiredWhereColumns: ["completed_at"],
+    where: `"completed_at" IS NULL`,
+  },
+  {
     table: "sps_plugin_authority_catalog",
     assignments: { revision: "gen_random_uuid()" },
     requiredWhereColumns: ["id"],

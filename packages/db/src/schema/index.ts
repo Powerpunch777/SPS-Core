@@ -137,6 +137,7 @@ export { spsWorkspaceExecutionControl } from "./sps_workspace_execution_control.
 export { spsNodeClaimReceipts } from "./sps_node_claim_receipts.js";
 export { spsPluginAuthorityCatalog, spsWorkspacePluginAuthority } from "./sps_plugin_authority.js";
 export { spsWorkspacePluginRuntimeConfigs } from "./sps_workspace_plugin_runtime_configs.js";
+export { spsPluginPackageOperations } from "./sps_plugin_package_operations.js";
 export { userSecretDeclarations } from "./user_secret_declarations.js";
 export { secretAccessEvents } from "./secret_access_events.js";
 export {

@@ -76,6 +76,7 @@ import {
   resolvePluginRecoveryState,
   type PluginRecoveryState,
 } from "./sps-plugin-recovery.js";
+import type { SpsPluginPackageOperations } from "./sps-plugin-package-operations.js";
 
 const execFileAsync = promisify(execFile);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -401,6 +402,7 @@ function getDeclaredPageRoutePaths(manifest: PaperclipPluginManifestV1): string[
  * Options for the plugin loader service.
  */
 export interface PluginLoaderOptions {
+  packageOperations?: SpsPluginPackageOperations;
   /**
    * Path to the local plugin directory to scan.
    * Defaults to ~/.paperclip/plugins/
@@ -1343,6 +1345,7 @@ export function pluginLoader(
   } = options;
   const recoveryState = options.recoveryState ?? resolvePluginRecoveryState();
   const assertRuntimeAllowed = (action: string) => assertPluginRuntimeAllowed(recoveryState, action);
+  const assertPackageOperationClear = (pluginId: string) => options.packageOperations?.assertClear(pluginId);
 
   const registry = pluginRegistryService(db);
   const manifestValidator = pluginManifestValidator();
@@ -1686,6 +1689,7 @@ export function pluginLoader(
     pluginId: string,
     upgradeOptions: PluginUpgradeOptions,
   ): Promise<PreparedPluginUpgrade> {
+    await options.packageOperations?.assertClear(pluginId);
     const plugin = (await registry.getById(pluginId)) as {
       id: string;
       packageName: string;
@@ -1768,6 +1772,7 @@ export function pluginLoader(
     pluginId: string,
     prepared: PreparedPluginUpgrade,
   ): Promise<void> {
+    await options.packageOperations?.assertClear(pluginId);
     await registry.update(pluginId, {
       packageName: prepared.discovered.packageName,
       packagePath: prepared.discovered.packagePath,
@@ -2052,6 +2057,7 @@ export function pluginLoader(
             ? { ...installOptions, installDir: stagingRoot }
             : installOptions);
           const manifest = discovered.manifest!;
+          await options.packageOperations?.assertClear(undefined, manifest.id);
 
           // Persist the exact package root used for validation. npm packages
           // are installed under their UUID-owned staging root so npm never
@@ -2158,6 +2164,7 @@ export function pluginLoader(
       // This write is autocommitted. A rejected response does not establish
       // that it rolled back; preserve the candidate in either outcome so a
       // committed registry pointer never references an artifact we removed.
+      await assertPackageOperationClear(pluginId);
       await registry.update(pluginId, {
         packageName: prepared.discovered.packageName,
         packagePath: prepared.discovered.packagePath,
@@ -2536,6 +2543,7 @@ export function pluginLoader(
     plugin: PluginRecord,
     options: PluginLoadOptions = {},
   ): Promise<PluginLoadResult> {
+    await assertPackageOperationClear(plugin.id);
     const pluginId = plugin.id;
     const pluginKey = plugin.pluginKey;
     let activePlugin = plugin;
