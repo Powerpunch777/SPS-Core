@@ -283,7 +283,7 @@ export function SpsExtensionsManager() {
         {bundled.length ? (
           <Card className="py-0"><div className="divide-y">{bundled.map((plugin) => renderExtension(plugin))}</div></Card>
         ) : (
-          <Card className="bg-muted/30"><CardContent className="py-5 text-sm text-muted-foreground">SPS is starting its built-in components. Refresh this page in a moment.</CardContent></Card>
+          <Card className="bg-muted/30"><CardContent className="py-5 text-sm text-muted-foreground">No built-in plugins are installed. Open signed Registry review to approve a restored current app copy or choose another package.</CardContent></Card>
         )}
       </section>
 

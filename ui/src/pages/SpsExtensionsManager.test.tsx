@@ -96,6 +96,22 @@ describe("SpsExtensionsManager", () => {
     await act(async () => { root.unmount(); });
   });
 
+  it("does not claim that absent or restored inactive bundles are still starting", async () => {
+    listPlugins.mockResolvedValue([]);
+    const root = createRoot(container);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    await act(async () => {
+      root.render(<MemoryRouter><QueryClientProvider client={queryClient}><SpsExtensionsManager /></QueryClientProvider></MemoryRouter>);
+    });
+    await flushReact();
+    await flushReact();
+    expect(container.textContent).toContain("No built-in plugins are installed");
+    expect(container.textContent).toContain("approve a restored current app copy");
+    expect(container.textContent).not.toContain("SPS is starting");
+    expect(enablePlugin).not.toHaveBeenCalled();
+    await act(async () => { root.unmount(); });
+  });
+
   it("keeps Inbox summaries by default and only deletes them after the Host checks the option", async () => {
     const root = createRoot(container);
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
