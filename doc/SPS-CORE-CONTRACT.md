@@ -54,6 +54,18 @@ soft-uninstall/reinstall path retains its ID and data; this is not schema
 downgrade, old-path relocation authority, publisher-trust migration or automatic
 plugin activation. External local checkouts require explicit reselection.
 
+Current-app official bundles are not exempt from new-Host review. Bundled
+startup checks declarative `spsPlugin.id` metadata against the preserved record
+before importing its executable manifest. A softly uninstalled record with no
+package path cannot be automatically refreshed or reactivated. Disabled,
+uninstalled (including retained-path records) and pending-upgrade bundles also
+remain inactive until explicitly enabled or reinstalled by the Host. The identity is
+a lookup hint for already trusted configured bundle paths, not a signature or
+new source of installation authority. Legacy bundles without this metadata do
+not import automatically while any inactive records could await review. An
+explicit normal Host reinstall records the package path and preserves data;
+ordinary approved bundle refresh on an existing Host remains unchanged.
+
 Workspace-wide execution admission and cancellation are platform-owned. The
 durable pause/stop/resume contract, per-lane acknowledgement limits, Host-only
 mutation authority and compatibility requirements are specified in
