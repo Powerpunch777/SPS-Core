@@ -22,6 +22,7 @@ import {
   approvals,
   activityLog,
   companySecrets,
+  pluginState,
   joinRequests,
   invites,
   principalPermissionGrants,
@@ -440,6 +441,13 @@ export function companyService(db: Db) {
         // lock as Workspace deletion so a concurrent resume cannot admit new
         // work between the drain and the cascading delete.
         if (expectedExecution) await assertSpsWorkspaceExecutionReadyForDeletion(tx, id, expectedExecution);
+        // Plugin state uses a textual scope key rather than a company FK.
+        // Remove this Workspace's explicit company scope in the same atomic
+        // deletion, preserving shared state and unrelated legacy scope kinds.
+        await tx.delete(pluginState).where(and(
+          eq(pluginState.scopeKind, "company"),
+          eq(pluginState.scopeId, id),
+        ));
         // Delete from child tables in dependency order
         const companyRunIds = await tx
           .select({ id: heartbeatRuns.id })

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import {
   activityLog,
   agentConfigRevisions,
@@ -15,6 +15,8 @@ import {
   heartbeatRunEvents,
   heartbeatRuns,
   issues,
+  pluginState,
+  plugins,
   principalPermissionGrants,
   routines,
   routineTriggers,
@@ -40,6 +42,7 @@ describeEmbeddedPostgres("companyService", () => {
   let db!: ReturnType<typeof createDb>;
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
   let tempDbStartup: Promise<Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>> | null = null;
+  const seededPluginIds: string[] = [];
 
   beforeAll(async () => {
     tempDbStartup = startEmbeddedPostgresTestDatabase("paperclip-company-service-");
@@ -49,6 +52,12 @@ describeEmbeddedPostgres("companyService", () => {
 
   afterEach(async () => {
     if (!db) return;
+    if (seededPluginIds.length > 0) {
+      const ids = [...seededPluginIds];
+      await db.delete(pluginState).where(inArray(pluginState.pluginId, ids));
+      await db.delete(plugins).where(inArray(plugins.id, ids));
+      seededPluginIds.length = 0;
+    }
     await db.delete(routineTriggers);
     await db.delete(routines);
     await db.delete(builtInManagedResources);
@@ -163,6 +172,87 @@ describeEmbeddedPostgres("companyService", () => {
       .from(companies)
       .where(eq(companies.id, created.id));
     expect(remaining).toEqual([]);
+  });
+
+  it("deletes only the removed Workspace's company-scoped plugin state", async () => {
+    const workspaceA = randomUUID();
+    const workspaceB = randomUUID();
+    const pluginA = randomUUID();
+    const pluginB = randomUUID();
+    const pluginIds = [pluginA, pluginB];
+    seededPluginIds.push(...pluginIds);
+    await db.insert(companies).values([
+      { id: workspaceA, name: "Plugin state cleanup A", issuePrefix: `A${workspaceA.replace(/-/g, "").slice(0, 7).toUpperCase()}` },
+      { id: workspaceB, name: "Plugin state cleanup B", issuePrefix: `B${workspaceB.replace(/-/g, "").slice(0, 7).toUpperCase()}` },
+    ]);
+    const pluginRecords = pluginIds.map((id, index) => {
+      const manifestId = `sps.workspace-delete-state-${index}-${id}`;
+      return {
+        id,
+        pluginKey: manifestId,
+        packageName: `@sps/workspace-delete-state-${index}`,
+        version: "1.0.0",
+        apiVersion: 1,
+        categories: [],
+        status: "ready" as const,
+        manifestJson: {
+          id: manifestId,
+          apiVersion: 1,
+          version: "1.0.0",
+          displayName: `Workspace delete state fixture ${index}`,
+          description: "Company deletion state cleanup regression fixture",
+          author: "SPS",
+          categories: [],
+          capabilities: ["plugin.state.read", "plugin.state.write"],
+          entrypoints: { worker: "./worker.js" },
+        },
+      } satisfies typeof plugins.$inferInsert;
+    });
+    await db.insert(plugins).values(pluginRecords);
+    const seededState = [
+      { pluginId: pluginA, scopeKind: "company" as const, scopeId: workspaceA, namespace: "default", stateKey: "shared-key", valueJson: { marker: "A/plugin-A" } },
+      { pluginId: pluginA, scopeKind: "company" as const, scopeId: workspaceA, namespace: "second", stateKey: "shared-key", valueJson: { marker: "A/plugin-A/second-namespace" } },
+      { pluginId: pluginA, scopeKind: "company" as const, scopeId: workspaceB, namespace: "default", stateKey: "shared-key", valueJson: { marker: "B/plugin-A" } },
+      { pluginId: pluginB, scopeKind: "company" as const, scopeId: workspaceA, namespace: "default", stateKey: "shared-key", valueJson: { marker: "A/plugin-B" } },
+      { pluginId: pluginB, scopeKind: "company" as const, scopeId: workspaceB, namespace: "default", stateKey: "shared-key", valueJson: { marker: "B/plugin-B" } },
+      { pluginId: pluginA, scopeKind: "instance" as const, scopeId: null, namespace: "default", stateKey: "shared-key", valueJson: { marker: "instance-shared" } },
+      { pluginId: pluginA, scopeKind: "project" as const, scopeId: workspaceA, namespace: "default", stateKey: "shared-key", valueJson: { marker: "project-scope-canary" } },
+    ];
+    await db.insert(pluginState).values(seededState);
+
+    const beforeRollback = await db.select().from(pluginState)
+      .where(inArray(pluginState.pluginId, pluginIds)).orderBy(pluginState.id);
+    const discardedRemoval = new Error("Discard the Workspace deletion rollback probe.");
+    await expect(db.transaction(async tx => {
+      const removed = await companyService(tx as unknown as typeof db).remove(workspaceA);
+      expect(removed?.id).toBe(workspaceA);
+      expect(await tx.select().from(pluginState).where(and(
+        eq(pluginState.scopeKind, "company"), eq(pluginState.scopeId, workspaceA),
+      ))).toEqual([]);
+      throw discardedRemoval;
+    })).rejects.toBe(discardedRemoval);
+    expect(await db.select({ id: companies.id }).from(companies).where(eq(companies.id, workspaceA)))
+      .toEqual([{ id: workspaceA }]);
+    expect(await db.select().from(pluginState).where(inArray(pluginState.pluginId, pluginIds)).orderBy(pluginState.id))
+      .toEqual(beforeRollback);
+
+    const removed = await companyService(db).remove(workspaceA);
+
+    expect(removed?.id).toBe(workspaceA);
+    expect(await db.select().from(companies).where(eq(companies.id, workspaceA))).toEqual([]);
+    expect(await db.select({ id: companies.id }).from(companies).where(eq(companies.id, workspaceB)))
+      .toEqual([{ id: workspaceB }]);
+    expect((await db.select({ id: plugins.id, status: plugins.status }).from(plugins)
+      .where(inArray(plugins.id, pluginIds))).sort((a, b) => a.id.localeCompare(b.id)))
+      .toEqual(pluginRecords.map(({ id, status }) => ({ id, status })).sort((a, b) => a.id.localeCompare(b.id)));
+
+    const remainingState = await db.select().from(pluginState).where(inArray(pluginState.pluginId, pluginIds));
+    const actualMarkers = remainingState.map(({ pluginId, scopeKind, scopeId, namespace, stateKey, valueJson }) => ({
+      pluginId, scopeKind, scopeId, namespace, stateKey, valueJson,
+    })).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+    const expectedMarkers = seededState.filter(row => row.scopeKind !== "company" || row.scopeId !== workspaceA)
+      .map(row => ({ ...row })).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+    expect(actualMarkers).toEqual(expectedMarkers);
   });
 
   it("archives companies by pausing runnable agents and cancelling active runs", async () => {
