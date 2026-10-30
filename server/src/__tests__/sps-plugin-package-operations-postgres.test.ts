@@ -205,6 +205,9 @@ describePostgres("SPS plugin package operation persistence", () => {
     const [retired] = await db.select().from(spsPluginPackageOperations)
       .where(eq(spsPluginPackageOperations.id, intent.id));
     expect(retired).toMatchObject({
+      id: intent.id,
+      pluginId: plugin.id,
+      pluginKey: plugin.pluginKey,
       kind: "cancelled_after_restore",
       activePluginId: null,
       completedAt: expect.any(Date),
@@ -212,7 +215,15 @@ describePostgres("SPS plugin package operation persistence", () => {
       removeData: true,
     });
     const [preservedPlugin] = await db.select().from(plugins).where(eq(plugins.id, plugin.id));
-    expect(preservedPlugin?.status).toBe("error");
+    expect(preservedPlugin).toMatchObject({
+      id: plugin.id,
+      pluginKey: plugin.pluginKey,
+      version: plugin.version,
+      manifestJson: plugin.manifestJson,
+      status: "uninstalled",
+      packagePath: null,
+      lastError: "Host restore requires review before reinstall; plugin data was retained.",
+    });
   });
 
   it("persists previous and candidate upgrade snapshots, backup, and approval hash across DB reopen", async () => {
@@ -374,6 +385,9 @@ describePostgres("SPS plugin package operation persistence", () => {
     const [retired] = await db.select().from(spsPluginPackageOperations)
       .where(eq(spsPluginPackageOperations.id, intent.id));
     expect(retired).toMatchObject({
+      id: intent.id,
+      pluginId: plugin.id,
+      pluginKey: plugin.pluginKey,
       kind: "cancelled_after_restore",
       activePluginId: null,
       completedAt: expect.any(Date),
@@ -381,6 +395,14 @@ describePostgres("SPS plugin package operation persistence", () => {
       removeData: false,
     });
     const [preservedPlugin] = await db.select().from(plugins).where(eq(plugins.id, plugin.id));
-    expect(preservedPlugin?.status).toBe("error");
+    expect(preservedPlugin).toMatchObject({
+      id: plugin.id,
+      pluginKey: plugin.pluginKey,
+      version: plugin.version,
+      manifestJson: plugin.manifestJson,
+      status: "uninstalled",
+      packagePath: null,
+      lastError: "Host restore requires review before reinstall; plugin data was retained.",
+    });
   });
 });
