@@ -63,6 +63,56 @@ describe("sanitizePostRestoreDatabaseWithExecutor", () => {
     await run(legacy);
     expect(legacy.calls.some(query => query.includes('"sps_plugin_package_operations"'))).toBe(false);
   });
+
+  it("uninstalls restored plugins for Host review and clears every old package path", async () => {
+    const executor = fakeExecutor({
+      tables: ["plugins"],
+      columnsByTable: {
+        plugins: ["id", "plugin_key", "version", "manifest_json", "status", "last_error", "package_path"],
+      },
+    });
+
+    const result = await run(executor);
+
+    const reviewUpdate = executor.calls.find((query) =>
+      query.startsWith('UPDATE "plugins" SET "status" ='),
+    );
+    const pathUpdate = executor.calls.find((query) =>
+      query.startsWith('UPDATE "plugins" SET "package_path" ='),
+    );
+    expect(reviewUpdate).toContain(`"status" = 'uninstalled'`);
+    expect(reviewUpdate).toContain(
+      `"last_error" = 'Host restore requires review before reinstall; plugin data was retained.'`,
+    );
+    expect(reviewUpdate).toContain(
+      `WHERE "status" IN ('installed', 'active', 'ready', 'disabled', 'error', 'upgrade_pending')`,
+    );
+    expect(pathUpdate).toBe('UPDATE "plugins" SET "package_path" = NULL');
+    expect(reviewUpdate).not.toMatch(/plugin_key|version|manifest_json|config|state|entity|migration/i);
+    expect(pathUpdate).not.toMatch(/WHERE/);
+    expect(result.scrubbedTables.plugins).toBe(2);
+    expect(executor.calls.indexOf(reviewUpdate!)).toBeGreaterThan(executor.calls.indexOf("BEGIN"));
+    expect(executor.calls.indexOf(pathUpdate!)).toBeLessThan(executor.calls.indexOf("COMMIT"));
+  });
+
+  it("clears plugin paths with partial legacy schemas and skips status reset without status", async () => {
+    const executor = fakeExecutor({
+      tables: ["plugins"],
+      columnsByTable: { plugins: ["id", "package_path"] },
+    });
+
+    await run(executor);
+
+    expect(executor.calls).toContain('UPDATE "plugins" SET "package_path" = NULL');
+    expect(executor.calls.some((query) => query.startsWith('UPDATE "plugins" SET "status"'))).toBe(false);
+
+    const noPathColumn = fakeExecutor({
+      tables: ["plugins"],
+      columnsByTable: { plugins: ["id", "manifest_json"] },
+    });
+    await run(noPathColumn);
+    expect(noPathColumn.calls.some((query) => query.startsWith('UPDATE "plugins"'))).toBe(false);
+  });
   it("deletes FK children before parents", async () => {
     const executor = fakeExecutor({
       tables: [
@@ -296,6 +346,20 @@ describe("sanitizePostRestoreDatabaseWithExecutor", () => {
     expect(executor.calls).not.toContain("COMMIT");
     expect(executor.calls).not.toContain('DELETE FROM "sps_native_pairings"');
     expect(executor.calls.some((query) => query.includes('"sps_native_pairing_events"'))).toBe(false);
+  });
+
+  it("rolls back when the restored plugin review reset fails", async () => {
+    const executor = fakeExecutor({
+      tables: ["plugins"],
+      columnsByTable: { plugins: ["status", "last_error", "package_path"] },
+      failOn: 'UPDATE "plugins" SET "status"',
+    });
+
+    await expect(run(executor)).rejects.toThrow("sanitizer failure");
+
+    expect(executor.calls.at(-1)).toBe("ROLLBACK");
+    expect(executor.calls).not.toContain("COMMIT");
+    expect(executor.calls).not.toContain('UPDATE "plugins" SET "package_path" = NULL');
   });
 
   it("is safe to run repeatedly", async () => {

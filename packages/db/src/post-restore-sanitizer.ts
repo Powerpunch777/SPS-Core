@@ -52,6 +52,22 @@ type UpdatePlan = {
 
 const UPDATE_PLANS: UpdatePlan[] = [
   {
+    // Restored plugin data is durable, but executable packages must be
+    // reviewed on the new Host before reinstalling or enabling them.
+    table: "plugins",
+    assignments: {
+      status: "'uninstalled'",
+      last_error: "'Host restore requires review before reinstall; plugin data was retained.'",
+    },
+    requiredWhereColumns: ["status"],
+    where: `"status" IN ('installed', 'active', 'ready', 'disabled', 'error', 'upgrade_pending')`,
+  },
+  {
+    // Clear paths from every row, including already-uninstalled plugins.
+    table: "plugins",
+    assignments: { package_path: "NULL" },
+  },
+  {
     // Package paths belong to the original Host. Restoring a backup must not
     // replay a deletion against a different machine's filesystem. Preserve
     // intent history while retiring its automatic execution authority.

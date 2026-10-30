@@ -41,6 +41,11 @@ Core owns platform capabilities:
 - backup and recovery primitives consumed by Desktop's empty-Host restore flow,
   plus update compatibility checks
 
+Fresh-Host restore preserves durable plugin data, but clears old package paths
+and retires code activation until the new Host reviews/reinstalls the package.
+Desktop owns managed package-file portability; Core's existing reinstall path
+retains the plugin ID and its scoped data. See the Core contract for limits.
+
 Plugins own workflow semantics:
 
 - rooms, tasks, roles, reporting lines, and approval policy

@@ -44,6 +44,16 @@ normal loader validation. Approval-pending updates still cannot be enabled.
 See [Plugin package lifecycle recovery](SPS-PLUGIN-PACKAGE-RECOVERY.md) for scope,
 rollback constraints, retained staging artifacts and outstanding qualification.
 
+Fresh-Host restore retains plugin IDs, manifests, versions and durable data,
+but retires prior-Host code execution approval: plugin records become softly
+uninstalled and every original package path is cleared before startup. Desktop
+owns portable managed package bytes and creates static-only review stages at
+the destination. Only a new Host's explicit normal Registry review/install may
+reactivate the preserved record with a newly verified package path. The existing
+soft-uninstall/reinstall path retains its ID and data; this is not schema
+downgrade, old-path relocation authority, publisher-trust migration or automatic
+plugin activation. External local checkouts require explicit reselection.
+
 Workspace-wide execution admission and cancellation are platform-owned. The
 durable pause/stop/resume contract, per-lane acknowledgement limits, Host-only
 mutation authority and compatibility requirements are specified in
