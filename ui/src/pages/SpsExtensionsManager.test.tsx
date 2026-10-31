@@ -29,10 +29,6 @@ vi.mock("@/context/CompanyContext", () => ({
 }));
 vi.mock("@/context/BreadcrumbContext", () => ({ useBreadcrumbs: () => ({ setBreadcrumbs }) }));
 vi.mock("@/context/ToastContext", () => ({ useToastActions: () => ({ pushToast }) }));
-vi.mock("@/components/SpsMarketplacePanel", () => ({
-  SpsMarketplacePanel: ({ companyId }: { companyId: string }) => <div>Marketplace for {companyId}</div>,
-}));
-
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -100,6 +96,22 @@ describe("SpsExtensionsManager", () => {
     await act(async () => { root.unmount(); });
   });
 
+  it("does not claim that absent or restored inactive bundles are still starting", async () => {
+    listPlugins.mockResolvedValue([]);
+    const root = createRoot(container);
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    await act(async () => {
+      root.render(<MemoryRouter><QueryClientProvider client={queryClient}><SpsExtensionsManager /></QueryClientProvider></MemoryRouter>);
+    });
+    await flushReact();
+    await flushReact();
+    expect(container.textContent).toContain("No built-in plugins are installed");
+    expect(container.textContent).toContain("approve a restored current app copy");
+    expect(container.textContent).not.toContain("SPS is starting");
+    expect(enablePlugin).not.toHaveBeenCalled();
+    await act(async () => { root.unmount(); });
+  });
+
   it("keeps Inbox summaries by default and only deletes them after the Host checks the option", async () => {
     const root = createRoot(container);
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -133,7 +145,7 @@ describe("SpsExtensionsManager", () => {
     await act(async () => { root.unmount(); });
   });
 
-  it("opens Marketplace inside Settings and delegates installation to the Host review window", async () => {
+  it("keeps signed Registry review available without a Marketplace surface", async () => {
     const openPluginRegistries = vi.fn().mockResolvedValue({ opened: true });
     (window as Window & { spsDesktopWorkspace?: unknown }).spsDesktopWorkspace = { openPluginRegistries };
     const root = createRoot(container);
@@ -144,14 +156,10 @@ describe("SpsExtensionsManager", () => {
     await flushReact();
     await flushReact();
 
-    const marketplace = Array.from(container.querySelectorAll("button"))
-      .find((button) => button.textContent === "Marketplace");
-    await act(async () => { marketplace?.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
-    await flushReact();
-    expect(container.textContent).toContain("Marketplace for workspace-1");
+    expect(container.textContent).not.toContain("Marketplace");
 
     const review = Array.from(container.querySelectorAll("button"))
-      .find((button) => button.textContent === "Open secure install review");
+      .find((button) => button.textContent === "Open signed Registry review");
     await act(async () => { review?.dispatchEvent(new MouseEvent("click", { bubbles: true })); });
     await flushReact();
     expect(openPluginRegistries).toHaveBeenCalledOnce();

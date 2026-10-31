@@ -15,7 +15,9 @@ import { createSpsIdentityAuth } from "../auth/sps-identity.js";
 import { createSpsNativeSessionEnrollment } from "../services/sps-native-session-enrollment.js";
 import { createSpsNativeEnrollmentRequestHandler } from "../services/sps-native-enrollment-http.js";
 import { createSpsNativeSessionExchangeRequestHandler } from "../services/sps-native-session-exchange-http.js";
-import { spsNativeEnrollmentService } from "../services/sps-native-enrollments.js";
+import { createSpsNativeParentIngress } from "../services/sps-native-parent-ingress.js";
+import { createSpsNativeMainIngressPeer, getSpsNativeEnrollmentPeerCertificate,
+  spsNativeEnrollmentService } from "../services/sps-native-enrollments.js";
 import { spsNativePairingService } from "../services/sps-native-pairings.js";
 import { createNativeEnrollmentTlsFixture, type NativeEnrollmentTlsFixture } from "./helpers/native-enrollment-tls.js";
 import { createMemberTlsFixture, type MemberTlsFixture } from "./helpers/member-tls.js";
@@ -46,17 +48,19 @@ describeDatabase("Native enrollment with actual SPS sessions and loopback HTTPS"
   const servers: Server[] = [];
   const handlers: ReturnType<typeof createSpsNativeEnrollmentRequestHandler>[] = [];
   const exchanges: ReturnType<typeof createSpsNativeSessionExchangeRequestHandler>[] = [];
+  const parentIngresses: Array<{ dispose(): void }> = [];
   const sockets = new Set<Duplex>();
   beforeAll(async () => {
     database = await startEmbeddedPostgresTestDatabase("sps-native-session-enrollment-");
     db = createDb(database.connectionString);
     member = await createNativeEnrollmentTlsFixture({ hostId, deviceKeyId });
     serverIdentity = await createMemberTlsFixture({ purpose: "serverAuth" });
-  }, 60_000);
+  }, 180_000);
   afterEach(async () => {
     globalThis.fetch = originalFetch;
     for (const handler of handlers.splice(0)) handler.dispose();
     for (const exchange of exchanges.splice(0)) exchange.dispose();
+    for (const ingress of parentIngresses.splice(0)) ingress.dispose();
     for (const socket of sockets) socket.destroy();
     sockets.clear();
     for (const server of servers.splice(0)) await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
@@ -74,15 +78,17 @@ describeDatabase("Native enrollment with actual SPS sessions and loopback HTTPS"
     await serverIdentity?.cleanup();
     await db?.$client.end();
     await database?.cleanup();
-  });
+  }, 30_000);
 
   async function setup(signing?: (input: { notBefore: number; notAfter: number }) => Promise<string>,
-    limits: { operationTimeoutMs?: number; maxConcurrentRequests?: number } = {}) {
+    limits: { operationTimeoutMs?: number; maxConcurrentRequests?: number } = {},
+    renewal?: { renewFromTlsPeer(peer: unknown, input: unknown, authorize: unknown): Promise<unknown> }) {
     globalThis.fetch = vi.fn(async () => new Response(JSON.stringify({ keys: [{ ...publicJwk, kid, alg: "RS256", use: "sig" }] }))) as typeof fetch;
     const identity = createSpsIdentityAuth(db, { authIdentityEnabled: true, authIdentityIssuer: issuer,
       authIdentityAudience: audience, authIdentityJwksUrl: `${issuer}/.well-known/jwks.json`,
       authPublicBaseUrl: "https://native.example.test" } as Config);
     const serverPin = hash(new X509Certificate(serverIdentity.certPem).publicKey.export({ type: "spki", format: "der" }));
+    const issuerPin = hash(new X509Certificate(Buffer.from(member.issuerCertificate, "base64url")).publicKey.export({ type: "spki", format: "der" }));
     const loginApp = express(); loginApp.use(express.json()); loginApp.use("/identity", identity.routes);
     const at = new Date();
     await db.insert(authUsers).values({ id: "native-host", name: "Fixture Host", email: "native-host@example.test", emailVerified: true, createdAt: at, updatedAt: at });
@@ -94,7 +100,7 @@ describeDatabase("Native enrollment with actual SPS sessions and loopback HTTPS"
       signs++;
       return { certificate: await (signing ? signing(input) : member.sign(input)), requestSha256: hash(input.requestPem) };
     });
-    const facade = createSpsNativeSessionEnrollment(identity, service);
+    const facade = createSpsNativeSessionEnrollment(identity, service, renewal as never);
     const handler = createSpsNativeEnrollmentRequestHandler(facade, {
       maxBodyBytes: 8192, readTimeoutMs: 1000, operationTimeoutMs: 10000, maxConcurrentRequests: 4, ...limits,
     });
@@ -162,8 +168,57 @@ describeDatabase("Native enrollment with actual SPS sessions and loopback HTTPS"
     expect(await db.select().from(authSessions)).toEqual([]);
     const account = await login("native-member");
     const input = { pairingId: invitation.pairingId, pairingSecret: invitation.pairingSecret, deviceKeyId, requestPem: member.requestPem };
-    return { facade, input, account, login, loginApp, invitation, call, signs: () => signs };
+    return { facade, identity, service, input, account, login, loginApp, invitation, call, serverPin, issuerPin, signs: () => signs };
   }
+
+  it("runs Main-owned nested IPC requests through real sessions, issuance and current-certificate completion", async () => {
+    const value = await setup();
+    expect(() => createSpsNativeMainIngressPeer({ protocol: "TLSv1.3", resumed: false,
+      certificateDer: new X509Certificate(member.certPem).raw,
+      assertActive: (() => Promise.reject(new Error("async guards are not accepted"))) as never })).toThrow();
+    const { EventEmitter } = await import("node:events");
+    class Ipc extends EventEmitter {
+      connected = true;
+      messages: unknown[] = [];
+      send(message: unknown) { this.messages.push(message); return true; }
+    }
+    const ipc = new Ipc();
+    const parentEnrollment = {
+      identity: { hostId, serverSpkiSha256: value.serverPin, issuerSpkiSha256: value.issuerPin,
+        issuerCertificate: member.issuerCertificate },
+      service: value.service,
+      assertActive() {},
+      dispose() {},
+    };
+    const ingress = createSpsNativeParentIngress(value.identity as never, parentEnrollment as never, {}, ipc as never);
+    parentIngresses.push(ingress);
+    const send = async (operation: string, body: unknown, request: Record<string, unknown>, id = randomUUID()) => {
+      ipc.emit("message", { v: 1, kind: "sps.native.parent-ingress.request", id, operation,
+        request: { body, transport: { tlsVersion: "TLSv1.3", sessionReused: false,
+          remoteAddress: "127.0.0.1", ...(operation.endsWith("complete") || operation.endsWith("reconcile")
+            ? { peerCertificateDer: request.peerCertificateDer } : {}) },
+          ...(Object.hasOwn(request, "peerCertificateDer") ? Object.fromEntries(Object.entries(request).filter(([key]) => key !== "peerCertificateDer")) : request) } });
+      await vi.waitFor(() => expect(ipc.messages.length).toBeGreaterThan(0));
+      const index = ipc.messages.findIndex((message: any) => message && message.id === id);
+      if (index < 0) throw new Error("Missing response for private ingress request");
+      return ipc.messages.splice(index, 1)[0] as { ok: boolean; result?: any };
+    };
+    const issued = await send("enrollment.issue", value.input, { credential: { sessionCookie: value.account.cookie } });
+    expect(issued.ok).toBe(true);
+    expect(issued.result).toMatchObject({ enrollmentId: expect.any(String), certificate: expect.any(String) });
+    const certificateDer = Buffer.from(issued.result.certificate, "base64url");
+    const completed = await send("enrollment.complete", { pairingId: value.input.pairingId,
+      pairingSecret: value.input.pairingSecret, enrollmentId: issued.result.enrollmentId, displayName: "IPC fixture" },
+    { credential: { sessionCookie: value.account.cookie }, peerCertificateDer: certificateDer.toString("base64url") });
+    expect(completed).toMatchObject({ ok: true, result: { deviceId: expect.any(String), status: "pending" } });
+    expect((await db.select().from(spsMemberDevices)).map(device => device.ownerUserId)).toEqual([value.account.userId]);
+
+    const otherAccount = await value.login("native-member-other-account");
+    const denied = await send("enrollment.reconcile", { enrollmentId: issued.result.enrollmentId },
+      { credential: { sessionCookie: otherAccount.cookie }, peerCertificateDer: certificateDer.toString("base64url") });
+    expect(denied.ok).toBe(false);
+    expect((await db.select().from(spsNativePairingEvents)).filter(event => event.action === "consumed")).toHaveLength(1);
+  });
 
   it("binds a membership-free session to issuance and fresh mTLS completion without granting access", async () => {
     const value = await setup();
@@ -184,6 +239,37 @@ describeDatabase("Native enrollment with actual SPS sessions and loopback HTTPS"
     const [row] = await db.select().from(spsNativePairings);
     expect(row).toMatchObject({ status: "consumed", consumedByUserId: value.account.userId });
     expect(JSON.stringify({ issued, completed })).not.toContain(value.account.cookie);
+  });
+
+  it("binds renewal to the current SPS cookie and the actual presented fresh TLS peer", async () => {
+    let expectedCertificate = "";
+    let expectedUserId = "";
+    const renewFromTlsPeer = vi.fn(async (peer: unknown, input: unknown) => {
+      const certificate = getSpsNativeEnrollmentPeerCertificate(peer as never);
+      expect(certificate.raw.toString("base64url")).toBe(expectedCertificate);
+      expect(input).toMatchObject({ deviceKeyId, requestPem: expect.any(String), userId: expectedUserId });
+      return { renewalId: "55555555-5555-4555-8555-555555555555",
+        deviceId: "66666666-6666-4666-8666-666666666666", predecessorCertificateSha256: "a".repeat(64),
+        certificate: expectedCertificate, issuerCertificate: member.issuerCertificate,
+        certificateNotBefore: "2026-10-27T00:00:00.000Z", certificateNotAfter: "2027-01-25T00:00:00.000Z" };
+    });
+    const value = await setup(undefined, {}, { renewFromTlsPeer });
+    expectedUserId = value.account.userId;
+    const issued = await value.call("/issue", value.input, { cookie: value.account.cookie });
+    expect(issued.status).toBe(200);
+    expectedCertificate = issued.body.certificate;
+    const route = "/sps-native/v1/enrollment/renew";
+    const body = { deviceKeyId, requestPem: value.input.requestPem };
+    const renewed = await value.call(route, body, { cookie: value.account.cookie, certificate: expectedCertificate });
+    expect(renewed.status).toBe(200);
+    expect(renewFromTlsPeer).toHaveBeenCalledTimes(1);
+    expect(renewed.body).toMatchObject({ renewalId: expect.any(String), deviceId: expect.any(String) });
+    expect(renewed.headers["set-cookie"]).toBeUndefined();
+    expect((await value.call(route, body, { certificate: expectedCertificate })).status).toBe(403);
+    expect((await value.call(route, body, { cookie: value.account.cookie })).status).toBe(409);
+    expect((await value.call(route, { ...body, userId: value.account.userId },
+      { cookie: value.account.cookie, certificate: expectedCertificate })).status).toBe(400);
+    expect(renewFromTlsPeer).toHaveBeenCalledTimes(2);
   });
 
   it("reconciles consumed registration over the actual session and fresh mTLS without replaying an invitation", async () => {

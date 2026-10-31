@@ -2,6 +2,88 @@
 
 Status: current engineering contract
 
+Confirmed product scope (2026-10-28): SPS operates reviewed and approved packages
+from its own solution-delivery business, without public Plugin publishing,
+distribution, sales or discovery. Preserve the internal Registry, package
+verification, installation/update/rollback, SDK and Runner contracts. Plugin
+Builder is a separate future handoff and is not a Core completion prerequisite.
+Full untrusted-code OS containment is deferred; its research is retained. Existing
+capability/grant checks, Secret and file mediation, Workspace boundaries and
+truthful process ownership/recovery remain required. The execution computer
+(Runner) is distinct from an Agent or Target; retained Node protocol names are
+compatibility identifiers. Tailscale and SSH remain the supported network and
+remote-management direction. Older Marketplace feature statements are superseded
+by this policy and must not become release gates.
+
+Plugins may opt into a dedicated Workspace UI/action worker and per-Workspace
+runtime configuration. The ownership, authorization, compatibility and cleanup
+contract is documented in [Workspace Plugin workers](SPS-WORKSPACE-PLUGIN-WORKERS.md).
+This separate process lane does not establish an OS sandbox.
+
+New npm Plugin installs and upgrades use separate UUID-owned artifact trees;
+their committed packagePath is authoritative. A missing explicit artifact must
+not silently load a different shared copy. Uninstall preserves caller-owned
+local checkouts and removes only a recognized owned staged tree. All artifact
+cleanup fences starts/restarts of that Plugin and requires its tracked workers
+to confirm close. The loader also requires a live Plugin-bound maintenance
+permit and rejects expired, mismatched or insufficient shared-cleanup authority.
+Legacy shared npm cleanup additionally requires a maintenance
+window with no other tracked workers or starts; Core returns the fixed
+`plugin_package_maintenance_required` conflict rather than stopping unrelated
+plugins. The maintenance action is joined by shutdown. These are graceful local
+coordination guarantees, not crash-atomic package journaling, descendant-process
+containment, or protection from arbitrary same-user filesystem access.
+
+The product composition additionally persists removal and approved-upgrade
+intents before destructive package mutations, and reconciles them before normal
+plugin startup. Pending operations deny unrelated activation/replacement.
+Upgrade phases preserve both artifacts and avoid old-code rollback after an
+entered activation may have changed the database. An explicit Host enable may
+resume an installed package whose initial activation was interrupted, using
+normal loader validation. Approval-pending updates still cannot be enabled.
+See [Plugin package lifecycle recovery](SPS-PLUGIN-PACKAGE-RECOVERY.md) for scope,
+rollback constraints, retained staging artifacts and outstanding qualification.
+
+Fresh-Host restore retains plugin IDs, manifests, versions and durable data,
+but retires prior-Host code execution approval: plugin records become softly
+uninstalled and every original package path is cleared before startup. Desktop
+owns portable managed package bytes and creates static-only review stages at
+the destination. Only a new Host's explicit normal Registry review/install may
+reactivate the preserved record with a newly verified package path. The existing
+soft-uninstall/reinstall path retains its ID and data; this is not schema
+downgrade, old-path relocation authority, publisher-trust migration or automatic
+plugin activation. External local checkouts require explicit reselection.
+
+Current-app official bundles are not exempt from new-Host review. Bundled
+startup checks declarative `spsPlugin.id` metadata against the preserved record
+before importing its executable manifest. A softly uninstalled record with no
+package path cannot be automatically refreshed or reactivated. Disabled,
+uninstalled (including retained-path records) and pending-upgrade bundles also
+remain inactive until explicitly enabled or reinstalled by the Host. The identity is
+a lookup hint for already trusted configured bundle paths, not a signature or
+new source of installation authority. Legacy bundles without this metadata do
+not import automatically while any inactive records could await review. An
+explicit normal Host reinstall records the package path and preserves data;
+ordinary approved bundle refresh on an existing Host remains unchanged.
+
+Workspace-wide execution admission and cancellation are platform-owned. The
+durable pause/stop/resume contract, per-lane acknowledgement limits, Host-only
+mutation authority and compatibility requirements are specified in
+[Workspace execution control](SPS-WORKSPACE-EXECUTION-CONTROL.md). A returned stop
+request or a database cancellation status is not process/provider exit evidence.
+
+Node claim retries can opt into durable request/result receipts while legacy
+claim callers retain their current responses. Receipt replay never grants new
+execution authority or proves launch/exit. Restart recovery combines these
+receipts with Desktop's encrypted claim/launch journal. Entered or uncertain
+work is never automatically replayed. See
+[Node claim recovery](SPS-NODE-CLAIM-RECOVERY.md).
+
+Optional adapter process-session input publishes complete frames in receive
+order. Failed input cannot become a successful normal EOF, and stop joins
+pending uploads before session cleanup. See [Process-session input ordering](SPS-PROCESS-SESSION-INPUT-ORDER.md)
+for the guarantees, provider limits, and separate Linux integration evidence.
+
 ## Goal
 
 SPS Core is the durable, workflow-neutral runtime embedded by SPS Desktop. A
@@ -13,11 +95,22 @@ non-AI programs. Core remains private and the Plugin SDK public. AI, OpenClaw,
 OCE and Agent registration are not mandatory. Current Windows/Tailscale access,
 identity and recovery contracts remain unchanged by this direction.
 
+Authentication keeps instance-scoped session cookies and explicit Origin/CSRF
+checks in every environment. Auth dependency upgrades must preserve the existing
+user/account/session schema and secret/cookie prefix. Better Auth1.7.7 isolates
+OAuth verification identifiers by purpose; redirects started before this upgrade
+must restart sign-in rather than migrate or reinterpret old verification state.
+This source contract does not authorize changing an installed Host or customer
+credentials, and does not qualify production-provider or cross-version sessions
+without separate evidence.
+
 ### Native Member foundation and local Host management
 
-Windows Native LAN is not supported by the current product startup. The new
-Host-scoped device registry, transport helper and optional event-WebSocket
-guard are source foundations, not an enabled listener or complete enrollment protocol.
+Full Windows Native LAN is not yet qualified. Prepared, directly owned startup
+can mount the private Main-ingress registration dispatcher, while Desktop Main
+owns the separate per-launch opt-in TLS listener. The Host device registry,
+transport helper and optional event-WebSocket guard do not yet provide complete
+Native Workspace/Source/Node transport. See [Main ingress](SPS-NATIVE-MAIN-INGRESS.md).
 
 Existing device-request routes require an authenticated user with current active Workspace
 membership and create `pending` state only. The Host UUID is trusted constructor
@@ -37,14 +130,19 @@ Workspace, Agent or Plugin. Reads and writes recheck the exact session inside
 their DB transaction; parent-channel loss/disposal also fences final projections.
 No Authorization token, legacy role or matching non-Owner session substitutes
 for this authority. Preparing keys requires an explicit Host restart to mount
-management; a lost channel is not silently rebound. This opens no Native listener,
-initial enrollment, invitation UI or Workspace/Node/Source grant.
+management; a lost channel is not silently rebound. Core opens no external Native
+TLS socket; the separately gated Workspace channel uses private loopback HTTP.
+Desktop can separately opt into registration and local Owner invitation actions;
+these grant no Workspace/Node/Source access.
 
 The directly owned Core process also has a bounded stop-only control path,
 independently of Native signing. An explicitly marked inherited pipe is mounted
 only with an existing direct parent IPC connection; its exact fixed command is
-accepted once, at EOF. Desktop revokes signing authority and disconnects Native
-IPC before requesting the existing Core drain and embedded-database shutdown.
+accepted once, at EOF. Desktop revokes signing authority before requesting the
+existing Core drain and embedded-database shutdown. A Windows job-owned Host
+keeps the IPC transport open until Core EOF so Node can confirm the actual child
+close; disposed signing and request handlers cannot accept new or late results.
+Other compositions retain their existing physical IPC-disconnect behavior.
 The separate pipe remains usable after that revocation, but never reconnects
 Native authority. Ordinary invalidation does not stop the Host. No HTTP, Plugin
 or SDK shutdown endpoint is added. A sent request is not process-exit or
@@ -59,10 +157,25 @@ termination before disposing Host services or stopping the embedded database.
 The terminal worker-manager shutdown is shared by concurrent callers and rejects
 new starts, including starts through previously returned managed handles; the
 existing reusable `stopAll` operation is not redefined as terminal shutdown.
-A shutdown RPC acknowledgement alone is not process-exit evidence. A child still
+A shutdown RPC acknowledgement alone is not process-exit evidence. Worker
+ownership and PID remain retained after process exit until the exact child's
+stdio `close` confirms resource closure. Buffered final RPC responses may drain
+between exit and close; new worker requests and notifications cannot admit Host
+work after exit. Unresolved calls and crash/restart cleanup finalize at close.
+An unconfirmed close fails stop and blocks replacement. Asynchronous Host calls
+and stream authorization continuations remain bound to their originating child
+and cannot write or register channels in a replacement generation. A child still
 alive after the bounded termination sequence makes shutdown fail, and Core exits
 nonzero rather than recording a clean shutdown. This is local lifecycle control,
 not physical two-PC, distributed cancellation, or arbitrary descendant proof.
+
+An explicitly invalid Worker invocation context fails closed for every Host RPC,
+including methods without Workspace selectors such as config and secret reads.
+The lack of a Workspace selector does not erase a missing, expired or unknown
+invocation. Genuine legacy Host calls with no invocation context retain their
+existing capability checks; this does not convert a shared Worker into a
+Workspace-owned process or a secret-isolation boundary.
+
 The reusable bulk stop also joins current startup and temporarily rejects new
 starts, then reopens admission after completion. Only the exact successfully
 stopped handles are removed; failed handles remain tracked and reject the call.
@@ -92,8 +205,18 @@ the same user session plus current device authority before event delivery;
 revocation/invalid sessions stop delivery. There is no product call site yet.
 Host identity persistence, certificate issuance/key storage and a zero-Plugin
 local management UI have separate source implementations in SPS-Source. Complete
-one-time pairing activation, HTTP/subresource/other-upgrade coverage, bounded
-ingress lifecycle and physical two-PC qualification remain required.
+HTTP/subresource/other-upgrade coverage, certificate renewal and physical two-PC
+qualification remain required beyond the bounded registration ingress.
+An explicitly constructed private loopback Workspace adapter, request-proof
+codec, and child-IPC startup composition now have source-level DB/HTTP and
+channel lifecycle tests for selected surface queries. Core mounts them only for
+a directly owned child when prepared Host management, the existing parent
+ingress, and `SPS_NATIVE_WORKSPACE_CHANNEL=1` are all present. The matching Main
+channel must be deployed before enabling that flag. This does not make the
+ordinary Core listener a Native ingress or provide full Workspace assets,
+WebSockets, Plugin, Source or Node access. See
+[private Workspace channel](SPS-NATIVE-WORKSPACE-CHANNEL.md) for
+request/session/device transaction boundaries and remaining composition.
 Do not enable an ordinary listener, broaden a bind or reuse Node credentials as
 a shortcut. No Connection API is added to the public SDK in this increment.
 
@@ -110,11 +233,12 @@ keeps non-authorizing event snapshots.
 This store is not an authentication boundary: a live transport must authenticate
 the session, validate key possession and supply the trusted Host identity before
 calling it. A verified database user alone is not a session. Existing HTTP routes
-still require membership; the new primitive has no HTTP/RPC/SDK/UI call site.
+still require membership; the storage primitive itself is not a public API.
+Prepared Owner routes and the private Main-ingress adapter now compose it.
 Certificate approval and membership/grants remain separate. Product target/TTL
 defaults are any verified recipient and one hour, supplied by Desktop under D6;
 Core callers must still provide explicit policy and a server pin.
-An inactive local `createSpsNativeHostPairings` composition now derives the
+A local `createSpsNativeHostPairings` composition derives the
 issuer solely from the prepared Host management object's current Owner session.
 It fixes the approved first invitation to one hour and any verified recipient;
 attempt and active-invitation caps remain mandatory explicit constructor inputs,
@@ -128,14 +252,15 @@ one-time secret is unrecoverable; that pending invitation occupies quota until
 expiry or a later authorized revoke. Old trusted internal callers retain their optional-guard
 behavior; the storage primitive alone still authenticates no session. Parent
 channel loss also fences final projections, but these checks are not atomic with
-COMMIT or proof of distributed logout. No product startup route, invitation UI,
-listener, SDK method or membership/execution grant is enabled by this composition.
+COMMIT or proof of distributed logout. Prepared startup mounts Owner-only
+invitation routes; the storage composition itself opens no listener, SDK method
+or membership/execution grant.
 The pin is captured per service instance, not checked against a persistent global
 identity registry. Rotation must retire old instances/listeners; the storage test
 does not prove global rotation or physical device authentication.
 
 Migration `0167_absurd_loki` adds Host-private public enrollment issuance records,
-with one unique cascading row per invitation. The inactive
+with one unique cascading row per invitation. The
 `spsNativeEnrollmentService` reuses the pairing transaction and wrong-secret
 budget for two operations, without adding a route, RPC, SDK method or listener:
 
@@ -147,7 +272,8 @@ budget for two operations, without adding a route, RPC, SDK method or listener:
   The stored public leaf must match the configured issuer, identity, purpose and
   requested validity. A committed identical retry returns the same certificate;
   a different request conflicts. The record stores neither full CSR nor secret.
-- `completeFromTlsPeer` requires a real authorized, non-resumed TLS 1.3 socket,
+- `completeFromTlsPeer` requires a real authorized, non-resumed TLS 1.3 socket
+  or a privately branded, immutable certificate proof from the owned Main IPC,
   the same verified account and the exact committed certificate fingerprint.
   It consumes the invitation and creates only `pending` device state plus audit
   in one transaction, rechecking peer and certificate expiry after async writes.
@@ -170,11 +296,12 @@ dispose and channel loss fence new operations and final transactional writes.
 Main independently checks the current local Host session, identity store and
 account/Vault lifecycle generation before and after asynchronous signing. This
 does not make the Core child untrusted-code isolation or establish a Member
-session. Startup does not instantiate the enrollment factory automatically.
+session. Startup instantiates this composition only with prepared Host
+management and the explicit `SPS_NATIVE_PARENT_INGRESS=1` capability.
 
-These are internal persistence/transport operations, not authenticated endpoints.
-The current user ID must still come from a real, revalidated SPS session in a
-future dedicated ingress; the DB verified flag alone is insufficient.
+These remain internal persistence/transport operations. The current user ID
+comes from a real, revalidated SPS session in the private Main-ingress adapter;
+the DB verified flag alone is insufficient.
 An inactive session-enrollment adapter now derives the user from the configured
 SPS Identity cookie, never a body or actor substitute. Its private transaction
 authorizer binds exact session ID/digest/user/expiry and verified account, with
@@ -235,9 +362,11 @@ an RSA-signed fixture token, not production Google OAuth or an active Main clien
 The handler is unmounted: creating it opens no listener, supplies no browser
 cookie jar and does not share existing hub cookies with a different origin.
 
-Product session-to-request activation, issued-credential persistence, enrollment
-UI and Native TLS ingress remain unwired. Current network listeners, Tailscale,
-Workspace/Plugin/Node/CLI/Source permissions and public SDK are unchanged.
+Desktop's source registration path now connects Main TLS, the private IPC
+dispatcher, issued-credential persistence and explicit enrollment/recovery UI.
+The ordinary HTTP factories described here remain unmounted in Core startup;
+their real-socket requirement is unchanged. Existing network listeners,
+Tailscale, Workspace/Plugin/Node/CLI/Source permissions and public SDK are unchanged.
 
 An inactive public-identity handler now accepts only an empty, fresh TLS 1.3
 POST on `/sps-native/v1/identity`, before account/session enrollment. It obtains
@@ -283,6 +412,17 @@ authorization for a subsequent request or proof against a revocation occurring
 after its transaction. Existing two-operation adapters remain compatible; the
 new HTTP path is unavailable unless its reconciliation method is explicitly
 provided. Product listener/startup and Main persistence/UI remain separate work.
+
+### Native Node development integration
+
+The private Workspace channel can now dispatch the closed Native Node operation
+set through the shared signed Node service. Actual Main TLS/session/device and
+Workspace authority remains mandatory, with an immutable Native device binding
+and separate Node proof of possession. Enrollment grants no execution authority.
+See [Native Node contract](SPS-NATIVE-NODE.md) for limits, compatibility, restore
+and rollback. This source implementation does not qualify full LAN/Source,
+arbitrary CLI isolation or an installed Windows release; SPS-Source records the
+actual integration evidence and incomplete gates.
 
 ### Optional Execution Backends
 
@@ -356,7 +496,15 @@ upstream termination or billing cancellation. There is no automatic HTTP retry,
 fallback or input replay. The read-to-dispatch interval is not atomic with the
 network. Common history uses the separate `model_request` lane and labels the
 model `configured`, not provider-reported; it never loads prompt/result content.
-Prices remain unknown. The Host configuration UI is not yet implemented. Source
+Prices remain unknown. Host settings now exposes the existing connection and
+per-Plugin approval APIs at `/company/settings/instance/model-connections`.
+The Core baseline also links the existing Secret management page; the model
+page consumes only credential metadata. Ready, enabled Plugins must declare
+`sps.models.submit` to appear as approval choices. Manifest metadata is not a
+grant: the existing server checks remain authoritative. Saved configuration is
+not provider readiness, and creating it does not start a model request or Agent.
+Uncertain mutation responses require a fresh read before another change; writes
+are not automatically repeated. AI remains optional. Source
 acceptance uses fake credentials and a loopback HTTP mock, not a real provider,
 installed-app qualification, two-PC proof or production isolation certification.
 
@@ -420,9 +568,10 @@ Core owns these cross-workflow contracts:
    slots, diagnostics, and rollback.
 6. Generic durable storage and events exposed through versioned plugin host
    services.
-7. Core Marketplace catalog search, plugin details, and the read-only,
-   adapter-backed Marketplace Assistant tool bridge. Desktop currently
-   materializes the trusted local catalog consumed by this service.
+7. Internal Registry metadata and Host-authorized approved package management.
+   Desktop materializes the trusted local catalog. Public discovery and
+   Marketplace Assistant execution are retired; old scoped credentials remain
+   rejected rather than gaining ordinary Core authority.
 8. Backup, update compatibility, and recovery primitives. SPS Desktop owns the
    complete transfer-bundle and empty-Host restore orchestration.
 
@@ -737,7 +886,7 @@ Plugin-scoped; they do not control Agent sessions or grant access to another
 plugin's executions. Lists are bounded, descending UUID pages, not chronological
 history. Existing get/events/artifact methods remain unchanged.
 
-### Neutral Plugin Execution Timeout and Node Ownership Guards
+### Node Execution Timeout and Ownership Guards
 
 Core validates an optional `timeoutMs` for neutral Plugin `dispatchRun` calls.
 When supplied and non-null it must be a positive safe integer; zero, negative,
@@ -751,11 +900,13 @@ handling.
 Before claiming a queued neutral Plugin run, Core validates the persisted
 timeout again. A corrupted or otherwise invalid queued value marks that run
 failed and claim processing skips it; invalid work is not sent to a process.
-Neutral Plugin claims are never silently requeued after 10 minutes without
-activity. Silence does not prove process termination: an old claim stays
-claimed, and an explicit cancellation stays `cancelling`, until the signed Node
-acknowledges completion. Uncertain process execution is not automatically
-retried. The legacy command lane's existing stale-claim behavior is unchanged.
+Neutral Plugin runs and legacy Agent commands are never silently requeued after
+10 minutes without activity. Silence does not prove process termination: an old
+claim stays claimed, and an explicit cancellation stays `cancelling`, until the
+signed Node acknowledges completion. Uncertain process execution is not
+automatically retried. Recovery that transfers ownership requires explicit
+termination evidence and a claim-generation fence; elapsed time alone is not
+such evidence. This policy adds no database migration or public SDK change.
 
 On the Local Node, an already-active command ID is rejected across all command
 lanes before it can replace the tracked entry, spawn another process, or emit a
@@ -785,11 +936,11 @@ new compatible Core/SDK release is published.
    contributed by plugins.
 4. Installation, Source access, Node execution, restore, and updates require the
    explicit authority defined by Core. Plugins may request but cannot bypass it.
-5. Marketplace Assistant search and detail tools are read-only. Recommendation
-   does not silently install or activate a plugin.
+5. Internal catalog metadata never grants installation, activation or execution
+   authority. Retired Marketplace Assistant credentials remain fail closed.
 6. Every new public contract requires a version, compatibility behavior, tests,
    and an ownership declaration (Core or Plugin).
-7. A Marketplace `source.id` or trust label is presentation metadata, not proof
+7. A catalog `source.id` or trust label is presentation metadata, not proof
    of signature or freshness. Core must not accept a widened or remote catalog
    source until provenance, signature/hash, expiry, and fail-closed behavior are
    verified at the catalog boundary. The current local catalog path assumes

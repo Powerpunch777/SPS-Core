@@ -10,6 +10,7 @@ export const heartbeatRuns = pgTable(
     companyId: uuid("company_id").notNull().references(() => companies.id),
     agentId: uuid("agent_id").notNull().references(() => agents.id),
     invocationSource: text("invocation_source").notNull().default("on_demand"),
+    workspaceExecutionEpoch: text("workspace_execution_epoch").notNull().default("0"),
     triggerDetail: text("trigger_detail"),
     status: text("status").notNull().default("queued"),
     responsibleUserId: text("responsible_user_id"),

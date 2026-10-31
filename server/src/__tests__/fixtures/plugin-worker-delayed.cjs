@@ -1,4 +1,6 @@
 const readline = require("node:readline");
+const pendingHandshakeCalls = new Map();
+let nextHandshakeId = 1;
 
 function send(message) {
   process.stdout.write(`${JSON.stringify(message)}\n`);
@@ -12,6 +14,22 @@ const rl = readline.createInterface({
 rl.on("line", (line) => {
   if (!line.trim()) return;
   const message = JSON.parse(line);
+  if (message && pendingHandshakeCalls.has(message.id)) {
+    const original = pendingHandshakeCalls.get(message.id);
+    pendingHandshakeCalls.delete(message.id);
+    send({
+      jsonrpc: "2.0",
+      id: original.id,
+      result: {
+        exitCode: 0,
+        signal: null,
+        timedOut: false,
+        stdout: "ok\n",
+        stderr: "",
+      },
+    });
+    return;
+  }
   const method = message && typeof message.method === "string" ? message.method : null;
 
   if (method === "initialize") {
@@ -27,6 +45,20 @@ rl.on("line", (line) => {
   }
 
   if (method === "environmentExecute") {
+    if (message.params?.testHandshake === true) {
+      const id = `test-handshake-${nextHandshakeId++}`;
+      pendingHandshakeCalls.set(id, message);
+      send({
+        jsonrpc: "2.0",
+        id,
+        method: "config.get",
+        params: {},
+        ...(message.paperclipInvocation?.id
+          ? { paperclipInvocationId: message.paperclipInvocation.id }
+          : {}),
+      });
+      return;
+    }
     const delayMs = Number(message.params?.delayMs ?? 0);
     setTimeout(() => {
       send({

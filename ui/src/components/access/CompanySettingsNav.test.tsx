@@ -84,6 +84,7 @@ describe("CompanySettingsNav", () => {
     expect(getCompanySettingsTab("/company/settings/instance/experimental")).toBe("instance-experimental");
     expect(getCompanySettingsTab("/PAP/company/settings/instance/plugins/example")).toBe("instance-plugins");
     expect(getCompanySettingsTab("/company/settings/instance/adapters")).toBe("instance-adapters");
+    expect(getCompanySettingsTab("/PAP/company/settings/instance/model-connections")).toBe("instance-model-connections");
   });
 
   it("renders the active tab and navigates when a different tab is selected", async () => {
@@ -114,6 +115,7 @@ describe("CompanySettingsNav", () => {
           { value: "instance-experimental", label: "Instance experimental" },
           { value: "instance-plugins", label: "Instance plugins" },
           { value: "instance-adapters", label: "Instance adapters" },
+          { value: "instance-model-connections", label: "Model connections" },
         ],
       }),
     );

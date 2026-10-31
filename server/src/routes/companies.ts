@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { Router, type Request } from "express";
 import { and, count as countFn, eq } from "drizzle-orm";
-import { z } from "zod";
+import { z } from "zod/v3";
 import type { Db } from "@paperclipai/db";
 import { agents as agentsTable } from "@paperclipai/db";
 import {
@@ -17,7 +17,7 @@ import {
   updateCompanyBrandingSchema,
   updateCompanySchema,
 } from "@paperclipai/shared";
-import { badRequest, forbidden } from "../errors.js";
+import { badRequest, conflict, forbidden } from "../errors.js";
 import { validate } from "../middleware/validate.js";
 import {
   accessService,
@@ -39,8 +39,13 @@ import {
   hasSpsCoreHostAuthority,
 } from "./authz.js";
 import { COMPANY_IMPORT_ROUTE_PATH } from "./company-import-paths.js";
+import { spsWorkspaceExecutionRoutes } from "./sps-workspace-execution.js";
+import { spsWorkspaceExecutionControlService, SpsWorkspaceExecutionCleanupPendingError } from "../services/sps-workspace-execution-control.js";
+import { SpsWorkspacePluginRuntimeUnavailableError, type SpsWorkspacePluginWorkers } from "../services/sps-workspace-plugin-workers.js";
 
-export function companyRoutes(db: Db, storage?: StorageService) {
+export function companyRoutes(db: Db, storage?: StorageService, dependencies: {
+  workspaceWorkers?: Pick<SpsWorkspacePluginWorkers, "withWorkspaceMutation">;
+} = {}) {
   const router = Router();
   const svc = companyService(db);
   const agents = agentService(db);
@@ -49,8 +54,11 @@ export function companyRoutes(db: Db, storage?: StorageService) {
   const budgets = budgetService(db);
   const artifacts = companyArtifactsService(db, storage);
   const feedback = feedbackService(db);
+  const executionControl = spsWorkspaceExecutionControlService(db);
   const importJobs = new Map<string, ImportJobRecord>();
   const importJobTerminalRetentionMs = 5 * 60 * 1000;
+
+  router.use("/:companyId/execution-control", spsWorkspaceExecutionRoutes(db));
 
   function parseBooleanQuery(value: unknown) {
     return value === true || value === "true" || value === "1";
@@ -563,12 +571,47 @@ export function companyRoutes(db: Db, storage?: StorageService) {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
     assertBoard(req);
-    const company = await svc.remove(companyId);
-    if (!company) {
-      res.status(404).json({ error: "Company not found" });
+    const workers = dependencies.workspaceWorkers;
+    if (!workers) {
+      res.status(503).json({ error: "Workspace runtime cleanup is unavailable.", code: "workspace_cleanup_unavailable" });
       return;
     }
-    res.json({ ok: true });
+    let executionSnapshot: { state: string; epoch: string; revision: number } | undefined;
+    try {
+      await workers.withWorkspaceMutation(companyId, async () => {
+        const current = await executionControl.get(companyId);
+        const stopped = await executionControl.transition(companyId, "stop", req.actor?.userId ?? "local-board", current.revision);
+        const latest = await executionControl.get(companyId);
+        executionSnapshot = { state: latest.state, epoch: latest.epoch, revision: latest.revision };
+        if (latest.state !== "stopped" || latest.epoch !== stopped.epoch || latest.revision !== stopped.revision) {
+          throw conflict("Workspace execution state changed. Refresh before retrying.");
+        }
+        const pending = Object.values(latest.pending).some(value => value !== 0);
+        if (stopped.cancellationFailures.length > 0 || pending) {
+          res.status(503).json({ error: "Workspace execution cleanup is still pending.",
+            code: "workspace_cleanup_pending", execution: executionSnapshot });
+          return;
+        }
+        const company = await svc.remove(companyId, { epoch: stopped.epoch, revision: stopped.revision });
+        if (!company) {
+          res.status(404).json({ error: "Company not found" });
+          return;
+        }
+        res.json({ ok: true });
+      });
+    } catch (error) {
+      const errorCode = error && typeof error === "object" && "code" in error
+        ? (error as { code?: unknown }).code : undefined;
+      if (error instanceof SpsWorkspacePluginRuntimeUnavailableError
+        || error instanceof SpsWorkspaceExecutionCleanupPendingError
+        || errorCode === "sps_workspace_plugin_runtime_unavailable"
+        || errorCode === "workspace_execution_cleanup_pending") {
+        res.status(503).json({ error: "Workspace execution cleanup is still pending.",
+          code: "workspace_cleanup_pending", ...(executionSnapshot ? { execution: executionSnapshot } : {}) });
+        return;
+      }
+      throw error;
+    }
   });
 
   return router;

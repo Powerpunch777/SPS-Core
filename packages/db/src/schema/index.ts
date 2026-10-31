@@ -102,8 +102,10 @@ export {
   spsNodeCommandEvents,
 } from "./sps_nodes.js";
 export { spsMemberDevices, spsMemberDeviceEvents } from "./sps_member_devices.js";
+export { spsMemberDeviceRenewalCertificates } from "./sps_member_device_renewal_certificates.js";
 export { spsNativePairings, spsNativePairingEvents } from "./sps_native_pairings.js";
 export { spsNativeEnrollments } from "./sps_native_enrollments.js";
+export { spsNativeNodeBindings } from "./sps_native_node_bindings.js";
 export {
   spsWorkspaceSources,
   spsWorkspaceSourceNodeGrants,
@@ -131,6 +133,11 @@ export { companySecrets } from "./company_secrets.js";
 export { companySecretVersions } from "./company_secret_versions.js";
 export { companySecretBindings } from "./company_secret_bindings.js";
 export { spsModelConnections, spsModelGrants, spsModelRuns } from "./sps_model_execution.js";
+export { spsWorkspaceExecutionControl } from "./sps_workspace_execution_control.js";
+export { spsNodeClaimReceipts } from "./sps_node_claim_receipts.js";
+export { spsPluginAuthorityCatalog, spsWorkspacePluginAuthority } from "./sps_plugin_authority.js";
+export { spsWorkspacePluginRuntimeConfigs } from "./sps_workspace_plugin_runtime_configs.js";
+export { spsPluginPackageOperations } from "./sps_plugin_package_operations.js";
 export { userSecretDeclarations } from "./user_secret_declarations.js";
 export { secretAccessEvents } from "./secret_access_events.js";
 export {

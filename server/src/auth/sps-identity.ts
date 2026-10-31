@@ -1,4 +1,4 @@
-import { createHash, createPublicKey, randomBytes, verify } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { Router, type Request, type Response } from "express";
 import { and, eq, gt } from "drizzle-orm";
 import type { Db } from "../compat/paperclip/db.js";
@@ -6,6 +6,11 @@ import { authSessions, authUsers } from "../compat/paperclip/db.js";
 import type { Config } from "../config.js";
 import type { SpsNativePairingTransaction } from "../services/sps-native-pairings.js";
 import type { BetterAuthSessionResult } from "./better-auth.js";
+import {
+  createSpsIdentityTokenVerifier,
+  type SpsIdentityJwk,
+  type SpsIdentityTokenProfile,
+} from "./sps-identity-token.js";
 
 const SESSION_COOKIE = "sps_identity_session";
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -18,46 +23,11 @@ export type SpsIdentityNativeEnrollmentSession = Readonly<{
   authorizeInTransaction(tx: SpsNativePairingTransaction, expectedUserId: string): Promise<void>;
 }>;
 
-type IdentityJwk = {
-  kty?: string;
-  kid?: string;
-  n?: string;
-  e?: string;
-  alg?: string;
-};
-
-type IdentityClaims = {
-  iss?: unknown;
-  aud?: unknown;
-  sub?: unknown;
-  email?: unknown;
-  name?: unknown;
-  picture?: unknown;
-  scope?: unknown;
-  exp?: unknown;
-  nbf?: unknown;
-};
-
-type IdentityProfile = {
-  subject: string;
-  email: string;
-  name: string;
-  picture: string | null;
-};
-
 type SessionMetadata = { ipAddress: string | null; userAgent: string | null };
 type SessionWriter = Pick<Db, "insert">;
 
 function value(input: unknown): string {
   return typeof input === "string" ? input.trim() : "";
-}
-
-function base64UrlJson(input: string): Record<string, unknown> {
-  try {
-    return JSON.parse(Buffer.from(input, "base64url").toString("utf8")) as Record<string, unknown>;
-  } catch {
-    throw new Error("SPS Identity token is invalid.");
-  }
 }
 
 function sha256(input: string): string {
@@ -115,29 +85,6 @@ function headerToken(request: Request): string | null {
   return match?.[1]?.trim() || null;
 }
 
-function tokenAudienceIncludes(value: unknown, expected: string): boolean {
-  return value === expected || (Array.isArray(value) && value.some((entry) => entry === expected));
-}
-
-function hasRequiredScope(value: unknown): boolean {
-  const scopes = typeof value === "string"
-    ? value.split(/\s+/)
-    : Array.isArray(value) ? value : [];
-  return scopes.includes("sps.core.session");
-}
-
-function profileFromClaims(claims: IdentityClaims): IdentityProfile {
-  const subject = value(claims.sub);
-  const email = value(claims.email);
-  if (!subject || !email) throw new Error("SPS Identity token has no verified account.");
-  return {
-    subject,
-    email,
-    name: value(claims.name) || email,
-    picture: value(claims.picture) || null,
-  };
-}
-
 function localUserId(subject: string): string {
   return `sps_identity_${sha256(subject)}`;
 }
@@ -174,13 +121,13 @@ export function createSpsIdentityAuth(db: Db, config: Config) {
     throw new Error("SPS Identity is not configured for this Core instance.");
   }
 
-  let cachedJwks: IdentityJwk[] = [];
+  let cachedJwks: SpsIdentityJwk[] = [];
   let jwksExpiresAt = 0;
 
   async function loadJwks() {
     if (cachedJwks.length > 0 && jwksExpiresAt > Date.now()) return cachedJwks;
     const response = await fetch(config.authIdentityJwksUrl!, { signal: AbortSignal.timeout(5000) });
-    const payload = await response.json().catch(() => null) as { keys?: IdentityJwk[] } | null;
+    const payload = await response.json().catch(() => null) as { keys?: SpsIdentityJwk[] } | null;
     if (!response.ok || !Array.isArray(payload?.keys)) {
       throw new Error("SPS Identity signing keys are unavailable.");
     }
@@ -190,37 +137,12 @@ export function createSpsIdentityAuth(db: Db, config: Config) {
     return cachedJwks;
   }
 
-  async function verifyAccessToken(token: string): Promise<IdentityProfile> {
-    const parts = value(token).split(".");
-    if (parts.length !== 3) throw new Error("SPS Identity token is invalid.");
-    const header = base64UrlJson(parts[0]);
-    const claims = base64UrlJson(parts[1]) as IdentityClaims;
-    if (header.alg !== "RS256" || !value(header.kid)) throw new Error("SPS Identity token uses an unsupported signature.");
-    const key = (await loadJwks()).find((candidate) => candidate.kid === header.kid);
-    if (!key) throw new Error("SPS Identity signing key is not recognized.");
-    const publicKey = createPublicKey({ key, format: "jwk" });
-    const valid = verify(
-      "RSA-SHA256",
-      Buffer.from(`${parts[0]}.${parts[1]}`),
-      publicKey,
-      Buffer.from(parts[2], "base64url"),
-    );
-    if (!valid) throw new Error("SPS Identity token signature is invalid.");
-    const now = Math.floor(Date.now() / 1000);
-    if (
-      value(claims.iss) !== config.authIdentityIssuer
-      || !tokenAudienceIncludes(claims.aud, config.authIdentityAudience)
-      || !hasRequiredScope(claims.scope)
-      || typeof claims.exp !== "number"
-      || claims.exp <= now
-      || (typeof claims.nbf === "number" && claims.nbf > now + 30)
-    ) {
-      throw new Error("SPS Identity token is not valid for this Core.");
-    }
-    return profileFromClaims(claims);
-  }
+  const verifyAccessToken = createSpsIdentityTokenVerifier({
+    issuer: config.authIdentityIssuer,
+    audience: config.authIdentityAudience,
+  }, loadJwks);
 
-  async function upsertUser(profile: IdentityProfile, writer: SessionWriter): Promise<string> {
+  async function upsertUser(profile: SpsIdentityTokenProfile, writer: SessionWriter): Promise<string> {
     const userId = localUserId(profile.subject);
     const now = new Date();
     await writer
@@ -247,7 +169,7 @@ export function createSpsIdentityAuth(db: Db, config: Config) {
     return userId;
   }
 
-  async function createSession(profile: IdentityProfile, metadata: SessionMetadata, writer: SessionWriter,
+  async function createSession(profile: SpsIdentityTokenProfile, metadata: SessionMetadata, writer: SessionWriter,
     assertRequestActive: () => void): Promise<string> {
     assertRequestActive();
     const userId = await upsertUser(profile, writer);

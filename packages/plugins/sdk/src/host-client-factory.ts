@@ -433,6 +433,7 @@ const METHOD_CAPABILITY_MAP: Record<WorkerToHostMethodName, PluginCapability | n
   "sps.workspaceSources.list": "sps.workspaceSources.read",
   "sps.runtimes.list": "sps.runtimes.read",
   "sps.models.list": "sps.models.read",
+  "sps.connectivity.current": "sps.connectivity.read",
   "sps.models.submit": "sps.models.submit",
   "sps.models.get": "sps.models.read",
   "sps.models.cancel": "sps.models.cancel",
@@ -652,9 +653,6 @@ export function createHostClientHandlers(
     params: unknown,
     context?: WorkerHostCallContext,
   ): void {
-    const requested = requestedCompanyScope(method, params);
-    if (requested.kind === "none") return;
-
     if (context?.invalidInvocationScope) {
       throw new InvocationScopeDeniedError(
         pluginId,
@@ -662,6 +660,9 @@ export function createHostClientHandlers(
         "the worker referenced a missing, expired, or unknown invocation scope",
       );
     }
+
+    const requested = requestedCompanyScope(method, params);
+    if (requested.kind === "none") return;
 
     const allowedCompanyId = readNonEmptyString(context?.invocationScope?.companyId);
     if (!allowedCompanyId) return;
@@ -710,6 +711,11 @@ export function createHostClientHandlers(
   ): HostHandler<M> {
     return async (params: WorkerToHostMethods[M][0], context?: WorkerHostCallContext) => {
       requireCapability(method);
+      // Reject selectors/accessors before the generic scope helper reads companyId.
+      if (method === "sps.connectivity.current" && (!params || typeof params !== "object" || Array.isArray(params)
+        || ![Object.prototype, null].includes(Object.getPrototypeOf(params)) || Reflect.ownKeys(params).length !== 0)) {
+        throw new TypeError("Connectivity current accepts no target or credential fields");
+      }
       requireInvocationCompanyScope(method, params, context);
       return handler(params, context);
     };
@@ -743,6 +749,30 @@ export function createHostClientHandlers(
   }
 
   return {
+    "sps.connectivity.current": gated("sps.connectivity.current", async (params, context) => {
+      const workspaceId = context?.invocationScope?.companyId;
+      const uuid = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/;
+      if (context?.invalidInvocationScope || typeof workspaceId !== "string" || !uuid.test(workspaceId)) {
+        throw new InvocationScopeDeniedError(pluginId, "sps.connectivity.current", "a current Workspace invocation is required");
+      }
+      if (!params || typeof params !== "object" || Array.isArray(params)
+        || ![Object.prototype, null].includes(Object.getPrototypeOf(params)) || Reflect.ownKeys(params).length !== 0) {
+        throw new TypeError("Connectivity current accepts no target or credential fields");
+      }
+      if (!context?.readNativeConnectivity) return Object.freeze({ state: "unavailable" as const,
+        transport: "native_tls" as const, hostId: null, workspaceId, authorization: "unknown" as const,
+        evidence: "none" as const, observedAt: new Date().toISOString() });
+      const result = await context.readNativeConnectivity();
+      if (!result || result.workspaceId !== workspaceId || result.state !== "verified"
+        || result.transport !== "native_tls" || typeof result.hostId !== "string" || !uuid.test(result.hostId)
+        || result.authorization !== "authorized" || result.evidence !== "authenticated_request"
+        || typeof result.observedAt !== "string" || new Date(result.observedAt).toISOString() !== result.observedAt) {
+        throw new InvocationScopeDeniedError(pluginId, "sps.connectivity.current", "Native request evidence is unavailable");
+      }
+      // Project only the public observation; never return a provider's extra fields.
+      return Object.freeze({ state: result.state, transport: result.transport, hostId: result.hostId,
+        workspaceId, authorization: result.authorization, evidence: result.evidence, observedAt: result.observedAt });
+    }),
     "sps.models.list": gated("sps.models.list", async (params, context) => {
       requireModelScope(params, context, "sps.models.list", ["companyId"]);
       if (!services.sps?.models) throw new Error("This SPS host does not expose model requests");

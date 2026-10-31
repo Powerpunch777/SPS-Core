@@ -12,7 +12,6 @@ import { useCompany } from "@/context/CompanyContext";
 import { queryKeys } from "@/lib/queryKeys";
 import { Link } from "@/lib/router";
 import { useToastActions } from "@/context/ToastContext";
-import { SpsMarketplacePanel } from "@/components/SpsMarketplacePanel";
 
 type DesktopPluginRegistryBridge = {
   openPluginRegistries: () => Promise<{ opened?: boolean }>;
@@ -130,7 +129,6 @@ export function SpsExtensionsManager() {
   const { setBreadcrumbs } = useBreadcrumbs();
   const queryClient = useQueryClient();
   const { pushToast } = useToastActions();
-  const [activeSection, setActiveSection] = useState<"installed" | "marketplace">("installed");
   const [registryOpening, setRegistryOpening] = useState(false);
   const [registryError, setRegistryError] = useState<string | null>(null);
   const [uninstallPlugin, setUninstallPlugin] = useState<PluginRecord | null>(null);
@@ -228,13 +226,6 @@ export function SpsExtensionsManager() {
     );
   };
 
-  const sectionTabs = (
-    <div className="flex w-fit gap-1 rounded-md border bg-muted/40 p-0.5" role="tablist" aria-label="Plugin sections">
-      <Button type="button" size="sm" variant={activeSection === "installed" ? "secondary" : "ghost"} role="tab" aria-selected={activeSection === "installed"} onClick={() => setActiveSection("installed")}>Installed</Button>
-      <Button type="button" size="sm" variant={activeSection === "marketplace" ? "secondary" : "ghost"} role="tab" aria-selected={activeSection === "marketplace"} onClick={() => setActiveSection("marketplace")}>Marketplace</Button>
-    </div>
-  );
-
   async function openSecureInstallReview() {
     const bridge = getDesktopPluginRegistryBridge();
     if (!bridge) return;
@@ -260,37 +251,17 @@ export function SpsExtensionsManager() {
           </div>
           <h1 className="text-xl font-semibold">Plugins</h1>
         </div>
-        {sectionTabs}
+        <div className="flex flex-wrap items-center gap-3">
+          {getDesktopPluginRegistryBridge() ? (
+            <Button type="button" onClick={() => void openSecureInstallReview()} disabled={registryOpening}>
+              {registryOpening ? "Opening review..." : "Open signed Registry review"}
+            </Button>
+          ) : (
+            <span className="text-sm text-muted-foreground">Host Desktop required to install signed Registry packages</span>
+          )}
+          {registryError ? <p role="alert" className="text-sm text-destructive">{registryError}</p> : null}
+        </div>
       </header>
-
-      {activeSection === "marketplace" ? (
-        <>
-          <section className="flex flex-col gap-3 border-b border-border pb-3 sm:flex-row sm:items-start sm:justify-between">
-            <details className="group min-w-0 text-sm">
-              <summary className="flex cursor-pointer list-none items-center gap-2 font-medium">
-                <ShieldCheck className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
-                Host-controlled installation
-                <ChevronDown className="ml-auto h-4 w-4 shrink-0 text-muted-foreground transition-transform group-open:rotate-180" aria-hidden="true" />
-              </summary>
-              <p className="mt-2 max-w-3xl text-muted-foreground">
-                Marketplace search and Assistant recommendations never install code. The Host must stage, review, and apply an exact signed version.
-              </p>
-            </details>
-            <div className="flex flex-wrap items-center gap-3 sm:shrink-0">
-              {getDesktopPluginRegistryBridge() ? (
-                <Button type="button" onClick={() => void openSecureInstallReview()} disabled={registryOpening}>
-                  {registryOpening ? "Opening review..." : "Open secure install review"}
-                </Button>
-              ) : (
-                <span className="text-sm text-muted-foreground">Host Desktop required to install</span>
-              )}
-              {registryError ? <p role="alert" className="text-sm text-destructive">{registryError}</p> : null}
-            </div>
-          </section>
-          <SpsMarketplacePanel key={selectedCompany.id} companyId={selectedCompany.id} />
-        </>
-      ) : (
-        <>
       <details className="group text-sm">
         <summary className="flex cursor-pointer list-none items-center gap-2 font-medium text-muted-foreground">
           <ShieldCheck className="h-4 w-4" aria-hidden="true" />
@@ -300,8 +271,7 @@ export function SpsExtensionsManager() {
         <div className="mt-2 space-y-1 pl-6 text-muted-foreground">
           <p>Installed plugins remain plugin-owned surfaces and appear only while they are active in this Workspace.</p>
           <p>Core controls package review and lifecycle. Each Workspace chooses which installed plugins contribute UI and behavior.</p>
-          <p><strong className="font-medium text-foreground">Signed Registry only.</strong> Package discovery, signature review, staging, and explicit enablement happen in SPS Desktop. Direct npm installation is intentionally not available here.</p>
-          <p>Host-controlled installation: Marketplace search and Assistant recommendations never install code. The Host must stage, review, and apply an exact signed version.</p>
+          <p><strong className="font-medium text-foreground">Signed Registry only.</strong> Package lookup, signature review, staging, and explicit enablement happen in SPS Desktop. Direct npm installation is intentionally not available here.</p>
         </div>
       </details>
 
@@ -313,7 +283,7 @@ export function SpsExtensionsManager() {
         {bundled.length ? (
           <Card className="py-0"><div className="divide-y">{bundled.map((plugin) => renderExtension(plugin))}</div></Card>
         ) : (
-          <Card className="bg-muted/30"><CardContent className="py-5 text-sm text-muted-foreground">SPS is starting its built-in components. Refresh this page in a moment.</CardContent></Card>
+          <Card className="bg-muted/30"><CardContent className="py-5 text-sm text-muted-foreground">No built-in plugins are installed. Open signed Registry review to approve a restored current app copy or choose another package.</CardContent></Card>
         )}
       </section>
 
@@ -325,7 +295,7 @@ export function SpsExtensionsManager() {
         <Card className="py-0">
           {custom.length ? <div className="divide-y">{custom.map((plugin) => renderExtension(plugin))}</div> : (
             <CardContent className="py-5 text-sm text-muted-foreground">
-              No Registry extensions are installed. Open Marketplace, then use <strong>Open secure install review</strong> to stage a trusted release.
+              No Registry extensions are installed. Use <strong>Open signed Registry review</strong> to stage a release for Host review.
             </CardContent>
           )}
         </Card>
@@ -343,8 +313,6 @@ export function SpsExtensionsManager() {
           });
         }}
       />
-        </>
-      )}
     </main>
   );
 }

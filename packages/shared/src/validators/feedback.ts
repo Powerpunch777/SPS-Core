@@ -1,4 +1,4 @@
-import { z } from "zod";
+import { z } from "zod/v3";
 import {
   FEEDBACK_DATA_SHARING_PREFERENCES,
   FEEDBACK_TARGET_TYPES,

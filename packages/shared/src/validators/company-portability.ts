@@ -1,4 +1,4 @@
-import { z } from "zod";
+import { z } from "zod/v3";
 import { PERMISSION_KEYS } from "../constants.js";
 import { MAX_COMPANY_ATTACHMENT_MAX_BYTES } from "../constants.js";
 import {

@@ -50,6 +50,7 @@ import type {
   PermissionKey,
   PluginToolDeclaration,
 } from "@paperclipai/shared";
+import type { PluginSpsConnectivity } from "./sps-connectivity-types.js";
 export type { PluginLauncherRenderContextSnapshot } from "@paperclipai/shared";
 
 import type {
@@ -309,6 +310,8 @@ export interface PluginInvocationContext {
 export interface WorkerHostCallContext {
   invocationScope?: PluginInvocationScope | null;
   invalidInvocationScope?: boolean;
+  /** Host-process callback from an authenticated Native invocation. Never sent over RPC. */
+  readNativeConnectivity?: () => Promise<PluginSpsConnectivity>;
 }
 
 // ---------------------------------------------------------------------------
@@ -1017,6 +1020,7 @@ export interface WorkerToHostMethods {
   ];
 
   // Workflow-neutral SPS infrastructure
+  "sps.connectivity.current": [params: Record<string, never>, result: PluginSpsConnectivity];
   "sps.models.list": [params: { companyId: string }, result: PluginSpsModelConnection[]];
   "sps.models.submit": [params: PluginSpsModelSubmitInput, result: PluginSpsModelRun];
   "sps.models.get": [params: { companyId: string; runId: string }, result: PluginSpsModelRun | null];

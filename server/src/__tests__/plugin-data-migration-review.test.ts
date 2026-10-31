@@ -58,6 +58,14 @@ function makeLoader(): PluginLoader {
   } as unknown as PluginLoader;
 }
 
+function makeWorkerManager() {
+  return {
+    getWorker: vi.fn(() => undefined),
+    stopWorker: vi.fn().mockResolvedValue(undefined),
+    withPluginPackageMutation: vi.fn(async (_pluginId: string, action: () => Promise<unknown>) => action()),
+  };
+}
+
 function setupRegistry(status = "ready") {
   mockRegistry.getById.mockResolvedValue({ ...pluginRecord, status });
   mockRegistry.updateStatus.mockImplementation(async (_id: string, update: { status: string; lastError?: string | null }) => ({
@@ -93,6 +101,7 @@ describe("plugin data migration review", () => {
     const backup = { runManualBackup: vi.fn() };
     const lifecycle = pluginLifecycleManager({} as never, {
       loader,
+      workerManager: makeWorkerManager() as never,
       databaseBackupService: backup,
     });
 
@@ -113,6 +122,7 @@ describe("plugin data migration review", () => {
     };
     const lifecycle = pluginLifecycleManager({} as never, {
       loader,
+      workerManager: makeWorkerManager() as never,
       databaseBackupService: backup,
     });
 

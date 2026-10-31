@@ -1,75 +1,93 @@
 import * as React from "react";
-import { StrictMode } from "react";
 import * as ReactDOM from "react-dom";
+import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
-import { BrowserRouter } from "@/lib/router";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { App } from "./App";
-import { CompanyProvider, useCompany } from "./context/CompanyContext";
-import { LiveUpdatesProvider } from "./context/LiveUpdatesProvider";
-import { BreadcrumbProvider } from "./context/BreadcrumbContext";
-import { PanelProvider } from "./context/PanelContext";
-import { SidebarProvider } from "./context/SidebarContext";
-import { DialogProvider } from "./context/DialogContext";
-import { EditorAutocompleteProvider } from "./context/EditorAutocompleteContext";
-import { ToastProvider } from "./context/ToastContext";
 import { ThemeProvider } from "./context/ThemeContext";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { initPluginBridge } from "./plugins/bridge-init";
-import { PluginLauncherProvider } from "./plugins/launchers";
+import { SpsNativeWorkspaceEntry } from "./pages/SpsNativeWorkspaceEntry";
+import { SpsNativePluginEntry } from "./pages/SpsNativePluginEntry";
 import "@mdxeditor/editor/style.css";
 import "./index.css";
 
-initPluginBridge(React, ReactDOM);
+const root = createRoot(document.getElementById("root")!);
+const nativePluginBridge = window.spsNativePlugin;
+const nativeWorkspaceBridge = window.spsNativeWorkspace;
 
-if ("serviceWorker" in navigator) {
-  window.addEventListener("load", () => {
-    navigator.serviceWorker.register("/sw.js");
+if (nativePluginBridge) {
+  root.render(
+      <ThemeProvider>
+        <TooltipProvider>
+          <SpsNativePluginEntry bridge={nativePluginBridge} />
+        </TooltipProvider>
+      </ThemeProvider>,
+  );
+} else if (nativeWorkspaceBridge) {
+  root.render(
+    <StrictMode>
+      <ThemeProvider>
+        <TooltipProvider>
+          <SpsNativeWorkspaceEntry bridge={nativeWorkspaceBridge} />
+        </TooltipProvider>
+      </ThemeProvider>
+    </StrictMode>,
+  );
+} else {
+  void import("./App").then(async ({ App }) => {
+    const [router, company, updates, breadcrumbs, panels, sidebar, dialogs, editor, toast, bridge, launchers, query] = await Promise.all([
+      import("@/lib/router"),
+      import("./context/CompanyContext"),
+      import("./context/LiveUpdatesProvider"),
+      import("./context/BreadcrumbContext"),
+      import("./context/PanelContext"),
+      import("./context/SidebarContext"),
+      import("./context/DialogContext"),
+      import("./context/EditorAutocompleteContext"),
+      import("./context/ToastContext"),
+      import("./plugins/bridge-init"),
+      import("./plugins/launchers"),
+      import("@tanstack/react-query"),
+    ]);
+    bridge.initPluginBridge(React, ReactDOM);
+    if ("serviceWorker" in navigator) {
+      const registerServiceWorker = () => { void navigator.serviceWorker.register("/sw.js"); };
+      if (document.readyState === "complete") registerServiceWorker();
+      else window.addEventListener("load", registerServiceWorker, { once: true });
+    }
+    const queryClient = new query.QueryClient({ defaultOptions: { queries: { staleTime: 30_000, refetchOnWindowFocus: true } } });
+    function CompanyAwareBreadcrumbProvider({ children }: { children: React.ReactNode }) {
+      const { selectedCompany } = company.useCompany();
+      return <breadcrumbs.BreadcrumbProvider companyName={selectedCompany?.name ?? null}>{children}</breadcrumbs.BreadcrumbProvider>;
+    }
+    root.render(
+      <StrictMode>
+        <query.QueryClientProvider client={queryClient}>
+          <ThemeProvider>
+            <router.BrowserRouter>
+              <company.CompanyProvider>
+                <editor.EditorAutocompleteProvider>
+                  <toast.ToastProvider>
+                    <updates.LiveUpdatesProvider>
+                      <TooltipProvider>
+                        <CompanyAwareBreadcrumbProvider>
+                          <sidebar.SidebarProvider>
+                            <panels.PanelProvider>
+                              <launchers.PluginLauncherProvider>
+                                <dialogs.DialogProvider><App /></dialogs.DialogProvider>
+                              </launchers.PluginLauncherProvider>
+                            </panels.PanelProvider>
+                          </sidebar.SidebarProvider>
+                        </CompanyAwareBreadcrumbProvider>
+                      </TooltipProvider>
+                    </updates.LiveUpdatesProvider>
+                  </toast.ToastProvider>
+                </editor.EditorAutocompleteProvider>
+              </company.CompanyProvider>
+            </router.BrowserRouter>
+          </ThemeProvider>
+        </query.QueryClientProvider>
+      </StrictMode>,
+    );
+  }).catch(() => {
+    root.render(<main role="alert">The SPS workspace could not be loaded. Restart the window and try again.</main>);
   });
 }
-
-const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: {
-      staleTime: 30_000,
-      refetchOnWindowFocus: true,
-    },
-  },
-});
-
-function CompanyAwareBreadcrumbProvider({ children }: { children: React.ReactNode }) {
-  const { selectedCompany } = useCompany();
-  return <BreadcrumbProvider companyName={selectedCompany?.name ?? null}>{children}</BreadcrumbProvider>;
-}
-
-createRoot(document.getElementById("root")!).render(
-  <StrictMode>
-    <QueryClientProvider client={queryClient}>
-      <ThemeProvider>
-        <BrowserRouter>
-          <CompanyProvider>
-            <EditorAutocompleteProvider>
-              <ToastProvider>
-                <LiveUpdatesProvider>
-                  <TooltipProvider>
-                    <CompanyAwareBreadcrumbProvider>
-                      <SidebarProvider>
-                        <PanelProvider>
-                          <PluginLauncherProvider>
-                            <DialogProvider>
-                              <App />
-                            </DialogProvider>
-                          </PluginLauncherProvider>
-                        </PanelProvider>
-                      </SidebarProvider>
-                    </CompanyAwareBreadcrumbProvider>
-                  </TooltipProvider>
-                </LiveUpdatesProvider>
-              </ToastProvider>
-            </EditorAutocompleteProvider>
-          </CompanyProvider>
-        </BrowserRouter>
-      </ThemeProvider>
-    </QueryClientProvider>
-  </StrictMode>
-);

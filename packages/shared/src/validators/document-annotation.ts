@@ -1,4 +1,4 @@
-import { z } from "zod";
+import { z } from "zod/v3";
 import {
   DOCUMENT_ANNOTATION_ANCHOR_CONFIDENCES,
   DOCUMENT_ANNOTATION_ANCHOR_STATES,

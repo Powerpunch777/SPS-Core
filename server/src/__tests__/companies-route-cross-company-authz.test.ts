@@ -1,6 +1,7 @@
 import express from "express";
 import request from "supertest";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { SpsWorkspacePluginRuntimeUnavailableError } from "../services/sps-workspace-plugin-workers.js";
 
 const companyAId = "11111111-1111-4111-8111-111111111111";
 const companyBId = "22222222-2222-4222-8222-222222222222";
@@ -45,6 +46,8 @@ const mockFeedbackService = vi.hoisted(() => ({
 }));
 
 const mockLogActivity = vi.hoisted(() => vi.fn());
+const mockExecutionControl = vi.hoisted(() => ({ get: vi.fn(), transition: vi.fn() }));
+const mockWithWorkspaceMutation = vi.hoisted(() => vi.fn(async (_companyId: string, action: () => Promise<unknown>) => action()));
 
 function registerCompanyRouteMocks() {
   vi.doMock("../services/index.js", () => ({
@@ -57,6 +60,10 @@ function registerCompanyRouteMocks() {
     feedbackService: () => mockFeedbackService,
     logActivity: mockLogActivity,
   }));
+  vi.doMock("../services/sps-workspace-execution-control.js", async importOriginal => {
+    const actual = await importOriginal<typeof import("../services/sps-workspace-execution-control.js")>();
+    return { ...actual, spsWorkspaceExecutionControlService: () => mockExecutionControl };
+  });
 }
 
 let appImportCounter = 0;
@@ -76,7 +83,9 @@ async function createApp(actor: Record<string, unknown>) {
     (req as any).actor = actor;
     next();
   });
-  app.use("/api/companies", companyRoutes({} as any));
+  app.use("/api/companies", companyRoutes({} as any, undefined, {
+    workspaceWorkers: { withWorkspaceMutation: mockWithWorkspaceMutation } as any,
+  }));
   app.use(errorHandler);
   return app;
 }
@@ -154,6 +163,9 @@ function importResult(companyId = companyBId) {
 }
 
 function resetMockDefaults() {
+  mockExecutionControl.get.mockReset();
+  mockExecutionControl.transition.mockReset();
+  mockWithWorkspaceMutation.mockReset();
   mockCompanyService.getById.mockImplementation(async (id: string) => {
     if (id === companyAId || id === companyBId) return createCompany(id);
     return null;
@@ -167,6 +179,12 @@ function resetMockDefaults() {
     status: "archived",
   }));
   mockCompanyService.remove.mockImplementation(async (id: string) => createCompany(id));
+  mockExecutionControl.get.mockResolvedValueOnce({ state: "running", epoch: "0", revision: 2,
+    pending: { agents: 0, jobs: 0, models: 0, commands: 0, plugins: 0 } }).mockResolvedValue({ state: "stopped", epoch: "1", revision: 3,
+    pending: { agents: 0, jobs: 0, models: 0, commands: 0, plugins: 0 } });
+  mockExecutionControl.transition.mockResolvedValue({ state: "stopped", epoch: "1", revision: 3,
+    cancellationFailures: [], pending: { agents: 0, jobs: 0, models: 0, commands: 0, plugins: 0 } });
+  mockWithWorkspaceMutation.mockImplementation(async (_companyId: string, action: () => Promise<unknown>) => action());
   mockAgentService.getById.mockImplementation(async (id: string) => {
     if (id === ceoAgentId) return { id, companyId: companyAId, role: "ceo" };
     return null;
@@ -349,5 +367,89 @@ describe.sequential("company route cross-company authorization", () => {
     expect(adminWrite.status).toBe(403);
     expect(adminWrite.body.error).toContain("access to this company");
     assertNoTargetMutationSideEffects();
+  });
+
+  it("stops execution and removes only after the fenced workspace drain", async () => {
+    const app = await createApp(boardActor({
+      userId: "member",
+      companyIds: [companyBId],
+      memberships: [{ companyId: companyBId, membershipRole: "member", status: "active" }],
+    }));
+
+    await request(app).delete(`/api/companies/${companyBId}`).expect(200, { ok: true });
+
+    expect(mockWithWorkspaceMutation).toHaveBeenCalledWith(companyBId, expect.any(Function));
+    expect(mockExecutionControl.get).toHaveBeenCalledTimes(2);
+    expect(mockExecutionControl.transition).toHaveBeenCalledWith(companyBId, "stop", "member", 2);
+    expect(mockCompanyService.remove).toHaveBeenCalledWith(companyBId, { epoch: "1", revision: 3 });
+  });
+
+  it("keeps the Workspace when cancellation remains pending after stop", async () => {
+    const app = await createApp(boardActor({
+      userId: "member",
+      companyIds: [companyBId],
+      memberships: [{ companyId: companyBId, membershipRole: "member", status: "active" }],
+    }));
+    mockExecutionControl.get.mockReset();
+    mockExecutionControl.get.mockResolvedValueOnce({ state: "running", epoch: "0", revision: 2,
+      pending: { agents: 0, jobs: 0, models: 0, commands: 0, plugins: 0 } }).mockResolvedValueOnce({ state: "stopped", epoch: "1", revision: 3,
+      pending: { agents: 1, jobs: 0, models: 0, commands: 0, plugins: 0 } });
+
+    const response = await request(app).delete(`/api/companies/${companyBId}`);
+
+    expect(response.status).toBe(503);
+    expect(response.body).toEqual({ error: "Workspace execution cleanup is still pending.",
+      code: "workspace_cleanup_pending", execution: { state: "stopped", epoch: "1", revision: 3 } });
+    expect(mockCompanyService.remove).not.toHaveBeenCalled();
+  });
+
+  it("keeps the Workspace when a stop handler reports unconfirmed cleanup", async () => {
+    const app = await createApp(boardActor({
+      userId: "member",
+      companyIds: [companyBId],
+      memberships: [{ companyId: companyBId, membershipRole: "member", status: "active" }],
+    }));
+    mockExecutionControl.transition.mockResolvedValueOnce({ state: "stopped", epoch: "1", revision: 3,
+      cancellationFailures: ["heartbeat"], pending: { agents: 0, jobs: 0, models: 0, commands: 0, plugins: 0 } });
+
+    const response = await request(app).delete(`/api/companies/${companyBId}`);
+
+    expect(response.status).toBe(503);
+    expect(response.body).toEqual({ error: "Workspace execution cleanup is still pending.",
+      code: "workspace_cleanup_pending", execution: { state: "stopped", epoch: "1", revision: 3 } });
+    expect(mockCompanyService.remove).not.toHaveBeenCalled();
+  });
+
+  it("does not delete when execution resumed after the stop snapshot", async () => {
+    const app = await createApp(boardActor({
+      userId: "member",
+      companyIds: [companyBId],
+      memberships: [{ companyId: companyBId, membershipRole: "member", status: "active" }],
+    }));
+    mockExecutionControl.get.mockReset();
+    mockExecutionControl.get.mockResolvedValueOnce({ state: "running", epoch: "0", revision: 2,
+      pending: { agents: 0, jobs: 0, models: 0, commands: 0, plugins: 0 } }).mockResolvedValueOnce({ state: "running", epoch: "1", revision: 4,
+      pending: { agents: 0, jobs: 0, models: 0, commands: 0, plugins: 0 } });
+
+    const response = await request(app).delete(`/api/companies/${companyBId}`);
+
+    expect(response.status).toBe(409);
+    expect(mockCompanyService.remove).not.toHaveBeenCalled();
+  });
+
+  it("keeps the Workspace when the worker drain cannot confirm process closure", async () => {
+    const app = await createApp(boardActor({
+      userId: "member",
+      companyIds: [companyBId],
+      memberships: [{ companyId: companyBId, membershipRole: "member", status: "active" }],
+    }));
+    mockWithWorkspaceMutation.mockRejectedValueOnce(new SpsWorkspacePluginRuntimeUnavailableError());
+
+    const response = await request(app).delete(`/api/companies/${companyBId}`);
+
+    expect(response.status).toBe(503);
+    expect(response.body).toEqual({ error: "Workspace execution cleanup is still pending.",
+      code: "workspace_cleanup_pending" });
+    expect(mockCompanyService.remove).not.toHaveBeenCalled();
   });
 });

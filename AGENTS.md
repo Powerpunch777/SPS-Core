@@ -11,6 +11,14 @@ plumbing, plugin lifecycle, recovery, and other shared safety boundaries.
 Workflow semantics belong to plugins. Do not make Rooms, Tasks, org charts,
 approval flows, or a particular development process mandatory Core behavior.
 
+Confirmed scope (2026-10-28): support packages built, reviewed and approved for
+SPS solution delivery. Public Marketplace discovery/publishing/sales are retired;
+internal Registry and package verification/lifecycle remain Core. New Plugin
+Builder work waits for its separate handoff after Core completion. Full untrusted
+OS containment is deferred, with experiments preserved; same-user workers are
+not a security sandbox. Preserve SDK/Runner extensibility and all existing
+capability, grant, Secret, file, communication and process-ownership controls.
+
 ## 2. Read This First
 
 Before making changes, read in this order:
@@ -71,7 +79,7 @@ Large legacy modules are being split incrementally. Extract one coherent domain
 at a time and preserve behavior with focused tests.
 
 8. Preserve catalog trust provenance.
-The Marketplace search service currently consumes a local catalog materialized
+The retained internal lookup service consumes a local catalog materialized
 by SPS Desktop. A catalog `source.id` or displayed trust label is not a signature
 check. Do not add arbitrary remote catalog input or elevate trust without a
 verified Source, hash/signature evidence, freshness policy, and fail-closed tests.
@@ -97,8 +105,8 @@ Never silently reinterpret existing rows as a new SPS contract.
   administrator sessions.
 - Node commands require signed authority, an active lease, an allowed runtime,
   and an authorized Source grant.
-- Marketplace Assistant tools remain read-only catalog tools unless a separate,
-  explicit Host action performs installation.
+- Retired Marketplace Assistant credentials and run contexts must fail closed;
+  never remove their restrictions in a way that grants ordinary Core access.
 
 ## 7. Verification Before Handoff
 

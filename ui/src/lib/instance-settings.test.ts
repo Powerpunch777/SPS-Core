@@ -21,6 +21,9 @@ describe("normalizeRememberedInstanceSettingsPath", () => {
     expect(normalizeRememberedInstanceSettingsPath("/PAP/company/settings/instance/adapters")).toBe(
       "/company/settings/instance/adapters",
     );
+    expect(normalizeRememberedInstanceSettingsPath("/PAP/company/settings/instance/model-connections")).toBe(
+      "/company/settings/instance/model-connections",
+    );
     expect(normalizeRememberedInstanceSettingsPath("/company/settings/instance/general")).toBe(
       "/company/settings/instance/general",
     );

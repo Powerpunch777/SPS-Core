@@ -1,4 +1,4 @@
-import { z } from "zod";
+import { z } from "zod/v3";
 
 export function normalizeEscapedLineBreaks(value: string): string {
   return value

@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { resolveSpsPluginPackageMetadata } from "./plugin-package-metadata.js";
 
 type PluginManifest = { id: string; version?: string };
 type ExistingPlugin = {
@@ -9,6 +10,9 @@ type ExistingPlugin = {
   status: string;
   version?: string | null;
 } | null;
+const inactiveBundleStatuses = ["disabled", "uninstalled", "upgrade_pending"] as const;
+const requiresHostActivation = (plugin: NonNullable<ExistingPlugin>) =>
+  inactiveBundleStatuses.some(status => status === plugin.status);
 
 type BundledPluginBootstrapDependencies = {
   loader: {
@@ -25,6 +29,7 @@ type BundledPluginBootstrapDependencies = {
   };
   pluginRegistry: {
     getByKey: (pluginKey: string) => Promise<ExistingPlugin>;
+    listByStatus: (status: typeof inactiveBundleStatuses[number]) => Promise<NonNullable<ExistingPlugin>[]>;
     uninstall: (pluginId: string, removeData?: boolean) => Promise<unknown>;
   };
 };
@@ -44,7 +49,8 @@ export function parseBundledPluginPaths(raw: string | undefined, delimiter = pat
  * when its version and path are unchanged; otherwise it is soft-reinstalled
  * before loading so Desktop updates can refresh the bundled code without
  * deleting plugin-owned state. Individual plugin failures never prevent the
- * authenticated Hub from starting.
+ * authenticated Hub from starting. Disabled, uninstalled and pending-upgrade
+ * records need explicit Host activation, including bundles after a Host restore.
  */
 export async function installConfiguredBundledPlugins(
   pluginPaths: readonly string[],
@@ -59,12 +65,47 @@ export async function installConfiguredBundledPlugins(
         dependencies.logger.warn({ pluginPath }, "configured bundled plugin path is missing package.json; skipping");
         continue;
       }
+      // Read identity without importing executable manifest code. Current SPS
+      // bundles declare this metadata; legacy bundles remain compatible unless
+      // any inactive record could belong to that unknown executable manifest.
+      const packageFile = path.join(pluginPath, "package.json");
+      if (fs.statSync(packageFile).size > 1024 * 1024) throw new Error("Bundled plugin package metadata is too large.");
+      const packageJson = JSON.parse(fs.readFileSync(packageFile, "utf8").replace(/^\uFEFF/, ""));
+      const declaredIdentity = resolveSpsPluginPackageMetadata(packageJson)?.entrypoints.id;
+      if (declaredIdentity !== undefined
+        && (typeof declaredIdentity !== "string" || !/^[a-z0-9][a-z0-9.-]{2,127}$/.test(declaredIdentity))) {
+        throw new Error("Bundled plugin declarative identity is invalid.");
+      }
+      let existing = declaredIdentity ? await dependencies.pluginRegistry.getByKey(declaredIdentity) : null;
+      if (declaredIdentity) {
+        if (existing && requiresHostActivation(existing)) {
+          dependencies.logger.info({ pluginKey: declaredIdentity, status: existing.status },
+            existing.status === "uninstalled" && !existing.packagePath
+              ? "bundled plugin requires new Host review; skipping automatic import"
+              : "bundled plugin awaits explicit Host activation; skipping automatic import");
+          continue;
+        }
+        if (!existing && !installMissing) continue;
+      } else {
+        let hasInactiveRecords = false;
+        for (const status of inactiveBundleStatuses) {
+          if ((await dependencies.pluginRegistry.listByStatus(status)).length > 0) {
+            hasInactiveRecords = true;
+            break;
+          }
+        }
+        if (hasInactiveRecords) {
+          dependencies.logger.info({ pluginPath }, "legacy bundled identity is unknown while Host review is pending; skipping automatic import");
+          continue;
+        }
+      }
       const manifest = await dependencies.loader.loadManifest(pluginPath);
       if (!manifest?.id) {
         dependencies.logger.warn({ pluginPath }, "configured bundled plugin has no valid manifest; skipping");
         continue;
       }
-      const existing = await dependencies.pluginRegistry.getByKey(manifest.id);
+      if (declaredIdentity && manifest.id !== declaredIdentity) throw new Error("Bundled plugin manifest does not match its declarative identity.");
+      if (!declaredIdentity) existing = await dependencies.pluginRegistry.getByKey(manifest.id);
       if (!existing && !installMissing) {
         dependencies.logger.info(
           { pluginKey: manifest.id, pluginPath },
@@ -73,6 +114,7 @@ export async function installConfiguredBundledPlugins(
         continue;
       }
       if (existing) {
+        if (requiresHostActivation(existing)) continue;
         const existingPath = existing.packagePath ? path.resolve(existing.packagePath) : null;
         const hasSameBundle = existing.status === "ready"
           && existing.version === manifest.version

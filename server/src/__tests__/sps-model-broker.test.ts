@@ -3,11 +3,12 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { companies, companySecretBindings, companySecrets, companySecretVersions, createDb, pluginCompanySettings, plugins, secretAccessEvents, spsModelConnections, spsModelGrants, spsModelRuns } from "@paperclipai/db";
+import { activityLog, companies, companySecretBindings, companySecrets, companySecretVersions, createDb, pluginCompanySettings, plugins, secretAccessEvents, spsModelConnections, spsModelGrants, spsModelRuns } from "@paperclipai/db";
 import { createSpsModelBroker } from "../services/sps-model-broker.js";
 import { spsModelConnectionService } from "../services/sps-model-connections.js";
 import { secretService } from "../services/secrets.js";
 import { spsExecutionHistoryService } from "../services/sps-execution-history.js";
+import { spsWorkspaceExecutionControlService } from "../services/sps-workspace-execution-control.js";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 
 const support = await getEmbeddedPostgresTestSupport();
@@ -21,16 +22,37 @@ function deferred() {
 }
 describeDb("durable model request broker", () => {
   let db: ReturnType<typeof createDb>, temporary: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>;
+  let databaseStartup: ReturnType<typeof startEmbeddedPostgresTestDatabase> | undefined;
   const previousKey = process.env.PAPERCLIP_SECRETS_MASTER_KEY;
   const brokers: ReturnType<typeof createSpsModelBroker>[] = [], servers: Server[] = [];
-  beforeAll(async () => { process.env.PAPERCLIP_SECRETS_MASTER_KEY = "2".repeat(64); temporary = await startEmbeddedPostgresTestDatabase("sps-model-broker-"); db = createDb(temporary.connectionString); }, 30_000);
+  beforeAll(async () => {
+    process.env.PAPERCLIP_SECRETS_MASTER_KEY = "2".repeat(64);
+    databaseStartup = startEmbeddedPostgresTestDatabase("sps-model-broker-");
+    temporary = await databaseStartup;
+    db = createDb(temporary.connectionString);
+  }, 180_000);
   afterEach(async () => {
     for (const broker of brokers.splice(0)) await broker.shutdown();
     for (const server of servers.splice(0)) await new Promise<void>(resolve => { server.close(() => resolve()); server.closeAllConnections(); });
     await db.delete(spsModelRuns); await db.delete(spsModelGrants); await db.delete(spsModelConnections); await db.delete(secretAccessEvents);
-    await db.delete(companySecretBindings); await db.delete(companySecretVersions); await db.delete(companySecrets); await db.delete(pluginCompanySettings); await db.delete(plugins); await db.delete(companies);
+    await db.delete(companySecretBindings); await db.delete(companySecretVersions); await db.delete(companySecrets); await db.delete(pluginCompanySettings); await db.delete(plugins);
+    await db.delete(activityLog); await db.delete(companies);
   });
-  afterAll(async () => { await temporary?.cleanup(); if (previousKey === undefined) delete process.env.PAPERCLIP_SECRETS_MASTER_KEY; else process.env.PAPERCLIP_SECRETS_MASTER_KEY = previousKey; });
+  afterAll(async () => {
+    try {
+      // beforeAll's timeout does not cancel embedded startup. Join its exact
+      // promise so a late fixture is still closed instead of orphaned.
+      if (!temporary && databaseStartup) temporary = await databaseStartup;
+    } catch { /* Startup failure is already reported by beforeAll. */ }
+    try { await db?.$client.end(); }
+    finally {
+      try { await temporary?.cleanup(); }
+      finally {
+        if (previousKey === undefined) delete process.env.PAPERCLIP_SECRETS_MASTER_KEY;
+        else process.env.PAPERCLIP_SECRETS_MASTER_KEY = previousKey;
+      }
+    }
+  }, 180_000);
   async function seed(fetch?: typeof globalThis.fetch, endpoint = "https://mock-provider.example/v1/responses") {
     const companyId = randomUUID(), pluginId = randomUUID(), pluginKey = `sps.model-test-${pluginId}`;
     await db.insert(companies).values({ id: companyId, name: "Model test", issuePrefix: `MB${companyId.slice(0, 7).toUpperCase()}` });
@@ -90,6 +112,50 @@ describeDb("durable model request broker", () => {
     await expect(fixture.broker.submit(fixture.pluginId, fixture.input)).rejects.toThrow();
     await expect(fixture.broker.submit(randomUUID(), fixture.input)).rejects.toThrow();
     expect(fetch).not.toHaveBeenCalled(); expect(await db.select().from(secretAccessEvents)).toEqual([]); expect(await db.select().from(spsModelRuns)).toEqual([]);
+  });
+  it("blocks new model submissions while paused and admits them after resume", async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>(async () => Response.json(payload)), fixture = await seed(fetch);
+    const control = spsWorkspaceExecutionControlService(db);
+    await control.transition(fixture.companyId, "pause", "test-host", 0);
+    await expect(fixture.broker.submit(fixture.pluginId, fixture.input)).rejects.toThrow("not accepting execution");
+    expect(await db.select().from(spsModelRuns)).toEqual([]);
+    await control.transition(fixture.companyId, "resume", "test-host", 1);
+    const run = await fixture.broker.submit(fixture.pluginId, fixture.input);
+    await finished(fixture, run.id);
+    expect(fetch).toHaveBeenCalledOnce();
+  });
+  it("lets already-dispatched model work continue while paused", async () => {
+    let finish!: (response: Response) => void, requestSignal: AbortSignal | undefined;
+    const fetch = vi.fn<typeof globalThis.fetch>((_input, init) => {
+      requestSignal = init?.signal ?? undefined;
+      return new Promise(resolve => { finish = resolve; });
+    });
+    const fixture = await seed(fetch), control = spsWorkspaceExecutionControlService(db);
+    const run = await fixture.broker.submit(fixture.pluginId, fixture.input);
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+    await control.transition(fixture.companyId, "pause", "test-host", 0);
+    expect(requestSignal?.aborted).toBe(false);
+    finish(Response.json(payload));
+    await expect(finished(fixture, run.id)).resolves.toMatchObject({ status: "succeeded", cleanupPending: false });
+  });
+  it("stop fences an in-flight model request, keeps its resource reserved until abort settles, and resume does not replay it", async () => {
+    let requestSignal: AbortSignal | undefined;
+    const fetch = vi.fn<typeof globalThis.fetch>((_input, init) => new Promise((_resolve, reject) => {
+      const signal = init?.signal;
+      requestSignal = signal ?? undefined;
+      if (signal?.aborted) reject(new DOMException("Aborted", "AbortError"));
+      else signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), { once: true });
+    }));
+    const fixture = await seed(fetch), control = spsWorkspaceExecutionControlService(db);
+    const run = await fixture.broker.submit(fixture.pluginId, fixture.input);
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledOnce());
+    await control.transition(fixture.companyId, "stop", "test-host", 0);
+    expect(requestSignal?.aborted).toBe(true);
+    await vi.waitFor(async () => expect(await fixture.broker.get(fixture.companyId, fixture.pluginId, run.id))
+      .toMatchObject({ status: "cancelled", externalEffects: "unknown", cleanupPending: false, result: null }));
+    await control.transition(fixture.companyId, "resume", "test-host", 1);
+    expect((await fixture.broker.submit(fixture.pluginId, fixture.input)).id).toBe(run.id);
+    expect(fetch).toHaveBeenCalledOnce();
   });
   it("does not expose another Plugin or Workspace run", async () => {
     const fixture = await seed(), first = await fixture.broker.submit(fixture.pluginId, fixture.input); await finished(fixture, first.id);

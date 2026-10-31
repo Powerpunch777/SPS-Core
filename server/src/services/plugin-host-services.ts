@@ -4,6 +4,7 @@ import {
   agentTaskSessions as agentTaskSessionsTable,
   agents as agentsTable,
   budgetIncidents,
+  companyMemberships,
   costEvents,
   heartbeatRuns,
   invites,
@@ -103,6 +104,53 @@ const TELEMETRY_EVENT_NAME_REGEX = /^[a-z0-9][a-z0-9_-]*$/;
 const MEMORY_LIFECYCLE_EVENTS = new Set<string>(PLUGIN_MEMORY_LIFECYCLE_EVENTS);
 const MEMORY_LIFECYCLE_ENTITY_TYPES = new Set(["project", "room", "task", "artifact"]);
 const MAX_MEMORY_LIFECYCLE_REFERENCE_LENGTH = 200;
+
+/** Targeted Workspace inbox items must address an active member of that Workspace. */
+export async function assertSpsWorkspaceInboxTargetMember(db: Db, workspaceId: string, userId?: string | null): Promise<void> {
+  if (userId == null) return;
+  const [membership] = await db.select({ id: companyMemberships.id }).from(companyMemberships).where(and(
+    eq(companyMemberships.companyId, workspaceId),
+    eq(companyMemberships.principalType, "user"),
+    eq(companyMemberships.principalId, userId),
+    eq(companyMemberships.status, "active"),
+  )).limit(1);
+  if (!membership) throw badRequest("Inbox targetUserId must be an active member of this Workspace.");
+}
+
+/** Entity storage adapter that binds private Workspace workers to their tenant row scope. */
+export function createPluginHostEntityService(
+  registry: Pick<ReturnType<typeof pluginRegistryService>, "upsertEntity" | "listEntities">,
+  pluginId: string,
+  workspaceId?: string,
+) {
+  return {
+    async upsert(params: Parameters<HostServices["entities"]["upsert"]>[0]) {
+      if (!workspaceId) return registry.upsertEntity(pluginId, params as any) as any;
+      const input = params as typeof params & { companyId?: string };
+      if (input.companyId !== undefined && input.companyId !== workspaceId) {
+        throw badRequest("Workspace entity cannot target another Workspace.");
+      }
+      if (input.scopeKind !== "company" || input.scopeId !== workspaceId) {
+        throw badRequest("Workspace entities require the owning company scope.");
+      }
+      return registry.upsertEntity(pluginId, { ...params, companyId: workspaceId } as any) as any;
+    },
+    async list(params: Parameters<HostServices["entities"]["list"]>[0]) {
+      if (!workspaceId) return registry.listEntities(pluginId, params as any) as any;
+      const query = params as typeof params & { companyId?: string };
+      if ((query.companyId !== undefined && query.companyId !== workspaceId)
+        || (query.scopeKind !== undefined && query.scopeKind !== "company")
+        || (query.scopeId !== undefined && query.scopeId !== workspaceId)) {
+        throw badRequest("Workspace entity queries must use the owning company scope.");
+      }
+      return registry.listEntities(pluginId, {
+        ...params,
+        scopeKind: "company",
+        scopeId: workspaceId,
+      }, workspaceId) as any;
+    },
+  };
+}
 
 /**
  * Check if an IP address is in a private/reserved range (RFC 1918, loopback,
@@ -526,6 +574,8 @@ export function buildHostServices(
   options: {
     pluginWorkerManager?: PluginWorkerManager;
     manifest?: import("@paperclipai/shared").PaperclipPluginManifestV1;
+    /** Trusted fixed owner for a private Workspace worker's Host services. */
+    workspaceId?: string;
     dynamicToolRegistrar?: (tools: PluginToolDeclaration[]) => Promise<{ registered: number }> | { registered: number };
   } = {},
 ): HostServices & { dispose(): void } {
@@ -1347,6 +1397,8 @@ export function buildHostServices(
     inbox: {
       async publish(params) {
         const companyId = ensureCompanyId(params.companyId);
+        if (options.workspaceId && companyId !== options.workspaceId) throw badRequest("Workspace worker cannot target another Workspace.");
+        if (options.workspaceId) await assertSpsWorkspaceInboxTargetMember(db, options.workspaceId, params.targetUserId);
         const plugin = await registry.getById(pluginId);
         if (!plugin) throw new Error("Plugin installation record is unavailable");
         await ensurePluginAvailableForCompany(companyId);
@@ -1358,6 +1410,8 @@ export function buildHostServices(
       },
       async update(params) {
         const companyId = ensureCompanyId(params.companyId);
+        if (options.workspaceId && companyId !== options.workspaceId) throw badRequest("Workspace worker cannot target another Workspace.");
+        if (options.workspaceId) await assertSpsWorkspaceInboxTargetMember(db, options.workspaceId, params.targetUserId);
         const plugin = await registry.getById(pluginId);
         if (!plugin) throw new Error("Plugin installation record is unavailable");
         await ensurePluginAvailableForCompany(companyId);
@@ -1390,14 +1444,7 @@ export function buildHostServices(
       },
     },
 
-    entities: {
-      async upsert(params) {
-        return registry.upsertEntity(pluginId, params as any) as any;
-      },
-      async list(params) {
-        return registry.listEntities(pluginId, params as any) as any;
-      },
-    },
+    entities: createPluginHostEntityService(registry, pluginId, options.workspaceId),
 
     events: {
       async emit(params) {

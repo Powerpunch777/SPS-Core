@@ -67,6 +67,7 @@ export const spsPluginNodeRuns = pgTable(
     companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
     pluginKey: text("plugin_key").notNull(),
     subjectKey: text("subject_key").notNull(),
+    workspaceExecutionEpoch: text("workspace_execution_epoch").notNull().default("0"),
     executionGrantId: uuid("execution_grant_id")
       .notNull()
       .references(() => spsPluginExecutionGrants.id, { onDelete: "cascade" }),
@@ -91,6 +92,8 @@ export const spsPluginNodeRuns = pgTable(
     timedOut: integer("timed_out").notNull().default(0),
     error: text("error"),
     usageJson: jsonb("usage_json").$type<Record<string, unknown>>(),
+    completionReceiptDigest: text("completion_receipt_digest"),
+    completionReportJson: jsonb("completion_report_json").$type<Record<string, unknown> | null>(),
     lastEventSeq: integer("last_event_seq").notNull().default(0),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),

@@ -1,4 +1,4 @@
-import { z } from "zod";
+import { z } from "zod/v3";
 import {
   BUDGET_INCIDENT_RESOLUTION_ACTIONS,
   BUDGET_METRICS,

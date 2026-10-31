@@ -1,7 +1,9 @@
 import express from "express";
 import request from "supertest";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { resolvePluginRecoveryState, type PluginRecoveryState } from "../services/sps-plugin-recovery.js";
+import { SpsPluginRuntimeCleanupPendingError, withSpsPluginRuntimeMutation } from "../services/sps-plugin-runtime-mutation.js";
+import { PluginPackageMaintenanceRequiredError } from "../services/sps-plugin-package-maintenance.js";
 
 const mockRegistry = vi.hoisted(() => ({
   getById: vi.fn(),
@@ -25,6 +27,7 @@ const mockLifecycle = vi.hoisted(() => ({
 const mockAccess = vi.hoisted(() => ({
   canUser: vi.fn(),
   hasPermission: vi.fn(),
+  getMembership: vi.fn(),
 }));
 
 const mockWorkspaceSurfaces = vi.hoisted(() => ({
@@ -32,6 +35,7 @@ const mockWorkspaceSurfaces = vi.hoisted(() => ({
 }));
 
 const mockLogActivity = vi.hoisted(() => vi.fn());
+const mockPublishGlobalLiveEvent = vi.hoisted(() => vi.fn());
 
 vi.mock("../services/plugin-registry.js", () => ({
   pluginRegistryService: () => mockRegistry,
@@ -50,7 +54,7 @@ vi.mock("../services/sps-workspace-surfaces.js", () => ({
 }));
 
 vi.mock("../services/live-events.js", () => ({
-  publishGlobalLiveEvent: vi.fn(),
+  publishGlobalLiveEvent: mockPublishGlobalLiveEvent,
 }));
 
 vi.mock("../services/access.js", () => ({
@@ -169,20 +173,50 @@ function agentActor(overrides: Record<string, unknown> = {}) {
 }
 
 function readyPlugin() {
-  mockRegistry.getById.mockResolvedValue({
+  const plugin = {
     id: pluginId,
     pluginKey: "paperclip.example",
+    packageName: "@example/paperclip-plugin",
     version: "1.0.0",
+    apiVersion: 1,
+    categories: [],
     status: "ready",
-    manifestJson: {},
-  });
+    installOrder: 1,
+    packagePath: null,
+    lastError: null,
+    installedAt: new Date("2026-01-01T00:00:00.000Z"),
+    updatedAt: new Date("2026-01-02T00:00:00.000Z"),
+    manifestJson: {
+      id: "paperclip.example",
+      apiVersion: 1,
+      version: "1.0.0",
+      displayName: "Example Plugin",
+      description: "Route authorization fixture.",
+      author: "Tests",
+      categories: [],
+      capabilities: [],
+      entrypoints: { worker: "./worker.js" },
+      companyActivation: { defaultEnabled: true },
+    },
+  };
+  mockRegistry.getById.mockResolvedValue(plugin);
+  mockRegistry.listInstalled.mockResolvedValue([plugin]);
+  return plugin;
 }
 
 describe.sequential("plugin install and upgrade authz", () => {
+  beforeAll(async () => {
+    await Promise.all([
+      import("../routes/plugins.js"),
+      import("../middleware/index.js"),
+    ]);
+  }, 60_000);
+
   beforeEach(() => {
     vi.clearAllMocks();
     mockAccess.canUser.mockResolvedValue(false);
     mockAccess.hasPermission.mockResolvedValue(false);
+    mockAccess.getMembership.mockResolvedValue({ status: "active" });
     mockRegistry.listInstalled.mockResolvedValue([]);
     mockWorkspaceSurfaces.deleteInboxSummariesBySourcePluginKey.mockResolvedValue(0);
   });
@@ -545,6 +579,51 @@ describe.sequential("plugin install and upgrade authz", () => {
     expect(mockWorkspaceSurfaces.deleteInboxSummariesBySourcePluginKey).not.toHaveBeenCalled();
   });
 
+  it("returns an actionable maintenance conflict without claiming an uninstall or deleting history", async () => {
+    const plugin = {
+      id: pluginId, pluginKey: "sps.team-workplane", version: "1.0.0", status: "ready",
+      manifestJson: { id: "sps.team-workplane" },
+    };
+    mockRegistry.getById.mockResolvedValue(plugin);
+    mockLifecycle.unload.mockRejectedValueOnce(new PluginPackageMaintenanceRequiredError());
+    const { app } = await createApp(boardActor({ isInstanceAdmin: true }));
+
+    const response = await request(app).delete(`/api/plugins/${pluginId}?deleteInboxSummaries=true`);
+
+    expect(response.status).toBe(409);
+    expect(response.body).toEqual({
+      error: "This package requires a maintenance window. Stop other plugins before removing it, then refresh and retry.",
+      code: "plugin_package_maintenance_required",
+    });
+    expect(mockWorkspaceSurfaces.deleteInboxSummariesBySourcePluginKey).not.toHaveBeenCalled();
+    expect(mockLogActivity).not.toHaveBeenCalled();
+    expect(mockPublishGlobalLiveEvent).not.toHaveBeenCalled();
+  }, 20_000);
+
+  it("audits a completed lifecycle change when cleanup is pending, without exposing worker details", async () => {
+    const plugin = {
+      id: pluginId, pluginKey: "sps.team-workplane", version: "1.0.0", status: "ready",
+      manifestJson: { id: "sps.team-workplane" },
+    };
+    mockRegistry.getById.mockResolvedValue(plugin);
+    const completedFailure = new SpsPluginRuntimeCleanupPendingError(true, true);
+    mockLifecycle.disable.mockRejectedValueOnce(completedFailure);
+    const { app } = await createApp(boardActor({ isInstanceAdmin: true }));
+
+    const response = await request(app).post(`/api/plugins/${pluginId}/disable`).send({ reason: "maintenance" });
+
+    expect(response.status).toBe(503);
+    expect(response.body).toMatchObject({ operationStarted: true, operationCompleted: true, committed: true });
+    expect(response.text).not.toContain("private workspace PID/path");
+    expect(mockLogActivity).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      action: "plugin.disabled", entityId: pluginId,
+      details: expect.objectContaining({ operationCompleted: true, reason: "maintenance" }),
+    }));
+    expect(mockPublishGlobalLiveEvent).toHaveBeenCalledWith(expect.objectContaining({
+      type: "plugin.ui.updated", payload: { action: "runtime-cleanup-pending" },
+    }));
+  }, 20_000);
+
   it("rejects plugin config saves that contain secret refs even for instance admins", async () => {
     readyPlugin();
 
@@ -760,12 +839,21 @@ describe.sequential("plugin local folder routes", () => {
 });
 
 describe.sequential("plugin tool and bridge authz", () => {
+  beforeAll(async () => {
+    await Promise.all([
+      import("../routes/plugins.js"),
+      import("../middleware/index.js"),
+    ]);
+  }, 60_000);
+
   beforeEach(() => {
     vi.clearAllMocks();
     mockRegistry.getById.mockReset();
     mockRegistry.getByKey.mockReset();
     mockRegistry.getCompanySettings.mockReset();
+    mockRegistry.getCompanySettings.mockResolvedValue(null);
     mockRegistry.upsertCompanySettings.mockReset();
+    mockRegistry.listInstalled.mockResolvedValue([]);
     mockAccess.canUser.mockReset();
     mockAccess.hasPermission.mockReset();
     mockAccess.canUser.mockResolvedValue(false);
@@ -1013,6 +1101,103 @@ describe.sequential("plugin tool and bridge authz", () => {
       params: { view: "compact" },
       renderEnvironment: null,
     });
+  });
+
+  it("joins only the target Host worker's initial startup before bridge calls", async () => {
+    readyPlugin();
+    mockAccess.canUser.mockResolvedValue(true);
+    mockAccess.getMembership.mockResolvedValue({ status: "active" });
+    let releaseStartup!: () => void;
+    const startup = new Promise<void>(resolve => { releaseStartup = resolve; });
+    const waitForInitialLoad = vi.fn(() => startup);
+    const call = vi.fn().mockResolvedValue({ ok: true });
+    const { app } = await createApp(boardActor(), { waitForInitialLoad }, {
+      bridgeDeps: { workerManager: { call } },
+    });
+
+    const response = request(app).post(`/api/plugins/${pluginId}/data/health`)
+      .send({ companyId: companyA, params: {} }).then(result => result);
+    await vi.waitFor(() => expect(waitForInitialLoad).toHaveBeenCalledWith(pluginId));
+    expect(call).not.toHaveBeenCalled();
+    releaseStartup();
+
+    const res = await response;
+    expect(res.status).toBe(200);
+    expect(call).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ["legacy data", `/api/plugins/${pluginId}/bridge/data`, { key: "health", params: {} }, "getData"],
+    ["legacy action", `/api/plugins/${pluginId}/bridge/action`, { key: "sync", params: {} }, "performAction"],
+    ["url data", `/api/plugins/${pluginId}/data/health`, { params: {} }, "getData"],
+    ["url action", `/api/plugins/${pluginId}/actions/sync`, { params: {} }, "performAction"],
+  ] as const)("routes declared Workspace Worker %s through the owner-scoped caller", async (_name, path, body, method) => {
+    const plugin = readyPlugin();
+    plugin.manifestJson.entrypoints.workspaceWorker = "./workspace-worker.js";
+    mockAccess.canUser.mockResolvedValue(true);
+    const call = vi.fn(async (...args: any[]) => {
+      await args[5].assertCurrent();
+      return { ok: true };
+    });
+    const hostCall = vi.fn();
+    const waitForInitialLoad = vi.fn();
+    mockAccess.getMembership.mockResolvedValue({ status: "active" });
+    const { app } = await createApp(boardActor(), { waitForInitialLoad }, {
+      bridgeDeps: { workerManager: { call: hostCall }, workspaceWorkers: { call } },
+    });
+    const res = await request(app).post(path).send({ ...body, companyId: companyA,
+      params: method === "performAction" ? { __paperclipRequestedPermissions: ["agents:configure"] } : body.params });
+    expect(res.status).toBe(200);
+    expect(call).toHaveBeenCalledOnce();
+    expect(call).toHaveBeenCalledWith(companyA, pluginId, method, expect.objectContaining({
+      key: method === "getData" ? "health" : "sync",
+    }), 30_000, expect.objectContaining({ boundWorkspaceId: companyA, assertCurrent: expect.any(Function) }));
+    expect(hostCall).not.toHaveBeenCalled();
+    expect(waitForInitialLoad).not.toHaveBeenCalled();
+    if (method === "performAction") {
+      expect(call.mock.calls[0]?.[3]).toMatchObject({
+        params: { companyId: companyA },
+        actorContext: { type: "user", userId: "user-1", companyId: companyA, permissions: ["agents:configure"] },
+      });
+    }
+  });
+
+  it("fails closed for a declared Workspace Worker when its caller or company scope is missing", async () => {
+    const plugin = readyPlugin();
+    plugin.manifestJson.entrypoints.workspaceWorker = "./workspace-worker.js";
+    const hostCall = vi.fn().mockResolvedValue({ ok: true });
+    const { app } = await createApp(boardActor(), {}, {
+      bridgeDeps: { workerManager: { call: hostCall } },
+    });
+    const scoped = await request(app).post(`/api/plugins/${pluginId}/data/health`).send({ companyId: companyA });
+    const admin = await createApp(boardActor({ isInstanceAdmin: true, companyIds: [] }), {}, {
+      bridgeDeps: { workerManager: { call: hostCall } },
+    });
+    const unscoped = await request(admin.app).post(`/api/plugins/${pluginId}/actions/sync`).send({});
+    expect(scoped.status).toBe(502);
+    expect(unscoped.status).toBe(502);
+    expect(hostCall).not.toHaveBeenCalled();
+  });
+
+  it("revokes a Workspace action invocation when its permission snapshot changes", async () => {
+    const plugin = readyPlugin();
+    plugin.manifestJson.entrypoints.workspaceWorker = "./workspace-worker.js";
+    mockAccess.canUser.mockResolvedValue(true);
+    const call = vi.fn(async (...args: any[]) => {
+      mockAccess.canUser.mockResolvedValue(false);
+      await args[5].assertCurrent();
+      return { ok: true };
+    });
+    const hostCall = vi.fn();
+    const { app } = await createApp(boardActor(), {}, {
+      bridgeDeps: { workerManager: { call: hostCall }, workspaceWorkers: { call } },
+    });
+    const res = await request(app).post(`/api/plugins/${pluginId}/actions/sync`).send({
+      companyId: companyA, params: { __paperclipRequestedPermissions: ["agents:configure"] },
+    });
+    expect(res.status).toBe(502);
+    expect(call).toHaveBeenCalledOnce();
+    expect(hostCall).not.toHaveBeenCalled();
   });
 
   it("allows omitted-company bridge calls for instance admins as global plugin actions", async () => {
@@ -1468,6 +1653,34 @@ describe.sequential("plugin tool and bridge authz", () => {
       lastError: null,
     });
   });
+
+  it("returns the saved Company activation and audit when scoped worker cleanup is pending", async () => {
+    mockRegistry.getById.mockResolvedValue({
+      id: pluginId, pluginKey: "paperclip.example", status: "ready", manifestJson: {},
+    });
+    mockRegistry.getCompanySettings.mockResolvedValueOnce(null);
+    mockRegistry.upsertCompanySettings.mockResolvedValueOnce({});
+    const reconcileWorkspacePolicy = vi.fn(async () => { throw new Error("private worker diagnostic"); });
+    const reconcileCatalogPolicy = vi.fn(async () => {});
+    const { app } = await createApp(boardActor({ isInstanceAdmin: true }), {}, {
+      bridgeDeps: { workspaceWorkers: { reconcileWorkspacePolicy, reconcileCatalogPolicy } },
+    });
+
+    const res = await request(app)
+      .put(`/api/plugins/${pluginId}/companies/${companyA}/activation`)
+      .send({ enabled: false });
+
+    expect(res.status).toBe(503);
+    expect(res.body).toMatchObject({ committed: true, activation: { enabled: false, source: "explicit" } });
+    expect(mockRegistry.upsertCompanySettings).toHaveBeenCalledTimes(1);
+    expect(reconcileWorkspacePolicy).toHaveBeenCalledOnce();
+    expect(reconcileWorkspacePolicy).toHaveBeenCalledWith(companyA);
+    expect(reconcileCatalogPolicy).not.toHaveBeenCalled();
+    expect(mockLogActivity).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      action: "plugin.company_activation.updated", companyId: companyA,
+    }));
+    expect(res.text).not.toContain("private worker diagnostic");
+  }, 20_000);
 
   it("rejects Company activation when the target dependency graph is blocked without mutating activation", async () => {
     const consumer = { id: pluginId, pluginKey: "sps.consumer", version: "1.0.0", status: "ready", manifestJson: { id: "sps.consumer", requiredDependencies: [{ id: "sps.required" }] } };

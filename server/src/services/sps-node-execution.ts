@@ -16,6 +16,7 @@ import { spsNodeCapabilityForAdapter, spsNodeSupportsAdapter } from "../compat/p
 import type { AdapterSpsNodeExecutionTarget } from "../compat/paperclip/adapter-runtime.js";
 import { hasSpsSessionCancellation } from "./sps-agent-session-runs.js";
 import { isSpsNodeHeartbeatRecent } from "./sps-runtime-connection.js";
+import { withSpsWorkspaceExecutionAdmission } from "./sps-workspace-execution-control.js";
 
 const COMMAND_RESULT_GRACE_MS = 90 * 1000;
 const COMMAND_POLL_MS = 300;
@@ -238,15 +239,17 @@ export async function resolveSpsNodeExecutionTarget(input: {
           projectId: input.projectId,
           nodeId: node.id,
         });
-        const created = await input.db.transaction(async tx => {
+        const created = await withSpsWorkspaceExecutionAdmission(input.db, input.companyId, async (tx, workspaceExecutionEpoch) => {
           if (input.heartbeatRunId) {
             const parent = await tx.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, input.heartbeatRunId)).for("update").then(rows => rows[0]);
-            if (!parent || !["queued", "running"].includes(parent.status) || hasSpsSessionCancellation(parent)) throw new Error("Session run is no longer accepting remote dispatch");
+            if (!parent || !["queued", "running"].includes(parent.status) || hasSpsSessionCancellation(parent)
+              || parent.workspaceExecutionEpoch !== workspaceExecutionEpoch) throw new Error("Session run is no longer accepting remote dispatch");
           }
           return tx
           .insert(spsNodeCommands)
           .values({
             companyId: input.companyId,
+            workspaceExecutionEpoch,
             nodeId: node.id,
             agentId: input.agentId,
             runnerProfileId: selectedRunner?.id ?? null,
@@ -298,7 +301,7 @@ export async function resolveSpsNodeExecutionTarget(input: {
           if (!current) {
             throw new Error("SPS Node command disappeared before it reported a result.");
           }
-          if (current.status === "failed") {
+          if (current.status === "failed" || current.status === "cancelled") {
             const detail = current.error?.trim() || "SPS Desktop Node command failed without an error detail.";
             await commandInput.onLog?.("stderr", `${detail}\n`);
             throw new Error(detail);

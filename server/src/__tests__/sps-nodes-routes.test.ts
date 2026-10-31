@@ -1,5 +1,5 @@
 import { createHash, generateKeyPairSync, randomBytes, randomUUID, sign } from "node:crypto";
-import { eq, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import express from "express";
 import request from "supertest";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
@@ -16,6 +16,7 @@ import {
   spsAgentNodeBindings,
   spsHostProjectShareNodeGrants,
   spsHostProjectShares,
+  spsNodeClaimReceipts,
   spsNodeCommandEvents,
   spsNodeCommands,
   spsNodeAgentGrants,
@@ -38,11 +39,17 @@ import {
 import { resolveSpsNodeExecutionTarget } from "../services/sps-node-execution.js";
 import { spsPluginExecutionService } from "../services/sps-plugin-execution.js";
 import { spsAgentSessionRunService } from "../services/sps-agent-session-runs.js";
+import { heartbeatService } from "../services/heartbeat.js";
+import { getSpsWorkspaceExecutionPending, spsWorkspaceExecutionControlService } from "../services/sps-workspace-execution-control.js";
+import { registerSpsWorkspaceExecutionStopHandler } from "../services/sps-workspace-execution-control.js";
 import { spsExecutionHistoryService } from "../services/sps-execution-history.js";
 import { buildSpsUsageEvidence } from "../services/sps-execution-observation.js";
 import { createSpsExecutionUsageReceipt } from "../services/sps-execution-usage-receipt.js";
+import type { PluginSpsExecutionCursor, PluginSpsExecutionPage } from "../compat/paperclip/plugin-sdk.js";
 import { plugins } from "@paperclipai/db";
 import { spsExecutionRoutes } from "../routes/sps-executions.js";
+import { createSpsNodeCompletionReceiptDigest } from "../services/sps-node-completion-receipt.js";
+import { spsNodeRoutes } from "../routes/sps-nodes.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -70,7 +77,6 @@ function boardActor(
 }
 
 async function createApp(db: Db, actor: ReturnType<typeof boardActor>) {
-  const { spsNodeRoutes } = await import("../routes/sps-nodes.js");
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => {
@@ -118,6 +124,35 @@ async function createCompanyFixture(db: Db) {
     .returning()
     .then((rows) => rows[0]!);
   return { company, ownerUserId, operatorUserId, agent };
+}
+
+async function createClaimableAgentNode(db: Db, fixture: Awaited<ReturnType<typeof createCompanyFixture>>) {
+  const app = await createApp(db, boardActor(fixture.company.id, fixture.ownerUserId, "owner"));
+  const node = createNodePayload();
+  const registered = await request(app).post(`/api/companies/${fixture.company.id}/sps-nodes`).send(node.payload).expect(201);
+  const nodeId = registered.body.id as string;
+  await request(app).post(`/api/sps-nodes/${nodeId}/heartbeat`).send(createSignedHeartbeat(nodeId, node.privateKey)).expect(200);
+  await request(app).post(`/api/sps-nodes/${nodeId}/approve`).send({}).expect(200);
+  await request(app).put(`/api/sps-nodes/${nodeId}/agent-grants/${fixture.agent.id}`).send({}).expect(200);
+  await request(app).put(`/api/agents/${fixture.agent.id}/sps-node-binding`).send({ nodeId }).expect(200);
+  return { app, node, nodeId, claimPath: `/sps-nodes/${nodeId}/commands/claim-next` };
+}
+
+async function createClaimablePluginNode(db: Db, fixture: Awaited<ReturnType<typeof createCompanyFixture>>) {
+  const app = await createApp(db, boardActor(fixture.company.id, fixture.ownerUserId, "owner"));
+  const node = createNodePayload();
+  const registered = await request(app).post(`/api/companies/${fixture.company.id}/sps-nodes`).send(node.payload).expect(201);
+  const nodeId = registered.body.id as string;
+  await request(app).post(`/api/sps-nodes/${nodeId}/heartbeat`).send(createSignedHeartbeat(nodeId, node.privateKey)).expect(200);
+  await request(app).post(`/api/sps-nodes/${nodeId}/approve`).send({}).expect(200);
+  const runner = await db.select().from(spsNodeRunnerProfiles).where(eq(spsNodeRunnerProfiles.nodeId, nodeId))
+    .then(rows => rows.find(row => row.kind === "codex_cli") ?? null);
+  expect(runner).not.toBeNull();
+  const grant = await db.insert(spsPluginExecutionGrants).values({
+    companyId: fixture.company.id, pluginKey: "sps.example-workplane", subjectKey: "worker:claim-receipt",
+    nodeId, runnerProfileId: runner!.id,
+  }).returning().then(rows => rows[0]!);
+  return { app, node, nodeId, runner: runner!, grant, claimPath: `/sps-nodes/${nodeId}/plugin-runs/claim-next` };
 }
 
 function createNodePayload() {
@@ -187,11 +222,13 @@ function createSignedNodeRequest(
 describeEmbeddedPostgres("SPS Node routes", () => {
   let db!: Db;
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
+  let startupPromise: ReturnType<typeof startEmbeddedPostgresTestDatabase> | null = null;
 
   beforeAll(async () => {
-    tempDb = await startEmbeddedPostgresTestDatabase("sps-node-routes-");
+    startupPromise = startEmbeddedPostgresTestDatabase("sps-node-routes-");
+    tempDb = await startupPromise;
     db = createDb(tempDb.connectionString);
-  }, 20_000);
+  }, 120_000);
 
   afterEach(async () => {
     await db.delete(activityLog);
@@ -199,6 +236,7 @@ describeEmbeddedPostgres("SPS Node routes", () => {
     await db.delete(spsPluginNodeRunEvents);
     await db.delete(spsPluginNodeRuns);
     await db.delete(spsPluginExecutionGrants);
+    await db.delete(spsNodeClaimReceipts);
     await db.delete(spsNodeCommandEvents);
     await db.delete(spsNodeCommands);
     await db.delete(spsNodeAgentRunnerGrants);
@@ -221,8 +259,10 @@ describeEmbeddedPostgres("SPS Node routes", () => {
   });
 
   afterAll(async () => {
-    await tempDb?.cleanup();
-  });
+    const ownedDatabase = tempDb ?? (startupPromise ? await startupPromise.catch(() => null) : null);
+    await db?.$client.end();
+    await ownedDatabase?.cleanup();
+  }, 45_000);
 
   it("requires approval and makes an Agent's first granted Node primary", async () => {
     const fixture = await createCompanyFixture(db);
@@ -894,6 +934,23 @@ describeEmbeddedPostgres("SPS Node routes", () => {
     expect(claimed.body.id).toBe(queued.id);
     expect(claimed.body.status).toBe("claimed");
 
+    const old = new Date(Date.now() - 30 * 60 * 1000);
+    await db.update(spsNodeCommands).set({ claimedAt: old, startedAt: old, updatedAt: old })
+      .where(eq(spsNodeCommands.id, queued.id));
+    await request(app)
+      .post(`/api${claimPath}`)
+      .send(createSignedNodeRequest(registered.body.id, node.privateKey, claimPath, {}))
+      .expect(204);
+    expect((await db.select().from(spsNodeCommands).where(eq(spsNodeCommands.id, queued.id)))[0])
+      .toMatchObject({ status: "claimed", finishedAt: null });
+
+    const leasePath = `/sps-nodes/${registered.body.id}/commands/${queued.id}/lease`;
+    await request(app)
+      .post(`/api${leasePath}`)
+      .send(createSignedNodeRequest(registered.body.id, node.privateKey, leasePath, {}))
+      .expect(200)
+      .expect(({ body }) => expect(body).toMatchObject({ active: true, status: "claimed" }));
+
     const eventPath = `/sps-nodes/${registered.body.id}/commands/${queued.id}/events`;
     const event = await request(app)
       .post(`/api${eventPath}`)
@@ -916,6 +973,115 @@ describeEmbeddedPostgres("SPS Node routes", () => {
       }));
     expect(complete.status, JSON.stringify(complete.body)).toBe(200);
     expect(complete.body.status).toBe("succeeded");
+    const successfulReport = { status: "succeeded" as const, exitCode: 0, signal: null, timedOut: false, error: null };
+    expect(complete.body.completionReceiptDigest).toBe(createSpsNodeCompletionReceiptDigest({
+      kind: "agent-command", nodeId: registered.body.id, commandId: queued.id, completion: successfulReport,
+    }));
+
+    // Discard the first response, reconstruct the service over the same real
+    // database and retry with a fresh signed nonce, as a restarted Node does.
+    const restartedApp = await createApp(db, boardActor(fixture.company.id, fixture.ownerUserId, "owner"));
+    const retried = await request(restartedApp).post(`/api${completePath}`)
+      .send(createSignedNodeRequest(registered.body.id, node.privateKey, completePath, successfulReport))
+      .expect(200);
+    expect(retried.body).toEqual(complete.body);
+
+    const cancelling = await db.insert(spsNodeCommands).values({
+      companyId: fixture.company.id, nodeId: registered.body.id, agentId: fixture.agent.id,
+      command: "codex", args: ["exec"], env: {}, status: "cancelling", claimedAt: new Date(),
+      error: "User requested cancellation.",
+    }).returning().then(rows => rows[0]!);
+    expect(cancelling.completionReceiptDigest).toBeNull();
+    const stoppedReport = { status: "failed" as const, exitCode: 143, signal: "SIGTERM", timedOut: false, error: "local stop completed" };
+    const stoppedPath = `/sps-nodes/${registered.body.id}/commands/${cancelling.id}/complete`;
+    const stopped = await request(app).post(`/api${stoppedPath}`)
+      .send(createSignedNodeRequest(registered.body.id, node.privateKey, stoppedPath, stoppedReport))
+      .expect(200);
+    expect(stopped.body).toMatchObject({ status: "cancelled", error: "User requested cancellation.", exitCode: 143 });
+    expect(stopped.body.completionReceiptDigest).toBe(createSpsNodeCompletionReceiptDigest({
+      kind: "agent-command", nodeId: registered.body.id, commandId: cancelling.id, completion: stoppedReport,
+    }));
+    const stored = await db.select().from(spsNodeCommands).where(eq(spsNodeCommands.id, cancelling.id)).then(rows => rows[0]!);
+    expect(stored.completionReceiptDigest).toBe(stopped.body.completionReceiptDigest);
+    const stoppedRetry = await request(restartedApp).post(`/api${stoppedPath}`)
+      .send(createSignedNodeRequest(registered.body.id, node.privateKey, stoppedPath, stoppedReport)).expect(200);
+    expect(stoppedRetry.body).toEqual(stopped.body);
+    expect((await db.select().from(spsNodeCommands).where(eq(spsNodeCommands.id, cancelling.id)))[0]!.updatedAt).toEqual(stored.updatedAt);
+  });
+
+  it("rechecks legacy Host Project Share routes per command and preserves sibling commands", async () => {
+    const fixture = await createCompanyFixture(db);
+    const app = await createApp(db, boardActor(fixture.company.id, fixture.ownerUserId, "owner"));
+    const node = createNodePayload();
+    const registered = await request(app).post(`/api/companies/${fixture.company.id}/sps-nodes`).send(node.payload).expect(201);
+    const nodeId = registered.body.id;
+    await request(app).post(`/api/sps-nodes/${nodeId}/heartbeat`).send(createSignedHeartbeat(nodeId, node.privateKey)).expect(200);
+    await request(app).post(`/api/sps-nodes/${nodeId}/approve`).send({}).expect(200);
+    await request(app).put(`/api/sps-nodes/${nodeId}/agent-grants/${fixture.agent.id}`).send({}).expect(200);
+    await request(app).put(`/api/agents/${fixture.agent.id}/sps-node-binding`).send({ nodeId }).expect(200);
+
+    const project = await db.insert(projects).values({ companyId: fixture.company.id, name: "Legacy Source lease" }).returning().then(rows => rows[0]!);
+    const siblingProject = await db.insert(projects).values({ companyId: fixture.company.id, name: "Sibling Source lease" }).returning().then(rows => rows[0]!);
+    const sharePath = "\\\\host.example.ts.net\\SPS_legacy";
+    const siblingSharePath = "\\\\host.example.ts.net\\SPS_legacy_sibling";
+    const share = await db.insert(spsHostProjectShares).values({ companyId: fixture.company.id, projectId: project.id,
+      sharePath, createdByUserId: fixture.ownerUserId }).returning().then(rows => rows[0]!);
+    const siblingShare = await db.insert(spsHostProjectShares).values({ companyId: fixture.company.id, projectId: siblingProject.id,
+      sharePath: siblingSharePath, createdByUserId: fixture.ownerUserId }).returning().then(rows => rows[0]!);
+    const grant = await db.insert(spsHostProjectShareNodeGrants).values({ companyId: fixture.company.id, shareId: share.id,
+      nodeId, credentialAlgorithm: "rsa-oaep-sha256", credentialEnvelope: Buffer.alloc(128, 4).toString("base64"),
+      grantedByUserId: fixture.ownerUserId }).returning().then(rows => rows[0]!);
+    const siblingGrant = await db.insert(spsHostProjectShareNodeGrants).values({ companyId: fixture.company.id, shareId: siblingShare.id,
+      nodeId, credentialAlgorithm: "rsa-oaep-sha256", credentialEnvelope: Buffer.alloc(128, 5).toString("base64"),
+      grantedByUserId: fixture.ownerUserId }).returning().then(rows => rows[0]!);
+    const command = (shareId: string, path: string, envelope: string) => db.insert(spsNodeCommands).values({
+      companyId: fixture.company.id, nodeId, agentId: fixture.agent.id, command: "codex", args: ["exec"], env: {},
+      status: "claimed", claimedAt: new Date(), startedAt: new Date(), cwdHint: path,
+      workspaceAccess: { kind: "sps_host_share", shareId, sharePath: path, credentialAlgorithm: "rsa-oaep-sha256", credentialEnvelope: envelope },
+    }).returning().then(rows => rows[0]!);
+    const firstCommand = await command(share.id, sharePath, Buffer.alloc(128, 4).toString("base64"));
+    const siblingCommand = await command(siblingShare.id, siblingSharePath, Buffer.alloc(128, 5).toString("base64"));
+
+    await db.update(spsHostProjectShares).set({ sharePath: "\\\\host.example.ts.net\\SPS_legacy_replaced" })
+      .where(eq(spsHostProjectShares.id, share.id));
+    const firstLeasePath = `/sps-nodes/${nodeId}/commands/${firstCommand.id}/lease`;
+    const firstLease = await request(app).post(`/api${firstLeasePath}`)
+      .send(createSignedNodeRequest(nodeId, node.privateKey, firstLeasePath, {})).expect(200);
+    expect(firstLease.body).toMatchObject({ active: false, status: "failed" });
+
+    const policyFailed = await db.select().from(spsNodeCommands).where(eq(spsNodeCommands.id, firstCommand.id)).then(rows => rows[0]!);
+    expect(policyFailed.completionReceiptDigest).toBeNull();
+    expect((await getSpsWorkspaceExecutionPending(db, fixture.company.id)).commands).toBe(2);
+    const lateReport = { status: "failed" as const, exitCode: 143, signal: "SIGTERM", timedOut: false, error: "local process closure confirmed" };
+    const latePath = `/sps-nodes/${nodeId}/commands/${firstCommand.id}/complete`;
+    const late = await request(app).post(`/api${latePath}`)
+      .send(createSignedNodeRequest(nodeId, node.privateKey, latePath, lateReport)).expect(200);
+    expect(late.body).toMatchObject({ status: "failed", error: policyFailed.error,
+      finishedAt: policyFailed.finishedAt!.toISOString(), completionReportJson: lateReport });
+    expect(late.body.completionReceiptDigest).toBe(createSpsNodeCompletionReceiptDigest({
+      kind: "agent-command", nodeId, commandId: firstCommand.id, completion: lateReport,
+    }));
+    const restartedApp = await createApp(db, boardActor(fixture.company.id, fixture.ownerUserId, "owner"));
+    const duplicate = await request(restartedApp).post(`/api${latePath}`)
+      .send(createSignedNodeRequest(nodeId, node.privateKey, latePath, lateReport)).expect(200);
+    expect(duplicate.body).toEqual(late.body);
+    expect((await getSpsWorkspaceExecutionPending(db, fixture.company.id)).commands).toBe(1);
+
+    const siblingLeasePath = `/sps-nodes/${nodeId}/commands/${siblingCommand.id}/lease`;
+    const siblingLease = await request(app).post(`/api${siblingLeasePath}`)
+      .send(createSignedNodeRequest(nodeId, node.privateKey, siblingLeasePath, {})).expect(200);
+    expect(siblingLease.body).toMatchObject({ active: true, status: "claimed" });
+
+    await db.update(spsHostProjectShareNodeGrants).set({ credentialAlgorithm: "unsupported" })
+      .where(eq(spsHostProjectShareNodeGrants.id, siblingGrant.id));
+    const badCredentialLease = await request(app).post(`/api${siblingLeasePath}`)
+      .send(createSignedNodeRequest(nodeId, node.privateKey, siblingLeasePath, {})).expect(200);
+    expect(badCredentialLease.body).toMatchObject({ active: false, status: "failed" });
+    expect((await getSpsWorkspaceExecutionPending(db, fixture.company.id)).commands).toBe(1);
+    expect((await db.select().from(spsHostProjectShareNodeGrants).where(eq(spsHostProjectShareNodeGrants.id, siblingGrant.id)))[0]!.revokedAt)
+      .toBeNull();
+    expect((await db.select().from(spsHostProjectShareNodeGrants).where(eq(spsHostProjectShareNodeGrants.id, grant.id)))[0]!.revokedAt)
+      .toBeNull();
   });
 
   it("keeps Agent-session cancellation pending until signed Node completion and rejects late output", async () => {
@@ -970,7 +1136,161 @@ describeEmbeddedPostgres("SPS Node routes", () => {
     expect((await request(app).post(`/api${nextCompletePath}`).send(createSignedNodeRequest(registered.body.id, node.privateKey, nextCompletePath, completion))).status).toBe(200);
     const laterCancel = spsAgentSessionRunService(db, pluginKey, async runId => { await db.update(heartbeatRuns).set({ status: "cancelled" }).where(eq(heartbeatRuns.id, runId)); });
     expect(await laterCancel.cancel({ ...params, runId: next.id })).toMatchObject({ cancellationRequested: true, termination: "confirmed" });
+
+    // An older optimistic parent flag cannot hide a policy-failed Node whose
+    // remote process has not yet acknowledged closure.
+    const legacyParent = await db.insert(heartbeatRuns).values({ companyId: fixture.company.id, agentId: fixture.agent.id, status: "cancelled",
+      contextSnapshot: { taskKey, spsPluginConversation: { pluginKey, sessionId: session.id },
+        spsSessionCancellationRequested: true, spsSessionCancellationTermination: "confirmed" },
+    }).returning().then(rows => rows[0]!);
+    const legacyCommand = await db.insert(spsNodeCommands).values({ companyId: fixture.company.id, nodeId: registered.body.id,
+      agentId: fixture.agent.id, heartbeatRunId: legacyParent.id, command: "codex", status: "failed",
+      claimedAt: new Date(), startedAt: new Date(), finishedAt: new Date(), error: "Access revoked before closure report",
+    }).returning().then(rows => rows[0]!);
+    const legacyScope = { ...params, runId: legacyParent.id };
+    expect(await scoped.getRun(legacyScope)).toMatchObject({ status: "cancelled", termination: "pending" });
+    expect(await scoped.cancel(legacyScope)).toMatchObject({ status: "cancelled", termination: "pending" });
+    const legacyPath = `/sps-nodes/${registered.body.id}/commands/${legacyCommand.id}/complete`;
+    const legacyReport = { status: "failed", exitCode: 143, signal: "SIGTERM", timedOut: false, error: "actual local closure" };
+    await request(app).post(`/api${legacyPath}`)
+      .send(createSignedNodeRequest(registered.body.id, node.privateKey, legacyPath, legacyReport)).expect(200);
+    expect(await scoped.getRun(legacyScope)).toMatchObject({ status: "cancelled", termination: "confirmed" });
+    // Read-only liveness evidence must also override an optimistic stored flag
+    // for a recorded local process. This path never calls the cancel effect.
+    const liveLocalParent = await db.insert(heartbeatRuns).values({ companyId: fixture.company.id, agentId: fixture.agent.id,
+      status: "cancelled", processPid: process.pid,
+      contextSnapshot: { taskKey, spsPluginConversation: { pluginKey, sessionId: session.id },
+        spsSessionCancellationRequested: true, spsSessionCancellationTermination: "confirmed" },
+    }).returning().then(rows => rows[0]!);
+    expect(await scoped.getRun({ ...params, runId: liveLocalParent.id })).toMatchObject({ termination: "pending" });
+    expect(await scoped.cancel({ ...params, runId: liveLocalParent.id })).toMatchObject({ termination: "pending" });
   });
+
+  it("blocks Node enqueue while paused and keeps stopped commands pending until signed cancellation completion", async () => {
+    const fixture = await createCompanyFixture(db);
+    const app = await createApp(db, boardActor(fixture.company.id, fixture.ownerUserId, "owner"));
+    const node = createNodePayload();
+    const registered = await request(app).post(`/api/companies/${fixture.company.id}/sps-nodes`).send(node.payload).expect(201);
+    const nodeId = registered.body.id;
+    await request(app).post(`/api/sps-nodes/${nodeId}/heartbeat`).send(createSignedHeartbeat(nodeId, node.privateKey)).expect(200);
+    await request(app).post(`/api/sps-nodes/${nodeId}/approve`).send({}).expect(200);
+    await request(app).put(`/api/sps-nodes/${nodeId}/agent-grants/${fixture.agent.id}`).send({}).expect(200);
+    await request(app).put(`/api/agents/${fixture.agent.id}/sps-node-binding`).send({ nodeId }).expect(200);
+    const control = spsWorkspaceExecutionControlService(db);
+    const paused = await control.transition(fixture.company.id, "pause", fixture.ownerUserId, 0);
+    const target = await resolveSpsNodeExecutionTarget({ db, companyId: fixture.company.id, agentId: fixture.agent.id,
+      adapterType: "codex_local", heartbeatRunId: null, projectId: null });
+    await expect(target!.runner.execute({ command: "codex", args: ["exec"], cwd: ".", env: {} })).rejects.toMatchObject({ status: 409 });
+    expect(await db.select().from(spsNodeCommands).where(eq(spsNodeCommands.companyId, fixture.company.id))).toHaveLength(0);
+
+    const heartbeat = heartbeatService(db);
+    let pendingResult: Promise<unknown> | undefined;
+    let pendingResultObserved: Promise<void> | undefined;
+    let queued: typeof spsNodeCommands.$inferSelect | null = null;
+    let stale: typeof spsNodeCommands.$inferSelect | null = null;
+    let nextResult: Promise<unknown> | undefined;
+    let nextResultObserved: Promise<void> | undefined;
+    let next: typeof spsNodeCommands.$inferSelect | null = null;
+    const claimPath = `/sps-nodes/${nodeId}/commands/claim-next`;
+    try {
+      await control.transition(fixture.company.id, "resume", fixture.ownerUserId, paused.revision);
+      pendingResult = target!.runner.execute({ command: "codex", args: ["exec"], cwd: ".", env: {} });
+      pendingResultObserved = pendingResult.then(() => undefined, () => undefined);
+      for (let attempt = 0; attempt < 20 && !queued; attempt += 1) {
+        queued = await db.select().from(spsNodeCommands).where(eq(spsNodeCommands.companyId, fixture.company.id)).then(rows => rows[0] ?? null);
+        if (!queued) await wait(25);
+      }
+      expect(queued?.workspaceExecutionEpoch).toBe("0");
+      await request(app).post(`/api${claimPath}`).send(createSignedNodeRequest(nodeId, node.privateKey, claimPath, {})).expect(200);
+      const stopped = await control.transition(fixture.company.id, "stop", fixture.ownerUserId, paused.revision + 1);
+      expect(stopped.pending.commands).toBe(1);
+      expect((await db.select().from(spsNodeCommands).where(eq(spsNodeCommands.id, queued!.id)))[0]?.status).toBe("cancelling");
+      const leasePath = `/sps-nodes/${nodeId}/commands/${queued!.id}/lease`;
+      await request(app).post(`/api${leasePath}`).send(createSignedNodeRequest(nodeId, node.privateKey, leasePath, {}))
+        .expect(200).then(response => expect(response.body).toMatchObject({ active: false, status: "cancelling" }));
+      const completePath = `/sps-nodes/${nodeId}/commands/${queued!.id}/complete`;
+      const completion = { status: "succeeded", exitCode: 0, timedOut: false };
+      const complete = await request(app).post(`/api${completePath}`).send(createSignedNodeRequest(nodeId, node.privateKey, completePath, completion)).expect(200);
+      expect(complete.body.status).toBe("cancelled");
+      expect((await control.get(fixture.company.id)).pending.commands).toBe(0);
+      await expect(pendingResult!).rejects.toThrow();
+
+      const resumed = await control.transition(fixture.company.id, "resume", fixture.ownerUserId, stopped.revision);
+      stale = await db.insert(spsNodeCommands).values({
+        companyId: fixture.company.id, nodeId, agentId: fixture.agent.id, command: "codex", args: ["exec"], env: {},
+        workspaceExecutionEpoch: "0", status: "queued", createdAt: new Date("2000-01-01T00:00:00.000Z"),
+      }).returning().then(rows => rows[0]!);
+      nextResult = target!.runner.execute({ command: "codex", args: ["exec"], cwd: ".", env: {} });
+      nextResultObserved = nextResult.then(() => undefined, () => undefined);
+      for (let attempt = 0; attempt < 20 && !next; attempt += 1) {
+        next = await db.select().from(spsNodeCommands).where(and(eq(spsNodeCommands.companyId, fixture.company.id),
+          eq(spsNodeCommands.status, "queued"), eq(spsNodeCommands.workspaceExecutionEpoch, resumed.epoch))).then(rows => rows[0] ?? null);
+        if (!next) await wait(25);
+      }
+      expect(next?.workspaceExecutionEpoch).toBe(resumed.epoch);
+      const freshClaim = await request(app).post(`/api${claimPath}`)
+        .send(createSignedNodeRequest(nodeId, node.privateKey, claimPath, {})).expect(200);
+      expect(freshClaim.body.id).toBe(next!.id);
+      expect((await db.select().from(spsNodeCommands).where(eq(spsNodeCommands.id, stale!.id)))[0]?.status).toBe("failed");
+      await db.update(spsNodeCommands).set({ status: "failed", finishedAt: new Date(), error: "fixture cleanup" }).where(eq(spsNodeCommands.id, next!.id));
+      await expect(nextResult!).rejects.toThrow();
+    } finally {
+      await db.update(spsNodeCommands).set({ status: "failed", finishedAt: new Date(), error: "fixture cleanup" })
+        .where(and(eq(spsNodeCommands.companyId, fixture.company.id), inArray(spsNodeCommands.status, ["queued", "claimed", "running", "cancelling"])));
+      heartbeat.disposeWorkspaceExecutionStopHandler();
+      if (pendingResultObserved) await pendingResultObserved;
+      if (nextResultObserved) await nextResultObserved;
+    }
+  }, 30_000);
+
+  it("accepts a signed cancellation acknowledgement after stop commits but before its fanout updates the Node row", async () => {
+    const fixture = await createCompanyFixture(db);
+    const app = await createApp(db, boardActor(fixture.company.id, fixture.ownerUserId, "owner"));
+    const node = createNodePayload();
+    const registered = await request(app).post(`/api/companies/${fixture.company.id}/sps-nodes`).send(node.payload).expect(201);
+    const nodeId = registered.body.id;
+    await request(app).post(`/api/sps-nodes/${nodeId}/heartbeat`).send(createSignedHeartbeat(nodeId, node.privateKey)).expect(200);
+    await request(app).post(`/api/sps-nodes/${nodeId}/approve`).send({}).expect(200);
+    await request(app).put(`/api/sps-nodes/${nodeId}/agent-grants/${fixture.agent.id}`).send({}).expect(200);
+    await request(app).put(`/api/agents/${fixture.agent.id}/sps-node-binding`).send({ nodeId }).expect(200);
+    const target = await resolveSpsNodeExecutionTarget({ db, companyId: fixture.company.id, agentId: fixture.agent.id,
+      adapterType: "codex_local", heartbeatRunId: null, projectId: null });
+    const pendingResult = target!.runner.execute({ command: "codex", args: ["exec"], cwd: ".", env: {} });
+    const pendingResultObserved = pendingResult.then(() => undefined, () => undefined);
+    let queued: typeof spsNodeCommands.$inferSelect | null = null;
+    for (let attempt = 0; attempt < 20 && !queued; attempt += 1) {
+      queued = await db.select().from(spsNodeCommands).where(eq(spsNodeCommands.companyId, fixture.company.id)).then(rows => rows[0] ?? null);
+      if (!queued) await wait(25);
+    }
+    expect(queued).not.toBeNull();
+    const claimPath = `/sps-nodes/${nodeId}/commands/claim-next`;
+    await request(app).post(`/api${claimPath}`).send(createSignedNodeRequest(nodeId, node.privateKey, claimPath, {})).expect(200);
+    let fanoutStarted!: () => void, releaseFanout!: () => void;
+    const started = new Promise<void>(resolve => { fanoutStarted = resolve; });
+    const fanout = new Promise<void>(resolve => { releaseFanout = resolve; });
+    const unregister = registerSpsWorkspaceExecutionStopHandler(db, "heartbeat-runs", async () => { fanoutStarted(); await fanout; });
+    let stop: Promise<unknown> | undefined;
+    try {
+      const control = spsWorkspaceExecutionControlService(db);
+      stop = control.transition(fixture.company.id, "stop", fixture.ownerUserId, 0);
+      await started;
+      expect((await db.select().from(spsNodeCommands).where(eq(spsNodeCommands.id, queued!.id)))[0]?.status).toBe("cancelling");
+      const completePath = `/sps-nodes/${nodeId}/commands/${queued!.id}/complete`;
+      const completion = { status: "succeeded", exitCode: 0, timedOut: false };
+      const complete = await request(app).post(`/api${completePath}`).send(createSignedNodeRequest(nodeId, node.privateKey, completePath, completion)).expect(200);
+      expect(complete.body.status).toBe("cancelled");
+      releaseFanout();
+      await stop;
+      await expect(pendingResult).rejects.toThrow();
+    } finally {
+      releaseFanout();
+      unregister();
+      if (stop) await stop.catch(() => undefined);
+      await db.update(spsNodeCommands).set({ status: "failed", finishedAt: new Date(), error: "fixture cleanup" })
+        .where(and(eq(spsNodeCommands.companyId, fixture.company.id), inArray(spsNodeCommands.status, ["queued", "claimed", "running", "cancelling"])));
+      await pendingResultObserved;
+    }
+  }, 30_000);
 
   it("claims a plugin-owned run without requiring a Paperclip Agent and invalidates it when its grant is revoked", async () => {
     const fixture = await createCompanyFixture(db);
@@ -1060,6 +1380,71 @@ describeEmbeddedPostgres("SPS Node routes", () => {
       .then((rows) => rows[0]!);
     expect(failed.status).toBe("failed");
     expect(failed.error).toContain("plugin execution access was revoked");
+  });
+
+  it("rechecks the Node Workspace Source grant on every plugin-run lease", async () => {
+    const fixture = await createCompanyFixture(db);
+    const app = await createApp(db, boardActor(fixture.company.id, fixture.ownerUserId, "owner"));
+    const node = createNodePayload();
+    const registered = await request(app).post(`/api/companies/${fixture.company.id}/sps-nodes`).send(node.payload).expect(201);
+    const nodeId = registered.body.id;
+    await request(app).post(`/api/sps-nodes/${nodeId}/heartbeat`).send(createSignedHeartbeat(nodeId, node.privateKey)).expect(200);
+    await request(app).post(`/api/sps-nodes/${nodeId}/approve`).send({}).expect(200);
+    const runner = await db.select().from(spsNodeRunnerProfiles).where(eq(spsNodeRunnerProfiles.nodeId, nodeId))
+      .then(rows => rows.find(row => row.kind === "codex_cli")!);
+    const source = await db.insert(spsWorkspaceSources).values({ companyId: fixture.company.id,
+      displayName: "Granted Source", sharePath: "\\\\host.example.ts.net\\SPS_source", createdByUserId: fixture.ownerUserId })
+      .returning().then(rows => rows[0]!);
+    const sourceGrant = await db.insert(spsWorkspaceSourceNodeGrants).values({ companyId: fixture.company.id,
+      sourceId: source.id, nodeId, credentialAlgorithm: "rsa-oaep-sha256", credentialEnvelope: Buffer.alloc(128, 8).toString("base64"),
+      grantedByUserId: fixture.ownerUserId }).returning().then(rows => rows[0]!);
+    const siblingSource = await db.insert(spsWorkspaceSources).values({ companyId: fixture.company.id,
+      displayName: "Sibling Source", sharePath: "\\\\host.example.ts.net\\SPS_sibling", createdByUserId: fixture.ownerUserId })
+      .returning().then(rows => rows[0]!);
+    const siblingSourceGrant = await db.insert(spsWorkspaceSourceNodeGrants).values({ companyId: fixture.company.id,
+      sourceId: siblingSource.id, nodeId, credentialAlgorithm: "rsa-oaep-sha256", credentialEnvelope: Buffer.alloc(128, 9).toString("base64"),
+      grantedByUserId: fixture.ownerUserId }).returning().then(rows => rows[0]!);
+    const execution = spsPluginExecutionService(db, "sps.source-grant-test");
+    const grant = await execution.upsertExecutionGrant({ companyId: fixture.company.id, subjectKey: "source-worker",
+      nodeId, runnerProfileId: runner.id, workspaceSourceId: source.id });
+    const siblingExecutionGrant = await execution.upsertExecutionGrant({ companyId: fixture.company.id, subjectKey: "source-worker",
+      nodeId, runnerProfileId: runner.id, workspaceSourceId: siblingSource.id });
+    const run = await execution.dispatchRun({ companyId: fixture.company.id, executionGrantId: grant.id, args: ["exec"] });
+    const claimPath = `/sps-nodes/${nodeId}/plugin-runs/claim-next`;
+    await request(app).post(`/api${claimPath}`).send(createSignedNodeRequest(nodeId, node.privateKey, claimPath, {})).expect(200);
+    const siblingRun = await execution.dispatchRun({ companyId: fixture.company.id, executionGrantId: siblingExecutionGrant.id, args: ["exec"] });
+    await request(app).post(`/api${claimPath}`).send(createSignedNodeRequest(nodeId, node.privateKey, claimPath, {})).expect(200);
+
+    await db.update(spsWorkspaceSourceNodeGrants).set({ revokedAt: new Date() })
+      .where(eq(spsWorkspaceSourceNodeGrants.id, sourceGrant.id));
+    const leasePath = `/sps-nodes/${nodeId}/plugin-runs/${run.id}/lease`;
+    const lease = await request(app).post(`/api${leasePath}`)
+      .send(createSignedNodeRequest(nodeId, node.privateKey, leasePath, {})).expect(200);
+    expect(lease.body).toMatchObject({ active: false, status: "failed" });
+    const siblingLeasePath = `/sps-nodes/${nodeId}/plugin-runs/${siblingRun.id}/lease`;
+    const siblingLease = await request(app).post(`/api${siblingLeasePath}`)
+      .send(createSignedNodeRequest(nodeId, node.privateKey, siblingLeasePath, {})).expect(200);
+    expect(siblingLease.body).toMatchObject({ active: true, status: "claimed" });
+
+    await db.update(spsWorkspaceSources).set({ sharePath: "\\\\host.example.ts.net\\SPS_sibling_replaced" })
+      .where(eq(spsWorkspaceSources.id, siblingSource.id));
+    const staleRouteLease = await request(app).post(`/api${siblingLeasePath}`)
+      .send(createSignedNodeRequest(nodeId, node.privateKey, siblingLeasePath, {})).expect(200);
+    expect(staleRouteLease.body).toMatchObject({ active: false, status: "failed" });
+    expect(await db.select().from(spsWorkspaceSourceNodeGrants).where(eq(spsWorkspaceSourceNodeGrants.id, siblingSourceGrant.id)))
+      .toMatchObject([{ revokedAt: null }]);
+    const credentialRun = await execution.dispatchRun({ companyId: fixture.company.id, executionGrantId: siblingExecutionGrant.id, args: ["exec"] });
+    await request(app).post(`/api${claimPath}`).send(createSignedNodeRequest(nodeId, node.privateKey, claimPath, {})).expect(200);
+    await db.update(spsWorkspaceSourceNodeGrants).set({ credentialAlgorithm: "unsupported" })
+      .where(eq(spsWorkspaceSourceNodeGrants.id, siblingSourceGrant.id));
+    const credentialLeasePath = `/sps-nodes/${nodeId}/plugin-runs/${credentialRun.id}/lease`;
+    const credentialLease = await request(app).post(`/api${credentialLeasePath}`)
+      .send(createSignedNodeRequest(nodeId, node.privateKey, credentialLeasePath, {})).expect(200);
+    expect(credentialLease.body).toMatchObject({ active: false, status: "failed" });
+    const eventPath = `/sps-nodes/${nodeId}/plugin-runs/${run.id}/events`;
+    await request(app).post(`/api${eventPath}`).send(createSignedNodeRequest(nodeId, node.privateKey, eventPath,
+      { sequence: 1, stream: "stdout", body: "must be rejected after grant revocation" })).expect(403);
+    expect(await execution.getRun({ companyId: fixture.company.id, runId: run.id })).toMatchObject({ status: "failed" });
   });
 
   it("lists only owned runs and cancels active runs only after signed Node completion", async () => {
@@ -1278,7 +1663,7 @@ describeEmbeddedPostgres("SPS Node routes", () => {
     await db.update(spsPluginNodeRuns).set({ createdAt: sql`${sameMillisecond + "001Z"}::timestamptz` });
     await insertRun(randomUUID(), { ...context, spsPluginConversation: { ...context.spsPluginConversation, pluginKey: "sps.other" } });
     await insertRun(randomUUID(), { ...context, taskKey: "plugin:sps.historyXtest:session:not-owned" });
-    await insertRun(randomUUID(), { ...context, spsPluginConversation: { ...context.spsPluginConversation, sessionId: "invalid" } });
+    await insertRun(randomUUID(), { ...context, spsPluginConversation: { ...context.spsPluginConversation, sessionId: "invalid" as typeof sessionId } });
     const history = spsExecutionHistoryService(db, pluginKey);
     const all = await history.list(fixture.company.id);
     expect(all.items).toHaveLength(3);
@@ -1295,14 +1680,14 @@ describeEmbeddedPostgres("SPS Node routes", () => {
     expect(again.tokens).toEqual(summary.tokens); // Read repetition never appends charges.
     const [registryPlugin] = await db.insert(plugins).values({
       pluginKey, packageName: "@sps/history-fixture", version: "0.0.1", status: "disabled",
-      manifestJson: { id: pluginKey, apiVersion: 1, version: "0.0.1", displayName: "History fixture", author: "SPS", categories: [], capabilities: [] },
+      manifestJson: { id: pluginKey, apiVersion: 1, version: "0.0.1", displayName: "History fixture", description: "History fixture", author: "SPS", categories: [], capabilities: [], entrypoints: { worker: "./worker.js" } },
     }).returning();
     const hostApp = await createApp(db, boardActor(fixture.company.id, fixture.ownerUserId, "owner", { source: "local_implicit" }));
     const historyEndpoint = `/api/companies/${fixture.company.id}/sps-executions`;
-    const hostPages = [];
-    let hostCursor;
+    const hostPages: PluginSpsExecutionPage["items"] = [];
+    let hostCursor: PluginSpsExecutionCursor | null = null;
     do {
-      const response = await request(hostApp).get(historyEndpoint).query({ pluginId: registryPlugin.id, limit: 1,
+      const response: { headers: Record<string, string | string[] | undefined>; body: PluginSpsExecutionPage } = await request(hostApp).get(historyEndpoint).query({ pluginId: registryPlugin.id, limit: 1,
         ...(hostCursor ? { beforeCreatedAt: hostCursor.createdAt, beforeRunId: hostCursor.runId, beforeLane: hostCursor.lane } : {}) }).expect(200);
       expect(response.headers["cache-control"]).toBe("no-store");
       expect(JSON.stringify(response.body)).not.toContain("secret");
@@ -1327,7 +1712,7 @@ describeEmbeddedPostgres("SPS Node routes", () => {
     expect(repeatSummary.body.tokens).toEqual(summary.tokens);
     const unrelatedPlugin = await db.insert(plugins).values({
       pluginKey: "sps.history-empty", packageName: "@sps/history-empty", version: "0.0.1",
-      manifestJson: { id: "sps.history-empty", apiVersion: 1, version: "0.0.1", displayName: "Empty fixture", author: "SPS", categories: [], capabilities: [] },
+      manifestJson: { id: "sps.history-empty", apiVersion: 1, version: "0.0.1", displayName: "Empty fixture", description: "Empty history fixture", author: "SPS", categories: [], capabilities: [], entrypoints: { worker: "./worker.js" } },
     }).returning().then(rows => rows[0]!);
     const emptySummary = await request(hostApp).get(endpoint).query({ pluginId: unrelatedPlugin.id, ...summaryWindow }).expect(200);
     expect(emptySummary.body.executionCount).toBe(0);
@@ -1684,5 +2069,120 @@ describeEmbeddedPostgres("SPS Node routes", () => {
       .then((rows) => rows[0]!);
     expect(failed.status).toBe("failed");
     expect(failed.error).toContain("no longer has access");
+  });
+
+  it("replays an Agent claim receipt across fresh signatures, concurrent requests, and app recreation", async () => {
+    const fixture = await createCompanyFixture(db);
+    const { app, node, nodeId, claimPath } = await createClaimableAgentNode(db, fixture);
+    const protocolPath = `/sps-nodes/${nodeId}/claim-protocol`;
+    const protocol = await request(app).post(`/api${protocolPath}`)
+      .send(createSignedNodeRequest(nodeId, node.privateKey, protocolPath, {})).expect(200);
+    expect(protocol.body).toEqual({ schemaVersion: 1, requestIdVersion: "v1", maxRecoveryAgeMs: 86_400_000 });
+    expect(await db.select().from(spsNodeClaimReceipts)).toHaveLength(0);
+    const firstQueued = await db.insert(spsNodeCommands).values({
+      companyId: fixture.company.id, nodeId, agentId: fixture.agent.id, command: "codex", args: ["exec", "first"], env: {},
+    }).returning().then(rows => rows[0]!);
+    const claimRequestId = `v1:${Date.now()}:${randomUUID()}`;
+    const claim = (targetApp: Awaited<ReturnType<typeof createApp>> = app) => request(targetApp)
+      .post(`/api${claimPath}`).send(createSignedNodeRequest(nodeId, node.privateKey, claimPath, { claimRequestId }));
+
+    const first = await claim().expect(200);
+    expect(first.body).toMatchObject({ schemaVersion: 1, claimRequestId, kind: "agent-command", work: { id: firstQueued.id } });
+    const secondQueued = await db.insert(spsNodeCommands).values({
+      companyId: fixture.company.id, nodeId, agentId: fixture.agent.id, command: "codex", args: ["exec", "second"], env: {},
+    }).returning().then(rows => rows[0]!);
+    // More simultaneous requests than the default SQL pool size must not hold
+    // the admission connection while waiting for a second pooled connection.
+    const concurrent = await Promise.all(Array.from({ length: 12 }, () => claim()));
+    for (const response of concurrent) {
+      expect(response.status).toBe(200);
+      expect(response.body).toEqual(first.body);
+    }
+    const restartedApp = await createApp(db, boardActor(fixture.company.id, fixture.ownerUserId, "owner"));
+    const restarted = await claim(restartedApp).expect(200);
+    expect(restarted.body).toEqual(first.body);
+    expect((await db.select().from(spsNodeCommands).where(eq(spsNodeCommands.id, secondQueued.id)))[0]?.status).toBe("queued");
+    expect(await db.select().from(spsNodeClaimReceipts)).toHaveLength(1);
+    // A replay must not silently adopt a new task payload under the same ID.
+    await db.update(spsNodeCommands).set({ args: ["exec", "changed-after-claim"] }).where(eq(spsNodeCommands.id, firstQueued.id));
+    await claim(restartedApp).expect(409);
+    expect((await db.select().from(spsNodeCommands).where(eq(spsNodeCommands.id, secondQueued.id)))[0]?.status).toBe("queued");
+  });
+
+  it("keeps an empty Agent claim receipt after work is enqueued and rejects cross-lane reuse", async () => {
+    const fixture = await createCompanyFixture(db);
+    const { app, node, nodeId, claimPath } = await createClaimableAgentNode(db, fixture);
+    const claimRequestId = `v1:${Date.now()}:${randomUUID()}`;
+    const claim = (targetApp: Awaited<ReturnType<typeof createApp>> = app) => request(targetApp)
+      .post(`/api${claimPath}`).send(createSignedNodeRequest(nodeId, node.privateKey, claimPath, { claimRequestId }));
+    const empty = await claim().expect(200);
+    expect(empty.body).toEqual({ schemaVersion: 1, claimRequestId, kind: "agent-command", work: null });
+
+    const queued = await db.insert(spsNodeCommands).values({
+      companyId: fixture.company.id, nodeId, agentId: fixture.agent.id, command: "codex", args: ["exec"], env: {},
+    }).returning().then(rows => rows[0]!);
+    const restartedApp = await createApp(db, boardActor(fixture.company.id, fixture.ownerUserId, "owner"));
+    const replayedEmpty = await claim(restartedApp).expect(200);
+    expect(replayedEmpty.body).toEqual(empty.body);
+
+    const pluginPath = `/sps-nodes/${nodeId}/plugin-runs/claim-next`;
+    await request(restartedApp).post(`/api${pluginPath}`)
+      .send(createSignedNodeRequest(nodeId, node.privateKey, pluginPath, { claimRequestId })).expect(409);
+    const newRequestId = `v1:${Date.now()}:${randomUUID()}`;
+    const newClaim = await request(restartedApp).post(`/api${claimPath}`)
+      .send(createSignedNodeRequest(nodeId, node.privateKey, claimPath, { claimRequestId: newRequestId })).expect(200);
+    expect(newClaim.body).toMatchObject({ schemaVersion: 1, claimRequestId: newRequestId, kind: "agent-command", work: { id: queued.id } });
+    expect(await db.select().from(spsNodeClaimReceipts)).toHaveLength(2);
+    const control = spsWorkspaceExecutionControlService(db);
+    const stopped = await control.transition(fixture.company.id, "stop", fixture.ownerUserId, 0);
+    await claim(restartedApp).expect(409);
+    await control.transition(fixture.company.id, "resume", fixture.ownerUserId, stopped.revision);
+    await claim(restartedApp).expect(409);
+  });
+
+  it("does not replay claimed work after the Agent grant is revoked", async () => {
+    const fixture = await createCompanyFixture(db);
+    const { app, node, nodeId, claimPath } = await createClaimableAgentNode(db, fixture);
+    const firstQueued = await db.insert(spsNodeCommands).values({
+      companyId: fixture.company.id, nodeId, agentId: fixture.agent.id, command: "codex", args: ["exec", "first"], env: {},
+    }).returning().then(rows => rows[0]!);
+    const claimRequestId = `v1:${Date.now()}:${randomUUID()}`;
+    const first = await request(app).post(`/api${claimPath}`)
+      .send(createSignedNodeRequest(nodeId, node.privateKey, claimPath, { claimRequestId })).expect(200);
+    expect(first.body.work.id).toBe(firstQueued.id);
+    const secondQueued = await db.insert(spsNodeCommands).values({
+      companyId: fixture.company.id, nodeId, agentId: fixture.agent.id, command: "codex", args: ["exec", "second"], env: {},
+    }).returning().then(rows => rows[0]!);
+
+    await request(app).delete(`/api/sps-nodes/${nodeId}/agent-grants/${fixture.agent.id}`).send({});
+    const replay = await request(app).post(`/api${claimPath}`)
+      .send(createSignedNodeRequest(nodeId, node.privateKey, claimPath, { claimRequestId }));
+    expect([403, 409]).toContain(replay.status);
+    expect((await db.select().from(spsNodeCommands).where(eq(spsNodeCommands.id, secondQueued.id)))[0]?.status).not.toBe("claimed");
+  });
+
+  it("replays a Plugin claim receipt and rejects an expired claim ID", async () => {
+    const fixture = await createCompanyFixture(db);
+    const { app, node, nodeId, runner, grant, claimPath } = await createClaimablePluginNode(db, fixture);
+    const firstQueued = await db.insert(spsPluginNodeRuns).values({
+      companyId: fixture.company.id, pluginKey: grant.pluginKey, subjectKey: grant.subjectKey, executionGrantId: grant.id,
+      nodeId, runnerProfileId: runner.id, command: "codex", args: ["exec", "first"], env: {},
+    }).returning().then(rows => rows[0]!);
+    const claimRequestId = `v1:${Date.now()}:${randomUUID()}`;
+    const claim = (id: string) => request(app).post(`/api${claimPath}`)
+      .send(createSignedNodeRequest(nodeId, node.privateKey, claimPath, { claimRequestId: id }));
+    const first = await claim(claimRequestId).expect(200);
+    expect(first.body).toMatchObject({ schemaVersion: 1, claimRequestId, kind: "plugin-run", work: { id: firstQueued.id } });
+
+    const secondQueued = await db.insert(spsPluginNodeRuns).values({
+      companyId: fixture.company.id, pluginKey: grant.pluginKey, subjectKey: grant.subjectKey, executionGrantId: grant.id,
+      nodeId, runnerProfileId: runner.id, command: "codex", args: ["exec", "second"], env: {},
+    }).returning().then(rows => rows[0]!);
+    const replay = await claim(claimRequestId).expect(200);
+    expect(replay.body).toEqual(first.body);
+    const expiredId = `v1:${Date.now() - 25 * 60 * 60 * 1000}:${randomUUID()}`;
+    await claim(expiredId).expect(409);
+    expect((await db.select().from(spsPluginNodeRuns).where(eq(spsPluginNodeRuns.id, secondQueued.id)))[0]?.status).toBe("queued");
+    expect(await db.select().from(spsNodeClaimReceipts)).toHaveLength(1);
   });
 });

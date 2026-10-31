@@ -124,6 +124,33 @@ describe("plugin local folders", () => {
     expect(status.healthy).toBe(true);
   });
 
+  it("rejects writes to a healthy readable folder declared read-only", async () => {
+    const root = await makeRoot();
+    const markerPath = path.join(root, "marker.txt");
+    await fs.writeFile(markerPath, "keep unchanged", "utf8");
+
+    const status = await inspectPluginLocalFolder({
+      folderKey: "content-root",
+      declaration: {
+        folderKey: "content-root",
+        displayName: "Content root",
+        access: "read",
+        requiredFiles: ["marker.txt"],
+      },
+      storedConfig: {
+        path: root,
+        access: "readWrite",
+      },
+    });
+
+    expect(status.healthy).toBe(true);
+    expect(status.readable).toBe(true);
+    expect(status.writable).toBe(false);
+    await expect(Promise.resolve().then(() => assertWritableConfiguredLocalFolder(status)))
+      .rejects.toMatchObject({ status: 403 });
+    await expect(fs.readFile(markerPath, "utf8")).resolves.toBe("keep unchanged");
+  });
+
   it("prepares required directories for a read-write folder without creating required files", async () => {
     const root = await makeRoot();
 

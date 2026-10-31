@@ -1,6 +1,6 @@
 import type { Request, Response, NextFunction } from "express";
 import type { Db } from "@paperclipai/db";
-import { ZodError } from "zod";
+import { ZodError } from "zod/v3";
 import { HttpError } from "../errors.js";
 import { trackErrorHandlerCrash } from "@paperclipai/shared/telemetry";
 import { getTelemetryClient } from "../telemetry.js";

@@ -52,12 +52,14 @@ if (!embeddedPostgresSupport.supported) {
 describeEmbeddedPostgres("plugin orchestration APIs", () => {
   let db!: ReturnType<typeof createDb>;
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
+  let tempDbStartup: Promise<Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>> | null = null;
   const tempRoots: string[] = [];
 
   beforeAll(async () => {
-    tempDb = await startEmbeddedPostgresTestDatabase("paperclip-plugin-orchestration-");
+    tempDbStartup = startEmbeddedPostgresTestDatabase("paperclip-plugin-orchestration-");
+    tempDb = await tempDbStartup;
     db = createDb(tempDb.connectionString);
-  }, 20_000);
+  }, process.platform === "win32" ? 180_000 : 20_000);
 
   afterEach(async () => {
     await Promise.all(tempRoots.map((root) => fs.rm(root, { recursive: true, force: true })));
@@ -77,8 +79,14 @@ describeEmbeddedPostgres("plugin orchestration APIs", () => {
   });
 
   afterAll(async () => {
-    await tempDb?.cleanup();
-  });
+    // Join the exact pending startup even if the setup hook timed out, so the
+    // eventual owned database handle cannot escape fixture cleanup.
+    if (tempDbStartup && !tempDb) {
+      try { tempDb = await tempDbStartup; } catch { /* setup reports the startup error */ }
+    }
+    try { await db?.$client.end(); }
+    finally { await tempDb?.cleanup(); }
+  }, 180_000);
 
   async function seedCompanyAndAgent() {
     const companyId = randomUUID();
@@ -376,7 +384,7 @@ describeEmbeddedPostgres("plugin orchestration APIs", () => {
     await expect(fs.readFile(path.join(root, "WIKI.md"), "utf8")).resolves.toBe("# Wiki\n");
   });
 
-  it("rejects worker local-folder access for undeclared manifest keys", async () => {
+  it("enforces local-folder declarations and read-only access", async () => {
     const { companyId } = await seedCompanyAndAgent();
     const pluginId = randomUUID();
     await db.insert(plugins).values({
@@ -399,6 +407,11 @@ describeEmbeddedPostgres("plugin orchestration APIs", () => {
             folderKey: "content-root",
             displayName: "Content root",
             access: "readWrite",
+          },
+          {
+            folderKey: "readonly-root",
+            displayName: "Read-only root",
+            access: "read",
           },
         ],
       },
@@ -427,6 +440,11 @@ describeEmbeddedPostgres("plugin orchestration APIs", () => {
               displayName: "Content root",
               access: "readWrite",
             },
+            {
+              folderKey: "readonly-root",
+              displayName: "Read-only root",
+              access: "read",
+            },
           ],
         },
       },
@@ -447,6 +465,28 @@ describeEmbeddedPostgres("plugin orchestration APIs", () => {
       relativePath: "id_rsa",
       contents: "secret",
     })).rejects.toThrow("Local folder key is not declared");
+
+    const readonlyRoot = await makeLocalRoot();
+    const markerPath = path.join(readonlyRoot, "marker.txt");
+    await fs.writeFile(markerPath, "preserve read-only data", "utf8");
+    const readonlyStatus = await services.localFolders.configure({
+      companyId,
+      folderKey: "readonly-root",
+      path: readonlyRoot,
+      access: "readWrite",
+    });
+    expect(readonlyStatus).toMatchObject({ healthy: true, readable: true, writable: false, access: "read" });
+    await expect(services.localFolders.readText({ companyId, folderKey: "readonly-root", relativePath: "marker.txt" }))
+      .resolves.toBe("preserve read-only data");
+    await expect(services.localFolders.writeTextAtomic({
+      companyId,
+      folderKey: "readonly-root",
+      relativePath: "marker.txt",
+      contents: "must not replace read-only data",
+    })).rejects.toMatchObject({ status: 403 });
+    await expect(services.localFolders.deleteFile({ companyId, folderKey: "readonly-root", relativePath: "marker.txt" }))
+      .rejects.toMatchObject({ status: 403 });
+    await expect(fs.readFile(markerPath, "utf8")).resolves.toBe("preserve read-only data");
   });
 
   it("resolves plugin-managed projects by stable key without overwriting user edits", async () => {

@@ -267,6 +267,7 @@ export type {
   PluginSpsRun,
   PluginSpsRunEvent,
   PluginSpsClient,
+  PluginSpsConnectivity,
   PluginSpsModelConnection,
   PluginSpsModelRun,
   PluginSpsModelTextResult,
@@ -465,7 +466,7 @@ export type {
  * });
  * ```
  */
-export { z } from "zod";
+export { z } from "zod/v3";
 
 // ---------------------------------------------------------------------------
 // Constants re-exports (for plugin code that needs to check values at runtime)

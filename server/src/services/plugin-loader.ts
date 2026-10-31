@@ -43,12 +43,20 @@ import { logger } from "../middleware/logger.js";
 import { pluginManifestValidator } from "./plugin-manifest-validator.js";
 import { pluginCapabilityValidator } from "./plugin-capability-validator.js";
 import { pluginRegistryService } from "./plugin-registry.js";
+import { createPluginInitialLoadReadiness } from "./plugin-initial-load-readiness.js";
 import type { PluginWorkerManager, WorkerStartOptions, WorkerToHostHandlers } from "./plugin-worker-manager.js";
+import type { SpsWorkspacePluginWorkers } from "./sps-workspace-plugin-workers.js";
 import type { PluginEventBus } from "./plugin-event-bus.js";
+import type { PluginStreamBus } from "./plugin-stream-bus.js";
+import { publishPluginStreamNotification } from "./plugin-stream-notifications.js";
 import type { PluginJobScheduler } from "./plugin-job-scheduler.js";
 import type { PluginJobStore } from "./plugin-job-store.js";
 import type { PluginToolDispatcher } from "./plugin-tool-dispatcher.js";
 import type { PluginLifecycleManager } from "./plugin-lifecycle.js";
+import {
+  assertPluginPackageMutationPermit,
+  type PluginPackageMutationPermit,
+} from "./sps-plugin-package-maintenance.js";
 import {
   pluginDatabaseService,
   type PluginDatabaseMigrationPlan,
@@ -68,6 +76,7 @@ import {
   resolvePluginRecoveryState,
   type PluginRecoveryState,
 } from "./sps-plugin-recovery.js";
+import type { SpsPluginPackageOperations } from "./sps-plugin-package-operations.js";
 
 const execFileAsync = promisify(execFile);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -393,6 +402,7 @@ function getDeclaredPageRoutePaths(manifest: PaperclipPluginManifestV1): string[
  * Options for the plugin loader service.
  */
 export interface PluginLoaderOptions {
+  packageOperations?: SpsPluginPackageOperations;
   /**
    * Path to the local plugin directory to scan.
    * Defaults to ~/.paperclip/plugins/
@@ -504,6 +514,9 @@ export interface PluginLoadOptions {
  * @see PLUGIN_SPEC.md §12 — Process Model
  */
 export interface PluginRuntimeServices {
+  /** Optional catalog-mutation fence for Workspace-owned plugin workers. */
+  workspaceRuntime?: Pick<SpsWorkspacePluginWorkers, "withCatalogMutation">;
+  streamBus?: PluginStreamBus;
   /** Worker process manager for spawning and managing plugin workers. */
   workerManager: PluginWorkerManager;
   /** Event bus for registering plugin event subscriptions. */
@@ -721,8 +734,14 @@ export interface PluginLoader {
    *
    * This only cleans files under the managed local plugin directory. Local-path
    * source checkouts outside that directory are intentionally left alone.
+   * @internal Caller must first close the target's owned workers and, when
+   * `requiresSharedPluginArtifactCleanup(plugin)` is true, hold the exclusive
+   * Host package mutation fence for the full lifecycle cleanup transaction.
    */
-  cleanupInstallArtifacts(plugin: PluginRecord): Promise<void>;
+  cleanupInstallArtifacts(plugin: PluginRecord, permit: PluginPackageMutationPermit): Promise<void>;
+
+  /** Whether cleanup mutates shared npm state and needs the Host package fence. */
+  requiresSharedPluginArtifactCleanup(plugin: PluginRecord): boolean;
 
   /**
    * Get the local plugin directory this loader is configured to use.
@@ -757,6 +776,20 @@ export interface PluginLoader {
    * @see PLUGIN_SPEC.md §12 — Process Model
    */
   loadAll(): Promise<PluginLoadAllResult>;
+
+  /**
+   * Arm the initial-load barrier while startup preparation runs before loadAll.
+   * The returned release function unblocks waiters if preparation aborts.
+   * @internal
+   */
+  prepareInitialLoad?(): () => void;
+
+  /**
+   * Wait for this plugin's initial startup activation, if loadAll has begun.
+   * Does not wait for unrelated plugins and is a no-op before initial loading.
+   * @internal
+   */
+  waitForInitialLoad?(pluginId: string): Promise<void>;
 
   /**
    * Activate a single plugin that is in `installed` or `ready` status.
@@ -1312,11 +1345,13 @@ export function pluginLoader(
   } = options;
   const recoveryState = options.recoveryState ?? resolvePluginRecoveryState();
   const assertRuntimeAllowed = (action: string) => assertPluginRuntimeAllowed(recoveryState, action);
+  const assertPackageOperationClear = (pluginId: string) => options.packageOperations?.assertClear(pluginId);
 
   const registry = pluginRegistryService(db);
   const manifestValidator = pluginManifestValidator();
   const capabilityValidator = pluginCapabilityValidator();
   const log = logger.child({ service: "plugin-loader" });
+  const initialLoadReadiness = createPluginInitialLoadReadiness();
   const hostVersion = runtimeServices?.instanceInfo.hostVersion;
 
   async function assertPageRoutePathsAvailable(manifest: PaperclipPluginManifestV1): Promise<void> {
@@ -1654,6 +1689,7 @@ export function pluginLoader(
     pluginId: string,
     upgradeOptions: PluginUpgradeOptions,
   ): Promise<PreparedPluginUpgrade> {
+    await options.packageOperations?.assertClear(pluginId);
     const plugin = (await registry.getById(pluginId)) as {
       id: string;
       packageName: string;
@@ -1663,11 +1699,16 @@ export function pluginLoader(
     if (!plugin) throw new Error(`Plugin not found: ${pluginId}`);
 
     const oldManifest = plugin.manifestJson;
-    const {
-      packageName = plugin.packageName,
-      localPath = plugin.packagePath ?? undefined,
-      version,
-    } = upgradeOptions;
+    const packageName = upgradeOptions.packageName ?? plugin.packageName;
+    if (plugin.packagePath && isUnderManagedStagingRoot(plugin.packagePath, localPluginDir)) {
+      const staged = classifyStagedPackagePath(plugin.packagePath, localPluginDir, plugin.packageName);
+      if (!staged.underStaging || !staged.root) throw new Error("Refusing to use an unrecognized staged plugin package path");
+    }
+    const localPath = upgradeOptions.localPath
+      ?? (plugin.packagePath && !isManagedNpmPackagePath(plugin.packagePath, localPluginDir, plugin.packageName)
+        ? plugin.packagePath
+        : undefined);
+    const { version } = upgradeOptions;
 
     log.info(
       { pluginId, packageName, version, localPath },
@@ -1731,6 +1772,7 @@ export function pluginLoader(
     pluginId: string,
     prepared: PreparedPluginUpgrade,
   ): Promise<void> {
+    await options.packageOperations?.assertClear(pluginId);
     await registry.update(pluginId, {
       packageName: prepared.discovered.packageName,
       packagePath: prepared.discovered.packagePath,
@@ -2003,49 +2045,77 @@ export function pluginLoader(
 
     async installPlugin(installOptions: PluginInstallOptions): Promise<DiscoveredPlugin> {
       assertRuntimeAllowed("plugin installation");
-      const discovered = await fetchAndValidate(installOptions);
-      const manifest = discovered.manifest!;
+      const performInstall = async () => {
+        const ownsStagingRoot = Boolean(installOptions.packageName && !installOptions.localPath);
+        const stagingRoot = ownsStagingRoot
+          ? path.join(localPluginDir, ".install-staging", randomUUID())
+          : null;
+        let commitMayHaveBeenAttempted = false;
+        try {
+          if (stagingRoot) await mkdir(stagingRoot, { recursive: true });
+          const discovered = await fetchAndValidate(stagingRoot
+            ? { ...installOptions, installDir: stagingRoot }
+            : installOptions);
+          const manifest = discovered.manifest!;
+          await options.packageOperations?.assertClear(undefined, manifest.id);
 
-      // Step 6: Persist install record and apply plugin-owned schema migrations
-      // in one database transaction. If migration validation fails, the plugin
-      // row, namespace record, migration ledger, and created schema all roll back.
-      const installDb = manifest.database ? migrationDb : db;
-      await installDb.transaction(async (tx) => {
-        const txDb = tx as unknown as Db;
-        const txRegistry = pluginRegistryService(txDb);
-        const installed = await txRegistry.install(
-          {
-            packageName: discovered.packageName,
-            packagePath: discovered.source === "local-filesystem" ? discovered.packagePath : undefined,
-          },
-          manifest,
-        );
+          // Persist the exact package root used for validation. npm packages
+          // are installed under their UUID-owned staging root so npm never
+          // reifies the shared active node_modules tree during a new install.
+          const installDb = manifest.database ? migrationDb : db;
+          await installDb.transaction(async (tx) => {
+            const txDb = tx as unknown as Db;
+            const txRegistry = pluginRegistryService(txDb);
+            const installed = await txRegistry.install(
+              {
+                packageName: discovered.packageName,
+                packagePath: discovered.packagePath,
+              },
+              manifest,
+            );
 
-        if (!installed) {
-          throw new Error(`Plugin install did not return a registry row: ${manifest.id}`);
-        }
+            if (!installed) {
+              throw new Error(`Plugin install did not return a registry row: ${manifest.id}`);
+            }
 
-        if (manifest.database) {
-          await pluginDatabaseService(txDb).applyMigrations(
-            installed.id,
-            manifest,
-            discovered.packagePath,
-            { persistFailure: false },
+            if (manifest.database) {
+              await pluginDatabaseService(txDb).applyMigrations(
+                installed.id,
+                manifest,
+                discovered.packagePath,
+                { persistFailure: false },
+              );
+            }
+            // The driver sends COMMIT only after this callback resolves. A
+            // later rejection can mean the commit response was lost, so it
+            // cannot prove that the registry did not adopt this package.
+            commitMayHaveBeenAttempted = true;
+          });
+
+          log.info(
+            {
+              pluginId: manifest.id,
+              packageName: discovered.packageName,
+              version: discovered.version,
+              capabilities: manifest.capabilities,
+            },
+            "plugin-loader: plugin installed successfully",
           );
+
+          return discovered;
+        } catch (error) {
+          // Clean only failures before COMMIT can have been attempted. Keep an
+          // uncertain artifact available for recovery rather than deleting a
+          // package that the registry may already reference.
+          if (stagingRoot && !commitMayHaveBeenAttempted) {
+            await rm(stagingRoot, { recursive: true, force: true });
+          }
+          throw error;
         }
-      });
-
-      log.info(
-        {
-          pluginId: manifest.id,
-          packageName: discovered.packageName,
-          version: discovered.version,
-          capabilities: manifest.capabilities,
-        },
-        "plugin-loader: plugin installed successfully",
-      );
-
-      return discovered;
+      };
+      return runtimeServices?.workspaceRuntime
+        ? await runtimeServices.workspaceRuntime.withCatalogMutation(performInstall)
+        : await performInstall();
     },
 
     async previewRegistryPluginEnable({ localPath, staticManifest }): Promise<DiscoveredPlugin> {
@@ -2079,77 +2149,29 @@ export function pluginLoader(
       upgradeOptions: PluginUpgradeOptions,
     ): Promise<PreparedPluginUpgrade> {
       assertRuntimeAllowed("plugin upgrade");
-      const plugin = (await registry.getById(pluginId)) as {
-        id: string;
-        packageName: string;
-        packagePath: string | null;
-        manifestJson: PaperclipPluginManifestV1;
-      } | null;
-      if (!plugin) throw new Error(`Plugin not found: ${pluginId}`);
-
-      const oldManifest = plugin.manifestJson;
-      const {
-        packageName = plugin.packageName,
-        // For local-path installs, fall back to the stored packagePath so
-        // `upgradePlugin` can re-read the manifest from disk without needing
-        // the caller to re-supply the path every time.
-        localPath = plugin.packagePath ?? undefined,
-        version,
-        approvedCapabilityEscalation = false,
-      } = upgradeOptions;
-
-      log.info(
-        { pluginId, packageName, version, localPath },
-        "plugin-loader: upgrading plugin",
-      );
-
-      // 1. Fetch/Install the new version
-      const discovered = await fetchAndValidate({
-        packageName,
-        localPath,
-        version,
-        installDir: localPluginDir,
-      });
-
-      const newManifest = discovered.manifest!;
-
-      // 2. Validate it's the same plugin ID
-      if (newManifest.id !== oldManifest.id) {
-        throw new Error(
-          `Upgrade failed: new manifest ID '${newManifest.id}' does not match existing plugin ID '${oldManifest.id}'`,
-        );
-      }
-
-      // 3. Detect capability escalation — new capabilities not in the old manifest
-      const oldCaps = new Set(oldManifest.capabilities ?? []);
-      const newCaps = newManifest.capabilities ?? [];
-      const escalated = newCaps.filter((c) => !oldCaps.has(c));
-
-      if (escalated.length > 0 && !approvedCapabilityEscalation) {
-        log.warn(
-          { pluginId, escalated, oldVersion: oldManifest.version, newVersion: newManifest.version },
-          "plugin-loader: upgrade introduces new capabilities — requires admin approval",
-        );
+      const prepared = await preparePluginUpgrade(pluginId, upgradeOptions);
+      const oldCapabilities = new Set(prepared.oldManifest.capabilities ?? []);
+      const escalated = (prepared.newManifest.capabilities ?? []).filter(capability => !oldCapabilities.has(capability));
+      if (escalated.length > 0 && !upgradeOptions.approvedCapabilityEscalation) {
+        await removeOwnedStagedArtifact(prepared.discovered.packagePath, prepared.discovered.packageName, localPluginDir);
         throw new Error(
           `Upgrade for "${pluginId}" introduces new capabilities that require approval: ${escalated.join(", ")}. ` +
-            `The previous version declared [${[...oldCaps].join(", ")}]. ` +
+            `The previous version declared [${[...oldCapabilities].join(", ")}]. ` +
             `Please review and approve the capability escalation before upgrading.`,
         );
       }
 
-      // 4. Update the existing record
+      // This write is autocommitted. A rejected response does not establish
+      // that it rolled back; preserve the candidate in either outcome so a
+      // committed registry pointer never references an artifact we removed.
+      await assertPackageOperationClear(pluginId);
       await registry.update(pluginId, {
-        packageName: discovered.packageName,
-        packagePath: discovered.packagePath,
-        version: discovered.version,
-        manifest: newManifest,
+        packageName: prepared.discovered.packageName,
+        packagePath: prepared.discovered.packagePath,
+        version: prepared.discovered.version,
+        manifest: prepared.newManifest,
       });
-
-      return {
-        oldManifest,
-        newManifest,
-        discovered,
-      };
+      return prepared;
     },
 
     async prepareUpgrade(
@@ -2195,7 +2217,25 @@ export function pluginLoader(
     // cleanupInstallArtifacts
     // -----------------------------------------------------------------------
 
-    async cleanupInstallArtifacts(plugin: PluginRecord): Promise<void> {
+    async cleanupInstallArtifacts(plugin: PluginRecord, permit: PluginPackageMutationPermit): Promise<void> {
+      assertPluginPackageMutationPermit(
+        permit,
+        plugin.id,
+        requiresSharedPluginArtifactCleanup(plugin, localPluginDir),
+      );
+      if (plugin.packagePath !== null && plugin.packagePath !== undefined) {
+        const staged = classifyStagedPackagePath(plugin.packagePath, localPluginDir, plugin.packageName);
+        if (staged.underStaging) {
+          await removeOwnedStagedArtifact(plugin.packagePath, plugin.packageName, localPluginDir);
+          return;
+        }
+        if (!requiresSharedPluginArtifactCleanup(plugin, localPluginDir)) {
+          // Caller-owned local checkouts are unlinked from the registry but
+          // their source files and unrelated packages remain untouched.
+          return;
+        }
+      }
+
       const managedTargets = new Set<string>();
       const managedNodeModulesDir = resolveManagedInstallPackageDir(localPluginDir, plugin.packageName);
       const directManagedDir = path.join(localPluginDir, plugin.packageName);
@@ -2234,6 +2274,10 @@ export function pluginLoader(
       }
     },
 
+    requiresSharedPluginArtifactCleanup(plugin: PluginRecord): boolean {
+      return requiresSharedPluginArtifactCleanup(plugin, localPluginDir);
+    },
+
     // -----------------------------------------------------------------------
     // getLocalPluginDir
     // -----------------------------------------------------------------------
@@ -2255,6 +2299,9 @@ export function pluginLoader(
     // loadAll
     // -----------------------------------------------------------------------
 
+    prepareInitialLoad: initialLoadReadiness.prepare,
+    waitForInitialLoad: initialLoadReadiness.wait,
+
     /**
      * loadAll — Loads and activates all plugins that are currently in 'ready' status.
      *
@@ -2273,10 +2320,28 @@ export function pluginLoader(
         );
       }
 
-      log.info("plugin-loader: loading all ready plugins");
+      const tracksInitialLoad = initialLoadReadiness.begin();
 
-      // Fetch all plugins in ready status, ordered by installOrder
-      const readyPlugins = (await registry.listByStatus("ready")) as PluginRecord[];
+      let readyPlugins: PluginRecord[];
+      let activationPromises: Promise<PluginLoadResult>[];
+      try {
+        log.info("plugin-loader: loading all ready plugins");
+
+        // Fetch all plugins in ready status, ordered by installOrder
+        readyPlugins = (await registry.listByStatus("ready")) as PluginRecord[];
+
+        // Publish each target promise before yielding, so a route that arrives
+        // during startup can join only its plugin's activation, not its siblings.
+        activationPromises = readyPlugins.map(plugin => {
+          const activation = activatePlugin(plugin);
+          if (tracksInitialLoad) initialLoadReadiness.register(plugin.id, activation);
+          return activation;
+        });
+      } catch (error) {
+        if (tracksInitialLoad) initialLoadReadiness.publish();
+        throw error;
+      }
+      if (tracksInitialLoad) initialLoadReadiness.publish();
 
       if (readyPlugins.length === 0) {
         log.info("plugin-loader: no ready plugins to load");
@@ -2290,7 +2355,7 @@ export function pluginLoader(
 
       // Load plugins in parallel
       const results = await Promise.allSettled(
-        readyPlugins.map((plugin) => activatePlugin(plugin))
+        activationPromises
       );
 
       const loadResults = results.map((r, i) => {
@@ -2478,6 +2543,7 @@ export function pluginLoader(
     plugin: PluginRecord,
     options: PluginLoadOptions = {},
   ): Promise<PluginLoadResult> {
+    await assertPackageOperationClear(plugin.id);
     const pluginId = plugin.id;
     const pluginKey = plugin.pluginKey;
     let activePlugin = plugin;
@@ -2580,6 +2646,13 @@ export function pluginLoader(
         hostHandlers,
         autoRestart: true,
         env: buildPluginWorkerEnv({ manifest, instanceInfo }),
+        // Declared Workspace UI streams belong exclusively to the scoped pool.
+        // The package's retained Host worker cannot publish into those tuples.
+        onStreamNotification: runtimeServices.streamBus && !manifest.entrypoints.workspaceWorker
+          ? (method, params, generation, canPublish) => {
+            if (canPublish()) publishPluginStreamNotification(runtimeServices.streamBus!, pluginId, method, params, generation);
+          }
+          : undefined,
       };
 
       // Repo-local plugin installs can resolve workspace TS sources at runtime
@@ -2735,63 +2808,34 @@ function resolveWorkerEntrypoint(
 ): string {
   const manifest = plugin.manifestJson;
   const workerRelPath = manifest.entrypoints.worker;
+  const packageDir = resolvePluginPackageRoot(plugin, localPluginDir);
+  const entrypoint = path.resolve(packageDir, workerRelPath);
 
-  // For local-path installs we persist the resolved package path; use it first
-  if (plugin.packagePath && existsSync(plugin.packagePath)) {
-    const entrypoint = path.resolve(plugin.packagePath, workerRelPath);
-    if (entrypoint.startsWith(path.resolve(plugin.packagePath)) && existsSync(entrypoint)) {
-      return entrypoint;
-    }
-  }
-
-  // Try the local plugin directory (standard npm install location)
-  const packageName = plugin.packageName;
-  let packageDir: string;
-
-  if (packageName.startsWith("@")) {
-    // Scoped package: @scope/plugin-name → localPluginDir/node_modules/@scope/plugin-name
-    const [scope, name] = packageName.split("/");
-    packageDir = path.join(localPluginDir, "node_modules", scope!, name!);
-  } else {
-    packageDir = path.join(localPluginDir, "node_modules", packageName);
-  }
-
-  // Also check if the package exists directly under localPluginDir
-  // (for direct local-path installs or symlinked packages)
-  const directDir = path.join(localPluginDir, packageName);
-
-  // Try in order: node_modules path, direct path
-  for (const dir of [packageDir, directDir]) {
-    const entrypoint = path.resolve(dir, workerRelPath);
-
-    // Security: ensure entrypoint is actually inside the directory (prevent path traversal)
-    if (!entrypoint.startsWith(path.resolve(dir))) {
-      continue;
-    }
-
-    if (existsSync(entrypoint)) {
-      return entrypoint;
-    }
-  }
+  // An explicit packagePath is authoritative. Never load an older shared
+  // package copy when its committed, staged artifact is missing.
+  if (isPathInsideDir(entrypoint, packageDir) && existsSync(entrypoint)) return entrypoint;
 
   // Fallback: try the worker path as-is (absolute or relative to cwd)
   // ONLY if it's already an absolute path and we trust the manifest (which we've already validated)
-  if (path.isAbsolute(workerRelPath) && existsSync(workerRelPath)) {
+  if (!plugin.packagePath && path.isAbsolute(workerRelPath) && existsSync(workerRelPath)) {
     return workerRelPath;
   }
 
   throw new Error(
     `Worker entrypoint not found for plugin "${plugin.pluginKey}". ` +
-      `Checked: ${path.resolve(packageDir, workerRelPath)}, ` +
-      `${path.resolve(directDir, workerRelPath)}`,
+      `Checked: ${entrypoint}`,
   );
 }
 
-function resolvePluginPackageRoot(
+/** @internal Resolve a persisted package path without falling back from stale explicit paths. */
+export function resolvePluginPackageRoot(
   plugin: PluginRecord & { packagePath?: string | null },
   localPluginDir: string,
 ): string {
-  if (plugin.packagePath && existsSync(plugin.packagePath)) {
+  if (plugin.packagePath !== null && plugin.packagePath !== undefined) {
+    if (!path.isAbsolute(plugin.packagePath) || !existsSync(plugin.packagePath)) {
+      throw new Error(`Package root not found for plugin "${plugin.pluginKey}"`);
+    }
     return path.resolve(plugin.packagePath);
   }
 
@@ -2812,6 +2856,118 @@ function resolveManagedInstallPackageDir(localPluginDir: string, packageName: st
     return path.join(localPluginDir, "node_modules", ...packageName.split("/"));
   }
   return path.join(localPluginDir, "node_modules", packageName);
+}
+
+type StagedArtifactClassification =
+  | { underStaging: false }
+  | { underStaging: true; root: string | null; npmPackage: boolean };
+
+const UUID_PATH_SEGMENT = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function npmPackageSegments(packageName: string): string[] | null {
+  const segments = packageName.split("/");
+  if (segments.some(segment => !segment || segment === "." || segment === "..")) return null;
+  if (packageName.startsWith("@")) return segments.length === 2 ? segments : null;
+  return segments.length === 1 ? segments : null;
+}
+
+function classifyStagedPackagePath(
+  packagePath: string,
+  localPluginDir: string,
+  packageName: string,
+): StagedArtifactClassification {
+  if (typeof packagePath !== "string" || !packagePath) return { underStaging: false };
+  const resolvedLocalRoot = path.resolve(localPluginDir);
+  const resolvedPackagePath = path.resolve(packagePath);
+  const relative = path.relative(resolvedLocalRoot, resolvedPackagePath);
+  if (path.isAbsolute(relative) || relative === ".." || relative.startsWith(`..${path.sep}`)) {
+    return { underStaging: false };
+  }
+  const segments = relative.split(path.sep);
+  const isInstallStage = segments[0] === ".install-staging";
+  const isUpgradeStage = segments[0] === ".upgrade-staging";
+  if (!isInstallStage && !isUpgradeStage) return { underStaging: false };
+
+  const pluginSegments = npmPackageSegments(packageName);
+  if (!path.isAbsolute(packagePath) || !pluginSegments) {
+    return { underStaging: true, root: null, npmPackage: false };
+  }
+
+  if (isInstallStage && UUID_PATH_SEGMENT.test(segments[1] ?? "")) {
+    const root = path.join(resolvedLocalRoot, ".install-staging", segments[1]!);
+    const expectedNpmLeaf = [".install-staging", segments[1]!, "node_modules", ...pluginSegments];
+    if (segments.length === expectedNpmLeaf.length && segments.every((value, index) => value === expectedNpmLeaf[index])) {
+      return { underStaging: true, root, npmPackage: true };
+    }
+  }
+
+  if (isUpgradeStage && UUID_PATH_SEGMENT.test(segments[1] ?? "")
+    && UUID_PATH_SEGMENT.test(segments[2] ?? "")) {
+    const root = path.join(resolvedLocalRoot, ".upgrade-staging", segments[1]!, segments[2]!);
+    if (segments.length === 4 && segments[3] === "package") {
+      return { underStaging: true, root, npmPackage: false };
+    }
+    const expectedNpmLeaf = [".upgrade-staging", segments[1]!, segments[2]!, "node_modules", ...pluginSegments];
+    if (segments.length === expectedNpmLeaf.length && segments.every((value, index) => value === expectedNpmLeaf[index])) {
+      return { underStaging: true, root, npmPackage: true };
+    }
+  }
+
+  return { underStaging: true, root: null, npmPackage: false };
+}
+
+function isUnderManagedStagingRoot(packagePath: string, localPluginDir: string): boolean {
+  if (!path.isAbsolute(packagePath)) return false;
+  const relative = path.relative(path.resolve(localPluginDir), path.resolve(packagePath));
+  if (path.isAbsolute(relative) || relative === ".." || relative.startsWith(`..${path.sep}`)) return false;
+  const firstSegment = relative.split(path.sep)[0];
+  return firstSegment === ".install-staging" || firstSegment === ".upgrade-staging";
+}
+
+/** @internal Classifies only exact legacy shared npm paths as requiring global mutation fencing. */
+export function requiresSharedPluginArtifactCleanup(
+  plugin: Pick<PluginRecord, "packageName" | "packagePath">,
+  localPluginDir: string,
+): boolean {
+  if (plugin.packagePath === null) return true;
+  if (!plugin.packagePath) return false;
+  const staged = classifyStagedPackagePath(plugin.packagePath, localPluginDir, plugin.packageName);
+  if (staged.underStaging) return false;
+  const resolvedPath = path.resolve(plugin.packagePath);
+  return resolvedPath === path.resolve(resolveManagedInstallPackageDir(localPluginDir, plugin.packageName))
+    || resolvedPath === path.resolve(localPluginDir, plugin.packageName);
+}
+
+function isManagedStagedNpmPackagePath(
+  packagePath: string,
+  localPluginDir: string,
+  packageName: string,
+): boolean {
+  const staged = classifyStagedPackagePath(packagePath, localPluginDir, packageName);
+  return staged.underStaging && staged.root !== null && staged.npmPackage;
+}
+
+function isManagedNpmPackagePath(
+  packagePath: string,
+  localPluginDir: string,
+  packageName: string,
+): boolean {
+  if (isManagedStagedNpmPackagePath(packagePath, localPluginDir, packageName)) return true;
+  return path.resolve(packagePath) === path.resolve(resolveManagedInstallPackageDir(localPluginDir, packageName));
+}
+
+async function removeOwnedStagedArtifact(
+  packagePath: string,
+  packageName: string,
+  localPluginDir: string,
+): Promise<void> {
+  const staged = classifyStagedPackagePath(packagePath, localPluginDir, packageName);
+  if (!staged.underStaging || !staged.root
+    || (!isPathInsideDir(staged.root, path.join(localPluginDir, ".install-staging"))
+      && !isPathInsideDir(staged.root, path.join(localPluginDir, ".upgrade-staging")))) {
+    throw new Error("Refusing to clean an unrecognized staged plugin artifact");
+  }
+  await rm(staged.root, { recursive: true, force: true });
 }
 
 function isPathInsideDir(candidatePath: string, parentDir: string): boolean {

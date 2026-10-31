@@ -3,6 +3,7 @@ import { TLSSocket } from "node:tls";
 import type { createSpsIdentityAuth } from "../auth/sps-identity.js";
 import { SpsNativeEnrollmentError, type spsNativeEnrollmentService } from "./sps-native-enrollments.js";
 import type { SpsNativePairingAuthorizer } from "./sps-native-pairings.js";
+import type { createSpsNativeMemberRenewalService } from "./sps-native-member-renewals.js";
 
 type Identity = Pick<ReturnType<typeof createSpsIdentityAuth>, "resolveNativeEnrollmentSessionFromHeaders">;
 type Enrollment = Pick<ReturnType<typeof spsNativeEnrollmentService>, "issue" | "completeFromTlsPeer">
@@ -10,6 +11,8 @@ type Enrollment = Pick<ReturnType<typeof spsNativeEnrollmentService>, "issue" | 
 type IssueBody = { pairingId: string; pairingSecret: string; deviceKeyId: string; requestPem: string };
 type CompleteBody = { pairingId: string; pairingSecret: string; enrollmentId: string; displayName: string };
 type ReconcileBody = { enrollmentId: string };
+type RenewBody = { deviceKeyId: string; requestPem: string };
+type Renewal = Pick<ReturnType<typeof createSpsNativeMemberRenewalService>, "renewFromTlsPeer">;
 
 export class SpsNativeSessionEnrollmentError extends Error {
   readonly code = "native_enrollment_request_unavailable";
@@ -61,10 +64,13 @@ export function assertSpsNativeEnrollmentTlsRequest(request: IncomingMessage): v
  * The optional dedicated handler supplies body/time/concurrency limits. The
  * future listener still owns TLS/socket admission, session exchange and pins.
  */
-export function createSpsNativeSessionEnrollment(identity: Identity, enrollment: Enrollment) {
+export function createSpsNativeSessionEnrollment(identity: Identity, enrollment: Enrollment, renewal?: Renewal) {
   if (!identity || typeof identity.resolveNativeEnrollmentSessionFromHeaders !== "function"
     || !enrollment || typeof enrollment.issue !== "function" || typeof enrollment.completeFromTlsPeer !== "function") {
     throw new TypeError("Invalid SPS Native session enrollment configuration.");
+  }
+  if (renewal !== undefined && typeof renewal.renewFromTlsPeer !== "function") {
+    throw new TypeError("Invalid SPS Native renewal configuration.");
   }
   async function session(request: IncomingMessage, assertRequestActive: () => void) {
     if (typeof assertRequestActive !== "function") deny();
@@ -91,6 +97,19 @@ export function createSpsNativeSessionEnrollment(identity: Identity, enrollment:
     catch (error) { if (error instanceof SpsNativeEnrollmentError) throw error; deny(); }
   }
   return Object.freeze({
+    ...(renewal ? {
+      renewFromTlsRequest(request: IncomingMessage, input: RenewBody, assertRequestActive: () => void = () => {}) {
+        return safe(async () => {
+          const value = body(input, ["deviceKeyId", "requestPem"]);
+          const { socket, current, authorize, recheck } = await session(request, assertRequestActive);
+          const result = await renewal.renewFromTlsPeer(socket, {
+            deviceKeyId: value.deviceKeyId!, requestPem: value.requestPem!, userId: current.userId,
+          }, authorize);
+          recheck();
+          return result;
+        });
+      },
+    } : {}),
     reconcileFromTlsRequest(request: IncomingMessage, input: ReconcileBody, assertRequestActive: () => void = () => {}) {
       return safe(async () => {
         const value = body(input, ["enrollmentId"]);

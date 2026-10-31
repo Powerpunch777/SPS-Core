@@ -21,14 +21,15 @@
 
 import { access, readdir, readFile } from "node:fs/promises";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { Router } from "express";
 import type { Request, Response } from "express";
-import { and, desc, eq, gte } from "drizzle-orm";
+import { and, desc, eq, gte, isNull } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   agents,
+  boardApiKeys,
   companies,
   heartbeatRuns,
   pluginLogs,
@@ -42,10 +43,7 @@ import type {
   PluginBridgeErrorCode,
   PluginLauncherRenderContextSnapshot,
 } from "@paperclipai/shared";
-import {
-  PLUGIN_STATUSES,
-  PERMISSION_KEYS,
-} from "@paperclipai/shared";
+import { PLUGIN_STATUSES } from "@paperclipai/shared";
 import { pluginRegistryService } from "../services/plugin-registry.js";
 import { registryStagingService, type RegistryStagedPluginRecord } from "../services/registry-staging.js";
 import { pluginDatabaseService } from "../services/plugin-database.js";
@@ -64,6 +62,8 @@ import {
 } from "../services/plugin-dependencies.js";
 import { listReadyAgentPlatformExtensions } from "../services/agent-platform-extensions.js";
 import { pluginLifecycleManager, type PluginLifecycleManager } from "../services/plugin-lifecycle.js";
+import { getCompletedSpsPluginRuntimeMutationResult, SpsPluginRuntimeCleanupPendingError } from "../services/sps-plugin-runtime-mutation.js";
+import { PluginPackageMaintenanceRequiredError } from "../services/sps-plugin-package-maintenance.js";
 import { spsWorkspaceSurfaceService } from "../services/sps-workspace-surfaces.js";
 import {
   getPluginUiContributionMetadata,
@@ -79,13 +79,18 @@ import { logActivity } from "../services/activity-log.js";
 import { publishGlobalLiveEvent } from "../services/live-events.js";
 import { issueService } from "../services/issues.js";
 import { accessService } from "../services/access.js";
+import { createPluginUiActionAuthority, type PluginUiActionActor } from "../services/plugin-ui-action-authority.js";
 import type { PluginJobScheduler } from "../services/plugin-job-scheduler.js";
 import type { PluginJobStore } from "../services/plugin-job-store.js";
-import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
+import type { PluginWorkerManager, WorkerInvocationAuthority } from "../compat/paperclip/control-plane.js";
+import type { SpsWorkspacePluginWorkers } from "../services/sps-workspace-plugin-workers.js";
 import type { PluginStreamBus } from "../services/plugin-stream-bus.js";
 import type { PluginToolDispatcher } from "../services/plugin-tool-dispatcher.js";
 import type { PluginCanonicalDiagnostics } from "../services/plugin-canonical-diagnostics.js";
-import type { PluginPerformActionActorContext, ToolRunContext } from "@paperclipai/plugin-sdk";
+import type { BetterAuthSessionResult } from "../auth/better-auth.js";
+import { getSpsWorkspaceExecutionControl, assertSpsWorkspaceExecutionActive } from "../services/sps-workspace-execution-control.js";
+import { readSpsPluginAuthorityRevision, sameSpsPluginAuthorityRevision } from "../services/sps-plugin-authority-revision.js";
+import type { ToolRunContext } from "@paperclipai/plugin-sdk";
 import { JsonRpcCallError, PLUGIN_RPC_ERROR_CODES } from "@paperclipai/plugin-sdk";
 import {
   assertAuthenticated,
@@ -451,8 +456,12 @@ export interface PluginRouteToolDeps {
 export interface PluginRouteBridgeDeps {
   /** The worker manager for dispatching getData/performAction RPC calls. */
   workerManager: PluginWorkerManager;
+  /** Optional owner-scoped caller and policy reconciliation for Workspace workers. */
+  workspaceWorkers?: Pick<SpsWorkspacePluginWorkers, "call" | "reconcileWorkspacePolicy" | "reconcileCatalogPolicy">;
   /** Optional stream bus for SSE push from worker to UI. */
   streamBus?: PluginStreamBus;
+  /** Re-resolve a browser session for long-lived streams; request actor fields are only a snapshot. */
+  resolveSession?: (req: Request) => Promise<BetterAuthSessionResult | null>;
 }
 
 /** Optional Core-owned memory provider control-plane routes. */
@@ -591,10 +600,86 @@ export function pluginRoutes(
   const workspaceSurfaces = spsWorkspaceSurfaceService(db);
   const issuesSvc = issueService(db);
   const accessSvc = accessService(db);
+  const pluginUiActionAuthority = createPluginUiActionAuthority(accessSvc);
   const toolAccess = createPluginToolAccessService(db);
   const registryStages = registryStagingDeps
     ? registryStagingService(registryStagingDeps.stagingRoot)
     : null;
+
+  const reconcileWorkspacePolicy = async (companyId: string) => {
+    try {
+      await bridgeDeps?.workspaceWorkers?.reconcileWorkspacePolicy?.(companyId);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const reconcileCatalogPolicy = async () => {
+    try {
+      await bridgeDeps?.workspaceWorkers?.reconcileCatalogPolicy?.();
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const sendCommittedPolicyCleanupPending = (res: Response, stateKey: string, state: unknown) => {
+    res.status(503).json({
+      error: "The change was saved, but Workspace Plugin workers could not be confirmed stopped. Refresh before retrying.",
+      committed: true,
+      [stateKey]: state,
+    });
+  };
+
+  const sendLifecycleCleanupPending = async (req: Request, res: Response, error: unknown): Promise<boolean> => {
+    if (error instanceof PluginPackageMaintenanceRequiredError) {
+      res.status(409).json({ error: error.message, code: error.code });
+      return true;
+    }
+    if (!(error instanceof SpsPluginRuntimeCleanupPendingError)) return false;
+    if (error.operationStarted) {
+      publishGlobalLiveEvent({ type: "plugin.ui.updated", payload: { action: "runtime-cleanup-pending" } });
+    }
+    if (error.operationCompleted) {
+      const result = getCompletedSpsPluginRuntimeMutationResult(error);
+      const record = result && typeof result === "object" ? result as Record<string, unknown> : {};
+      const requestPluginId = typeof req.params.pluginId === "string" ? req.params.pluginId : undefined;
+      const pluginId = typeof record.id === "string" ? record.id : requestPluginId;
+      if (pluginId) {
+        const path = req.path;
+        const action = req.method === "DELETE" ? "plugin.uninstalled"
+          : path.endsWith("/enable") ? (path.includes("/registry/") ? "plugin.registry.enabled" : "plugin.enabled")
+            : path.endsWith("/disable") ? "plugin.disabled"
+              : path.endsWith("/upgrade") ? "plugin.upgraded"
+                : path.endsWith("/worker/restart") ? "plugin.worker.restarted"
+                  : path === "/plugins/install" ? "plugin.installed"
+                    : path.endsWith("/config") ? "plugin.config.updated"
+                      : "plugin.runtime_cleanup_pending";
+        const details: Record<string, unknown> = { operationCompleted: true };
+        for (const key of ["pluginKey", "version", "packageName"] as const) {
+          if (typeof record[key] === "string") details[key] = record[key];
+        }
+        if (req.params.stageId) details.stageId = req.params.stageId;
+        if (req.method === "DELETE") {
+          details.purge = req.query.purge === "true";
+          details.deleteInboxSummaries = req.query.deleteInboxSummaries === "true";
+          details.deletedInboxSummaries = 0;
+        }
+        if (path.endsWith("/disable")) {
+          const reason = (req.body as { reason?: unknown } | undefined)?.reason;
+          if (typeof reason === "string") details.reason = reason;
+        }
+        try { await logPluginMutationActivity(req, action, pluginId, details); }
+        catch { /* Preserve the committed operation result and fixed cleanup response. */ }
+      }
+    }
+    res.status(503).json({
+      error: error.message,
+      operationStarted: error.operationStarted,
+      operationCompleted: error.operationCompleted,
+      ...(error.operationCompleted ? { committed: true } : {}),
+    });
+    return true;
+  };
 
   function matchScopedApiRoute(route: PluginApiRouteDeclaration, method: string, requestPath: string) {
     if (route.method !== method) return null;
@@ -790,86 +875,63 @@ export function pluginRoutes(
     return companyId;
   }
 
-  const PLUGIN_ACTION_PERMISSION_REQUEST_PARAM = "__paperclipRequestedPermissions";
-
-  function requestedPluginActionPermissions(params: Record<string, unknown> | undefined) {
-    const rawPermissions = params?.[PLUGIN_ACTION_PERMISSION_REQUEST_PARAM];
-    if (!Array.isArray(rawPermissions)) return [];
-    return [...new Set(rawPermissions.filter((permission): permission is (typeof PERMISSION_KEYS)[number] => (
-      typeof permission === "string" && (PERMISSION_KEYS as readonly string[]).includes(permission)
-    )))];
-  }
-
-  async function effectivePluginActionPermissions(
-    req: Request,
-    companyId: string | undefined,
-    requestedPermissions: readonly (typeof PERMISSION_KEYS)[number][],
-  ) {
-    if (!companyId || requestedPermissions.length === 0) return [];
-    if (hasSpsCoreHostAuthority(req)) {
-      return [...requestedPermissions];
-    }
-    if (req.actor.type === "board" && req.actor.userId) {
-      const decisions = await Promise.all(requestedPermissions.map(async (permissionKey) => ({
-        permissionKey,
-        allowed: await accessSvc.canUser(companyId, req.actor.userId, permissionKey),
-      })));
-      return decisions.filter((decision) => decision.allowed).map((decision) => decision.permissionKey);
-    }
-    if (req.actor.type === "agent" && req.actor.agentId) {
-      const decisions = await Promise.all(requestedPermissions.map(async (permissionKey) => ({
-        permissionKey,
-        allowed: await accessSvc.hasPermission(companyId, "agent", req.actor.agentId!, permissionKey),
-      })));
-      return decisions.filter((decision) => decision.allowed).map((decision) => decision.permissionKey);
-    }
-    return [];
-  }
-
-  async function performActionActorContext(
-    req: Request,
-    companyId: string | undefined,
-    requestedPermissions: readonly (typeof PERMISSION_KEYS)[number][],
-  ): Promise<PluginPerformActionActorContext> {
-    const scopedCompanyId = companyId ?? null;
-    const permissions = await effectivePluginActionPermissions(req, companyId, requestedPermissions);
-    const permissionContext = permissions.length ? { permissions } : {};
-    if (req.actor.type === "agent") {
-      return {
-        type: "agent",
-        userId: null,
-        agentId: req.actor.agentId ?? null,
-        runId: req.actor.runId ?? null,
-        companyId: scopedCompanyId,
-        ...permissionContext,
-      };
-    }
-    if (req.actor.type === "board") {
-      return {
-        type: "user",
-        userId: req.actor.userId ?? null,
-        agentId: null,
-        runId: req.actor.runId ?? null,
-        companyId: scopedCompanyId,
-        ...permissionContext,
-      };
-    }
+  function trustedPluginActionActor(req: Request, companyId: string | undefined): PluginUiActionActor {
     return {
-      type: "system",
-      userId: null,
-      agentId: null,
+      type: req.actor.type === "agent" ? "agent" : req.actor.type === "board" ? "user" : "system",
+      userId: req.actor.userId ?? null,
+      agentId: req.actor.agentId ?? null,
       runId: req.actor.runId ?? null,
-      companyId: scopedCompanyId,
-      ...permissionContext,
+      companyId: companyId ?? null,
+      hostAuthority: hasSpsCoreHostAuthority(req),
     };
   }
 
-  function actionParamsWithAuthorizedCompanyScope(
-    params: Record<string, unknown> | undefined,
+  async function callPluginUiWorker(
+    plugin: { id: string; pluginKey: string; status: string; manifestJson: PaperclipPluginManifestV1 },
+    req: Request,
     companyId: string | undefined,
-  ): Record<string, unknown> {
-    const { [PLUGIN_ACTION_PERMISSION_REQUEST_PARAM]: _permissionRequest, ...base } = params ?? {};
-    return companyId === undefined ? base : { ...base, companyId };
+    method: "getData" | "performAction",
+    params: unknown,
+    actionFence?: { actor: PluginUiActionActor; requestedPermissions: ReturnType<typeof pluginUiActionAuthority.requestedPermissions>; actorContext: unknown },
+  ) {
+    if (!plugin.manifestJson.entrypoints.workspaceWorker) {
+      await loader.waitForInitialLoad?.(plugin.id);
+      return bridgeDeps!.workerManager.call(plugin.id, method, params as never);
+    }
+    const workspaceWorkers = bridgeDeps?.workspaceWorkers;
+    if (!workspaceWorkers || !companyId) throw new Error("Workspace Plugin worker is unavailable.");
+
+    const actorSnapshot = actionFence?.actor ?? trustedPluginActionActor(req, companyId);
+    const actorJson = JSON.stringify(actorSnapshot);
+    const permissionJson = actionFence ? JSON.stringify(actionFence.actorContext) : undefined;
+    const authority: WorkerInvocationAuthority = {
+      boundWorkspaceId: companyId,
+      assertCurrent: async () => {
+        assertCompanyAccess(req, companyId);
+        const currentPlugin = await resolvePlugin(registry, plugin.id);
+        if (!currentPlugin || currentPlugin.status !== "ready"
+          || !currentPlugin.manifestJson.entrypoints.workspaceWorker) {
+          throw new Error("Workspace Plugin worker is unavailable.");
+        }
+        await assertCompanyPluginEnabled(currentPlugin, companyId);
+        const actor = trustedPluginActionActor(req, companyId);
+        if (JSON.stringify(actor) !== actorJson) throw new Error("Plugin UI actor authority changed.");
+        if (!hasSpsCoreHostAuthority(req)) {
+          const principalType = req.actor.type === "agent" ? "agent" : "user";
+          const principalId = principalType === "agent" ? req.actor.agentId : req.actor.userId;
+          if (!principalId) throw new Error("Plugin UI company membership is unavailable.");
+          const membership = await accessSvc.getMembership(companyId, principalType, principalId);
+          if (!membership || membership.status !== "active") throw new Error("Plugin UI company membership is no longer active.");
+        }
+        if (actionFence) {
+          const currentActorContext = await pluginUiActionAuthority.actorContext(actor, actionFence.requestedPermissions);
+          if (JSON.stringify(currentActorContext) !== permissionJson) {
+            throw new Error("Plugin UI action permissions changed.");
+          }
+        }
+      },
+    };
+    return workspaceWorkers.call(companyId, plugin.id, method, params as never, 30_000, authority);
   }
 
   async function validateToolRunContextScope(runContext: ToolRunContext): Promise<string | null> {
@@ -1103,6 +1165,7 @@ export function pluginRoutes(
       displayName: plugin.manifestJson.displayName,
       version: plugin.version,
       status: plugin.status,
+      capabilities: plugin.manifestJson.capabilities ?? [],
       activation: await resolveCompanyPluginActivation(plugin, companyId),
     })));
     res.json({ companyId, plugins: rows });
@@ -1163,6 +1226,9 @@ export function pluginRoutes(
       return;
     }
     const activation = await setPluginCompanyActivation(registry, plugin, companyId, enabled);
+    // The setting is committed. Notify the UI before attempting to retire
+    // Workspace workers so a failed close cannot leave the visible choice stale.
+    publishGlobalLiveEvent({ type: "plugin.ui.updated", payload: { pluginId: plugin.id, companyId, action: "company-activation-updated" } });
     const actor = getActorInfo(req);
     await logActivity(db, {
       companyId,
@@ -1175,7 +1241,10 @@ export function pluginRoutes(
       entityId: plugin.id,
       details: { pluginId: plugin.id, pluginKey: plugin.pluginKey, enabled },
     });
-    publishGlobalLiveEvent({ type: "plugin.ui.updated", payload: { pluginId: plugin.id, companyId, action: "company-activation-updated" } });
+    if (!(await reconcileWorkspacePolicy(companyId))) {
+      sendCommittedPolicyCleanupPending(res, "activation", activation);
+      return;
+    }
     res.json({ activation });
   });
 
@@ -1651,6 +1720,7 @@ export function pluginRoutes(
       if (existingPlugin) {
         await lifecycle.load(existingPlugin.id);
         const updated = await registry.getById(existingPlugin.id);
+        publishGlobalLiveEvent({ type: "plugin.ui.updated", payload: { pluginId: existingPlugin.id, action: "installed" } });
         await logPluginMutationActivity(req, "plugin.installed", existingPlugin.id, {
           pluginId: existingPlugin.id,
           pluginKey: existingPlugin.pluginKey,
@@ -1658,13 +1728,17 @@ export function pluginRoutes(
           version: updated?.version ?? existingPlugin.version,
           source: isLocalPath ? "local_path" : "npm",
         });
-        publishGlobalLiveEvent({ type: "plugin.ui.updated", payload: { pluginId: existingPlugin.id, action: "installed" } });
+        if (!(await reconcileCatalogPolicy())) {
+          sendCommittedPolicyCleanupPending(res, "plugin", updated);
+          return;
+        }
         res.json(updated);
       } else {
         // This shouldn't happen since installPlugin already registers in the DB
         res.status(500).json({ error: "Plugin installed but not found in registry" });
       }
     } catch (err) {
+      if (await sendLifecycleCleanupPending(req, res, err)) return;
       const message = err instanceof Error ? err.message : String(err);
       res.status(400).json({ error: message });
     }
@@ -1794,6 +1868,7 @@ export function pluginRoutes(
         }
       }
 
+      publishGlobalLiveEvent({ type: "plugin.ui.updated", payload: { pluginId: plugin.id, action: operation } });
       await logPluginMutationActivity(req, "plugin.registry.enabled", plugin.id, {
         stageId: stage.stageId,
         pluginId: plugin.id,
@@ -1802,9 +1877,13 @@ export function pluginRoutes(
         operation,
         registryId: stage.source.registryId,
       });
-      publishGlobalLiveEvent({ type: "plugin.ui.updated", payload: { pluginId: plugin.id, action: operation } });
+      if (!(await reconcileCatalogPolicy())) {
+        sendCommittedPolicyCleanupPending(res, "result", { stage: registryStageResponse(updatedStage), plugin: result });
+        return;
+      }
       res.json({ stage: registryStageResponse(updatedStage), plugin: result });
     } catch (error) {
+      if (await sendLifecycleCleanupPending(req, res, error)) return;
       res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
     }
   });
@@ -2009,8 +2088,10 @@ export function pluginRoutes(
     if (companyId) await assertCompanyPluginEnabled(plugin, companyId);
 
     try {
-      const result = await bridgeDeps.workerManager.call(
-        plugin.id,
+      const result = await callPluginUiWorker(
+        plugin,
+        req,
+        companyId,
         "getData",
         {
           key: body.key,
@@ -2100,18 +2181,23 @@ export function pluginRoutes(
     }
     const companyId = assertPluginBridgeScope(req, body.companyId);
     if (companyId) await assertCompanyPluginEnabled(plugin, companyId);
-    const requestedPermissions = requestedPluginActionPermissions(body.params);
 
     try {
-      const result = await bridgeDeps.workerManager.call(
-        plugin.id,
+      const requestedPermissions = pluginUiActionAuthority.requestedPermissions(body.params);
+      const actor = trustedPluginActionActor(req, companyId);
+      const actorContext = await pluginUiActionAuthority.actorContext(actor, requestedPermissions);
+      const result = await callPluginUiWorker(
+        plugin,
+        req,
+        companyId,
         "performAction",
         {
           key: body.key,
-          params: actionParamsWithAuthorizedCompanyScope(body.params, companyId),
-          actorContext: await performActionActorContext(req, companyId, requestedPermissions),
+          params: pluginUiActionAuthority.actionParams(body.params, companyId),
+          actorContext,
           renderEnvironment: body.renderEnvironment ?? null,
         },
+        { actor, requestedPermissions, actorContext },
       );
       res.json({ data: result });
     } catch (err) {
@@ -2198,8 +2284,10 @@ export function pluginRoutes(
     if (companyId) await assertCompanyPluginEnabled(plugin, companyId);
 
     try {
-      const result = await bridgeDeps.workerManager.call(
-        plugin.id,
+      const result = await callPluginUiWorker(
+        plugin,
+        req,
+        companyId,
         "getData",
         {
           key,
@@ -2287,18 +2375,23 @@ export function pluginRoutes(
 
     const companyId = assertPluginBridgeScope(req, body?.companyId);
     if (companyId) await assertCompanyPluginEnabled(plugin, companyId);
-    const requestedPermissions = requestedPluginActionPermissions(body?.params);
 
     try {
-      const result = await bridgeDeps.workerManager.call(
-        plugin.id,
+      const requestedPermissions = pluginUiActionAuthority.requestedPermissions(body?.params);
+      const actor = trustedPluginActionActor(req, companyId);
+      const actorContext = await pluginUiActionAuthority.actorContext(actor, requestedPermissions);
+      const result = await callPluginUiWorker(
+        plugin,
+        req,
+        companyId,
         "performAction",
         {
           key,
-          params: actionParamsWithAuthorizedCompanyScope(body?.params, companyId),
-          actorContext: await performActionActorContext(req, companyId, requestedPermissions),
+          params: pluginUiActionAuthority.actionParams(body?.params, companyId),
+          actorContext,
           renderEnvironment: body?.renderEnvironment ?? null,
         },
+        { actor, requestedPermissions, actorContext },
       );
       res.json({ data: result });
     } catch (err) {
@@ -2363,7 +2456,131 @@ export function pluginRoutes(
     }
 
     assertCompanyAccess(req, companyId);
+    if (plugin.status !== "ready") {
+      res.status(503).json({ error: "Plugin worker is unavailable" });
+      return;
+    }
     await assertCompanyPluginEnabled(plugin, companyId);
+
+    const capturedPolicy = await readSpsPluginAuthorityRevision(db, companyId);
+    const capturedExecution = await getSpsWorkspaceExecutionControl(db, companyId);
+    await assertSpsWorkspaceExecutionActive(db, companyId, capturedExecution.epoch);
+
+    const hasCurrentMembership = async (userId: string) => {
+      const membership = await accessSvc.getMembership(companyId, "user", userId);
+      return membership?.status === "active";
+    };
+    const assertFreshActor = async () => {
+      const actor = req.actor;
+      if (actor.type !== "board") throw forbidden("Current board access is required for plugin streams");
+      if (actor.source === "local_implicit") {
+        if (!hasSpsCoreHostAuthority(req)) throw forbidden("Current Host access is required for plugin streams");
+        return;
+      }
+      if (actor.source === "session") {
+        if (!actor.userId || !bridgeDeps.resolveSession) throw forbidden("Current session authority is unavailable for plugin streams");
+        const current = await bridgeDeps.resolveSession(req);
+        if (current?.user?.id !== actor.userId) throw forbidden("Current session authority is unavailable for plugin streams");
+      } else if (actor.source === "board_key" && actor.keyId && actor.userId) {
+        const [key] = await db.select({ userId: boardApiKeys.userId, expiresAt: boardApiKeys.expiresAt })
+          .from(boardApiKeys)
+          .where(and(eq(boardApiKeys.id, actor.keyId), eq(boardApiKeys.userId, actor.userId), isNull(boardApiKeys.revokedAt)))
+          .limit(1);
+        if (!key || (key.expiresAt && key.expiresAt.getTime() <= Date.now())) {
+          throw forbidden("Current board credential is unavailable for plugin streams");
+        }
+      } else if (actor.source === "cloud_tenant") {
+        const expected = process.env.PAPERCLIP_CLOUD_TENANT_SERVER_TOKEN?.trim() ?? "";
+        const provided = req.header("x-paperclip-cloud-tenant-token")?.trim() ?? "";
+        const expectedBytes = Buffer.from(expected);
+        const providedBytes = Buffer.from(provided);
+        if (!expected || expectedBytes.length !== providedBytes.length
+          || !timingSafeEqual(expectedBytes, providedBytes)) {
+          throw forbidden("Current cloud tenant authority is unavailable for plugin streams");
+        }
+      } else {
+        throw forbidden("Current authorization is unavailable for plugin streams");
+      }
+      // A current local Host proof or live instance-admin role keeps its
+      // existing access semantics. Other board actors need a current membership.
+      if (!hasSpsCoreHostAuthority(req) && (!actor.userId || !await hasCurrentMembership(actor.userId))) {
+        throw forbidden("Current Workspace membership is required for plugin streams");
+      }
+    };
+
+    const assertCurrentStreamAuthority = async () => {
+      if (res.destroyed || res.writableEnded || req.aborted) throw new Error("stream closed");
+      await assertFreshActor();
+      const currentPlugin = await resolvePlugin(registry, plugin.id);
+      if (!currentPlugin || currentPlugin.id !== plugin.id || currentPlugin.status !== "ready") {
+        throw new Error("plugin unavailable");
+      }
+      await assertCompanyPluginEnabled(currentPlugin, companyId);
+      await assertSpsWorkspaceExecutionActive(db, companyId, capturedExecution.epoch);
+      const beforePolicy = await readSpsPluginAuthorityRevision(db, companyId);
+      if (!sameSpsPluginAuthorityRevision(capturedPolicy, beforePolicy)) throw new Error("plugin authority changed");
+      const beforeExecution = await getSpsWorkspaceExecutionControl(db, companyId);
+      if (beforeExecution.epoch !== capturedExecution.epoch || beforeExecution.state === "stopped") {
+        throw new Error("Workspace execution stopped");
+      }
+      const afterPolicy = await readSpsPluginAuthorityRevision(db, companyId);
+      if (!sameSpsPluginAuthorityRevision(capturedPolicy, afterPolicy)) throw new Error("plugin authority changed");
+      const afterExecution = await getSpsWorkspaceExecutionControl(db, companyId);
+      if (afterExecution.epoch !== capturedExecution.epoch || afterExecution.state === "stopped") {
+        throw new Error("Workspace execution stopped");
+      }
+    };
+
+    const AUTHORITY_CHECK_TIMEOUT_MS = 5_000;
+    let initialCheckTimer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        assertCurrentStreamAuthority(),
+        new Promise<never>((_resolve, reject) => {
+          initialCheckTimer = setTimeout(() => reject(new Error("stream authority check timed out")), 5_000);
+        }),
+      ]);
+    } finally {
+      if (initialCheckTimer) clearTimeout(initialCheckTimer);
+    }
+
+    // A Host worker can still be in detached process startup after HTTP begins
+    // listening. Join only this plugin's initial activation before committing
+    // to the stream response; Workspace workers use their own lifecycle path.
+    if (!plugin.manifestJson.entrypoints.workspaceWorker) {
+      await loader.waitForInitialLoad?.(plugin.id);
+    }
+    if (res.destroyed || res.writableEnded || req.aborted) return;
+
+    // Startup can take long enough for access or the Workspace execution
+    // epoch to change. Recheck the captured authority before committing to SSE.
+    if (!plugin.manifestJson.entrypoints.workspaceWorker) {
+      const currentPlugin = await resolvePlugin(registry, plugin.id);
+      const hostWorkerRunning = typeof bridgeDeps.workerManager.isRunning === "function"
+        ? bridgeDeps.workerManager.isRunning(plugin.id)
+        : true;
+      if (!currentPlugin || currentPlugin.status !== "ready" || !hostWorkerRunning) {
+        res.status(503).json({ error: "Plugin worker is unavailable" });
+        return;
+      }
+      let startupAuthorityTimer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          assertCurrentStreamAuthority(),
+          new Promise<never>((_resolve, reject) => {
+            startupAuthorityTimer = setTimeout(() => reject(new Error("stream authority check timed out")), AUTHORITY_CHECK_TIMEOUT_MS);
+          }),
+        ]);
+      } catch {
+        if (!res.destroyed && !res.writableEnded && !req.aborted) {
+          res.status(403).json({ error: "Current plugin stream authority is unavailable" });
+        }
+        return;
+      } finally {
+        if (startupAuthorityTimer) clearTimeout(startupAuthorityTimer);
+      }
+    }
+    if (res.destroyed || res.writableEnded || req.aborted) return;
 
     // Set SSE headers
     res.writeHead(200, {
@@ -2374,37 +2591,148 @@ export function pluginRoutes(
     });
     res.flushHeaders();
 
-    // Send initial comment to establish the connection
-    res.write(":ok\n\n");
+    // Bounded delivery prevents a slow client from retaining an unbounded event backlog.
+    const MAX_QUEUED_EVENTS = 64;
+    const MAX_QUEUED_BYTES = 512 * 1024;
+    const MAX_EVENT_BYTES = 256 * 1024;
+    type QueuedFrame = { frame: string; bytes: number; terminal: boolean; heartbeat?: boolean };
+    const queue: QueuedFrame[] = [];
+    let queuedBytes = 0;
+    let closed = false;
+    let draining = false;
+    let heartbeatCheckInFlight = false;
+    let authorityValidation: Promise<void> | undefined;
+    let unsubscribe = () => {};
+    const streamSocket = res.socket ?? req.socket;
+    const DRAIN_TIMEOUT_MS = 5_000;
 
-    let unsubscribed = false;
-    const safeUnsubscribe = () => {
-      if (!unsubscribed) {
-        unsubscribed = true;
-        unsubscribe();
+    const cleanup = () => {
+      if (closed) return;
+      closed = true;
+      clearInterval(heartbeatTimer);
+      unsubscribe();
+      streamSocket?.off("close", cleanup);
+      queue.length = 0;
+      queuedBytes = 0;
+    };
+    const finishStream = (sendClose: boolean) => {
+      if (closed) return;
+      if (sendClose && res.writable && !res.writableEnded && !res.destroyed) {
+        try { res.write("event: close\ndata: {}\n\n"); } catch { /* A disconnected client needs no terminal frame. */ }
+      }
+      cleanup();
+      if (!res.writableEnded && !res.destroyed) res.end();
+    };
+    const validateCurrentAuthority = () => {
+      if (authorityValidation) return authorityValidation;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const checked = Promise.race([
+        assertCurrentStreamAuthority(),
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => reject(new Error("stream authority check timed out")), AUTHORITY_CHECK_TIMEOUT_MS);
+        }),
+      ]).finally(() => {
+        if (timer) clearTimeout(timer);
+        if (authorityValidation === checked) authorityValidation = undefined;
+      });
+      authorityValidation = checked;
+      void checked.catch(() => {});
+      return checked;
+    };
+    const waitForDrain = () => new Promise<boolean>(resolve => {
+      const timer = setTimeout(() => done(false), DRAIN_TIMEOUT_MS);
+      const done = (writable: boolean) => {
+        clearTimeout(timer);
+        res.off("drain", onDrain);
+        res.off("close", onClose);
+        res.off("error", onClose);
+        req.off("aborted", onClose);
+        resolve(writable);
+      };
+      const onDrain = () => done(true);
+      const onClose = () => done(false);
+      res.once("drain", onDrain);
+      res.once("close", onClose);
+      res.once("error", onClose);
+      req.once("aborted", onClose);
+    });
+    const heartbeatTimer = setInterval(() => {
+      if (closed || heartbeatCheckInFlight) return;
+      heartbeatCheckInFlight = true;
+      void validateCurrentAuthority().then(() => {
+        if (!closed && !draining && queue.length === 0 && res.writable && !res.destroyed) {
+          try {
+            if (!res.write(":heartbeat\n\n")) {
+              void waitForDrain().then(writable => { if (!writable) finishStream(false); });
+            }
+          } catch { finishStream(false); }
+        }
+      }).catch(() => finishStream(true)).finally(() => { heartbeatCheckInFlight = false; });
+    }, 15_000);
+    heartbeatTimer.unref?.();
+    const drain = async () => {
+      if (draining || closed) return;
+      draining = true;
+      try {
+        while (!closed && queue.length > 0) {
+          const item = queue.shift()!;
+          queuedBytes -= item.bytes;
+          await validateCurrentAuthority();
+          if (closed || res.destroyed || res.writableEnded || req.aborted) return;
+          let accepted: boolean;
+          try { accepted = res.write(item.frame); } catch { finishStream(false); return; }
+          if (!accepted && !await waitForDrain()) { finishStream(false); return; }
+          if (item.terminal) { finishStream(false); return; }
+        }
+      } catch {
+        finishStream(true);
+      } finally {
+        draining = false;
       }
     };
+    function enqueue(item: QueuedFrame) {
+      if (closed) return;
+      if (queue.length >= MAX_QUEUED_EVENTS || queuedBytes + item.bytes > MAX_QUEUED_BYTES) {
+        finishStream(true);
+        return;
+      }
+      queue.push(item);
+      queuedBytes += item.bytes;
+      void drain();
+    }
 
-    const unsubscribe = bridgeDeps.streamBus.subscribe(
-      plugin.id,
-      channel,
-      companyId,
-      (event, eventType) => {
-        if (unsubscribed || !res.writable) return;
-        try {
-          if (eventType !== "message") {
-            res.write(`event: ${eventType}\n`);
+    // Send a comment only after the subscription is active so the client is ready for events.
+    try {
+      unsubscribe = bridgeDeps.streamBus.subscribe(
+        plugin.id,
+        channel,
+        companyId,
+        (event, eventType) => {
+          if (closed || !res.writable || res.destroyed) return;
+          try {
+            const data = JSON.stringify(eventType === "error" ? { error: "plugin stream error" } : event);
+            if (data === undefined) throw new Error("invalid stream event");
+            const bytes = Buffer.byteLength(data, "utf8");
+            if (bytes > MAX_EVENT_BYTES) throw new Error("oversized stream event");
+            const frame = `${eventType !== "message" ? `event: ${eventType}\n` : ""}data: ${data}\n\n`;
+            enqueue({ frame, bytes, terminal: eventType === "close" });
+          } catch {
+            finishStream(true);
           }
-          res.write(`data: ${JSON.stringify(event)}\n\n`);
-        } catch {
-          // Connection closed or write error — stop delivering
-          safeUnsubscribe();
-        }
-      },
-    );
+        },
+        () => finishStream(true),
+      );
+    } catch {
+      finishStream(true);
+      return;
+    }
 
-    req.on("close", safeUnsubscribe);
-    res.on("error", safeUnsubscribe);
+    res.write(":ok\n\n");
+    req.on("aborted", () => finishStream(false));
+    res.on("close", cleanup);
+    streamSocket?.on("close", cleanup);
+    res.on("error", () => finishStream(false));
+    res.on("finish", cleanup);
   });
 
   router.use("/plugins/:pluginId/api", async (req, res) => {
@@ -2588,6 +2916,11 @@ export function pluginRoutes(
 
     try {
       const result = await lifecycle.unload(plugin.id, purge);
+      publishGlobalLiveEvent({ type: "plugin.ui.updated", payload: { pluginId: plugin.id, action: "uninstalled" } });
+      if (!(await reconcileCatalogPolicy())) {
+        sendCommittedPolicyCleanupPending(res, "plugin", result);
+        return;
+      }
       // Runtime teardown must finish first. For a hard purge the FK has
       // already cleared sourcePluginId, so deletion intentionally keys off
       // the immutable sourcePluginKey rather than the database id.
@@ -2601,9 +2934,9 @@ export function pluginRoutes(
         deleteInboxSummaries,
         deletedInboxSummaries,
       });
-      publishGlobalLiveEvent({ type: "plugin.ui.updated", payload: { pluginId: plugin.id, action: "uninstalled" } });
       res.json(result);
     } catch (err) {
+      if (await sendLifecycleCleanupPending(req, res, err)) return;
       const message = err instanceof Error ? err.message : String(err);
       res.status(400).json({ error: message });
     }
@@ -2631,14 +2964,19 @@ export function pluginRoutes(
 
     try {
       const result = await lifecycle.enable(plugin.id);
+      publishGlobalLiveEvent({ type: "plugin.ui.updated", payload: { pluginId: plugin.id, action: "enabled" } });
+      if (!(await reconcileCatalogPolicy())) {
+        sendCommittedPolicyCleanupPending(res, "plugin", result);
+        return;
+      }
       await logPluginMutationActivity(req, "plugin.enabled", plugin.id, {
         pluginId: plugin.id,
         pluginKey: plugin.pluginKey,
         version: result?.version ?? plugin.version,
       });
-      publishGlobalLiveEvent({ type: "plugin.ui.updated", payload: { pluginId: plugin.id, action: "enabled" } });
       res.json(result);
     } catch (err) {
+      if (await sendLifecycleCleanupPending(req, res, err)) return;
       const message = err instanceof Error ? err.message : String(err);
       res.status(400).json({ error: message });
     }
@@ -2677,14 +3015,19 @@ export function pluginRoutes(
 
     try {
       const result = await lifecycle.disable(plugin.id, reason);
+      publishGlobalLiveEvent({ type: "plugin.ui.updated", payload: { pluginId: plugin.id, action: "disabled" } });
+      if (!(await reconcileCatalogPolicy())) {
+        sendCommittedPolicyCleanupPending(res, "plugin", result);
+        return;
+      }
       await logPluginMutationActivity(req, "plugin.disabled", plugin.id, {
         pluginId: plugin.id,
         pluginKey: plugin.pluginKey,
         reason: reason ?? null,
       });
-      publishGlobalLiveEvent({ type: "plugin.ui.updated", payload: { pluginId: plugin.id, action: "disabled" } });
       res.json(result);
     } catch (err) {
+      if (await sendLifecycleCleanupPending(req, res, err)) return;
       const message = err instanceof Error ? err.message : String(err);
       res.status(400).json({ error: message });
     }
@@ -2711,6 +3054,7 @@ export function pluginRoutes(
       await lifecycle.restartWorker(plugin.id);
       res.json({ pluginId: plugin.id, restarted: true });
     } catch (err) {
+      if (await sendLifecycleCleanupPending(req, res, err)) return;
       const message = err instanceof Error ? err.message : String(err);
       res.status(400).json({ error: message });
     }
@@ -3007,6 +3351,8 @@ export function pluginRoutes(
             }
             : version,
       );
+      publishGlobalLiveEvent({ type: "plugin.ui.updated", payload: { pluginId: plugin.id, action: "upgraded" } });
+      const policyCleanupConfirmed = await reconcileCatalogPolicy();
       if (pendingStage && result.status === "ready") {
         await registryStages!.markRegistered(pendingStage.stageId);
       }
@@ -3020,9 +3366,13 @@ export function pluginRoutes(
         approvedCapabilityEscalation: body?.approvedCapabilityEscalation === true,
         approvedDataMigrationPlanHash: body?.approvedDataMigrationPlanHash ?? null,
       });
-      publishGlobalLiveEvent({ type: "plugin.ui.updated", payload: { pluginId: plugin.id, action: "upgraded" } });
+      if (!policyCleanupConfirmed) {
+        sendCommittedPolicyCleanupPending(res, "plugin", result);
+        return;
+      }
       res.json(result);
     } catch (err) {
+      if (await sendLifecycleCleanupPending(req, res, err)) return;
       const message = err instanceof Error ? err.message : String(err);
       res.status(400).json({ error: message });
     }
@@ -3123,6 +3473,7 @@ export function pluginRoutes(
       const result = await registry.upsertConfig(plugin.id, {
         configJson: body.configJson,
       });
+      publishGlobalLiveEvent({ type: "plugin.ui.updated", payload: { pluginId: plugin.id, action: "config-updated" } });
       await logPluginMutationActivity(req, "plugin.config.updated", plugin.id, {
         pluginId: plugin.id,
         pluginKey: plugin.pluginKey,
@@ -3157,8 +3508,13 @@ export function pluginRoutes(
         }
       }
 
+      if (!(await reconcileCatalogPolicy())) {
+        sendCommittedPolicyCleanupPending(res, "config", result);
+        return;
+      }
       res.json(result);
     } catch (err) {
+      if (await sendLifecycleCleanupPending(req, res, err)) return;
       const message = err instanceof Error ? err.message : String(err);
       res.status(400).json({ error: message });
     }

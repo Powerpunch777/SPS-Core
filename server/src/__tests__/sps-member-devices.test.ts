@@ -7,6 +7,7 @@ import {
   createDb,
   spsMemberDeviceEvents,
   spsMemberDevices,
+  spsMemberDeviceRenewalCertificates,
 } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
@@ -34,19 +35,21 @@ describeEmbeddedPostgres("SPS Member device service", () => {
   beforeAll(async () => {
     tempDb = await startEmbeddedPostgresTestDatabase("sps-member-devices-");
     db = createDb(tempDb.connectionString);
-  }, 20_000);
+  }, process.platform === "win32" ? 120_000 : 20_000);
 
   afterEach(async () => {
     await Promise.all(fixtures.splice(0).map((fixture) => fixture.cleanup()));
     await db.delete(spsMemberDeviceEvents);
+    await db.delete(spsMemberDeviceRenewalCertificates);
     await db.delete(spsMemberDevices);
     await db.delete(companyMemberships);
     await db.delete(companies);
   });
 
   afterAll(async () => {
+    await db?.$client.end();
     await tempDb?.cleanup();
-  });
+  }, 30_000);
 
   async function tls(options: Parameters<typeof createMemberTlsFixture>[0] = {}) {
     const fixture = await createMemberTlsFixture(options);
@@ -283,6 +286,89 @@ describeEmbeddedPostgres("SPS Member device service", () => {
     ]);
     expect(events.find((event) => event.action === "approved")?.actorUserId).toBe(actorUserId);
     expect(events.find((event) => event.action === "revoked")?.actorUserId).toBe(actorUserId);
+  });
+
+  it("authorizes an exact currently valid registered renewal leaf through its approved parent", async () => {
+    const userId = "user-member-device-renewal";
+    const companyId = await workspace(userId);
+    const { hostId, value } = service();
+    const fixture = await tls();
+    const requested = await value.request({ companyId, userId, displayName: "Renewed laptop", certificate: fixture.certificate });
+    await value.approve(requested.id, "host-actor-renewal");
+    const certificateSha256 = "b".repeat(64);
+    const now = Date.now();
+    await db.insert(spsMemberDeviceRenewalCertificates).values({
+      deviceId: requested.id,
+      predecessorCertificateSha256: fixture.certificateSha256,
+      certificate: fixture.certificate,
+      certificateSha256,
+      spkiSha256: fixture.spkiSha256,
+      issuerSpkiSha256: "c".repeat(64),
+      requestSha256: "d".repeat(64),
+      deviceKeyId: randomUUID(),
+      certificateNotBefore: new Date(now - 1000),
+      certificateNotAfter: new Date(now + 60_000),
+      actorUserId: userId,
+    });
+
+    await expect(value.authorize({ companyId, userId, certificateSha256 })).resolves.toMatchObject({
+      deviceId: requested.id,
+      hostId,
+      userId,
+      companyId,
+      revision: 2,
+      certificateSha256,
+      certificateNotAfter: expect.any(Date),
+    });
+
+    await value.revoke(requested.id, "host-actor-renewal");
+    await expect(value.authorize({ companyId, userId, certificateSha256 }))
+      .rejects.toMatchObject({ code: "not_authorized" });
+  });
+
+  it("holds current device and membership authority until a Native Workspace transaction completes", async () => {
+    const userId = "user-native-workspace-transaction";
+    const companyId = await workspace(userId);
+    const { value } = service();
+    const fixture = await tls();
+    const device = await value.request({ companyId, userId, displayName: "Transaction laptop", certificate: fixture.certificate });
+    await value.approve(device.id, "host-actor");
+    const input = { companyId, userId, certificateSha256: fixture.certificateSha256 };
+
+    await db.transaction(async tx => {
+      expect(await value.authorizeInTransaction(tx, input)).toMatchObject({ deviceId: device.id, companyId, userId });
+      // The real PostgreSQL lock timeout proves concurrent changes cannot
+      // invalidate authority in the middle of the authorized transaction.
+      for (const mutate of [
+        async (connection: typeof tx) => connection.update(spsMemberDevices)
+          .set({ status: "revoked" }).where(eq(spsMemberDevices.id, device.id)),
+        async (connection: typeof tx) => connection.update(companyMemberships)
+          .set({ status: "inactive" }).where(eq(companyMemberships.companyId, companyId)),
+        async (connection: typeof tx) => connection.update(companies)
+          .set({ status: "paused" }).where(eq(companies.id, companyId)),
+      ]) {
+        let conflict: unknown;
+        try {
+          await db.transaction(async concurrent => {
+            await concurrent.execute(sql`set local lock_timeout = '100ms'`);
+            await mutate(concurrent);
+          });
+        } catch (error) { conflict = error; }
+        expect(conflict).toBeDefined();
+        const cause = conflict as { code?: string; cause?: { code?: string } };
+        expect(cause.code ?? cause.cause?.code).toBe("55P03");
+      }
+    });
+    await value.revoke(device.id, "host-actor");
+    await expect(db.transaction(tx => value.authorizeInTransaction(tx, input)))
+      .rejects.toMatchObject({ code: "not_authorized" });
+  });
+
+  it("requires a real transaction for locked Native authorization", async () => {
+    const { value } = service();
+    await expect(value.authorizeInTransaction(db as never, {
+      companyId: randomUUID(), userId: "member", certificateSha256: "a".repeat(64),
+    })).rejects.toThrow("A Member authorization transaction is required");
   });
 
   it("rejects a different certificate reusing a registered SPKI and keeps revoked identities terminal", async () => {

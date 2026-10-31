@@ -11,6 +11,7 @@ import { createMemberTlsFixture, type MemberTlsFixture } from "./helpers/member-
 
 const ISSUE_PATH = "/sps-native/v1/enrollment/issue";
 const COMPLETE_PATH = "/sps-native/v1/enrollment/complete";
+const RENEW_PATH = "/sps-native/v1/enrollment/renew";
 const FAILURE_CODE = "native_enrollment_request_unavailable";
 const COOKIE = "sps_identity_session=fixture-session";
 const ISSUE_BODY = Object.freeze({
@@ -31,6 +32,13 @@ const ISSUE_RESULT = Object.freeze({
   issuerCertificate: Buffer.from("fixture-issuer").toString("base64url"),
   expiresAt: new Date(Date.now() + 60_000).toISOString(),
 });
+const RENEW_BODY = Object.freeze({ deviceKeyId: "22222222-2222-4222-8222-222222222222", requestPem: "fixture-csr" });
+const RENEW_RESULT = Object.freeze({ renewalId: "55555555-5555-4555-8555-555555555555",
+  deviceId: "44444444-4444-4444-8444-444444444444", predecessorCertificateSha256: "a".repeat(64),
+  certificate: Buffer.from("fixture-renewed-cert").toString("base64url"),
+  issuerCertificate: Buffer.from("fixture-issuer").toString("base64url"),
+  certificateNotBefore: new Date(Date.now() - 1000).toISOString(),
+  certificateNotAfter: new Date(Date.now() + 60_000).toISOString() });
 type HandlerOptions = { maxBodyBytes: number; readTimeoutMs: number; operationTimeoutMs: number; maxConcurrentRequests: number };
 const DEFAULT_OPTIONS: HandlerOptions = Object.freeze({
   maxBodyBytes: 8192,
@@ -81,7 +89,7 @@ function closed(server: HttpServer | HttpsServer): Promise<void> {
   return new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
 }
 
-function createAdapter(actions: { issue?: AdapterCall; complete?: AdapterCall; reconcile?: AdapterCall } = {}) {
+function createAdapter(actions: { issue?: AdapterCall; complete?: AdapterCall; reconcile?: AdapterCall; renew?: AdapterCall } = {}) {
   const issue = vi.fn(async (request: import("node:http").IncomingMessage, input: unknown, active?: () => void) => {
     return actions.issue ? actions.issue(request, input, active) : ISSUE_RESULT;
   });
@@ -94,16 +102,21 @@ function createAdapter(actions: { issue?: AdapterCall; complete?: AdapterCall; r
       secret: "must-not-project",
     };
   });
+  const renew = vi.fn(async (request: import("node:http").IncomingMessage, input: unknown, active?: () => void) => {
+    return actions.renew ? actions.renew(request, input, active) : RENEW_RESULT;
+  });
   return {
     adapter: { issue, completeFromTlsRequest: complete,
-      ...(actions.reconcile ? { reconcileFromTlsRequest: vi.fn(actions.reconcile) } : {}) } as unknown as Adapter,
+      ...(actions.reconcile ? { reconcileFromTlsRequest: vi.fn(actions.reconcile) } : {}),
+      ...(actions.renew ? { renewFromTlsRequest: renew } : {}) } as unknown as Adapter,
     issue,
     complete,
+    renew,
   };
 }
 
 function installHandler(
-  actions: { issue?: AdapterCall; complete?: AdapterCall; reconcile?: AdapterCall } = {},
+  actions: { issue?: AdapterCall; complete?: AdapterCall; reconcile?: AdapterCall; renew?: AdapterCall } = {},
   options: HandlerOptions = DEFAULT_OPTIONS,
 ) {
   const mocks = createAdapter(actions);
@@ -283,6 +296,41 @@ describe("SPS Native enrollment HTTP request handler (inactive TLS ingress)", ()
       { deviceId: "44444444-4444-4444-8444-444444444444", status: "pending", private: "must-not-project" }]) {
       installHandler({ reconcile: async () => result });
       expectFailure(await requestTls(route, { body }), 503);
+    }
+  });
+
+  it("serves only the exact same-key renewal request and closed certificate DTO", async () => {
+    installHandler();
+    expectFailure(await requestTls(RENEW_PATH, { body: RENEW_BODY }), 404);
+    let capturedProtocol: string | null | undefined;
+    const renew = vi.fn(async (request: import("node:http").IncomingMessage, input: unknown, active?: () => void) => {
+      capturedProtocol = (request.socket as TLSSocket).getProtocol();
+      active?.();
+      expect(input).toEqual(RENEW_BODY);
+      return RENEW_RESULT;
+    });
+    const mocks = installHandler({ renew });
+    const response = await requestTls(RENEW_PATH, { body: RENEW_BODY });
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual(RENEW_RESULT);
+    expect(Object.keys(response.body as object).sort()).toEqual([
+      "certificate", "certificateNotAfter", "certificateNotBefore", "deviceId", "issuerCertificate",
+      "predecessorCertificateSha256", "renewalId",
+    ]);
+    expect(capturedProtocol).toBe("TLSv1.3");
+    expect(renew).toHaveBeenCalledTimes(1);
+    expect(mocks.issue).not.toHaveBeenCalled();
+    expect(mocks.complete).not.toHaveBeenCalled();
+    expectResponseHeaders(response);
+
+    for (const widened of [{ ...RENEW_BODY, userId: "body-selected" }, { ...RENEW_BODY, enrollmentId: "old-flow" }, {}]) {
+      expectFailure(await requestTls(RENEW_PATH, { body: widened }), 400);
+    }
+    expect(renew).toHaveBeenCalledTimes(1);
+    for (const widenedResult of [{ ...RENEW_RESULT, expiresAt: "not-certificate-validity" },
+      { ...RENEW_RESULT, privateKeyPem: "must-not-project" }]) {
+      installHandler({ renew: async () => widenedResult });
+      expectFailure(await requestTls(RENEW_PATH, { body: RENEW_BODY }), 503);
     }
   });
 

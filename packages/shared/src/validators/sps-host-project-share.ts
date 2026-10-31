@@ -1,4 +1,4 @@
-import { z } from "zod";
+import { z } from "zod/v3";
 
 // The Core routes only opaque, Node-encrypted credential envelopes. The
 // plaintext Windows account and password remain exclusively on the Owner Host

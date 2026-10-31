@@ -114,11 +114,19 @@ function boardActor() {
   };
 }
 
+// Evaluate the actual route graph once as fixture initialization. Each request
+// still gets a fresh app/router and the existing per-test HTTP deadline.
+vi.resetModules();
+vi.doUnmock("../routes/agents.js");
+vi.doUnmock("../routes/authz.js");
+vi.doUnmock("../middleware/index.js");
+registerModuleMocks();
+const [{ agentRoutes }, { errorHandler }] = await Promise.all([
+  vi.importActual<typeof import("../routes/agents.js")>("../routes/agents.js"),
+  vi.importActual<typeof import("../middleware/index.js")>("../middleware/index.js"),
+]);
+
 async function createApp(actor: Record<string, unknown> = boardActor()) {
-  const [{ agentRoutes }, { errorHandler }] = await Promise.all([
-    vi.importActual<typeof import("../routes/agents.js")>("../routes/agents.js"),
-    vi.importActual<typeof import("../middleware/index.js")>("../middleware/index.js"),
-  ]);
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => {
@@ -193,11 +201,6 @@ function makeReflectionCoachAgent(overrides: Record<string, unknown> = {}) {
 
 describe("agent instructions bundle routes", () => {
   beforeEach(() => {
-    vi.resetModules();
-    vi.doUnmock("../routes/agents.js");
-    vi.doUnmock("../routes/authz.js");
-    vi.doUnmock("../middleware/index.js");
-    registerModuleMocks();
     vi.clearAllMocks();
     mockBuiltInAgentService.ensureCompanyDefaultAgentGrants.mockResolvedValue(0);
     mockSyncInstructionsBundleConfigFromFilePath.mockImplementation((_agent, config) => config);

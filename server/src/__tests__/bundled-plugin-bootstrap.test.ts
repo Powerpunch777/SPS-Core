@@ -37,7 +37,7 @@ describe("installConfiguredBundledPlugins", () => {
       loader: { loadManifest, installPlugin },
       lifecycle: { load: lifecycleLoad },
       logger,
-      pluginRegistry: { getByKey, uninstall: vi.fn() },
+      pluginRegistry: { getByKey, listByStatus: async () => [], uninstall: vi.fn() },
     });
 
     expect(installPlugin).toHaveBeenCalledWith({ localPath: path.resolve(pluginPath) });
@@ -59,6 +59,7 @@ describe("installConfiguredBundledPlugins", () => {
       lifecycle: { load: lifecycleLoad },
       logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
       pluginRegistry: {
+        listByStatus: async () => [],
         getByKey: async () => ({
           id: "plugin-1",
           pluginKey: "local.room-chat",
@@ -99,7 +100,7 @@ describe("installConfiguredBundledPlugins", () => {
       loader: { loadManifest: async () => ({ id: "local.room-chat", version: "0.3.60" }), installPlugin },
       lifecycle: { load: lifecycleLoad },
       logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-      pluginRegistry: { getByKey, uninstall },
+      pluginRegistry: { getByKey, listByStatus: async () => [], uninstall },
     });
 
     expect(uninstall).toHaveBeenCalledWith("plugin-1", false);
@@ -131,7 +132,7 @@ describe("installConfiguredBundledPlugins", () => {
       loader: { loadManifest: async () => ({ id: "sps.default-memory", version: "0.1.0" }), installPlugin },
       lifecycle: { load: lifecycleLoad },
       logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-      pluginRegistry: { getByKey, uninstall },
+      pluginRegistry: { getByKey, listByStatus: async () => [], uninstall },
     });
 
     expect(uninstall).toHaveBeenCalledWith("plugin-1", false);

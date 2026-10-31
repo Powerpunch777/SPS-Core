@@ -50,8 +50,15 @@ import {
 } from "./plugin-loader.js";
 import { pluginDatabaseService } from "./plugin-database.js";
 import type { PluginWorkerManager, WorkerStartOptions } from "./plugin-worker-manager.js";
-import { badRequest, notFound } from "../errors.js";
+import { badRequest, conflict, notFound } from "../errors.js";
 import { logger } from "../middleware/logger.js";
+import { withSpsPluginRuntimeMutation, type SpsPluginRuntimeMutationCoordinator } from "./sps-plugin-runtime-mutation.js";
+import {
+  PluginPackageMaintenanceRequiredError,
+  type PluginPackageMutationPermit,
+} from "./sps-plugin-package-maintenance.js";
+import { samePluginPackageArtifact, type SpsPluginPackageOperation, type SpsPluginPackageOperations,
+  type SpsPluginUpgradeOperation } from "./sps-plugin-package-operations.js";
 
 // ---------------------------------------------------------------------------
 // Lifecycle state machine
@@ -147,6 +154,8 @@ type LifecycleEventPayload<K extends LifecycleEventName> = PluginLifecycleEvents
 // ---------------------------------------------------------------------------
 
 export interface PluginLifecycleManager {
+  /** Reconcile durable package intents before normal startup admission. */
+  recoverPackageOperations?(): Promise<void>;
   /**
    * Attach the runtime-capable loader after the lifecycle and loader finish
    * their circular server composition. This may be called only once unless the
@@ -164,7 +173,8 @@ export interface PluginLifecycleManager {
   load(pluginId: string): Promise<PluginRecord>;
 
   /**
-   * Enable a plugin that is in `disabled`, `error`, or `upgrade_pending` state.
+   * Enable an installed, disabled, or errored plugin. Updates waiting for
+   * approval must be reviewed through upgrade instead.
    * Transitions → `ready`.
    */
   enable(pluginId: string): Promise<PluginRecord>;
@@ -284,6 +294,10 @@ export interface PluginLifecycleManager {
  * Options for constructing a PluginLifecycleManager.
  */
 export interface PluginLifecycleManagerOptions {
+  /** Core composition supplies the durable Host package-operation store. */
+  packageOperations?: SpsPluginPackageOperations;
+  /** Optional Core-owned Workspace process drain and policy reconciliation. */
+  workspaceRuntime?: SpsPluginRuntimeMutationCoordinator;
   /** Plugin loader instance. Falls back to the default if omitted. */
   loader?: PluginLoader;
 
@@ -293,8 +307,9 @@ export interface PluginLifecycleManagerOptions {
    * process, and transitions that take a plugin offline (disable, unload,
    * markError) will stop it.
    *
-   * When omitted the lifecycle manager operates in state-only mode — the
-   * caller is responsible for managing worker processes externally.
+   * When omitted and the loader has no runtime services, the lifecycle manager
+   * operates in state-only mode. Runtime-backed stop/replacement transitions
+   * require this owner so they can verify closure and fence concurrent starts.
    */
   workerManager?: PluginWorkerManager;
 
@@ -338,6 +353,8 @@ export function pluginLifecycleManager(
   let workerManager: PluginWorkerManager | undefined;
   let migrationDb = db;
   let databaseBackupService: PluginLifecycleManagerOptions["databaseBackupService"];
+  let workspaceRuntime: SpsPluginRuntimeMutationCoordinator | undefined;
+  let packageOperations: SpsPluginPackageOperations | undefined;
 
   if (options && typeof options === "object" && "discoverAll" in options) {
     // Legacy: second arg is a PluginLoader directly
@@ -348,6 +365,8 @@ export function pluginLifecycleManager(
     workerManager = opts.workerManager;
     migrationDb = opts.migrationDb ?? db;
     databaseBackupService = opts.databaseBackupService;
+    workspaceRuntime = opts.workspaceRuntime;
+    packageOperations = opts.packageOperations;
   }
 
   const registry = pluginRegistryService(db);
@@ -423,9 +442,8 @@ export function pluginLifecycleManager(
   // -----------------------------------------------------------------------
 
   /**
-   * Stop the worker for a plugin if one is running.
-   * This is a best-effort operation — if no worker manager is configured
-   * or no worker is running, it silently succeeds.
+   * Stop the worker for a plugin if one is running. A registered handle must
+   * be removed by the manager before this reports success.
    */
   async function stopWorkerIfRunning(
     pluginId: string,
@@ -434,16 +452,12 @@ export function pluginLifecycleManager(
     if (!workerManager) return;
     if (!workerManager.isRunning(pluginId) && !workerManager.getWorker(pluginId)) return;
 
-    try {
-      await workerManager.stopWorker(pluginId);
-      log.info({ pluginId, pluginKey }, "plugin lifecycle: worker stopped");
-      emitDomain("plugin.worker_stopped", { pluginId, pluginKey });
-    } catch (err) {
-      log.warn(
-        { pluginId, pluginKey, err: err instanceof Error ? err.message : String(err) },
-        "plugin lifecycle: failed to stop worker (best-effort)",
-      );
+    await workerManager.stopWorker(pluginId);
+    if (workerManager.getWorker(pluginId)) {
+      throw new PluginPackageMaintenanceRequiredError();
     }
+    log.info({ pluginId, pluginKey }, "plugin lifecycle: worker stopped");
+    emitDomain("plugin.worker_stopped", { pluginId, pluginKey });
   }
 
   async function activateReadyPlugin(
@@ -484,49 +498,180 @@ export function pluginLifecycleManager(
     await stopWorkerIfRunning(pluginId, pluginKey);
   }
 
+  async function withArtifactCleanupFence<T>(
+    plugin: PluginRecord,
+    action: (permit: PluginPackageMutationPermit) => Promise<T>,
+  ): Promise<T> {
+    const classify = pluginLoaderInstance.requiresSharedPluginArtifactCleanup;
+    if (typeof classify !== "function" || !workerManager) {
+      throw new PluginPackageMaintenanceRequiredError();
+    }
+    if (classify.call(pluginLoaderInstance, plugin)) {
+      if (typeof workerManager.withExclusivePackageMutation !== "function") throw new PluginPackageMaintenanceRequiredError();
+      return workerManager.withExclusivePackageMutation(plugin.id, action);
+    }
+    if (typeof workerManager.withPluginPackageMutation !== "function") throw new PluginPackageMaintenanceRequiredError();
+    return workerManager.withPluginPackageMutation(plugin.id, action);
+  }
+
+  async function finishDurableUninstall(operation: SpsPluginPackageOperation): Promise<PluginRecord | null> {
+    const snapshot = operation.snapshot;
+    return withArtifactCleanupFence(snapshot, async permit => {
+      const active = await packageOperations!.pendingForPlugin(operation.pluginId);
+      if (!active) return null;
+      if (active.kind !== "uninstall" || active.id !== operation.id || !samePluginPackageArtifact(active.snapshot, snapshot)) {
+        throw new Error("Plugin removal intent changed before recovery; artifacts were preserved.");
+      }
+      const current = await registry.getById(snapshot.id) as PluginRecord | null;
+      const sameKey = current ? current : await registry.getByKey(snapshot.pluginKey) as PluginRecord | null;
+      if ((sameKey && !samePluginPackageArtifact(sameKey, snapshot)) || (!current && !operation.removeData)) {
+        throw new Error("Plugin package changed during removal recovery; artifacts were preserved.");
+      }
+      await deactivatePluginRuntime(snapshot.id, snapshot.pluginKey);
+      await ensurePluginWorkerClosed(snapshot.id);
+      // Reuse the exact live maintenance permit and path classifier. A journal
+      // is never authority to bypass closure or delete an arbitrary local path.
+      await pluginLoaderInstance.cleanupInstallArtifacts(snapshot, permit);
+      const result = current ? await registry.uninstall(snapshot.id, operation.removeData) as PluginRecord | null : null;
+      await packageOperations!.complete(operation.id);
+      emitter.emit("plugin.status_changed", { pluginId: snapshot.id, pluginKey: snapshot.pluginKey,
+        previousStatus: snapshot.status, newStatus: "uninstalled" as PluginStatus });
+      emitDomain("plugin.unloaded", { pluginId: snapshot.id, pluginKey: snapshot.pluginKey, removeData: operation.removeData });
+      return result;
+    });
+  }
+
+  async function ensurePluginWorkerClosed(pluginId: string): Promise<void> {
+    if (!workerManager) {
+      // Preserve the documented metadata-only mode. A runtime-backed loader
+      // without its process owner cannot certify closure. Destructive artifact
+      // cleanup separately requires the manager in withArtifactCleanupFence.
+      if (typeof pluginLoaderInstance.hasRuntimeServices !== "function"
+        || !pluginLoaderInstance.hasRuntimeServices()) return;
+      throw new PluginPackageMaintenanceRequiredError();
+    }
+    // unloadSingle is intentionally best-effort for ordinary lifecycle paths.
+    // Package deletion needs a confirmed close, so retry through the manager
+    // and refuse to touch artifacts if its exact handle remains registered.
+    if (workerManager.getWorker(pluginId)) await workerManager.stopWorker(pluginId);
+    if (workerManager.getWorker(pluginId)) throw new PluginPackageMaintenanceRequiredError();
+  }
+
+  async function reconcileDurableUpgrade(operation: SpsPluginUpgradeOperation): Promise<void> {
+    await withPluginWorkerStartFence(operation.pluginId, async () => {
+      const active = await packageOperations!.pendingForPlugin(operation.pluginId);
+      if (!active || active.id !== operation.id) return;
+      if (active.kind !== "upgrade") throw new Error("Plugin update intent changed before recovery.");
+      operation = active;
+      const current = await requirePlugin(operation.pluginId);
+      // Quarantine first, including a changed package. Neither an uncertain
+      // pointer nor an old ready status permits replaying update side effects.
+      await registry.updateStatus(operation.pluginId, { status: "error", lastError: "Interrupted plugin update requires recovery review." });
+      if (!samePluginPackageArtifact(current, operation.snapshot) && !samePluginPackageArtifact(current, operation.candidate)) {
+        throw new Error("Plugin package changed during update recovery; both artifacts were preserved.");
+      }
+      await ensurePluginWorkerClosed(operation.pluginId);
+      await deactivatePluginRuntime(operation.pluginId, operation.pluginKey);
+      await ensurePluginWorkerClosed(operation.pluginId);
+      if (operation.phase === "activation_entered" && operation.databaseMayChange) {
+        if (!samePluginPackageArtifact(current, operation.candidate)) {
+          throw new Error("Interrupted data migration has an uncertain package pointer; Host review is required.");
+        }
+        // Reconciled does not mean successful. Keep the compatible candidate in
+        // error; only a fresh Host action may retry it through normal approval.
+        await packageOperations!.complete(operation.id, "review_required");
+      } else {
+        await registry.update(operation.pluginId, { packageName: operation.snapshot.packageName,
+          packagePath: operation.snapshot.packagePath, version: operation.snapshot.version, manifest: operation.snapshot.manifestJson });
+        await registry.updateStatus(operation.pluginId, { status: operation.snapshot.status, lastError: operation.snapshot.lastError });
+        await packageOperations!.complete(operation.id, "rolled_back");
+      }
+    });
+  }
+
+  async function quarantineUpgrade(pluginId: string, pluginKey: string, message: string, error: unknown): Promise<boolean> {
+    try {
+      await registry.updateStatus(pluginId, { status: "error", lastError: message });
+      await withPluginWorkerStartFence(pluginId, async () => {
+        await ensurePluginWorkerClosed(pluginId);
+        await deactivatePluginRuntime(pluginId, pluginKey);
+        await ensurePluginWorkerClosed(pluginId);
+      });
+      return true;
+    } catch (recoveryError) {
+      log.error({ pluginId, error, recoveryError }, "plugin lifecycle: update cleanup remains unconfirmed");
+      return false;
+    }
+  }
+
+  async function withPluginWorkerStartFence<T>(pluginId: string, action: () => Promise<T>): Promise<T> {
+    if (!workerManager) {
+      if (typeof pluginLoaderInstance.hasRuntimeServices !== "function"
+        || !pluginLoaderInstance.hasRuntimeServices()) return await action();
+      throw new PluginPackageMaintenanceRequiredError();
+    }
+    if (typeof workerManager.withPluginPackageMutation !== "function") {
+      throw new PluginPackageMaintenanceRequiredError();
+    }
+    return await workerManager.withPluginPackageMutation(pluginId, action);
+  }
+
   async function restoreUpgradeSnapshot(
     snapshot: PluginRecord,
     reactivateReadyRuntime: boolean,
     unloadCandidateRuntime: boolean,
   ): Promise<void> {
     const restoreErrors: string[] = [];
+    let previousArtifactRestored = false;
 
     // A failing loader can have registered routes, tools, jobs, or a worker
-    // before it reports activation failure. Unload while the candidate record
-    // still points at that artifact; restoring the old registry entry first
-    // would make this cleanup target ambiguous.
-    if (unloadCandidateRuntime) {
-      try {
-        await deactivatePluginRuntime(snapshot.id, snapshot.pluginKey);
-      } catch (error) {
-        restoreErrors.push(`candidate runtime cleanup failed: ${error instanceof Error ? error.message : String(error)}`);
-      }
-    }
-
+    // before it reports activation failure. Keep starts fenced and confirm the
+    // exact worker is gone before restoring the old package pointer. If closure
+    // is uncertain, leave the candidate record in place so it cannot describe
+    // a different package than the process that may still be running.
     try {
-      const restored = await registry.update(snapshot.id, {
-        packageName: snapshot.packageName,
-        packagePath: snapshot.packagePath,
-        version: snapshot.version,
-        manifest: snapshot.manifestJson as PaperclipPluginManifestV1,
+      await withPluginWorkerStartFence(snapshot.id, async () => {
+        await ensurePluginWorkerClosed(snapshot.id);
+        if (unloadCandidateRuntime) {
+          // A failed unload may leave Host handlers bound to the candidate.
+          // Do not restore the old package pointer or reactivate it unless the
+          // candidate runtime was fully unloaded and its exact worker closed.
+          await deactivatePluginRuntime(snapshot.id, snapshot.pluginKey);
+          await ensurePluginWorkerClosed(snapshot.id);
+        }
+
+        let restored: PluginRecord | null;
+        try {
+          restored = await registry.update(snapshot.id, {
+            packageName: snapshot.packageName,
+            packagePath: snapshot.packagePath,
+            version: snapshot.version,
+            manifest: snapshot.manifestJson as PaperclipPluginManifestV1,
+          }) as PluginRecord | null;
+        } catch (error) {
+          restoreErrors.push(`registry restore failed: ${error instanceof Error ? error.message : String(error)}`);
+          return;
+        }
+        if (!restored) {
+          restoreErrors.push("plugin registry record was not found while restoring the previous artifact");
+          return;
+        }
+        try {
+          const current = await requirePlugin(snapshot.id);
+          if (current.status !== snapshot.status || current.lastError !== snapshot.lastError) {
+            await transition(snapshot.id, snapshot.status, snapshot.lastError ?? null, current);
+          }
+        } catch (error) {
+          restoreErrors.push(`status restore failed: ${error instanceof Error ? error.message : String(error)}`);
+          return;
+        }
+        previousArtifactRestored = true;
       });
-      if (!restored) {
-        restoreErrors.push("plugin registry record was not found while restoring the previous artifact");
-      }
     } catch (error) {
-      restoreErrors.push(`registry restore failed: ${error instanceof Error ? error.message : String(error)}`);
+      restoreErrors.push(`candidate runtime closure or rollback failed: ${error instanceof Error ? error.message : String(error)}`);
     }
 
-    try {
-      const current = await requirePlugin(snapshot.id);
-      if (current.status !== snapshot.status || current.lastError !== snapshot.lastError) {
-        await transition(snapshot.id, snapshot.status, snapshot.lastError ?? null, current);
-      }
-    } catch (error) {
-      restoreErrors.push(`status restore failed: ${error instanceof Error ? error.message : String(error)}`);
-    }
-
-    if (reactivateReadyRuntime) {
+    if (reactivateReadyRuntime && previousArtifactRestored) {
       try {
         await activateReadyPlugin(snapshot.id);
       } catch (error) {
@@ -544,10 +689,12 @@ export function pluginLifecycleManager(
     snapshot: PluginRecord,
     reactivateReadyRuntime: boolean,
     unloadCandidateRuntime: boolean,
+    onRestored?: () => Promise<void>,
   ): Promise<never> {
     const originalMessage = error instanceof Error ? error.message : String(error);
     try {
       await restoreUpgradeSnapshot(snapshot, reactivateReadyRuntime, unloadCandidateRuntime);
+      await onRestored?.();
     } catch (rollbackError) {
       const rollbackMessage = rollbackError instanceof Error ? rollbackError.message : String(rollbackError);
       log.error(
@@ -568,7 +715,23 @@ export function pluginLifecycleManager(
   // Public API
   // -----------------------------------------------------------------------
 
-  return {
+  const service: PluginLifecycleManager = {
+    async recoverPackageOperations() {
+      if (!packageOperations) return;
+      // An invalid/unreadable journal fails startup before loadAll. Individual
+      // blocked operations stay quarantined and do not stop unrelated plugins.
+      for (const operation of await packageOperations.listPending()) {
+        try {
+          const resume = async () => operation.kind === "uninstall"
+            ? await finishDurableUninstall(operation) : await reconcileDurableUpgrade(operation);
+          if (workspaceRuntime) await withSpsPluginRuntimeMutation(workspaceRuntime, operation.pluginId, resume);
+          else await resume();
+        } catch (error) {
+          log.error({ pluginId: operation.pluginId, operationId: operation.id, error },
+            "plugin lifecycle: package operation recovery remains pending");
+        }
+      }
+    },
     attachRuntimeLoader(loader: PluginLoader): void {
       if (pluginLoaderInstance === loader) return;
       if (runtimeLoaderAttached) {
@@ -606,10 +769,11 @@ export function pluginLifecycleManager(
 
     // -- enable -----------------------------------------------------------
     /**
-     * enable — Re-enables a plugin that was previously in an error or upgrade state.
+     * enable — Starts an installed plugin or re-enables a disabled/errored plugin.
      *
      * Similar to load(), this method transitions the plugin to 'ready' and starts
-     * its worker, but it specifically targets plugins that are currently disabled.
+     * its worker. An explicit enable can resume installation interrupted before
+     * initial activation; it does not approve a pending package update.
      *
      * @param pluginId - The UUID of the plugin to enable.
      * @returns The updated plugin record.
@@ -622,9 +786,9 @@ export function pluginLifecycleManager(
           "Plugin update is waiting for review. Re-run the upgrade with the required approval instead of enabling it directly.",
         );
       }
-      if (plugin.status !== "disabled" && plugin.status !== "error") {
+      if (plugin.status !== "installed" && plugin.status !== "disabled" && plugin.status !== "error") {
         throw badRequest(
-          `Cannot enable plugin in status '${plugin.status}'. Plugin must be in 'disabled' or 'error' status to be enabled.`,
+          `Cannot enable plugin in status '${plugin.status}'. Plugin must be in 'installed', 'disabled', or 'error' status to be enabled.`,
         );
       }
 
@@ -649,9 +813,12 @@ export function pluginLifecycleManager(
         );
       }
 
-      await deactivatePluginRuntime(pluginId, plugin.pluginKey);
-
-      const result = await transition(pluginId, "disabled", reason ?? null, plugin);
+      const result = await withPluginWorkerStartFence(pluginId, async () => {
+        await ensurePluginWorkerClosed(pluginId);
+        await deactivatePluginRuntime(pluginId, plugin.pluginKey);
+        await ensurePluginWorkerClosed(pluginId);
+        return await transition(pluginId, "disabled", reason ?? null, plugin);
+      });
       emitDomain("plugin.disabled", {
         pluginId,
         pluginKey: result.pluginKey,
@@ -665,23 +832,51 @@ export function pluginLifecycleManager(
       pluginId: string,
       removeData = false,
     ): Promise<PluginRecord | null> {
+      if (packageOperations) {
+        const pending = await packageOperations.pendingForPlugin(pluginId);
+        if (pending) {
+          if (pending.kind !== "uninstall") throw badRequest("Recover the interrupted update before removing the plugin.");
+          if (pending.removeData !== removeData) throw badRequest("Resume the existing package removal before changing its data policy.");
+          return finishDurableUninstall(pending);
+        }
+        const snapshot = await requirePlugin(pluginId);
+        if (snapshot.status === "uninstalled" && !removeData) throw badRequest("Plugin is already uninstalled.");
+        // Close inside the existing admission fence before writing durable
+        // intent. Failure to persist intent cannot authorize artifact deletion.
+        return withArtifactCleanupFence(snapshot, async permit => {
+          await deactivatePluginRuntime(pluginId, snapshot.pluginKey);
+          await ensurePluginWorkerClosed(pluginId);
+          const operation = await packageOperations!.beginUninstall(snapshot, removeData);
+          await pluginLoaderInstance.cleanupInstallArtifacts(snapshot, permit);
+          const result = await registry.uninstall(pluginId, removeData) as PluginRecord | null;
+          await packageOperations!.complete(operation.id);
+          emitter.emit("plugin.status_changed", { pluginId, pluginKey: snapshot.pluginKey,
+            previousStatus: snapshot.status, newStatus: "uninstalled" as PluginStatus });
+          emitDomain("plugin.unloaded", { pluginId, pluginKey: snapshot.pluginKey, removeData });
+          return result;
+        });
+      }
       const plugin = await requirePlugin(pluginId);
 
       // If already uninstalled and removeData, hard-delete
       if (plugin.status === "uninstalled") {
         if (removeData) {
-          await pluginLoaderInstance.cleanupInstallArtifacts(plugin);
-          const deleted = await registry.uninstall(pluginId, true);
-          log.info(
-            { pluginId, pluginKey: plugin.pluginKey },
-            "plugin lifecycle: hard-deleted already-uninstalled plugin",
-          );
-          emitDomain("plugin.unloaded", {
-            pluginId,
-            pluginKey: plugin.pluginKey,
-            removeData: true,
+          return withArtifactCleanupFence(plugin, async (permit) => {
+            await deactivatePluginRuntime(pluginId, plugin.pluginKey);
+            await ensurePluginWorkerClosed(pluginId);
+            await pluginLoaderInstance.cleanupInstallArtifacts(plugin, permit);
+            const deleted = await registry.uninstall(pluginId, true);
+            log.info(
+              { pluginId, pluginKey: plugin.pluginKey },
+              "plugin lifecycle: hard-deleted already-uninstalled plugin",
+            );
+            emitDomain("plugin.unloaded", {
+              pluginId,
+              pluginKey: plugin.pluginKey,
+              removeData: true,
+            });
+            return deleted as PluginRecord | null;
           });
-          return deleted as PluginRecord | null;
         }
         throw badRequest(
           `Plugin ${plugin.pluginKey} is already uninstalled. ` +
@@ -689,31 +884,34 @@ export function pluginLifecycleManager(
         );
       }
 
-      await deactivatePluginRuntime(pluginId, plugin.pluginKey);
-      await pluginLoaderInstance.cleanupInstallArtifacts(plugin);
+      return withArtifactCleanupFence(plugin, async (permit) => {
+        await deactivatePluginRuntime(pluginId, plugin.pluginKey);
+        await ensurePluginWorkerClosed(pluginId);
+        await pluginLoaderInstance.cleanupInstallArtifacts(plugin, permit);
 
-      // Perform the uninstall via registry (handles soft/hard delete)
-      const result = await registry.uninstall(pluginId, removeData);
+        // Perform the uninstall via registry (handles soft/hard delete)
+        const result = await registry.uninstall(pluginId, removeData);
 
-      log.info(
-        { pluginId, pluginKey: plugin.pluginKey, removeData },
-        `plugin lifecycle: ${plugin.status} → uninstalled${removeData ? " (hard delete)" : ""}`,
-      );
+        log.info(
+          { pluginId, pluginKey: plugin.pluginKey, removeData },
+          `plugin lifecycle: ${plugin.status} → uninstalled${removeData ? " (hard delete)" : ""}`,
+        );
 
-      emitter.emit("plugin.status_changed", {
-        pluginId,
-        pluginKey: plugin.pluginKey,
-        previousStatus: plugin.status,
-        newStatus: "uninstalled" as PluginStatus,
+        emitter.emit("plugin.status_changed", {
+          pluginId,
+          pluginKey: plugin.pluginKey,
+          previousStatus: plugin.status,
+          newStatus: "uninstalled" as PluginStatus,
+        });
+
+        emitDomain("plugin.unloaded", {
+          pluginId,
+          pluginKey: plugin.pluginKey,
+          removeData,
+        });
+
+        return result as PluginRecord | null;
       });
-
-      emitDomain("plugin.unloaded", {
-        pluginId,
-        pluginKey: plugin.pluginKey,
-        removeData,
-      });
-
-      return result as PluginRecord | null;
     },
 
     // -- markError --------------------------------------------------------
@@ -848,23 +1046,33 @@ export function pluginLifecycleManager(
             : []),
         ];
         let attemptedReadyRuntimeTeardown = false;
+        let mutationStarted = false;
         try {
-          if (plugin.status === "ready") {
-            attemptedReadyRuntimeTeardown = true;
-            await deactivatePluginRuntime(pluginId, plugin.pluginKey);
-          }
-          const result = await transition(
-            pluginId,
-            "upgrade_pending",
-            `Upgrade review required: ${reviewReasons.join("; ")}`,
-            plugin,
-          );
+          const result = await withPluginWorkerStartFence(pluginId, async () => {
+            if (plugin.status === "ready") {
+              // Close before unloading Host handlers. unloadSingle treats a
+              // process-stop error as best-effort for ordinary lifecycle use.
+              await ensurePluginWorkerClosed(pluginId);
+              attemptedReadyRuntimeTeardown = true;
+              mutationStarted = true;
+              await deactivatePluginRuntime(pluginId, plugin.pluginKey);
+            }
+            await ensurePluginWorkerClosed(pluginId);
+            mutationStarted = true;
+            return await transition(
+              pluginId,
+              "upgrade_pending",
+              `Upgrade review required: ${reviewReasons.join("; ")}`,
+              plugin,
+            );
+          });
           emitDomain("plugin.upgrade_pending", {
             pluginId,
             pluginKey: result.pluginKey,
           });
           return result;
         } catch (error) {
+          if (!mutationStarted) throw error;
           return await failUpgradeWithRollback(
             error,
             originalPlugin,
@@ -873,6 +1081,7 @@ export function pluginLifecycleManager(
           );
         }
       } else {
+        let upgradeBackupFile: string | null = null;
         if (migrationPlan?.requiresHostApproval) {
           if (!databaseBackupService) {
             throw badRequest(
@@ -883,6 +1092,7 @@ export function pluginLifecycleManager(
           if (!backup.backupFile) {
             throw badRequest("Host backup completed without a backup file reference.");
           }
+          upgradeBackupFile = backup.backupFile;
           log.info(
             {
               pluginId,
@@ -893,47 +1103,113 @@ export function pluginLifecycleManager(
             "plugin lifecycle: created Host backup before approved data migration",
           );
         }
-        let attemptedReadyRuntimeTeardown = false;
-        let candidateRuntimeMayBeActive = false;
-        try {
-          if (plugin.status === "ready") {
-            attemptedReadyRuntimeTeardown = true;
-            await deactivatePluginRuntime(pluginId, plugin.pluginKey);
+        const upgradeJournal = packageOperations?.upgrade;
+        if (packageOperations && !upgradeJournal) throw new Error("Plugin package update journal is unavailable.");
+        const upgradeOperation = upgradeJournal ? await upgradeJournal.begin(originalPlugin, {
+          ...originalPlugin, packageName: discovered.packageName, packagePath: discovered.packagePath,
+          version: discovered.version, manifestJson: newManifest, status: "error",
+        }, { databaseMayChange: Boolean(migrationPlan?.pendingMigrations.length),
+          approvedMigrationPlanHash: migrationPlan?.requiresHostApproval ? migrationPlan.reviewHash : null,
+          backupFile: upgradeBackupFile }) : undefined;
+        const performUpgrade = async () => {
+          let attemptedReadyRuntimeTeardown = false;
+          let candidateRuntimeMayBeActive = false;
+          let candidateActivationEntered = false;
+          let mutationStarted = false;
+          try {
+            const result = await withPluginWorkerStartFence(pluginId, async () => {
+              if (plugin.status === "ready") {
+                // Close before unloading Host handlers. The manager fence keeps
+                // a direct Host start from slipping between closure and commit.
+                await ensurePluginWorkerClosed(pluginId);
+                attemptedReadyRuntimeTeardown = true;
+                mutationStarted = true;
+                await deactivatePluginRuntime(pluginId, plugin.pluginKey);
+              }
+              await ensurePluginWorkerClosed(pluginId);
+              mutationStarted = true;
+              if (upgradeOperation) await upgradeJournal!.advance(upgradeOperation.id, "committing");
+              await pluginLoaderInstance.commitPreparedUpgrade(pluginId, {
+                oldManifest,
+                newManifest,
+                discovered,
+              });
+              if (upgradeOperation) await upgradeJournal!.advance(upgradeOperation.id, "committed");
+              const transitioned = await transition(pluginId, "ready", null, {
+                ...plugin,
+                version: discovered.version,
+                manifestJson: newManifest,
+              } as PluginRecord);
+              candidateRuntimeMayBeActive = true;
+              return transitioned;
+            });
+            if (upgradeOperation) await upgradeJournal!.advance(upgradeOperation.id, "activation_entered");
+            candidateActivationEntered = true;
+            await activateReadyPlugin(
+              pluginId,
+              migrationPlan?.requiresHostApproval ? migrationPlan.reviewHash : undefined,
+            );
+
+            emitDomain("plugin.loaded", {
+              pluginId,
+              pluginKey: result.pluginKey,
+            });
+            emitDomain("plugin.enabled", {
+              pluginId,
+              pluginKey: result.pluginKey,
+            });
+
+            return result;
+          } catch (error) {
+            if (!mutationStarted) throw error;
+            if (candidateActivationEntered && migrationPlan && migrationPlan.pendingMigrations.length > 0) {
+              // applyMigrations commits before worker startup. A rejected
+              // activation cannot prove its SQL rolled back. Keep the package
+              // matching that schema; never reactivate the old code against it.
+              const message = "Plugin update requires data recovery review. Database changes may have completed; the new package was preserved.";
+              try {
+                const closed = await quarantineUpgrade(pluginId, plugin.pluginKey, message, error);
+                if (closed && upgradeOperation) await packageOperations!.complete(upgradeOperation.id, "review_required");
+              } catch (recoveryError) {
+                log.error({ pluginId, error, recoveryError }, "plugin lifecycle: migrated upgrade cleanup remains unconfirmed");
+              }
+              throw conflict(message, { code: "plugin_upgrade_data_recovery_required" });
+            }
+            if (upgradeOperation) {
+              try { await upgradeJournal!.advance(upgradeOperation.id, "rollback_required"); }
+              catch (phaseError) {
+                await quarantineUpgrade(pluginId, plugin.pluginKey, "Plugin rollback intent is unconfirmed; recovery is required.", phaseError);
+                throw phaseError;
+              }
+            }
+            return await failUpgradeWithRollback(
+              error,
+              originalPlugin,
+              originalPlugin.status === "ready" && attemptedReadyRuntimeTeardown,
+              candidateRuntimeMayBeActive,
+              upgradeOperation ? async () => {
+                try { await packageOperations!.complete(upgradeOperation.id, "rolled_back"); }
+                catch (completionError) {
+                  await quarantineUpgrade(pluginId, plugin.pluginKey, "Plugin rollback completion is unconfirmed; recovery is required.", completionError);
+                  throw completionError;
+                }
+              } : undefined,
+            );
           }
-          await pluginLoaderInstance.commitPreparedUpgrade(pluginId, {
-            oldManifest,
-            newManifest,
-            discovered,
-          });
-          const result = await transition(pluginId, "ready", null, {
-            ...plugin,
-            version: discovered.version,
-            manifestJson: newManifest,
-          } as PluginRecord);
-          candidateRuntimeMayBeActive = true;
-          await activateReadyPlugin(
-            pluginId,
-            migrationPlan?.requiresHostApproval ? migrationPlan.reviewHash : undefined,
-          );
-
-          emitDomain("plugin.loaded", {
-            pluginId,
-            pluginKey: result.pluginKey,
-          });
-          emitDomain("plugin.enabled", {
-            pluginId,
-            pluginKey: result.pluginKey,
-          });
-
-          return result;
-        } catch (error) {
-          return await failUpgradeWithRollback(
-            error,
-            originalPlugin,
-            originalPlugin.status === "ready" && attemptedReadyRuntimeTeardown,
-            candidateRuntimeMayBeActive,
-          );
+        };
+        const result = upgradeOperation
+          ? await upgradeJournal!.run(upgradeOperation.id, performUpgrade) : await performUpgrade();
+        if (upgradeOperation) {
+          try {
+            // Completion response loss must not enter ordinary rollback after
+            // successful activation. Preserve the candidate and quarantine it.
+            await packageOperations!.complete(upgradeOperation.id, "succeeded");
+          } catch (error) {
+            await quarantineUpgrade(pluginId, plugin.pluginKey, "Plugin update completion is unconfirmed; recovery is required.", error);
+            throw error;
+          }
         }
+        return result;
       }
     },
 
@@ -1029,7 +1305,11 @@ export function pluginLifecycleManager(
         // Bouncing the worker process alone (`handle.restart()`) leaves plugin
         // schema out of sync with worker code whenever a hot reload adds a new
         // migration, which makes downstream queries fail against missing tables.
-        await deactivatePluginRuntime(pluginId, plugin.pluginKey);
+        await withPluginWorkerStartFence(pluginId, async () => {
+          await ensurePluginWorkerClosed(pluginId);
+          await deactivatePluginRuntime(pluginId, plugin.pluginKey);
+          await ensurePluginWorkerClosed(pluginId);
+        });
         await activateReadyPlugin(pluginId);
       } else {
         // No runtime activation services wired in (e.g. state-only test harness)
@@ -1038,7 +1318,19 @@ export function pluginLifecycleManager(
           { pluginId, pluginKey: plugin.pluginKey },
           "plugin lifecycle: restarting worker (runtime services unavailable; skipping migration re-apply)",
         );
-        await handle.restart();
+        await withPluginWorkerStartFence(pluginId, async () => {
+          await handle.stop();
+          const diagnostics = handle.diagnostics();
+          if (diagnostics.status !== "stopped" || diagnostics.pid !== null) {
+            throw new PluginPackageMaintenanceRequiredError();
+          }
+        });
+        // startInternal checks the manager's owner fence, so restarting the
+        // retained handle must happen after the package-mutation fence opens.
+        if (workerManager.getWorker(pluginId) !== handle) {
+          throw new PluginPackageMaintenanceRequiredError();
+        }
+        await handle.start();
         emitDomain("plugin.worker_stopped", { pluginId, pluginKey: plugin.pluginKey });
         emitDomain("plugin.worker_started", { pluginId, pluginKey: plugin.pluginKey });
       }
@@ -1074,5 +1366,26 @@ export function pluginLifecycleManager(
     once(event, listener) {
       emitter.once(event, listener);
     },
+  };
+  if (!workspaceRuntime && !packageOperations) return service;
+  const coordinate = <T>(pluginId: string, operation: () => Promise<T>, resumeRemoval = false) => {
+    const guarded = async () => {
+      if (!resumeRemoval) await packageOperations?.assertClear(pluginId);
+      return operation();
+    };
+    return workspaceRuntime ? withSpsPluginRuntimeMutation(workspaceRuntime, pluginId, guarded) : guarded();
+  };
+  // Central coordination also covers development reloads and non-HTTP callers.
+  return {
+    ...service,
+    load: id => coordinate(id, () => service.load(id)),
+    enable: id => coordinate(id, () => service.enable(id)),
+    disable: (id, reason) => coordinate(id, () => service.disable(id, reason)),
+    unload: (id, removeData) => coordinate(id, () => service.unload(id, removeData), true),
+    markError: (id, error) => coordinate(id, () => service.markError(id, error)),
+    markUpgradePending: id => coordinate(id, () => service.markUpgradePending(id)),
+    upgrade: (id, options) => coordinate(id, () => service.upgrade(id, options)),
+    restartWorker: id => coordinate(id, () => service.restartWorker(id)),
+    startWorker: (id, options) => coordinate(id, () => service.startWorker(id, options)),
   };
 }

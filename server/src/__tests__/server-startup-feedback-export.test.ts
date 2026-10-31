@@ -5,11 +5,15 @@ const ORIGINAL_PAPERCLIP_RUNTIME_API_URL = process.env.PAPERCLIP_RUNTIME_API_URL
 const ORIGINAL_PAPERCLIP_RUNTIME_API_CANDIDATES_JSON = process.env.PAPERCLIP_RUNTIME_API_CANDIDATES_JSON;
 const ORIGINAL_PAPERCLIP_LISTEN_HOST = process.env.PAPERCLIP_LISTEN_HOST;
 const ORIGINAL_PAPERCLIP_LISTEN_PORT = process.env.PAPERCLIP_LISTEN_PORT;
+const ORIGINAL_SPS_NATIVE_HOST_MANAGEMENT = process.env.SPS_NATIVE_HOST_MANAGEMENT;
+const ORIGINAL_SPS_NATIVE_PARENT_INGRESS = process.env.SPS_NATIVE_PARENT_INGRESS;
 
 const {
   createAppMock,
   createBetterAuthInstanceMock,
   createDbMock,
+  createSpsNativeParentEnrollmentServiceMock,
+  createSpsNativeParentIngressMock,
   detectPortMock,
   deriveAuthTrustedOriginsMock,
   environmentCustomImagesServiceMock,
@@ -27,6 +31,8 @@ const {
   const createAppMock = vi.fn(async () => ((_: unknown, __: unknown) => {}) as never);
   const createBetterAuthInstanceMock = vi.fn(() => ({}));
   const createDbMock = vi.fn(() => ({}) as never);
+  const createSpsNativeParentEnrollmentServiceMock = vi.fn();
+  const createSpsNativeParentIngressMock = vi.fn();
   const detectPortMock = vi.fn(async (port: number) => port);
   const deriveAuthTrustedOriginsMock = vi.fn(() => []);
   const resolveHeartbeatSchedulingSuppressionMock = vi.fn(() => ({
@@ -86,6 +92,8 @@ const {
     createAppMock,
     createBetterAuthInstanceMock,
     createDbMock,
+    createSpsNativeParentEnrollmentServiceMock,
+    createSpsNativeParentIngressMock,
     detectPortMock,
     deriveAuthTrustedOriginsMock,
     environmentCustomImagesServiceMock,
@@ -168,6 +176,17 @@ vi.mock("@paperclipai/db", () => ({
 
 vi.mock("../app.js", () => ({
   createApp: createAppMock,
+}));
+
+// Startup feedback/export coverage uses a deliberately minimal fake DB. Native
+// parent composition is outside this test's contract; keep its DB-backed
+// modules out of collection and verify the opt-in is absent in this fixture.
+vi.mock("../services/sps-native-parent-enrollment.js", () => ({
+  createSpsNativeParentEnrollmentService: createSpsNativeParentEnrollmentServiceMock,
+}));
+
+vi.mock("../services/sps-native-parent-ingress.js", () => ({
+  createSpsNativeParentIngress: createSpsNativeParentIngressMock,
 }));
 
 vi.mock("../config.js", () => ({
@@ -260,6 +279,18 @@ vi.mock("../auth/better-auth.js", () => ({
 
 import { startServer } from "../index.ts";
 
+beforeEach(() => {
+  delete process.env.SPS_NATIVE_HOST_MANAGEMENT;
+  delete process.env.SPS_NATIVE_PARENT_INGRESS;
+});
+
+afterEach(() => {
+  if (ORIGINAL_SPS_NATIVE_HOST_MANAGEMENT === undefined) delete process.env.SPS_NATIVE_HOST_MANAGEMENT;
+  else process.env.SPS_NATIVE_HOST_MANAGEMENT = ORIGINAL_SPS_NATIVE_HOST_MANAGEMENT;
+  if (ORIGINAL_SPS_NATIVE_PARENT_INGRESS === undefined) delete process.env.SPS_NATIVE_PARENT_INGRESS;
+  else process.env.SPS_NATIVE_PARENT_INGRESS = ORIGINAL_SPS_NATIVE_PARENT_INGRESS;
+});
+
 describe("startServer feedback export wiring", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -278,6 +309,8 @@ describe("startServer feedback export wiring", () => {
 
     expect(started.server).toBe(fakeServer);
     expect(feedbackServiceFactoryMock).toHaveBeenCalledTimes(1);
+    expect(createSpsNativeParentEnrollmentServiceMock).not.toHaveBeenCalled();
+    expect(createSpsNativeParentIngressMock).not.toHaveBeenCalled();
     expect(createAppMock).toHaveBeenCalledTimes(1);
     expect(createAppMock.mock.calls[0]?.[1]).toMatchObject({
       feedbackExportService: feedbackExportServiceMock,

@@ -1,0 +1,564 @@
+diff --git a/v3/types.js b/v3/types.js
+index ea2be4d..1c28fde 100644
+--- a/v3/types.js
++++ b/v3/types.js
+@@ -3,6 +3,51 @@ import { defaultErrorMap, getErrorMap } from "./errors.js";
+ import { errorUtil } from "./helpers/errorUtil.js";
+ import { DIRTY, INVALID, OK, ParseStatus, addIssueToContext, isAborted, isAsync, isDirty, isValid, makeIssue, } from "./helpers/parseUtil.js";
+ import { util, ZodParsedType, getParsedType } from "./helpers/util.js";
++const issueBudgetParam = Symbol("zod.issueBudget");
++
++// Bound invalid collection work as well as retained diagnostics. A truncated
++// failed union alternative must not reject a subsequently valid result.
++function parseCollectionElements(ctx, values, parseElement, finalize) {
++    const inputSize = Array.isArray(ctx.data) ? ctx.data.length : ctx.data.size;
++    if (inputSize === 0) return finalize([]);
++    if (ctx.common.async) {
++        return (async () => {
++            const results = [];
++            let batch = [], index = 0;
++            const flush = async () => {
++                const current = batch;
++                batch = [];
++                const parsed = await Promise.all(current);
++                results.push(...parsed);
++                return ctx.common.issueBudget.truncated && parsed.some(item => item.status !== "valid");
++            };
++            try {
++                for (const value of values) {
++                    batch.push(parseElement(value, index++));
++                    if (batch.length >= 32 || ctx.common.issueBudget.truncated) {
++                        if (await flush()) return INVALID;
++                    }
++                    if (index >= inputSize) break;
++                }
++                if (batch.length && await flush()) return INVALID;
++                return finalize(results);
++            } catch (error) {
++                await Promise.allSettled(batch);
++                throw error;
++            }
++        })();
++    }
++    const results = [];
++    let index = 0;
++    for (const value of values) {
++        const parsed = parseElement(value, index++);
++        results.push(parsed);
++        if (ctx.common.issueBudget.truncated && parsed.status !== "valid") return INVALID;
++        if (index >= inputSize) break;
++    }
++    return finalize(results);
++}
++
+ class ParseInputLazyPath {
+     constructor(parent, value, path, key) {
+         this._cachedPath = [];
+@@ -117,6 +162,7 @@ export class ZodType {
+         const ctx = {
+             common: {
+                 issues: [],
++                issueBudget: params?.[issueBudgetParam] ?? { count: 0, truncated: false, rootIssues: null },
+                 async: params?.async ?? false,
+                 contextualErrorMap: params?.errorMap,
+             },
+@@ -126,6 +172,7 @@ export class ZodType {
+             data,
+             parsedType: getParsedType(data),
+         };
++        ctx.common.issueBudget.rootIssues = ctx.common.issues;
+         const result = this._parseSync({ data, path: ctx.path, parent: ctx });
+         return handleResult(ctx, result);
+     }
+@@ -133,6 +180,7 @@ export class ZodType {
+         const ctx = {
+             common: {
+                 issues: [],
++                issueBudget: { count: 0, truncated: false, rootIssues: null },
+                 async: !!this["~standard"].async,
+             },
+             path: [],
+@@ -141,6 +189,7 @@ export class ZodType {
+             data,
+             parsedType: getParsedType(data),
+         };
++        ctx.common.issueBudget.rootIssues = ctx.common.issues;
+         if (!this["~standard"].async) {
+             try {
+                 const result = this._parseSync({ data, path: [], parent: ctx });
+@@ -158,8 +207,10 @@ export class ZodType {
+                 }
+                 ctx.common = {
+                     issues: [],
++                    issueBudget: { count: 0, truncated: false, rootIssues: null },
+                     async: true,
+                 };
++                ctx.common.issueBudget.rootIssues = ctx.common.issues;
+             }
+         }
+         return this._parseAsync({ data, path: [], parent: ctx }).then((result) => isValid(result)
+@@ -180,6 +231,7 @@ export class ZodType {
+         const ctx = {
+             common: {
+                 issues: [],
++                issueBudget: params?.[issueBudgetParam] ?? { count: 0, truncated: false, rootIssues: null },
+                 contextualErrorMap: params?.errorMap,
+                 async: true,
+             },
+@@ -189,6 +241,7 @@ export class ZodType {
+             data,
+             parsedType: getParsedType(data),
+         };
++        ctx.common.issueBudget.rootIssues = ctx.common.issues;
+         const maybeAsyncResult = this._parse({ data, path: ctx.path, parent: ctx });
+         const result = await (isAsync(maybeAsyncResult) ? maybeAsyncResult : Promise.resolve(maybeAsyncResult));
+         return handleResult(ctx, result);
+@@ -1800,17 +1853,16 @@ export class ZodArray extends ZodType {
+                 status.dirty();
+             }
+         }
+-        if (ctx.common.async) {
+-            return Promise.all([...ctx.data].map((item, i) => {
+-                return def.type._parseAsync(new ParseInputLazyPath(ctx, item, ctx.path, i));
+-            })).then((result) => {
+-                return ParseStatus.mergeArray(status, result);
+-            });
++        // Enforce declared limits before reading collection elements.
++        if ((def.exactLength !== null && ctx.data.length > def.exactLength.value) ||
++            (def.maxLength !== null && ctx.data.length > def.maxLength.value)) {
++            return INVALID;
+         }
+-        const result = [...ctx.data].map((item, i) => {
+-            return def.type._parseSync(new ParseInputLazyPath(ctx, item, ctx.path, i));
+-        });
+-        return ParseStatus.mergeArray(status, result);
++        return parseCollectionElements(ctx, ctx.data,
++            (item, index) => ctx.common.async
++                ? def.type._parseAsync(new ParseInputLazyPath(ctx, item, ctx.path, index))
++                : def.type._parseSync(new ParseInputLazyPath(ctx, item, ctx.path, index)),
++            result => ParseStatus.mergeArray(status, result));
+     }
+     get element() {
+         return this._def.type;
+@@ -2737,44 +2789,20 @@ export class ZodMap extends ZodType {
+         }
+         const keyType = this._def.keyType;
+         const valueType = this._def.valueType;
+-        const pairs = [...ctx.data.entries()].map(([key, value], index) => {
+-            return {
+-                key: keyType._parse(new ParseInputLazyPath(ctx, key, ctx.path, [index, "key"])),
+-                value: valueType._parse(new ParseInputLazyPath(ctx, value, ctx.path, [index, "value"])),
++        return parseCollectionElements(ctx, ctx.data.entries(), ([key, value], index) => {
++            const parsedKey = keyType._parse(new ParseInputLazyPath(ctx, key, ctx.path, [index, "key"]));
++            const parsedValue = valueType._parse(new ParseInputLazyPath(ctx, value, ctx.path, [index, "value"]));
++            const combine = (key, value) => {
++                if (key.status === "aborted" || value.status === "aborted") return INVALID;
++                return { status: key.status === "dirty" || value.status === "dirty" ? "dirty" : "valid",
++                    value: [key.value, value.value] };
+             };
++            return ctx.common.async ? Promise.all([parsedKey, parsedValue]).then(([key, value]) => combine(key, value))
++                : combine(parsedKey, parsedValue);
++        }, results => {
++            const merged = ParseStatus.mergeArray(status, results);
++            return merged.status === "aborted" ? merged : { status: merged.status, value: new Map(merged.value) };
+         });
+-        if (ctx.common.async) {
+-            const finalMap = new Map();
+-            return Promise.resolve().then(async () => {
+-                for (const pair of pairs) {
+-                    const key = await pair.key;
+-                    const value = await pair.value;
+-                    if (key.status === "aborted" || value.status === "aborted") {
+-                        return INVALID;
+-                    }
+-                    if (key.status === "dirty" || value.status === "dirty") {
+-                        status.dirty();
+-                    }
+-                    finalMap.set(key.value, value.value);
+-                }
+-                return { status: status.value, value: finalMap };
+-            });
+-        }
+-        else {
+-            const finalMap = new Map();
+-            for (const pair of pairs) {
+-                const key = pair.key;
+-                const value = pair.value;
+-                if (key.status === "aborted" || value.status === "aborted") {
+-                    return INVALID;
+-                }
+-                if (key.status === "dirty" || value.status === "dirty") {
+-                    status.dirty();
+-                }
+-                finalMap.set(key.value, value.value);
+-            }
+-            return { status: status.value, value: finalMap };
+-        }
+     }
+ }
+ ZodMap.create = (keyType, valueType, params) => {
+@@ -2835,13 +2863,11 @@ export class ZodSet extends ZodType {
+             }
+             return { status: status.value, value: parsedSet };
+         }
+-        const elements = [...ctx.data.values()].map((item, i) => valueType._parse(new ParseInputLazyPath(ctx, item, ctx.path, i)));
+-        if (ctx.common.async) {
+-            return Promise.all(elements).then((elements) => finalizeSet(elements));
+-        }
+-        else {
+-            return finalizeSet(elements);
++        if (def.maxSize !== null && ctx.data.size > def.maxSize.value) {
++            return INVALID;
+         }
++        return parseCollectionElements(ctx, ctx.data.values(),
++            (item, index) => valueType._parse(new ParseInputLazyPath(ctx, item, ctx.path, index)), finalizeSet);
+     }
+     min(minSize, message) {
+         return new ZodSet({
+@@ -2908,13 +2934,14 @@ export class ZodFunction extends ZodType {
+                 },
+             });
+         }
+-        const params = { errorMap: ctx.common.contextualErrorMap };
++        const createParams = () => ({ errorMap: ctx.common.contextualErrorMap, [issueBudgetParam]: { count: 0, truncated: false, rootIssues: null, limit: 99 } });
+         const fn = ctx.data;
+         if (this._def.returns instanceof ZodPromise) {
+             // Would love a way to avoid disabling this rule, but we need an alias (using an arrow function was what caused 2651).
+             // eslint-disable-next-line @typescript-eslint/no-this-alias
+             const me = this;
+             return OK(async function (...args) {
++                const params = createParams();
+                 const error = new ZodError([]);
+                 const parsedArgs = await me._def.args.parseAsync(args, params).catch((e) => {
+                     error.addIssue(makeArgsIssue(args, e));
+@@ -2922,7 +2949,7 @@ export class ZodFunction extends ZodType {
+                 });
+                 const result = await Reflect.apply(fn, this, parsedArgs);
+                 const parsedReturns = await me._def.returns._def.type
+-                    .parseAsync(result, params)
++                    .parseAsync(result, createParams())
+                     .catch((e) => {
+                     error.addIssue(makeReturnsIssue(result, e));
+                     throw error;
+@@ -2935,12 +2962,13 @@ export class ZodFunction extends ZodType {
+             // eslint-disable-next-line @typescript-eslint/no-this-alias
+             const me = this;
+             return OK(function (...args) {
++                const params = createParams();
+                 const parsedArgs = me._def.args.safeParse(args, params);
+                 if (!parsedArgs.success) {
+                     throw new ZodError([makeArgsIssue(args, parsedArgs.error)]);
+                 }
+                 const result = Reflect.apply(fn, this, parsedArgs.data);
+-                const parsedReturns = me._def.returns.safeParse(result, params);
++                const parsedReturns = me._def.returns.safeParse(result, createParams());
+                 if (!parsedReturns.success) {
+                     throw new ZodError([makeReturnsIssue(result, parsedReturns.error)]);
+                 }
+diff --git a/v3/types.cjs b/v3/types.cjs
+index 7c3fa90..9c22648 100644
+--- a/v3/types.cjs
++++ b/v3/types.cjs
+@@ -9,6 +9,51 @@ const errors_js_1 = require("./errors.cjs");
+ const errorUtil_js_1 = require("./helpers/errorUtil.cjs");
+ const parseUtil_js_1 = require("./helpers/parseUtil.cjs");
+ const util_js_1 = require("./helpers/util.cjs");
++const issueBudgetParam = Symbol("zod.issueBudget");
++
++// Bound invalid collection work as well as retained diagnostics. A truncated
++// failed union alternative must not reject a subsequently valid result.
++function parseCollectionElements(ctx, values, parseElement, finalize) {
++    const inputSize = Array.isArray(ctx.data) ? ctx.data.length : ctx.data.size;
++    if (inputSize === 0) return finalize([]);
++    if (ctx.common.async) {
++        return (async () => {
++            const results = [];
++            let batch = [], index = 0;
++            const flush = async () => {
++                const current = batch;
++                batch = [];
++                const parsed = await Promise.all(current);
++                results.push(...parsed);
++                return ctx.common.issueBudget.truncated && parsed.some(item => item.status !== "valid");
++            };
++            try {
++                for (const value of values) {
++                    batch.push(parseElement(value, index++));
++                    if (batch.length >= 32 || ctx.common.issueBudget.truncated) {
++                        if (await flush()) return parseUtil_js_1.INVALID;
++                    }
++                    if (index >= inputSize) break;
++                }
++                if (batch.length && await flush()) return parseUtil_js_1.INVALID;
++                return finalize(results);
++            } catch (error) {
++                await Promise.allSettled(batch);
++                throw error;
++            }
++        })();
++    }
++    const results = [];
++    let index = 0;
++    for (const value of values) {
++        const parsed = parseElement(value, index++);
++        results.push(parsed);
++        if (ctx.common.issueBudget.truncated && parsed.status !== "valid") return parseUtil_js_1.INVALID;
++        if (index >= inputSize) break;
++    }
++    return finalize(results);
++}
++
+ class ParseInputLazyPath {
+     constructor(parent, value, path, key) {
+         this._cachedPath = [];
+@@ -123,6 +168,7 @@ class ZodType {
+         const ctx = {
+             common: {
+                 issues: [],
++                issueBudget: params?.[issueBudgetParam] ?? { count: 0, truncated: false, rootIssues: null },
+                 async: params?.async ?? false,
+                 contextualErrorMap: params?.errorMap,
+             },
+@@ -132,6 +178,7 @@ class ZodType {
+             data,
+             parsedType: (0, util_js_1.getParsedType)(data),
+         };
++        ctx.common.issueBudget.rootIssues = ctx.common.issues;
+         const result = this._parseSync({ data, path: ctx.path, parent: ctx });
+         return handleResult(ctx, result);
+     }
+@@ -139,6 +186,7 @@ class ZodType {
+         const ctx = {
+             common: {
+                 issues: [],
++                issueBudget: { count: 0, truncated: false, rootIssues: null },
+                 async: !!this["~standard"].async,
+             },
+             path: [],
+@@ -147,6 +195,7 @@ class ZodType {
+             data,
+             parsedType: (0, util_js_1.getParsedType)(data),
+         };
++        ctx.common.issueBudget.rootIssues = ctx.common.issues;
+         if (!this["~standard"].async) {
+             try {
+                 const result = this._parseSync({ data, path: [], parent: ctx });
+@@ -164,8 +213,10 @@ class ZodType {
+                 }
+                 ctx.common = {
+                     issues: [],
++                    issueBudget: { count: 0, truncated: false, rootIssues: null },
+                     async: true,
+                 };
++                ctx.common.issueBudget.rootIssues = ctx.common.issues;
+             }
+         }
+         return this._parseAsync({ data, path: [], parent: ctx }).then((result) => (0, parseUtil_js_1.isValid)(result)
+@@ -186,6 +237,7 @@ class ZodType {
+         const ctx = {
+             common: {
+                 issues: [],
++                issueBudget: params?.[issueBudgetParam] ?? { count: 0, truncated: false, rootIssues: null },
+                 contextualErrorMap: params?.errorMap,
+                 async: true,
+             },
+@@ -195,6 +247,7 @@ class ZodType {
+             data,
+             parsedType: (0, util_js_1.getParsedType)(data),
+         };
++        ctx.common.issueBudget.rootIssues = ctx.common.issues;
+         const maybeAsyncResult = this._parse({ data, path: ctx.path, parent: ctx });
+         const result = await ((0, parseUtil_js_1.isAsync)(maybeAsyncResult) ? maybeAsyncResult : Promise.resolve(maybeAsyncResult));
+         return handleResult(ctx, result);
+@@ -1821,17 +1874,16 @@ class ZodArray extends ZodType {
+                 status.dirty();
+             }
+         }
+-        if (ctx.common.async) {
+-            return Promise.all([...ctx.data].map((item, i) => {
+-                return def.type._parseAsync(new ParseInputLazyPath(ctx, item, ctx.path, i));
+-            })).then((result) => {
+-                return parseUtil_js_1.ParseStatus.mergeArray(status, result);
+-            });
++        // Enforce declared limits before reading collection elements.
++        if ((def.exactLength !== null && ctx.data.length > def.exactLength.value) ||
++            (def.maxLength !== null && ctx.data.length > def.maxLength.value)) {
++            return parseUtil_js_1.INVALID;
+         }
+-        const result = [...ctx.data].map((item, i) => {
+-            return def.type._parseSync(new ParseInputLazyPath(ctx, item, ctx.path, i));
+-        });
+-        return parseUtil_js_1.ParseStatus.mergeArray(status, result);
++        return parseCollectionElements(ctx, ctx.data,
++            (item, index) => ctx.common.async
++                ? def.type._parseAsync(new ParseInputLazyPath(ctx, item, ctx.path, index))
++                : def.type._parseSync(new ParseInputLazyPath(ctx, item, ctx.path, index)),
++            result => parseUtil_js_1.ParseStatus.mergeArray(status, result));
+     }
+     get element() {
+         return this._def.type;
+@@ -2765,44 +2817,20 @@ class ZodMap extends ZodType {
+         }
+         const keyType = this._def.keyType;
+         const valueType = this._def.valueType;
+-        const pairs = [...ctx.data.entries()].map(([key, value], index) => {
+-            return {
+-                key: keyType._parse(new ParseInputLazyPath(ctx, key, ctx.path, [index, "key"])),
+-                value: valueType._parse(new ParseInputLazyPath(ctx, value, ctx.path, [index, "value"])),
++        return parseCollectionElements(ctx, ctx.data.entries(), ([key, value], index) => {
++            const parsedKey = keyType._parse(new ParseInputLazyPath(ctx, key, ctx.path, [index, "key"]));
++            const parsedValue = valueType._parse(new ParseInputLazyPath(ctx, value, ctx.path, [index, "value"]));
++            const combine = (key, value) => {
++                if (key.status === "aborted" || value.status === "aborted") return parseUtil_js_1.INVALID;
++                return { status: key.status === "dirty" || value.status === "dirty" ? "dirty" : "valid",
++                    value: [key.value, value.value] };
+             };
++            return ctx.common.async ? Promise.all([parsedKey, parsedValue]).then(([key, value]) => combine(key, value))
++                : combine(parsedKey, parsedValue);
++        }, results => {
++            const merged = parseUtil_js_1.ParseStatus.mergeArray(status, results);
++            return merged.status === "aborted" ? merged : { status: merged.status, value: new Map(merged.value) };
+         });
+-        if (ctx.common.async) {
+-            const finalMap = new Map();
+-            return Promise.resolve().then(async () => {
+-                for (const pair of pairs) {
+-                    const key = await pair.key;
+-                    const value = await pair.value;
+-                    if (key.status === "aborted" || value.status === "aborted") {
+-                        return parseUtil_js_1.INVALID;
+-                    }
+-                    if (key.status === "dirty" || value.status === "dirty") {
+-                        status.dirty();
+-                    }
+-                    finalMap.set(key.value, value.value);
+-                }
+-                return { status: status.value, value: finalMap };
+-            });
+-        }
+-        else {
+-            const finalMap = new Map();
+-            for (const pair of pairs) {
+-                const key = pair.key;
+-                const value = pair.value;
+-                if (key.status === "aborted" || value.status === "aborted") {
+-                    return parseUtil_js_1.INVALID;
+-                }
+-                if (key.status === "dirty" || value.status === "dirty") {
+-                    status.dirty();
+-                }
+-                finalMap.set(key.value, value.value);
+-            }
+-            return { status: status.value, value: finalMap };
+-        }
+     }
+ }
+ exports.ZodMap = ZodMap;
+@@ -2864,13 +2892,11 @@ class ZodSet extends ZodType {
+             }
+             return { status: status.value, value: parsedSet };
+         }
+-        const elements = [...ctx.data.values()].map((item, i) => valueType._parse(new ParseInputLazyPath(ctx, item, ctx.path, i)));
+-        if (ctx.common.async) {
+-            return Promise.all(elements).then((elements) => finalizeSet(elements));
+-        }
+-        else {
+-            return finalizeSet(elements);
++        if (def.maxSize !== null && ctx.data.size > def.maxSize.value) {
++            return parseUtil_js_1.INVALID;
+         }
++        return parseCollectionElements(ctx, ctx.data.values(),
++            (item, index) => valueType._parse(new ParseInputLazyPath(ctx, item, ctx.path, index)), finalizeSet);
+     }
+     min(minSize, message) {
+         return new ZodSet({
+@@ -2938,13 +2964,14 @@ class ZodFunction extends ZodType {
+                 },
+             });
+         }
+-        const params = { errorMap: ctx.common.contextualErrorMap };
++        const createParams = () => ({ errorMap: ctx.common.contextualErrorMap, [issueBudgetParam]: { count: 0, truncated: false, rootIssues: null, limit: 99 } });
+         const fn = ctx.data;
+         if (this._def.returns instanceof ZodPromise) {
+             // Would love a way to avoid disabling this rule, but we need an alias (using an arrow function was what caused 2651).
+             // eslint-disable-next-line @typescript-eslint/no-this-alias
+             const me = this;
+             return (0, parseUtil_js_1.OK)(async function (...args) {
++                const params = createParams();
+                 const error = new ZodError_js_1.ZodError([]);
+                 const parsedArgs = await me._def.args.parseAsync(args, params).catch((e) => {
+                     error.addIssue(makeArgsIssue(args, e));
+@@ -2952,7 +2979,7 @@ class ZodFunction extends ZodType {
+                 });
+                 const result = await Reflect.apply(fn, this, parsedArgs);
+                 const parsedReturns = await me._def.returns._def.type
+-                    .parseAsync(result, params)
++                    .parseAsync(result, createParams())
+                     .catch((e) => {
+                     error.addIssue(makeReturnsIssue(result, e));
+                     throw error;
+@@ -2965,12 +2992,13 @@ class ZodFunction extends ZodType {
+             // eslint-disable-next-line @typescript-eslint/no-this-alias
+             const me = this;
+             return (0, parseUtil_js_1.OK)(function (...args) {
++                const params = createParams();
+                 const parsedArgs = me._def.args.safeParse(args, params);
+                 if (!parsedArgs.success) {
+                     throw new ZodError_js_1.ZodError([makeArgsIssue(args, parsedArgs.error)]);
+                 }
+                 const result = Reflect.apply(fn, this, parsedArgs.data);
+-                const parsedReturns = me._def.returns.safeParse(result, params);
++                const parsedReturns = me._def.returns.safeParse(result, createParams());
+                 if (!parsedReturns.success) {
+                     throw new ZodError_js_1.ZodError([makeReturnsIssue(result, parsedReturns.error)]);
+                 }
+diff --git a/v3/helpers/parseUtil.js b/v3/helpers/parseUtil.js
+index 91b2afb..9274f0c 100644
+--- a/v3/helpers/parseUtil.js
++++ b/v3/helpers/parseUtil.js
+@@ -29,7 +29,20 @@ export const makeIssue = (params) => {
+     };
+ };
+ export const EMPTY_PATH = [];
++const MAX_RETAINED_ISSUES = 100;
+ export function addIssueToContext(ctx, issueData) {
++    const budget = ctx.common.issueBudget;
++    if (!budget) throw new Error("Missing Zod v3 issue budget.");
++    const issueLimit = budget.limit ?? MAX_RETAINED_ISSUES;
++    if (budget.count >= issueLimit - 1) {
++        if (!budget.truncated) {
++            budget.truncated = true;
++            budget.count++;
++            budget.rootIssues.push({ code: "custom", path: [], message: "Too many validation issues; additional issues omitted." });
++        }
++        return;
++    }
++    budget.count++;
+     const overrideMap = getErrorMap();
+     const issue = makeIssue({
+         issueData: issueData,
+diff --git a/v3/helpers/parseUtil.cjs b/v3/helpers/parseUtil.cjs
+index a5541c5..9c86960 100644
+--- a/v3/helpers/parseUtil.cjs
++++ b/v3/helpers/parseUtil.cjs
+@@ -37,7 +37,20 @@ const makeIssue = (params) => {
+ };
+ exports.makeIssue = makeIssue;
+ exports.EMPTY_PATH = [];
++const MAX_RETAINED_ISSUES = 100;
+ function addIssueToContext(ctx, issueData) {
++    const budget = ctx.common.issueBudget;
++    if (!budget) throw new Error("Missing Zod v3 issue budget.");
++    const issueLimit = budget.limit ?? MAX_RETAINED_ISSUES;
++    if (budget.count >= issueLimit - 1) {
++        if (!budget.truncated) {
++            budget.truncated = true;
++            budget.count++;
++            budget.rootIssues.push({ code: "custom", path: [], message: "Too many validation issues; additional issues omitted." });
++        }
++        return;
++    }
++    budget.count++;
+     const overrideMap = (0, errors_js_1.getErrorMap)();
+     const issue = (0, exports.makeIssue)({
+         issueData: issueData,

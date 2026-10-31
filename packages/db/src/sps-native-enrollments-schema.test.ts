@@ -64,20 +64,43 @@ if (!support.supported) console.warn(`Skipping Native enrollment PostgreSQL chec
 describePostgres("Native enrollment PostgreSQL constraints and restore", () => {
   let db: ReturnType<typeof createDb>;
   let fixture: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | undefined;
+  let fixtureStartup: Promise<Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>> | undefined;
   const createdAt = new Date("2026-10-25T00:00:00.000Z");
   const expiresAt = new Date("2026-10-25T01:00:00.000Z");
   const certificate = Buffer.from([0x30, 0x00]).toString("base64url");
   const certificateSha256 = createHash("sha256").update(Buffer.from(certificate, "base64url")).digest("hex");
 
   beforeAll(async () => {
-    fixture = await startEmbeddedPostgresTestDatabase("sps-native-enrollment-schema-");
+    fixtureStartup = startEmbeddedPostgresTestDatabase("sps-native-enrollment-schema-");
+    fixture = await fixtureStartup;
     db = createDb(fixture.connectionString);
   }, 30_000);
 
   afterAll(async () => {
-    await db?.$client.end();
-    await fixture?.cleanup();
-  });
+    const cleanupErrors: unknown[] = [];
+    try {
+      // Vitest can time out beforeAll while startup is still in flight. Join
+      // that promise before attempting fixture cleanup so a late-created
+      // fixture is not left behind.
+      if (!fixture && fixtureStartup) fixture = await fixtureStartup;
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+    try {
+      await db?.$client.end();
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+    try {
+      await fixture?.cleanup();
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+    if (cleanupErrors.length === 1) throw cleanupErrors[0];
+    if (cleanupErrors.length > 1) {
+      throw new AggregateError(cleanupErrors, "Native enrollment PostgreSQL fixture cleanup failed.");
+    }
+  }, 30_000);
 
   async function signingRow(): Promise<typeof spsNativeEnrollments.$inferInsert> {
     const hostId = randomUUID();

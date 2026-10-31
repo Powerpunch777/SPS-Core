@@ -10,6 +10,8 @@
  */
 
 import type { PluginSpsModelConnection, PluginSpsModelRun, PluginSpsModelSubmitInput } from "./sps-model-types.js";
+import type { PluginSpsConnectivity } from "./sps-connectivity-types.js";
+export type { PluginSpsConnectivity } from "./sps-connectivity-types.js";
 export type { PluginSpsModelConnection, PluginSpsModelTextResult, PluginSpsModelRun, PluginSpsModelSubmitInput } from "./sps-model-types.js";
 import type {
   PaperclipPluginManifestV1,
@@ -730,6 +732,7 @@ export interface PluginSpsExecutionSummary {
 
 /** Finite SPS Runtime operations, excluding general plugin RPC methods. */
 export type PluginSpsRuntimeOperation =
+  | "sps.connectivity.current"
   | "sps.executions.list"
   | "sps.executions.get"
   | "sps.executions.summarize"
@@ -766,6 +769,10 @@ export interface PluginSpsRuntimeTransport {
  * the calling plugin; Core does not interpret it as an Agent, Task, or role.
  */
 export interface PluginSpsClient {
+  connectivity: {
+    /** Requires a current Workspace invocation and sps.connectivity.read. No target selectors. */
+    current(): Promise<PluginSpsConnectivity>;
+  };
   models: {
     list(companyId: string): Promise<PluginSpsModelConnection[]>;
     submit(input: PluginSpsModelSubmitInput): Promise<PluginSpsModelRun>;

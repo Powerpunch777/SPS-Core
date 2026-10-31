@@ -1,6 +1,7 @@
 import { Router } from "express";
-import { z } from "zod";
+import { z } from "zod/v3";
 import {
+  spsNodeClaimRequestSchema,
   // Agent
   createAgentSchema,
   createAgentHireSchema,
@@ -665,6 +666,9 @@ const SPS_HOST_SECURITY = BOARD_SECURITY.map((authentication) => ({
 }));
 const SPS_HOST_AUTH_DESCRIPTION = "Host-only Core infrastructure endpoint. In the SPS Core baseline, a Board actor must use direct loopback transport with both per-launch Desktop access and separate owner-bootstrap Host proofs. A Board session or API key alone is not Host authority. Workspace access is checked separately. Existing local_implicit development authority and non-baseline instance-admin compatibility remain unchanged; this is not the Plugin capability API.";
 const SPS_HOST_OPERATIONS = new Set([
+  "GET /api/plugins/{pluginId}/companies/{companyId}/workspace-runtime-config",
+  "PUT /api/plugins/{pluginId}/companies/{companyId}/workspace-runtime-config",
+  "DELETE /api/plugins/{pluginId}/companies/{companyId}/workspace-runtime-config",
   "GET /api/companies/{companyId}/sps-executions",
   "GET /api/companies/{companyId}/sps-executions/summary",
   "GET /api/companies/{companyId}/sps-executions/{lane}/{runId}",
@@ -1166,8 +1170,10 @@ registry.registerPath({
   path: "/api/companies/{companyId}",
   tags: ["companies"],
   summary: "Delete a company",
+  description: "Requires existing Board access to the Workspace. Drains its owned Plugin workers, durably stops execution, and deletes only after pending work is clear. The deletion transaction rechecks the stopped epoch/revision under lock. A concurrent execution change returns 409; unconfirmed cleanup returns 503 and preserves the Workspace. Refresh before retrying; this does not terminate unrelated Workspace or Host workers.",
   request: { params: z.object({ companyId: z.string() }) },
-  responses: { 200: r.ok(), 401: r.unauthorized, 404: r.notFound },
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound,
+    409: r.conflict, 503: { description: "Workspace cleanup is unavailable or termination is unconfirmed; no Workspace data was deleted." } },
 });
 
 registry.registerPath({
@@ -4519,8 +4525,11 @@ registry.registerPath({
   path: "/api/plugins/{pluginId}",
   tags: ["plugins"],
   summary: "Delete a plugin",
+  description: "Requires confirmed closure of this Plugin's workers before package cleanup. Legacy shared npm installs also require other Plugin workers and starts to be stopped; otherwise returns plugin_package_maintenance_required without uninstalling the package. Caller-owned local source files are preserved.",
   request: { params: z.object({ pluginId: z.string() }) },
-  responses: { 200: r.ok(), 401: r.unauthorized },
+  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound,
+    409: { description: "Dependency impact review or a package maintenance window is required." },
+    503: { description: "Workspace worker cleanup is unconfirmed; inspect operationStarted and operationCompleted before retrying." } },
 });
 
 registry.registerPath({
@@ -5594,114 +5603,6 @@ for (const route of [
   registerCurrentRoute({ method: route[0], path: route[1], tags: ["plugins"], summary: route[2] });
 }
 
-const marketplaceSearchQuerySchema = z.object({
-  q: z.string().optional(),
-  category: z.string().optional(),
-  capability: z.string().optional(),
-  limit: z.string().optional(),
-});
-
-const marketplaceMessageListQuerySchema = z.object({
-  limit: z.string().optional(),
-  after: z.string().optional(),
-});
-
-const marketplaceAssistantSessionSchema = z.object({
-  agentId: z.string().uuid(),
-});
-
-const marketplaceAssistantMessageSchema = z.object({
-  content: z.string().trim().min(1).max(16_000),
-  idempotencyKey: z.string().trim().min(8).max(200).optional(),
-});
-
-const marketplaceAssistantToolSchema = z.object({
-  input: z.unknown(),
-});
-
-registerCurrentRoute({
-  method: "get",
-  path: "/api/companies/{companyId}/marketplace/plugins",
-  tags: ["marketplace"],
-  summary: "Search Marketplace plugins",
-  query: marketplaceSearchQuerySchema,
-  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
-});
-
-registerCurrentRoute({
-  method: "get",
-  path: "/api/companies/{companyId}/marketplace/plugins/{pluginId}",
-  tags: ["marketplace"],
-  summary: "Get Marketplace plugin details",
-  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
-});
-
-registerCurrentRoute({
-  method: "get",
-  path: "/api/companies/{companyId}/marketplace/assistant/agents",
-  tags: ["marketplace"],
-  summary: "List Agents available to Marketplace Assistant",
-  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
-});
-
-registerCurrentRoute({
-  method: "post",
-  path: "/api/companies/{companyId}/marketplace/assistant/sessions",
-  tags: ["marketplace"],
-  summary: "Create or reuse a Marketplace Assistant session",
-  body: marketplaceAssistantSessionSchema,
-  responses: {
-    201: r.ok(),
-    400: r.badRequest,
-    401: r.unauthorized,
-    403: r.forbidden,
-    404: r.notFound,
-    409: r.conflict,
-  },
-});
-
-registerCurrentRoute({
-  method: "get",
-  path: "/api/companies/{companyId}/marketplace/assistant/sessions/{sessionId}/messages",
-  tags: ["marketplace"],
-  summary: "List Marketplace Assistant messages",
-  query: marketplaceMessageListQuerySchema,
-  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
-});
-
-registerCurrentRoute({
-  method: "post",
-  path: "/api/companies/{companyId}/marketplace/assistant/sessions/{sessionId}/messages",
-  tags: ["marketplace"],
-  summary: "Send a Marketplace Assistant message",
-  body: marketplaceAssistantMessageSchema,
-  responses: {
-    202: { description: "Marketplace Assistant run queued" },
-    400: r.badRequest,
-    401: r.unauthorized,
-    403: r.forbidden,
-    404: r.notFound,
-    409: r.conflict,
-  },
-});
-
-registerCurrentRoute({
-  method: "post",
-  path: "/api/companies/{companyId}/marketplace/assistant/sessions/{sessionId}/close",
-  tags: ["marketplace"],
-  summary: "Close a Marketplace Assistant session",
-  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
-});
-
-registerCurrentRoute({
-  method: "post",
-  path: "/api/companies/{companyId}/marketplace/assistant/tools/{toolName}",
-  tags: ["marketplace"],
-  summary: "Execute a scoped Marketplace Assistant tool",
-  body: marketplaceAssistantToolSchema,
-  responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
-});
-
 const pluginDependencyImpactQuerySchema = z.object({
   action: z.enum(["disable", "delete"]),
 });
@@ -5891,6 +5792,7 @@ for (const route of [
   ["delete", "/api/projects/{projectId}/sps-host-share/nodes/{nodeId}", "Revoke an SPS Node project host share grant"],
   ["post", "/api/sps-nodes/{nodeId}/workspace-sources/{sourceId}/claim-route", "Claim an SPS workspace source route"],
   ["post", "/api/sps-nodes/{nodeId}/commands/claim-next", "Claim the next SPS Node command"],
+  ["post", "/api/sps-nodes/{nodeId}/claim-protocol", "Read signed Node claim recovery protocol support without claiming work"],
   ["post", "/api/sps-nodes/{nodeId}/commands/{commandId}/lease", "Renew an SPS Node command lease"],
   ["post", "/api/sps-nodes/{nodeId}/commands/{commandId}/events", "Append SPS Node command events"],
   ["post", "/api/sps-nodes/{nodeId}/commands/{commandId}/complete", "Complete an SPS Node command"],
@@ -5899,7 +5801,16 @@ for (const route of [
   ["post", "/api/sps-nodes/{nodeId}/plugin-runs/{runId}/events", "Append SPS Node plugin-run events"],
   ["post", "/api/sps-nodes/{nodeId}/plugin-runs/{runId}/complete", "Complete an SPS Node plugin run"],
 ] as const) {
-  registerCurrentRoute({ method: route[0], path: route[1], tags: ["sps-nodes"], summary: route[2] });
+  const resumableClaim = route[1].endsWith("/claim-next");
+  registerCurrentRoute({ method: route[0], path: route[1], tags: ["sps-nodes"], summary: route[2],
+    ...(resumableClaim ? {
+      body: spsNodeClaimRequestSchema,
+      description: "Without claimRequestId, preserves the legacy task/204 contract. A signed v1:<created-ms>:<uuid-v4> id opts into a durable 24-hour receipt: HTTP 200 {schemaVersion:1,claimRequestId,kind,work}, including work:null for an empty claim. Retry with the same id and a fresh signature nonce. A receipt does not authorize replay of entered work or bypass current execution grants.",
+      responses: { 200: r.ok(), 204: { description: "Legacy claim only: no queued work" },
+        400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound,
+        409: { description: "Claim expired, input conflicted, Workspace stopped or claimed work is no longer recoverable" } },
+    } : {}),
+  });
 }
 
 for (const route of [
@@ -6008,6 +5919,41 @@ const noStoreResponse = (response: OpenApiResponse): OpenApiResponse => ({
   headers: { "Cache-Control": { description: "This response is not cached.", schema: { type: "string", enum: ["no-store"] } } },
 });
 
+const workspacePluginConfigPath = "/api/plugins/{pluginId}/companies/{companyId}/workspace-runtime-config";
+const workspacePluginConfigParams = z.object({ pluginId: z.string().uuid(), companyId: z.string().uuid() });
+const workspacePluginConfigRecord = z.object({
+  workspaceId: z.string().uuid(), pluginId: z.string().uuid(), configJson: z.record(z.string(), z.unknown()),
+  revision: z.string().uuid().nullable(), updatedAt: z.string().datetime().nullable(),
+}).strict();
+const workspacePluginConfigRevision = z.object({ expectedRevision: z.string().uuid().nullable() }).strict();
+const workspacePluginConfigResponses = {
+  200: noStoreResponse(r.ok(workspacePluginConfigRecord)), 400: r.badRequest,
+  403: r.forbidden, 404: r.notFound,
+  409: { description: "Plugin is unavailable, has no valid Workspace worker, or the expected revision is stale." },
+};
+registerCurrentRoute({
+  method: "get", path: workspacePluginConfigPath, tags: ["plugins"],
+  summary: "Read Host-managed Workspace Plugin runtime configuration", params: workspacePluginConfigParams,
+  description: "Returns the dedicated Workspace config snapshot. An absent record returns empty config and null revision; global Plugin settings are never inherited. Requires a ready Plugin with a declared Workspace worker.",
+  responses: workspacePluginConfigResponses,
+});
+registerCurrentRoute({
+  method: "put", path: workspacePluginConfigPath, tags: ["plugins"],
+  summary: "Save Workspace Plugin runtime configuration", params: workspacePluginConfigParams,
+  body: workspacePluginConfigRevision.extend({ configJson: z.record(z.string(), z.unknown()) }),
+  description: "Validates nonsecret config against the inline Workspace schema and atomically compares expectedRevision. Invalidates only the previous owned runtime after commit. A saved-but-unconfirmed restart returns 503 and the saved revision; refresh explicitly before retrying. Does not replay an action or inherit Host config.",
+  responses: { ...workspacePluginConfigResponses, 422: r.unprocessable,
+    503: { description: "Invalidation is unavailable before save, or saved configuration has an unconfirmed previous-worker close; the latter returns its saved revision." } },
+});
+registerCurrentRoute({
+  method: "delete", path: workspacePluginConfigPath, tags: ["plugins"],
+  summary: "Reset Workspace Plugin runtime configuration", params: workspacePluginConfigParams,
+  body: workspacePluginConfigRevision,
+  description: "Compares expectedRevision and removes the Workspace-owned config record. Returns empty config with a null revision. Required schema fields may need configuration before the next lazy start. A post-commit restart failure returns 503; refresh explicitly before retrying.",
+  responses: { ...workspacePluginConfigResponses,
+    503: { description: "Invalidation is unavailable before reset, or reset committed but the previous owned runtime has not confirmed close." } },
+});
+
 registerCurrentRoute({
   method: "get", path: "/api/companies/{companyId}/sps-executions", tags: ["sps-executions"],
   summary: "List Plugin execution metadata", params: spsWorkspaceParamsSchema, query: spsExecutionHistoryQuerySchema,
@@ -6082,6 +6028,31 @@ const memberDeviceEventSchema = z.object({
   action: z.enum(["request", "approved", "revoked"]), revision: z.number().int().positive(), createdAt: z.string(),
 }).strict();
 const nativeDeviceDescription = "Optional Native Core management contract. Product startup mounts nativeConnectivityManagement only for the prepared Host identity, owned Main IPC binding and exact current SPS Identity Owner session; nativeConnectivityHostId alone is retained for explicit legacy composition. No LAN listener, device TLS handshake, Node grant or Plugin SDK method is created by this endpoint. Unknown query/body fields are rejected; raw certificates and private keys are absent from responses.";
+const nativePairingSchema = z.object({
+  id: z.string().uuid(), status: z.enum(["pending", "expired", "identity_changed", "consumed", "revoked", "exhausted"]),
+  createdAt: z.string().datetime(), expiresAt: z.string().datetime(), failedAttempts: z.number().int().nonnegative(),
+  maxAttempts: z.number().int().positive(), issuedByUserId: z.string(), consumedByUserId: z.string().nullable(),
+  consumedDeviceSnapshotId: z.string().uuid().nullable(), target: z.enum(["any_verified_user", "verified_email"]),
+}).strict();
+const nativePairingDescription = `${nativeDeviceDescription} Invitation management is available only from the local Desktop Host with a current Owner SPS Identity session. Invitations expire after one hour, allow five attempts and are capped at ten active invitations. Listing and revocation never return invitation secrets.`;
+registerCurrentRoute({
+  method: "get", path: "/api/sps/native-pairings", tags: ["sps-native-pairings"],
+  summary: "List local Host invitations", description: nativePairingDescription,
+  responses: { 200: noStoreResponse(r.ok(z.array(nativePairingSchema))), 400: r.badRequest, 403: r.forbidden, 503: { description: "Native Host pairing state is unavailable." } },
+});
+registerCurrentRoute({
+  method: "post", path: "/api/sps/native-pairings", tags: ["sps-native-pairings"],
+  summary: "Create a local Host invitation", description: `${nativePairingDescription} The one-time secret appears only in this response and is not stored or returned by later reads.`,
+  body: z.object({}).strict(),
+  responses: { 201: noStoreResponse(r.ok(z.object({ pairingId: z.string().uuid(), pairingSecret: z.string().min(32).max(128), issuedAt: z.number().int(), expiresAt: z.number().int() }).strict())),
+    400: r.badRequest, 403: r.forbidden, 409: r.conflict, 503: { description: "Invitation state or one-time result delivery is unavailable." } },
+});
+registerCurrentRoute({
+  method: "post", path: "/api/sps/native-pairings/{pairingId}/revoke", tags: ["sps-native-pairings"],
+  summary: "Revoke a local Host invitation", params: z.object({ pairingId: z.string().uuid() }), body: z.object({}).strict(),
+  description: `${nativePairingDescription} Revocation is terminal.`,
+  responses: { 200: noStoreResponse(r.ok(nativePairingSchema)), 400: r.badRequest, 403: r.forbidden, 503: { description: "Native Host pairing state is unavailable." } },
+});
 registerCurrentRoute({
   method: "get", path: "/api/sps/member-devices/status", tags: ["sps-member-devices"],
   summary: "Read the prepared local Native Host binding",
@@ -6121,7 +6092,7 @@ registerCurrentRoute({
 registerCurrentRoute({
   method: "post", path: "/api/companies/{companyId}/sps-member-device-requests", tags: ["sps-member-devices"],
   summary: "Request registration of a Member device", params: spsWorkspaceParamsSchema, body: createSpsMemberDeviceRequestSchema,
-  description: `${nativeDeviceDescription} Authenticated member self-registration creates pending only, not TLS proof or approval. Immutable certificate/key, no owner/Host/status override; a revoked key is not revived. First-time invitation/pairing is a separate unimplemented protocol.`,
+  description: `${nativeDeviceDescription} Authenticated member self-registration creates pending only, not TLS proof or approval. Immutable certificate/key, no owner/Host/status override; a revoked key is not revived. Native TLS enrollment must complete through the explicitly configured Desktop Main TLS ingress.`,
   responses: { 201: noStoreResponse(r.ok(memberDeviceSchema)), 400: r.badRequest, 403: r.forbidden, 409: r.conflict },
 });
 
