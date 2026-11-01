@@ -150,6 +150,112 @@ describe("pluginLoader private npm artifacts", () => {
     expect(assertClear).toHaveBeenCalledTimes(2);
     expect(registry.update).not.toHaveBeenCalled();
     expect(execFileMock).not.toHaveBeenCalled();
+    expect(loader.readPreparedArtifactReferences!()).toEqual([]);
+  });
+
+  it("retains an immutable preparation reference before allocation and through returned candidate inspection", async () => {
+    const installed = createNpmRunner();
+    const loader = createLoader();
+    expect(loader.readPreparedArtifactReferences!()).toEqual([]);
+    const preparing = loader.prepareUpgrade(pluginId, { version: "2.0.0" });
+    expect(() => loader.readPreparedArtifactReferences!()).toThrow("references are unavailable");
+    const prepared = await preparing;
+    const references = loader.readPreparedArtifactReferences!();
+    expect(references).toHaveLength(1);
+    expect(references[0]).toMatchObject({ pluginId, artifactRoot: installed[0]!.prefix, phase: "prepared" });
+    expect(references[0]!.ownerId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(Object.isFrozen(references)).toBe(true);
+    expect(Object.isFrozen(references[0])).toBe(true);
+    const originalPath = prepared.discovered.packagePath;
+    prepared.discovered.packagePath = path.join(root, "different-input");
+    expect(loader.readPreparedArtifactReferences!()).toEqual(references);
+    expect(await readFile(path.join(originalPath, "artifact-marker.txt"), "utf8"))
+      .toBe("@sps/private-npm-upgrade@2.0.0");
+  });
+
+  it("retains the actual commit input until acknowledgement and hands the original preparation to the registry", async () => {
+    createNpmRunner();
+    const loader = createLoader();
+    const prepared = await loader.prepareUpgrade(pluginId, { version: "2.0.0" });
+    let acknowledge!: () => void;
+    registry.update.mockImplementationOnce(() => new Promise<void>(resolve => { acknowledge = resolve; }));
+    const committing = loader.commitPreparedUpgrade(pluginId, { ...prepared });
+    await vi.waitFor(() => expect(registry.update).toHaveBeenCalledOnce());
+    const references = loader.readPreparedArtifactReferences!();
+    expect(references.map(reference => reference.phase).sort()).toEqual(["committing", "prepared"]);
+    expect(references.some(reference => reference.artifactRoot === prepared.discovered.packagePath)).toBe(true);
+    acknowledge();
+    await committing;
+    expect(loader.readPreparedArtifactReferences!()).toEqual([]);
+  });
+
+  it("keeps both original and changed actual commit paths after a lost write response", async () => {
+    createNpmRunner();
+    const loader = createLoader();
+    const prepared = await loader.prepareUpgrade(pluginId, { version: "2.0.0" });
+    const original = loader.readPreparedArtifactReferences!()[0]!;
+    const attempted = path.join(root, "different-input");
+    prepared.discovered.packagePath = attempted;
+    registry.update.mockRejectedValueOnce(new Error("commit response lost"));
+    await expect(loader.commitPreparedUpgrade(pluginId, prepared)).rejects.toThrow("commit response lost");
+    const references = loader.readPreparedArtifactReferences!();
+    expect(references).toHaveLength(2);
+    expect(references).toContainEqual({ ...original, phase: "uncertain" });
+    expect(references.some(reference => reference.artifactRoot === attempted && reference.phase === "uncertain")).toBe(true);
+    expect(await readFile(path.join(original.artifactRoot, "node_modules", "@sps", "private-npm-upgrade", "artifact-marker.txt"), "utf8"))
+      .toBe("@sps/private-npm-upgrade@2.0.0");
+  });
+
+  it("releases only its own known-rejected preparation after actual stage cleanup", async () => {
+    createNpmRunner();
+    const loader = createLoader();
+    const retained = await loader.prepareUpgrade(pluginId, { version: "2.0.0" });
+    const original = loader.readPreparedArtifactReferences!();
+    execFileMock.mockImplementationOnce((...args: unknown[]) => {
+      const callback = args[3] as (error: Error | null) => void;
+      callback(new Error("controlled npm failure"));
+      return {};
+    });
+    await expect(loader.prepareUpgrade(pluginId, { version: "3.0.0" })).rejects.toThrow("controlled npm failure");
+    expect(loader.readPreparedArtifactReferences!()).toEqual(original);
+    expect(await readFile(path.join(retained.discovered.packagePath, "artifact-marker.txt"), "utf8"))
+      .toBe("@sps/private-npm-upgrade@2.0.0");
+    expect(await readdir(path.dirname(original[0]!.artifactRoot))).toEqual([path.basename(original[0]!.artifactRoot)]);
+  });
+
+  it.each(["acknowledged", "lost response"])("keeps commit ownership captured when the caller swaps candidates before %s", async outcome => {
+    createNpmRunner();
+    const loader = createLoader();
+    const first = await loader.prepareUpgrade(pluginId, { version: "2.0.0" });
+    const firstPath = first.discovered.packagePath;
+    const second = await loader.prepareUpgrade(pluginId, { version: "3.0.0" });
+    const before = loader.readPreparedArtifactReferences!();
+    const firstReference = before.find(reference => firstPath.startsWith(`${reference.artifactRoot}${path.sep}`))!;
+    const secondReference = before.find(reference => second.discovered.packagePath.startsWith(`${reference.artifactRoot}${path.sep}`))!;
+    let acknowledge!: () => void;
+    let reject!: (error: Error) => void;
+    registry.update.mockImplementationOnce(() => new Promise<void>((resolve, rejectPromise) => {
+      acknowledge = resolve; reject = rejectPromise;
+    }));
+    const committing = loader.commitPreparedUpgrade(pluginId, first);
+    const expected = outcome === "lost response" ? assertRejected() : committing;
+    async function assertRejected() { await expect(committing).rejects.toThrow("commit reply lost"); }
+    await vi.waitFor(() => expect(registry.update).toHaveBeenCalledOnce());
+    first.discovered = second.discovered;
+    expect(registry.update.mock.calls[0]![1]).toMatchObject({ packagePath: firstPath, version: "2.0.0" });
+    if (outcome === "lost response") reject(new Error("commit reply lost"));
+    else acknowledge();
+    await expected;
+    const after = loader.readPreparedArtifactReferences!();
+    expect(after).toContainEqual(secondReference);
+    if (outcome === "acknowledged") expect(after).toEqual([secondReference]);
+    else {
+      expect(after).toHaveLength(3);
+      expect(after).toContainEqual({ ...firstReference, phase: "uncertain" });
+      expect(after.some(reference => reference.artifactRoot === firstPath && reference.phase === "uncertain")).toBe(true);
+    }
+    expect(await readFile(path.join(second.discovered.packagePath, "artifact-marker.txt"), "utf8"))
+      .toBe("@sps/private-npm-upgrade@3.0.0");
   });
 
   it("installs separate npm packages under immutable UUID-owned prefixes and persists exact paths", async () => {

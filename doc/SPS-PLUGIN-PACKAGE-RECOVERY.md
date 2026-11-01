@@ -263,3 +263,51 @@ or a coherent multi-source maintenance snapshot. Cleanup must still compose
 DB/journal/Registry/preparation references, canonicalize and verify paths, and
 hold the real mutation fence with fresh Host authority. No remove API, UI,
 automatic collection or additional execution permission is supplied here.
+
+### Prepared Candidates And Registry Stage References
+
+The loader's optional Host-private `readPreparedArtifactReferences()` tracks
+upgrade preparation before its first awaited operation. Unresolved allocation
+makes the reader unavailable rather than returning an empty reference set.
+Allocated roots remain captured through returned candidate inspection; mutating
+the returned discovery object cannot rewrite that captured root. A separate
+reference captures the actual commit input before the registry write. A known
+write acknowledgement hands that reference to the committed Registry path;
+a rejected write preserves both the original preparation and actual attempted
+input as uncertain. Known pre-allocation rejection or confirmed rejected-stage
+cleanup releases only that preparation's reference. These paths are private
+inputs, not verified current filesystem identities or removal permits.
+
+This is process-local retention. An uncommitted returned candidate remains
+protected for the loader's lifetime; normal lifecycle return, `upgrade_pending`
+or rollback is not an implicit permission to release it. A generic scoped-release
+experiment was removed after review showed it could discard the original
+prepared root following a changed-path uncertain commit. Typed abandonment and
+review handoff, startup reconstruction from durable sources, and a shared
+non-draining mutation fence remain part of the unfinished cleanup composition.
+
+Registry staging separately exposes Host-private `readArtifactReferences()`.
+It observes every `staged`, `review_pending` and `registered` root without
+importing package code or creating storage. All index records must validate
+before any paths are returned. Reads are handle-bound and limited to8MiB and
+10,000records, reject links/hardlinks, invalid identity/review relationships,
+changed membership and unknown fields, and keep missing managed package paths
+as protection references. The strict reader accepts the current pretty-JSON
+writer spelling with optional UTF-8 BOM, LF/CRLF and final newline; other
+spellings and duplicate/escaped duplicate keys are unavailable. Existing normal
+Registry list/write semantics are not replaced by this stricter private reader.
+Ordinary Windows case aliases resolve only when the original and canonical
+ancestries identify the same plain directories. Missing descendants stay
+protected under that verified parent; a string case fold is not identity proof.
+Actual 8.3 coverage is skipped when the filesystem does not provide that alias.
+
+The final fourteen-file preparation, Registry and lifecycle selection passed
+151 tests with one unavailable-8.3 skip (152 total). All thirty Core workspace
+typechecks and the full build passed locally. These are not packaged or full
+Linux acceptance of the resulting revision.
+
+Neither reader forms an atomic multi-source maintenance snapshot, covers an
+independent Desktop preview process, authorizes cleanup of preexisting Registry
+trees, or permits deletion. The final tool must still join every reference
+source and fence actual package mutations/starts without draining unrelated
+Workers. No SDK, public route, migration or Settings deletion action is added.

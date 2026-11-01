@@ -620,6 +620,14 @@ export interface PreparedPluginUpgrade {
   discovered: DiscoveredPlugin;
 }
 
+/** Host-private live preparation reference, not filesystem ownership or deletion authority. */
+export interface PreparedPluginArtifactReference {
+  readonly ownerId: string;
+  readonly pluginId: string;
+  readonly artifactRoot: string;
+  readonly phase: "preparing" | "prepared" | "committing" | "uncertain";
+}
+
 // ---------------------------------------------------------------------------
 // Service interface
 // ---------------------------------------------------------------------------
@@ -716,6 +724,9 @@ export interface PluginLoader {
   prepareUpgrade(pluginId: string, options: PluginUpgradeOptions): Promise<PreparedPluginUpgrade>;
 
   commitPreparedUpgrade(pluginId: string, prepared: PreparedPluginUpgrade): Promise<void>;
+
+  /** Retains returned candidates and uncertain writes; unresolved allocation makes reads unavailable. */
+  readPreparedArtifactReferences?(): readonly PreparedPluginArtifactReference[];
 
   upgradePlugin(pluginId: string, options: PluginUpgradeOptions): Promise<PreparedPluginUpgrade>;
 
@@ -1353,6 +1364,16 @@ export function pluginLoader(
   const capabilityValidator = pluginCapabilityValidator();
   const log = logger.child({ service: "plugin-loader" });
   const artifactOwnership = createSpsPluginArtifactOwnership(localPluginDir);
+  type PreparationReference = { ownerId: string; pluginId: string; artifactRoot: string | null;
+    phase: PreparedPluginArtifactReference["phase"]; allocationEntered: boolean; cleanupConfirmed: boolean };
+  const preparationReferences = new Map<string, PreparationReference>();
+  const preparedReferences = new WeakMap<DiscoveredPlugin, PreparationReference>();
+  function beginPreparationReference(pluginId: string): PreparationReference {
+    const reference: PreparationReference = { ownerId: randomUUID(), pluginId, artifactRoot: null,
+      phase: "preparing", allocationEntered: false, cleanupConfirmed: false };
+    preparationReferences.set(reference.ownerId, reference);
+    return reference;
+  }
   const initialLoadReadiness = createPluginInitialLoadReadiness();
   const hostVersion = runtimeServices?.instanceInfo.hostVersion;
 
@@ -1717,6 +1738,24 @@ export function pluginLoader(
     pluginId: string,
     upgradeOptions: PluginUpgradeOptions,
   ): Promise<PreparedPluginUpgrade> {
+    const reference = beginPreparationReference(pluginId);
+    try {
+      const prepared = await preparePluginUpgradeCandidate(pluginId, upgradeOptions, reference);
+      reference.phase = "prepared";
+      preparedReferences.set(prepared.discovered, reference);
+      return prepared;
+    } catch (error) {
+      if (!reference.allocationEntered || reference.cleanupConfirmed) preparationReferences.delete(reference.ownerId);
+      else reference.phase = "uncertain";
+      throw error;
+    }
+  }
+
+  async function preparePluginUpgradeCandidate(
+    pluginId: string,
+    upgradeOptions: PluginUpgradeOptions,
+    reference: PreparationReference,
+  ): Promise<PreparedPluginUpgrade> {
     await options.packageOperations?.assertClear(pluginId);
     const plugin = (await registry.getById(pluginId)) as {
       id: string;
@@ -1747,8 +1786,10 @@ export function pluginLoader(
     // is still being parsed, imported, and capability-checked. Keep both npm
     // and local development candidates in a private staging directory until
     // the lifecycle commits the replacement.
+    reference.allocationEntered = true;
     const staging = await allocateArtifact("upgrade", pluginId);
     const stagingDir = staging.root;
+    reference.artifactRoot = stagingDir;
     let stagedLocalPath: string | undefined;
 
     try {
@@ -1790,6 +1831,7 @@ export function pluginLoader(
       // Removing only this UUID-scoped staging directory cannot affect the
       // active package, which remains at its pre-upgrade packagePath.
       await rm(stagingDir, { recursive: true, force: true });
+      reference.cleanupConfirmed = true;
       throw error;
     }
   }
@@ -1798,13 +1840,31 @@ export function pluginLoader(
     pluginId: string,
     prepared: PreparedPluginUpgrade,
   ): Promise<void> {
-    await options.packageOperations?.assertClear(pluginId);
-    await registry.update(pluginId, {
-      packageName: prepared.discovered.packageName,
-      packagePath: prepared.discovered.packagePath,
-      version: prepared.discovered.version,
-      manifest: prepared.newManifest,
-    });
+    const commit = beginPreparationReference(pluginId);
+    commit.phase = "committing";
+    let writeEntered = false;
+    let original: PreparationReference | undefined;
+    try {
+      await options.packageOperations?.assertClear(pluginId);
+      const discovered = prepared.discovered;
+      original = preparedReferences.get(discovered);
+      const input = { packageName: discovered.packageName, packagePath: discovered.packagePath,
+        version: discovered.version, manifest: prepared.newManifest };
+      commit.artifactRoot = input.packagePath;
+      writeEntered = true;
+      await registry.update(pluginId, input);
+      preparationReferences.delete(commit.ownerId);
+      if (original?.pluginId === pluginId) preparationReferences.delete(original.ownerId);
+    } catch (error) {
+      // A rejected write cannot prove its path was not committed. Preserve both
+      // the original prepared root and the actual attempted commit input.
+      if (writeEntered) {
+        commit.phase = "uncertain";
+        if (original?.pluginId === pluginId) original.phase = "uncertain";
+      }
+      else preparationReferences.delete(commit.ownerId);
+      throw error;
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -1812,6 +1872,18 @@ export function pluginLoader(
   // -------------------------------------------------------------------------
 
   return {
+    readPreparedArtifactReferences(): readonly PreparedPluginArtifactReference[] {
+      if (preparationReferences.size > 60_000) throw new Error("Plugin preparation references are unavailable; preserve their files.");
+      return Object.freeze([...preparationReferences.values()].sort((left, right) =>
+        left.ownerId < right.ownerId ? -1 : left.ownerId > right.ownerId ? 1 : 0).map(reference => {
+        if (typeof reference.artifactRoot !== "string" || !path.isAbsolute(reference.artifactRoot)
+          || reference.artifactRoot.includes("\0") || reference.artifactRoot.length > 32_768) {
+          throw new Error("Plugin preparation references are unavailable; preserve their files.");
+        }
+        return Object.freeze({ ownerId: reference.ownerId, pluginId: reference.pluginId,
+          artifactRoot: reference.artifactRoot, phase: reference.phase });
+      }));
+    },
     // -----------------------------------------------------------------------
     // discoverAll
     // -----------------------------------------------------------------------
@@ -2180,6 +2252,8 @@ export function pluginLoader(
       const escalated = (prepared.newManifest.capabilities ?? []).filter(capability => !oldCapabilities.has(capability));
       if (escalated.length > 0 && !upgradeOptions.approvedCapabilityEscalation) {
         await removeOwnedStagedArtifact(prepared.discovered.packagePath, prepared.discovered.packageName, localPluginDir);
+        const reference = preparedReferences.get(prepared.discovered);
+        if (reference) preparationReferences.delete(reference.ownerId);
         throw new Error(
           `Upgrade for "${pluginId}" introduces new capabilities that require approval: ${escalated.join(", ")}. ` +
             `The previous version declared [${[...oldCapabilities].join(", ")}]. ` +
@@ -2190,13 +2264,7 @@ export function pluginLoader(
       // This write is autocommitted. A rejected response does not establish
       // that it rolled back; preserve the candidate in either outcome so a
       // committed registry pointer never references an artifact we removed.
-      await assertPackageOperationClear(pluginId);
-      await registry.update(pluginId, {
-        packageName: prepared.discovered.packageName,
-        packagePath: prepared.discovered.packagePath,
-        version: prepared.discovered.version,
-        manifest: prepared.newManifest,
-      });
+      await commitPreparedPluginUpgrade(pluginId, prepared);
       return prepared;
     },
 
