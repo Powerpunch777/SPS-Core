@@ -59,6 +59,7 @@ import {
 } from "./sps-plugin-package-maintenance.js";
 import { samePluginPackageArtifact, type SpsPluginPackageOperation, type SpsPluginPackageOperations,
   type SpsPluginUpgradeOperation } from "./sps-plugin-package-operations.js";
+import type { SpsPluginArtifactMaintenance } from "./sps-plugin-artifact-maintenance.js";
 
 // ---------------------------------------------------------------------------
 // Lifecycle state machine
@@ -294,6 +295,7 @@ export interface PluginLifecycleManager {
  * Options for constructing a PluginLifecycleManager.
  */
 export interface PluginLifecycleManagerOptions {
+  artifactMaintenance?: SpsPluginArtifactMaintenance;
   /** Core composition supplies the durable Host package-operation store. */
   packageOperations?: SpsPluginPackageOperations;
   /** Optional Core-owned Workspace process drain and policy reconciliation. */
@@ -355,6 +357,7 @@ export function pluginLifecycleManager(
   let databaseBackupService: PluginLifecycleManagerOptions["databaseBackupService"];
   let workspaceRuntime: SpsPluginRuntimeMutationCoordinator | undefined;
   let packageOperations: SpsPluginPackageOperations | undefined;
+  let artifactMaintenance: SpsPluginArtifactMaintenance | undefined;
 
   if (options && typeof options === "object" && "discoverAll" in options) {
     // Legacy: second arg is a PluginLoader directly
@@ -367,10 +370,11 @@ export function pluginLifecycleManager(
     databaseBackupService = opts.databaseBackupService;
     workspaceRuntime = opts.workspaceRuntime;
     packageOperations = opts.packageOperations;
+    artifactMaintenance = opts.artifactMaintenance;
   }
 
   const registry = pluginRegistryService(db);
-  let pluginLoaderInstance = loaderArg ?? pluginLoader(db);
+  let pluginLoaderInstance = loaderArg ?? pluginLoader(db, { artifactMaintenance });
   let runtimeLoaderAttached = Boolean(loaderArg);
   const emitter = new EventEmitter();
   emitter.setMaxListeners(100); // plugins may have many listeners; 100 is a safe upper bound
@@ -1367,17 +1371,21 @@ export function pluginLifecycleManager(
       emitter.once(event, listener);
     },
   };
-  if (!workspaceRuntime && !packageOperations) return service;
+  if (!workspaceRuntime && !packageOperations && !artifactMaintenance) return service;
   const coordinate = <T>(pluginId: string, operation: () => Promise<T>, resumeRemoval = false) => {
     const guarded = async () => {
       if (!resumeRemoval) await packageOperations?.assertClear(pluginId);
       return operation();
     };
-    return workspaceRuntime ? withSpsPluginRuntimeMutation(workspaceRuntime, pluginId, guarded) : guarded();
+    const run = () => workspaceRuntime ? withSpsPluginRuntimeMutation(workspaceRuntime, pluginId, guarded) : guarded();
+    return artifactMaintenance ? artifactMaintenance.withActivity(run) : run();
   };
   // Central coordination also covers development reloads and non-HTTP callers.
   return {
     ...service,
+    recoverPackageOperations: () => artifactMaintenance
+      ? artifactMaintenance.withActivity(() => service.recoverPackageOperations!())
+      : service.recoverPackageOperations!(),
     load: id => coordinate(id, () => service.load(id)),
     enable: id => coordinate(id, () => service.enable(id)),
     disable: (id, reason) => coordinate(id, () => service.disable(id, reason)),

@@ -70,6 +70,7 @@ import { applyUiBranding } from "./ui-branding.js";
 import { logger } from "./middleware/logger.js";
 import { DEFAULT_LOCAL_PLUGIN_DIR, pluginLoader } from "./services/plugin-loader.js";
 import { createSpsPluginPackageOperations } from "./services/sps-plugin-package-operations.js";
+import { createSpsPluginArtifactMaintenance } from "./services/sps-plugin-artifact-maintenance.js";
 import { createPluginWorkerManager, type PluginWorkerManager } from "./services/plugin-worker-manager.js";
 import { createSpsNativePluginRuntime } from "./services/sps-native-plugin-runtime.js";
 import { createSpsWorkspacePluginWorkers } from "./services/sps-workspace-plugin-workers.js";
@@ -257,6 +258,7 @@ export async function createApp(
 
   const hostServicesDisposers = new Map<string, () => void>();
   const workerManager = opts.pluginWorkerManager ?? createPluginWorkerManager();
+  const artifactMaintenance = workerManager.artifactMaintenance ?? createSpsPluginArtifactMaintenance();
   const eventBus = createPluginEventBus();
   const streamBus = createPluginStreamBus();
   const workspacePluginWorkers = createSpsWorkspacePluginWorkers(db, workerManager, {
@@ -327,6 +329,7 @@ export async function createApp(
   setPluginEventBus(eventBus);
   const jobStore = pluginJobStore(db);
   const lifecycle = pluginLifecycleManager(db, {
+    artifactMaintenance,
     packageOperations,
     workerManager,
     workspaceRuntime: workspacePluginWorkers,
@@ -359,6 +362,7 @@ export async function createApp(
     db,
     {
       localPluginDir: opts.localPluginDir ?? DEFAULT_LOCAL_PLUGIN_DIR,
+      artifactMaintenance,
       migrationDb: opts.pluginMigrationDb,
       recoveryState: pluginRecoveryState,
       packageOperations,
@@ -418,6 +422,7 @@ export async function createApp(
       { workerManager, workspaceWorkers: workspacePluginWorkers, streamBus, resolveSession: opts.resolveSession },
       { runtime: memoryProviderRuntime },
       {
+        artifactMaintenance,
         stagingRoot: opts.registryStagingDir
           ?? path.join(
             process.env.PAPERCLIP_HOME?.trim()
@@ -683,6 +688,7 @@ export async function createApp(
   );
   const ensureConfiguredBundledPlugins = async (): Promise<void> => {
     await installConfiguredBundledPlugins(configuredBundledPluginPaths, {
+      artifactMaintenance,
       loader,
       lifecycle,
       logger,
@@ -691,6 +697,7 @@ export async function createApp(
   };
   const refreshConfiguredBundledPlugins = async (): Promise<void> => {
     await installConfiguredBundledPlugins(configuredBundledPluginRefreshPaths, {
+      artifactMaintenance,
       loader,
       lifecycle,
       logger,
@@ -698,7 +705,7 @@ export async function createApp(
     }, { installMissing: false });
   };
   let pluginRuntimeStopping = false;
-  const pluginStartup = runPluginStartupUnlessRecovering(pluginRecoveryState, () => {
+  const pluginStartup = runPluginStartupUnlessRecovering(pluginRecoveryState, () => artifactMaintenance.withActivity(async () => {
     // HTTP may begin serving before these bundled-plugin checks finish. Arm
     // the per-plugin barrier synchronously so bridge calls arriving in that
     // window can join their plugin's activation instead of racing a missing worker.
@@ -718,7 +725,7 @@ export async function createApp(
         }
       })
       .finally(() => releaseInitialLoad?.());
-  });
+  }));
   void pluginStartup?.catch((err) => {
     logger.error({ err }, "Failed to load ready plugins on startup");
   });

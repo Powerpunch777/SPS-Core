@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { resolveSpsPluginPackageMetadata } from "./plugin-package-metadata.js";
+import type { SpsPluginArtifactMaintenance } from "./sps-plugin-artifact-maintenance.js";
 
 type PluginManifest = { id: string; version?: string };
 type ExistingPlugin = {
@@ -15,6 +16,7 @@ const requiresHostActivation = (plugin: NonNullable<ExistingPlugin>) =>
   inactiveBundleStatuses.some(status => status === plugin.status);
 
 type BundledPluginBootstrapDependencies = {
+  artifactMaintenance?: SpsPluginArtifactMaintenance;
   loader: {
     installPlugin: (input: { localPath: string }) => Promise<{ manifest: PluginManifest | null }>;
     loadManifest: (pluginPath: string) => Promise<PluginManifest | null>;
@@ -56,6 +58,15 @@ export async function installConfiguredBundledPlugins(
   pluginPaths: readonly string[],
   dependencies: BundledPluginBootstrapDependencies,
   options: { installMissing?: boolean } = {},
+): Promise<void> {
+  const install = () => installConfiguredBundledPluginsAdmitted(pluginPaths, dependencies, options);
+  return dependencies.artifactMaintenance ? dependencies.artifactMaintenance.withActivity(install) : install();
+}
+
+async function installConfiguredBundledPluginsAdmitted(
+  pluginPaths: readonly string[],
+  dependencies: BundledPluginBootstrapDependencies,
+  options: { installMissing?: boolean },
 ): Promise<void> {
   const installMissing = options.installMissing ?? true;
   for (const configuredPath of pluginPaths) {

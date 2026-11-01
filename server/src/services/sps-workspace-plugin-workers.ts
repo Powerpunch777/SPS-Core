@@ -279,7 +279,7 @@ export function createSpsWorkspacePluginWorkers(db: Db, manager: PluginWorkerMan
 
   async function ensure(workspaceId: string, pluginId: string, epoch: string): Promise<Runtime> {
     const key = keyFor(workspaceId, pluginId);
-    return locked(key, async () => {
+    const prepare = () => locked(key, async () => {
       if (closed || catalogMutationActive || mutatingPlugins.has(pluginId) || mutatingWorkspaces.has(workspaceId)) throw unavailable();
       await options.assertPackageOperationClear?.(pluginId);
       if (!await readSpsWorkspacePresence(db, workspaceId)) throw unavailable();
@@ -361,6 +361,7 @@ export function createSpsWorkspacePluginWorkers(db: Db, manager: PluginWorkerMan
         throw unavailable();
       }
     });
+    return manager.artifactMaintenance ? manager.artifactMaintenance.withActivity(prepare) : prepare();
   }
 
   const unregisterStop = registerSpsWorkspaceExecutionStopHandler(db, `sps-workspace-plugin-workers:${randomUUID()}`, async (workspaceId, _reason, stoppedEpoch) => {

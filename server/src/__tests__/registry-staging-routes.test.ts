@@ -6,6 +6,7 @@ import express from "express";
 import request from "supertest";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { calculateRegistryCapabilitiesDigest } from "../services/registry-static-manifest.js";
+import { createSpsPluginArtifactMaintenance, type SpsPluginArtifactMaintenance } from "../services/sps-plugin-artifact-maintenance.js";
 
 const mockRegistry = vi.hoisted(() => ({
   getByKey: vi.fn(),
@@ -56,7 +57,8 @@ async function createStagedPackage(
   return packageRoot;
 }
 
-async function createApp(stagingRoot: string, loader: Record<string, unknown>) {
+async function createApp(stagingRoot: string, loader: Record<string, unknown>, artifactMaintenance?: SpsPluginArtifactMaintenance,
+  isInstanceAdmin = true) {
   const [{ pluginRoutes }, { errorHandler }] = await Promise.all([
     import("../routes/plugins.js"),
     import("../middleware/index.js"),
@@ -68,19 +70,79 @@ async function createApp(stagingRoot: string, loader: Record<string, unknown>) {
       type: "board",
       userId: "owner-1",
       source: "session",
-      isInstanceAdmin: true,
+      isInstanceAdmin,
       companyIds: [],
     } as typeof req.actor;
     next();
   });
   app.use("/api", pluginRoutes({} as never, loader as never, undefined, undefined, undefined, undefined, undefined, {
     stagingRoot,
+    artifactMaintenance,
   }));
   app.use(errorHandler);
   return app;
 }
 
 describe("Registry staging routes", () => {
+  it("returns a bounded conflict before enable preflight while maintenance is active", async () => {
+    const stagingRoot = await mkdtemp(path.join(os.tmpdir(), "registry-route-maintenance-"));
+    cleanup.push(stagingRoot);
+    const maintenance = createSpsPluginArtifactMaintenance();
+    const loader = { previewRegistryPluginEnable: vi.fn(), installPlugin: vi.fn() };
+    const app = await createApp(stagingRoot, loader, maintenance);
+    await maintenance.withMaintenance(async () => {
+      for (const url of ["/api/plugins/registry/stages/absent-stage/enable", "/api/plugins/absent-plugin/upgrade"]) {
+        const response = await request(app).post(url).expect(409);
+        expect(response.body).toEqual({ error: "Plugin artifact maintenance is busy. Wait for the current operation, refresh and retry.",
+          code: "SPS_PLUGIN_ARTIFACT_MAINTENANCE_BUSY" });
+      }
+      expect(loader.previewRegistryPluginEnable).not.toHaveBeenCalled();
+      expect(mockRegistry.getByKey).not.toHaveBeenCalled();
+    });
+    await request(app).post("/api/plugins/registry/stages/absent-stage/enable").expect(404);
+  });
+
+  it("retains instance-admin authorization before returning maintenance status", async () => {
+    const stagingRoot = await mkdtemp(path.join(os.tmpdir(), "registry-route-maintenance-denial-"));
+    cleanup.push(stagingRoot);
+    const maintenance = createSpsPluginArtifactMaintenance();
+    const loader = { previewRegistryPluginEnable: vi.fn() };
+    const app = await createApp(stagingRoot, loader, maintenance, false);
+    await maintenance.withMaintenance(async () => {
+      for (const url of ["/api/plugins/registry/stages/absent-stage/enable", "/api/plugins/absent-plugin/upgrade"]) {
+        const response = await request(app).post(url).expect(403);
+        expect(response.body.code).not.toBe("SPS_PLUGIN_ARTIFACT_MAINTENANCE_BUSY");
+      }
+      expect(loader.previewRegistryPluginEnable).not.toHaveBeenCalled();
+    });
+  });
+
+  it("holds enable admission across the gap after import and before Registry/lifecycle writes", async () => {
+    const stagingRoot = await mkdtemp(path.join(os.tmpdir(), "registry-route-maintenance-gap-"));
+    cleanup.push(stagingRoot);
+    const packageRoot = await createStagedPackage(stagingRoot);
+    const maintenance = createSpsPluginArtifactMaintenance();
+    const loader = { previewRegistryPluginEnable: vi.fn(async () => undefined), installPlugin: vi.fn(async () => undefined) };
+    const app = await createApp(stagingRoot, loader, maintenance);
+    const staged = await request(app).post("/api/plugins/registry/stages").send({ packageRoot,
+      artifactSha256: "a".repeat(64), source: { registryId: "test.registry", kind: "local", releaseLocator: "fixture.json" } }).expect(201);
+    let entered!: () => void, release!: () => void;
+    const waiting = new Promise<void>(done => { entered = done; });
+    const released = new Promise<void>(done => { release = done; });
+    const plugin = { id: "11111111-1111-4111-8111-111111111111", pluginKey: "com.example.weather", status: "installed" };
+    mockRegistry.getByKey.mockImplementationOnce(async () => { entered(); await released; return null; }).mockResolvedValue(plugin);
+    mockLifecycle.load.mockResolvedValue({ ...plugin, status: "ready", version: "1.2.3" });
+    const response = request(app).post(`/api/plugins/registry/stages/${staged.body.stageId}/enable`).then(value => value);
+    try {
+      await waiting;
+      expect(loader.previewRegistryPluginEnable).toHaveBeenCalledOnce();
+      expect(loader.installPlugin).not.toHaveBeenCalled();
+      await expect(maintenance.withMaintenance(async () => {})).rejects.toMatchObject({ code: "SPS_PLUGIN_ARTIFACT_MAINTENANCE_BUSY" });
+    } finally { release(); }
+    expect((await response).status).toBe(200);
+    await maintenance.withMaintenance(async () => {});
+  });
+
   it("keeps a static-only stage out of the Plugin registry until explicit Owner enable", async () => {
     const stagingRoot = await mkdtemp(path.join(os.tmpdir(), "registry-route-stage-"));
     cleanup.push(stagingRoot);

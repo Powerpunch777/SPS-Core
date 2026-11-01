@@ -63,6 +63,7 @@ import {
 import { listReadyAgentPlatformExtensions } from "../services/agent-platform-extensions.js";
 import { pluginLifecycleManager, type PluginLifecycleManager } from "../services/plugin-lifecycle.js";
 import { getCompletedSpsPluginRuntimeMutationResult, SpsPluginRuntimeCleanupPendingError } from "../services/sps-plugin-runtime-mutation.js";
+import { SpsPluginArtifactMaintenanceBusyError, type SpsPluginArtifactMaintenance } from "../services/sps-plugin-artifact-maintenance.js";
 import { PluginPackageMaintenanceRequiredError } from "../services/sps-plugin-package-maintenance.js";
 import { spsWorkspaceSurfaceService } from "../services/sps-workspace-surfaces.js";
 import {
@@ -472,6 +473,7 @@ export interface PluginRouteMemoryDeps {
 /** Owner Host storage for Registry packages that have not executed yet. */
 export interface PluginRouteRegistryStagingDeps {
   stagingRoot: string;
+  artifactMaintenance?: SpsPluginArtifactMaintenance;
 }
 
 /** Canonical, bounded diagnostics owned by the Core runtime. */
@@ -595,6 +597,7 @@ export function pluginRoutes(
   const registry = pluginRegistryService(db);
   const lifecycle = lifecycleManager ?? pluginLifecycleManager(db, {
     loader,
+    artifactMaintenance: registryStagingDeps?.artifactMaintenance,
     workerManager: bridgeDeps?.workerManager ?? webhookDeps?.workerManager,
   });
   const workspaceSurfaces = spsWorkspaceSurfaceService(db);
@@ -603,7 +606,7 @@ export function pluginRoutes(
   const pluginUiActionAuthority = createPluginUiActionAuthority(accessSvc);
   const toolAccess = createPluginToolAccessService(db);
   const registryStages = registryStagingDeps
-    ? registryStagingService(registryStagingDeps.stagingRoot)
+    ? registryStagingService(registryStagingDeps.stagingRoot, registryStagingDeps.artifactMaintenance)
     : null;
 
   const reconcileWorkspacePolicy = async (companyId: string) => {
@@ -631,7 +634,7 @@ export function pluginRoutes(
   };
 
   const sendLifecycleCleanupPending = async (req: Request, res: Response, error: unknown): Promise<boolean> => {
-    if (error instanceof PluginPackageMaintenanceRequiredError) {
+    if (error instanceof PluginPackageMaintenanceRequiredError || error instanceof SpsPluginArtifactMaintenanceBusyError) {
       res.status(409).json({ error: error.message, code: error.code });
       return true;
     }
@@ -1784,6 +1787,7 @@ export function pluginRoutes(
       });
       res.status(201).json(registryStageResponse(stage));
     } catch (error) {
+      if (await sendLifecycleCleanupPending(req, res, error)) return;
       res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
     }
   });
@@ -1793,8 +1797,22 @@ export function pluginRoutes(
    * The static declaration is checked before every enable attempt and must
    * match the imported runtime manifest before the normal lifecycle begins.
    */
-  router.post("/plugins/registry/stages/:stageId/enable", async (req, res) => {
-    assertInstanceAdmin(req);
+  // Keep the whole authorized stage-read/import/register transaction admitted,
+  // including gaps between individual service calls. No authority is delegated.
+  const withRegistryArtifactActivity = <Params extends Record<string, string>>(action: (req: Request<Params>, res: Response) => Promise<void>) =>
+    async (req: Request<Params>, res: Response) => {
+      assertInstanceAdmin(req);
+      try {
+        if (registryStagingDeps?.artifactMaintenance) {
+          await registryStagingDeps.artifactMaintenance.withActivity(() => action(req, res));
+        } else await action(req, res);
+      } catch (error) {
+        if (await sendLifecycleCleanupPending(req, res, error)) return;
+        throw error;
+      }
+    };
+
+  router.post("/plugins/registry/stages/:stageId/enable", withRegistryArtifactActivity<{ stageId: string }>(async (req, res) => {
     if (!registryStages) {
       res.status(501).json({ error: "Registry staging is not enabled" });
       return;
@@ -1886,7 +1904,7 @@ export function pluginRoutes(
       if (await sendLifecycleCleanupPending(req, res, error)) return;
       res.status(400).json({ error: error instanceof Error ? error.message : String(error) });
     }
-  });
+  }));
 
   // ===========================================================================
   // UI Bridge proxy routes (getData / performAction)
@@ -3279,8 +3297,7 @@ export function pluginRoutes(
     });
   });
 
-  router.post("/plugins/:pluginId/upgrade", async (req, res) => {
-    assertInstanceAdmin(req);
+  router.post("/plugins/:pluginId/upgrade", withRegistryArtifactActivity<{ pluginId: string }>(async (req, res) => {
     const { pluginId } = req.params;
     const body = req.body as {
       version?: string;
@@ -3376,7 +3393,7 @@ export function pluginRoutes(
       const message = err instanceof Error ? err.message : String(err);
       res.status(400).json({ error: message });
     }
-  });
+  }));
 
   // ===========================================================================
   // Plugin configuration routes

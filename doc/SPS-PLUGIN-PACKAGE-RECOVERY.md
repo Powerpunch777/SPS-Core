@@ -311,3 +311,52 @@ independent Desktop preview process, authorizes cleanup of preexisting Registry
 trees, or permits deletion. The final tool must still join every reference
 source and fence actual package mutations/starts without draining unrelated
 Workers. No SDK, public route, migration or Settings deletion action is added.
+
+### Non-Draining Artifact Activity Admission
+
+Core now supplies a Host-private process-local activity/maintenance coordinator.
+Activity is counted synchronously before the first await and may run in parallel;
+nested or detached admitted work retains its own count. Maintenance requires no
+admitted activity and denies another maintenance attempt, new package activity
+or Worker start without waiting, cancelling, replaying or draining any Worker.
+Both lanes release in `finally`, preserving the original operation result/error.
+This is not a Host approval, deletion permit, durable lease or OS security boundary.
+
+The actual Worker manager owns the shared coordinator, including its retained
+handle and automatic restart initialization. The app passes that same instance
+to the runtime loader, lifecycle and Registry-stage writers. Loader discovery,
+manifest imports, preparation/commit, migration inspection, activation and
+existing cleanup operations retain admission across their awaits. Lifecycle
+admission starts before its existing Workspace drain; interrupted-operation
+recovery is also covered. Workspace adapter construction starts admission
+before asynchronous preparation. Read-only private reference readers remain
+available while maintenance holds; shutdown is not denied by inspection.
+
+Registry enable and ordinary upgrade retain admission across their complete
+authorized route operation, not just separate imports/lifecycle/stage writes.
+Instance-admin checks precede admission; busy responses use a fixed conflict
+without package paths. Existing capability, migration approval and lifecycle
+behavior remain unchanged. Normal package operations are not newly serialized
+against each other. This coordinator is exclusively for the future reviewed
+artifact-maintenance action, not a general replacement mutation queue.
+The complete app startup chain is admitted, including configured bundle refresh.
+Direct bundled-bootstrap calls also protect soft-uninstall through installation
+and final activation; their existing per-bundle failure/continue policy remains.
+
+The final combined twenty-five-file selection passed348 tests with one actual
+unavailable-8.3 skip (349 total). It includes real owned Worker startup/stop,
+HTTP admin/busy responses and deferred service-boundary regressions; bundle
+Registry writes in the focused tests are synthetic, not a real DB crash proof.
+All thirty workspace typechecks and the full build passed on the final source;
+existing CSS/chunk warnings remain. Actual isolated source Desktop no-AI
+acceptance passed public install/update, initialization-failure rollback,
+explicit exact-artifact rollback, state/events/Workspace jobs, A/B isolation,
+capability denial and Host restart. Three owned Main processes exited normally,
+all six output streams ended, and owned temporary data cleanup completed.
+This is not installed/signed/two-device/full-descendant or SQL-crash acceptance.
+
+All-reference composition, current byte ownership, typed candidate abandonment,
+cross-process Desktop Preview/restore coordination, fresh Host confirmation,
+bounded review handles, actual removal and Settings UI are still unfinished.
+A custom Worker manager without the private coordinator cannot be assumed fully
+fenced. No new cleanup endpoint or public SDK access is provided by this step.

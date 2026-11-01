@@ -8,6 +8,7 @@ import {
   type RegistryStaticPluginManifest,
 } from "./registry-static-manifest.js";
 import type { PluginDatabaseMigrationPlan } from "./plugin-database.js";
+import type { SpsPluginArtifactMaintenance } from "./sps-plugin-artifact-maintenance.js";
 
 const STAGING_INDEX_FILE = "registry-stages.json";
 const SHA256 = /^[a-f0-9]{64}$/;
@@ -269,9 +270,13 @@ async function writeIndex(indexPath: string, records: RegistryStagedPluginRecord
  * Packages enter this store only after a safe extractor produced their folder;
  * no dynamic manifest, migration, worker, or plugin code is loaded here.
  */
-export function registryStagingService(stagingRoot: string) {
+export function registryStagingService(stagingRoot: string, artifactMaintenance?: SpsPluginArtifactMaintenance) {
   const root = path.resolve(stagingRoot);
   const indexPath = path.join(root, STAGING_INDEX_FILE);
+  const withArtifactActivity = <Args extends unknown[], Result>(action: (...args: Args) => Promise<Result>) =>
+    async (...args: Args): Promise<Result> => artifactMaintenance
+      ? artifactMaintenance.withActivity(() => action(...args))
+      : action(...args);
 
   async function resolveManagedPackageRoot(packageRoot: string): Promise<string> {
     await fs.mkdir(root, { recursive: true, mode: 0o700 });
@@ -305,7 +310,7 @@ export function registryStagingService(stagingRoot: string) {
       ) ?? null;
     },
 
-    stage: async (input: {
+    stage: withArtifactActivity(async (input: {
       packageRoot: string;
       artifactSha256: string;
       source: RegistryStagedPluginRecord["source"];
@@ -353,17 +358,17 @@ export function registryStagingService(stagingRoot: string) {
       else records.push(record);
       await writeIndex(indexPath, records);
       return record;
-    },
+    }),
 
-    remove: async (stageId: string): Promise<boolean> => {
+    remove: withArtifactActivity(async (stageId: string): Promise<boolean> => {
       const records = await readIndex(indexPath);
       const next = records.filter((record) => record.stageId !== stageId);
       if (next.length === records.length) return false;
       await writeIndex(indexPath, next);
       return true;
-    },
+    }),
 
-    markReviewPending: async (
+    markReviewPending: withArtifactActivity(async (
       stageId: string,
       review: Omit<RegistryStageReview, "requestedAt">,
     ): Promise<RegistryStagedPluginRecord | null> => {
@@ -382,9 +387,9 @@ export function registryStagingService(stagingRoot: string) {
       records[index] = updated;
       await writeIndex(indexPath, records);
       return updated;
-    },
+    }),
 
-    markRegistered: async (stageId: string): Promise<RegistryStagedPluginRecord | null> => {
+    markRegistered: withArtifactActivity(async (stageId: string): Promise<RegistryStagedPluginRecord | null> => {
       const records = await readIndex(indexPath);
       const index = records.findIndex((record) => record.stageId === stageId);
       if (index < 0) return null;
@@ -397,6 +402,6 @@ export function registryStagingService(stagingRoot: string) {
       records[index] = updated;
       await writeIndex(indexPath, records);
       return updated;
-    },
+    }),
   };
 }

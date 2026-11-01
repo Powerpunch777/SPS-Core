@@ -182,6 +182,42 @@ describe("SPS Workspace Plugin worker factory", () => {
   });
   afterEach(() => vi.clearAllMocks());
 
+  it("protects asynchronous Workspace adapter construction without draining an existing Worker", async () => {
+    const manager = createPluginWorkerManager();
+    let entered!: () => void, release!: (services: any) => void;
+    const started = new Promise<void>(done => { entered = done; });
+    const pending = new Promise<any>(done => { release = done; });
+    const disposed = vi.fn();
+    const buildServices = vi.fn(() => { entered(); return pending; });
+    const factory = createSpsWorkspacePluginWorkers({} as any, manager, {
+      localPluginDir: "/unused", resolveEntrypoint: async () => "/fixture/workspace-worker.js", buildServices,
+    });
+    const opening = factory.call(workspaceA, pluginId, "getData", { key: "fixture.data", companyId: workspaceA } as any,
+      1_000, authority(workspaceA));
+    try {
+      await started;
+      expect(children).toHaveLength(0);
+      await expect(manager.artifactMaintenance!.withMaintenance(async () => {}))
+        .rejects.toMatchObject({ code: "SPS_PLUGIN_ARTIFACT_MAINTENANCE_BUSY" });
+      release({ dispose: disposed } as any);
+      await opening;
+      const handle = manager.getWorkspaceWorker(workspaceA, pluginId)!;
+      const pid = handle.diagnostics().pid;
+      await manager.artifactMaintenance!.withMaintenance(async () => {
+        await expect(factory.call(workspaceB, pluginId, "getData", { key: "fixture.data", companyId: workspaceB } as any,
+          1_000, authority(workspaceB))).rejects.toMatchObject({ code: "SPS_PLUGIN_ARTIFACT_MAINTENANCE_BUSY" });
+        expect(buildServices).toHaveBeenCalledOnce();
+        expect(children).toHaveLength(1);
+        expect(handle.diagnostics()).toMatchObject({ pid, status: "running" });
+        expect(disposed).not.toHaveBeenCalled();
+      });
+    } finally {
+      release({ dispose: disposed } as any);
+      await opening.catch(() => {});
+      await factory.shutdown(); await manager.shutdown();
+    }
+  });
+
   it("denies Workspace startup when a package journal blocks an otherwise ready plugin", async () => {
     const manager = createPluginWorkerManager();
     const pending = Object.assign(new Error("package recovery pending"), { details: { code: "sps_plugin_package_recovery_required" } });

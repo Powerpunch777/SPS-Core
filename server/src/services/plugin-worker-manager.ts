@@ -65,6 +65,7 @@ import {
   withPluginPackageMutationPermit,
   type PluginPackageMutationPermit,
 } from "./sps-plugin-package-maintenance.js";
+import { createSpsPluginArtifactMaintenance, type SpsPluginArtifactMaintenance } from "./sps-plugin-artifact-maintenance.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -391,6 +392,8 @@ export interface PluginWorkerArtifactReference {
  * for starting/stopping all workers and routing RPC calls.
  */
 export interface PluginWorkerManager {
+  /** Private shared admission; not execution approval or filesystem authority. */
+  readonly artifactMaintenance?: SpsPluginArtifactMaintenance;
   /**
    * Register and start a worker for a plugin.
    *
@@ -508,6 +511,7 @@ function createPluginWorkerHandleInternal(
   canStart: () => boolean,
   ownerWorkspaceId?: string,
   entrypointPath: string = options.entrypointPath,
+  artifactMaintenance?: SpsPluginArtifactMaintenance,
 ): PluginWorkerHandle {
   const log = logger.child({ service: "plugin-worker", pluginId, ...(ownerWorkspaceId ? { workspaceId: ownerWorkspaceId } : {}) });
   const emitter = new EventEmitter();
@@ -1528,7 +1532,11 @@ function createPluginWorkerHandleInternal(
   // Process and stop callbacks can change status while initialization is awaited.
   function currentStatus(): WorkerStatus { return status; }
 
-  async function startInternal(): Promise<void> {
+  function startInternal(): Promise<void> {
+    return artifactMaintenance ? artifactMaintenance.withActivity(startUnfenced) : startUnfenced();
+  }
+
+  async function startUnfenced(): Promise<void> {
     if (status === "stopping") {
       throw new Error(`Cannot start worker for plugin "${pluginId}" while it is stopping`);
     }
@@ -2166,6 +2174,7 @@ function createPluginWorkerHandleInternal(
  * Options for creating a PluginWorkerManager.
  */
 export interface PluginWorkerManagerOptions {
+  artifactMaintenance?: SpsPluginArtifactMaintenance;
   /**
    * Optional callback invoked when a worker emits a lifecycle event
    * (crash, restart). Used by the server to publish global live events.
@@ -2210,6 +2219,7 @@ export function createPluginWorkerManager(
   managerOptions?: PluginWorkerManagerOptions,
 ): PluginWorkerManager {
   const log = logger.child({ service: "plugin-worker-manager" });
+  const artifactMaintenance = managerOptions?.artifactMaintenance ?? createSpsPluginArtifactMaintenance();
   const workers = new Map<string, PluginWorkerHandle>();
   const artifactReferences = new WeakMap<PluginWorkerHandle, { ownerId: string; entrypointPath: string }>();
   /** Per-owner startup locks to prevent concurrent spawn races. */
@@ -2234,17 +2244,21 @@ export function createPluginWorkerManager(
     pluginId: handle.pluginId,
   });
   const keyOf = (owner: WorkerOwner): string => workerOwnerKey(owner);
-  const canStartOwner = (owner: WorkerOwner): boolean => !closed && !stoppingAll && !exclusivePackageMutationActive
-    && !packageMutationPlugins.has(owner.pluginId)
-    && !stoppingPlugins.has(owner.pluginId)
-    && (owner.workspaceId === null || (!stoppingWorkspaceScopes.has(owner.workspaceId)
-      && !stoppingWorkspacePlugins.has(keyOf(owner))));
+  const canStartOwner = (owner: WorkerOwner): boolean => {
+    artifactMaintenance.assertAdmissionAllowed();
+    return !closed && !stoppingAll && !exclusivePackageMutationActive
+      && !packageMutationPlugins.has(owner.pluginId)
+      && !stoppingPlugins.has(owner.pluginId)
+      && (owner.workspaceId === null || (!stoppingWorkspaceScopes.has(owner.workspaceId)
+        && !stoppingWorkspacePlugins.has(keyOf(owner))));
+  };
 
   function rejectTerminal(observer?: WorkerInvocationAuthority["onTerminal"]): void {
     void Promise.resolve(observer?.("not_dispatched")).catch(() => undefined);
   }
 
   function startOwnedWorker(owner: WorkerOwner, options: WorkerStartOptions): Promise<PluginWorkerHandle> {
+    artifactMaintenance.assertAdmissionAllowed();
     if (Object.prototype.hasOwnProperty.call(options, "workspaceId")) {
       throw new TypeError("Workspace ownership must be selected with startWorkspaceWorker");
     }
@@ -2278,6 +2292,7 @@ export function createPluginWorkerManager(
       () => canStartOwner(owner) && workers.get(key) === handle,
       owner.workspaceId ?? undefined,
       entrypointPath,
+      artifactMaintenance,
     );
     artifactReferences.set(handle, { ownerId: randomUUID(), entrypointPath });
     workers.set(key, handle);
@@ -2348,6 +2363,14 @@ export function createPluginWorkerManager(
     action: (permit: PluginPackageMutationPermit) => Promise<T>,
     exclusive: boolean,
   ): Promise<T> {
+    return artifactMaintenance.withActivity(() => runAdmittedPackageMutation(pluginId, action, exclusive));
+  }
+
+  function runAdmittedPackageMutation<T>(
+    pluginId: string,
+    action: (permit: PluginPackageMutationPermit) => Promise<T>,
+    exclusive: boolean,
+  ): Promise<T> {
     if (closed || !pluginId || typeof action !== "function" || packageMutationPlugins.has(pluginId)
       || (exclusive ? exclusivePackageMutationActive || packageMutationPlugins.size > 0 : exclusivePackageMutationActive)
       || stoppingAll || stopAllPromise) return Promise.reject(new PluginPackageMaintenanceRequiredError());
@@ -2400,6 +2423,7 @@ export function createPluginWorkerManager(
   }
 
   return {
+    artifactMaintenance,
     async startWorker(pluginId: string, options: WorkerStartOptions): Promise<PluginWorkerHandle> {
       return startOwnedWorker(hostOwner(pluginId), options);
     },

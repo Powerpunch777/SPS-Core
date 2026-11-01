@@ -78,6 +78,7 @@ import {
 } from "./sps-plugin-recovery.js";
 import type { SpsPluginPackageOperations } from "./sps-plugin-package-operations.js";
 import { createSpsPluginArtifactOwnership, type SpsPluginArtifactAllocation } from "./sps-plugin-artifact-ownership.js";
+import type { SpsPluginArtifactMaintenance } from "./sps-plugin-artifact-maintenance.js";
 
 const execFileAsync = promisify(execFile);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -404,6 +405,8 @@ function getDeclaredPageRoutePaths(manifest: PaperclipPluginManifestV1): string[
  */
 export interface PluginLoaderOptions {
   packageOperations?: SpsPluginPackageOperations;
+  /** Host-private, non-draining package observation/removal admission. */
+  artifactMaintenance?: SpsPluginArtifactMaintenance;
   /**
    * Path to the local plugin directory to scan.
    * Defaults to ~/.paperclip/plugins/
@@ -1871,7 +1874,7 @@ export function pluginLoader(
   // Public API
   // -------------------------------------------------------------------------
 
-  return {
+  const service: PluginLoader = {
     readPreparedArtifactReferences(): readonly PreparedPluginArtifactReference[] {
       if (preparationReferences.size > 60_000) throw new Error("Plugin preparation references are unavailable; preserve their files.");
       return Object.freeze([...preparationReferences.values()].sort((left, right) =>
@@ -2619,6 +2622,28 @@ export function pluginLoader(
 
       log.info("plugin-loader: all plugins shut down");
     },
+  };
+
+  const maintenance = options.artifactMaintenance;
+  if (!maintenance) return service;
+  // Keep imports, builds, commits and existing lifecycle drains admitted before
+  // any await. Private reference reads and shutdown remain available.
+  return {
+    ...service,
+    discoverAll: (...args) => maintenance.withActivity(() => service.discoverAll(...args)),
+    discoverFromLocalFilesystem: (...args) => maintenance.withActivity(() => service.discoverFromLocalFilesystem(...args)),
+    discoverFromNpm: (...args) => maintenance.withActivity(() => service.discoverFromNpm(...args)),
+    loadManifest: (...args) => maintenance.withActivity(() => service.loadManifest(...args)),
+    installPlugin: (...args) => maintenance.withActivity(() => service.installPlugin(...args)),
+    previewRegistryPluginEnable: (...args) => maintenance.withActivity(() => service.previewRegistryPluginEnable(...args)),
+    prepareUpgrade: (...args) => maintenance.withActivity(() => service.prepareUpgrade(...args)),
+    commitPreparedUpgrade: (...args) => maintenance.withActivity(() => service.commitPreparedUpgrade(...args)),
+    upgradePlugin: (...args) => maintenance.withActivity(() => service.upgradePlugin(...args)),
+    inspectPluginMigrations: (...args) => maintenance.withActivity(() => service.inspectPluginMigrations(...args)),
+    cleanupInstallArtifacts: (...args) => maintenance.withActivity(() => service.cleanupInstallArtifacts(...args)),
+    loadAll: (...args) => maintenance.withActivity(() => service.loadAll(...args)),
+    loadSingle: (...args) => maintenance.withActivity(() => service.loadSingle(...args)),
+    unloadSingle: (...args) => maintenance.withActivity(() => service.unloadSingle(...args)),
   };
 
   // -------------------------------------------------------------------------
