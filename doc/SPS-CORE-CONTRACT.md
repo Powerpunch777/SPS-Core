@@ -88,8 +88,10 @@ unchanged; raw routes, credentials and local folders do not cross this channel.
 The actual app also supplies that same process-local coordinator to Workspace
 Source create/update/delete/grant/revoke, retained project-share routes,
 Node/member revocation, Node approval and project/Workspace cascade removal.
-Existing authority checks run before admission; the admitted async operation is
-counted through its awaited SQL settlement and audit work. Workspace deletion
+Existing authority checks run before admission; each admitted route operation is
+counted through its awaited SQL settlement and audit work inside that callback.
+The project service's deletion guard ends after SQL; its later HTTP audit is
+outside that service scope and is not part of the Source inventory. Workspace deletion
 joins before its worker/execution drain, and service-level project/Workspace
 deletes also join before SQL. Busy operations fail with the existing fixed
 technical409 conflict rather than waiting, cancelling work or granting access;
