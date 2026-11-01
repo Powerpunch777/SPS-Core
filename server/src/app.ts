@@ -294,14 +294,14 @@ export async function createApp(
     }),
   );
   api.use(openApiRoutes());
-  api.use("/companies", companyRoutes(db, opts.storageService, { workspaceWorkers: workspacePluginWorkers }));
+  api.use("/companies", companyRoutes(db, opts.storageService, { workspaceWorkers: workspacePluginWorkers, artifactMaintenance }));
   api.use(llmRoutes(db));
   api.use(companySkillRoutes(db));
   api.use(builtInAgentRoutes(db));
   api.use(teamsCatalogRoutes(db));
   api.use(agentRoutes(db, { pluginWorkerManager: workerManager }));
   api.use(assetRoutes(db, opts.storageService));
-  api.use(projectRoutes(db));
+  api.use(projectRoutes(db, { artifactMaintenance }));
   api.use(issueRoutes(db, opts.storageService, {
     feedbackExportService: opts.feedbackExportService,
     pluginWorkerManager: workerManager,
@@ -470,7 +470,7 @@ export async function createApp(
       nativePluginRuntime.invalidateWorkspaceConfig(workspaceId, pluginId, previousRevision),
   }));
   api.use(adapterRoutes());
-  api.use(spsNodeRoutes(db));
+  api.use(spsNodeRoutes(db, { artifactMaintenance }));
   api.use(spsExecutionRoutes(db));
   api.use(spsModelConnectionRoutes(db));
   if (opts.nativeConnectivityManagement || opts.nativeConnectivityHostId) {
@@ -481,7 +481,7 @@ export async function createApp(
     if (opts.nativeConnectivityManagement) api.use(spsNativePairingRoutes(db, opts.nativeConnectivityManagement));
   }
   getSpsModelBroker(db); // Recovery never replays inputs or starts a provider request.
-  api.use(spsWorkspaceSourceRoutes(db));
+  api.use(spsWorkspaceSourceRoutes(db, { artifactMaintenance }));
   api.use(
     accessRoutes(db, {
       deploymentMode: opts.deploymentMode,

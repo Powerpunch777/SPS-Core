@@ -44,12 +44,17 @@ import {
 } from "../compat/paperclip/control-plane.js";
 import { isSpsCoreBaselineModeEnabled } from "../ui-branding.js";
 import { createSpsNodeOperations, type SpsNodeOperationContext } from "../services/sps-node-operations.js";
+import { withSpsPluginArtifactMutation } from "../services/sps-plugin-artifact-mutation.js";
+import type { SpsPluginArtifactMaintenance } from "../services/sps-plugin-artifact-maintenance.js";
 
 function actorUserId(req: Request) {
   return req.actor.type === "board" ? req.actor.userId ?? "local-board" : null;
 }
 
-export function spsNodeRoutes(db: Db) {
+export function spsNodeRoutes(
+  db: Db,
+  options: { artifactMaintenance?: SpsPluginArtifactMaintenance } = {},
+) {
   const router = Router();
   const access = accessService(db);
   const nodeOperations = createSpsNodeOperations(db);
@@ -611,38 +616,40 @@ export function spsNodeRoutes(db: Db) {
       throw forbidden("The SPS Host technical membership cannot be removed");
     }
 
-    const ownedNodes = await db
-      .select()
-      .from(spsNodes)
-      .where(and(eq(spsNodes.companyId, companyId), eq(spsNodes.ownerUserId, member.principalId)));
-    const revokedNodes = [];
-    for (const node of ownedNodes) {
-      if (node.status === "revoked") continue;
-      revokedNodes.push(await revokeNodeExecutionAccess(req, node, {
-        action: "sps_technical_member.node_revoked",
-        reason: "The technical SPS Member that owns this Node was removed.",
-      }));
-    }
-    const archived = await access.archiveTechnicalMember(companyId, member.id);
-    if (!archived) throw notFound("SPS technical Member not found");
-    await logActivity(db, {
-      companyId,
-      actorType: "user",
-      actorId: actorUserId(req) ?? "local-board",
-      action: "sps_technical_member.revoked",
-      entityType: "company_membership",
-      entityId: archived.id,
-      details: { nodeCount: revokedNodes.length },
-    });
-    res.json({
-      member: {
-        id: archived.id,
-        accountId: archived.principalId,
-        status: archived.status,
-        joinedAt: archived.createdAt,
-        archivedAt: archived.updatedAt,
-      },
-      revokedNodeCount: revokedNodes.length,
+    return withSpsPluginArtifactMutation(options.artifactMaintenance, async () => {
+      const ownedNodes = await db
+        .select()
+        .from(spsNodes)
+        .where(and(eq(spsNodes.companyId, companyId), eq(spsNodes.ownerUserId, member.principalId)));
+      const revokedNodes = [];
+      for (const node of ownedNodes) {
+        if (node.status === "revoked") continue;
+        revokedNodes.push(await revokeNodeExecutionAccess(req, node, {
+          action: "sps_technical_member.node_revoked",
+          reason: "The technical SPS Member that owns this Node was removed.",
+        }));
+      }
+      const archived = await access.archiveTechnicalMember(companyId, member.id);
+      if (!archived) throw notFound("SPS technical Member not found");
+      await logActivity(db, {
+        companyId,
+        actorType: "user",
+        actorId: actorUserId(req) ?? "local-board",
+        action: "sps_technical_member.revoked",
+        entityType: "company_membership",
+        entityId: archived.id,
+        details: { nodeCount: revokedNodes.length },
+      });
+      res.json({
+        member: {
+          id: archived.id,
+          accountId: archived.principalId,
+          status: archived.status,
+          joinedAt: archived.createdAt,
+          archivedAt: archived.updatedAt,
+        },
+        revokedNodeCount: revokedNodes.length,
+      });
     });
   });
 
@@ -776,53 +783,55 @@ export function spsNodeRoutes(db: Db) {
       if (!req.body.sharePath.startsWith("\\\\")) {
         throw badRequest("SPS Host project access requires a managed UNC share path");
       }
-      const now = new Date();
-      const existing = await db
-        .select()
-        .from(spsHostProjectShares)
-        .where(and(
-          eq(spsHostProjectShares.companyId, project.companyId),
-          eq(spsHostProjectShares.projectId, project.id),
-        ))
-        .then((rows) => rows[0] ?? null);
-      const share = existing
-        ? await db
-          .update(spsHostProjectShares)
-          .set({
-            sharePath: req.body.sharePath,
-            status: "active",
-            updatedAt: now,
-          })
-          .where(eq(spsHostProjectShares.id, existing.id))
-          .returning()
-          .then((rows) => rows[0]!)
-        : await db
-          .insert(spsHostProjectShares)
-          .values({
-            companyId: project.companyId,
-            projectId: project.id,
-            sharePath: req.body.sharePath,
-            createdByUserId: actorUserId(req) ?? "local-board",
-          })
-          .returning()
-          .then((rows) => rows[0]!);
-      await logActivity(db, {
-        companyId: project.companyId,
-        actorType: "user",
-        actorId: actorUserId(req) ?? "local-board",
-        action: existing ? "sps_host_project_share.updated" : "sps_host_project_share.created",
-        entityType: "project",
-        entityId: project.id,
-        details: { shareId: share.id, hostNodeId: share.hostNodeId ?? null },
-      });
-      res.json({
-        id: share.id,
-        projectId: share.projectId,
-        hostNodeId: share.hostNodeId,
-        sharePath: share.sharePath,
-        status: share.status,
-        createdAt: share.createdAt,
-        updatedAt: share.updatedAt,
+      return withSpsPluginArtifactMutation(options.artifactMaintenance, async () => {
+        const now = new Date();
+        const existing = await db
+          .select()
+          .from(spsHostProjectShares)
+          .where(and(
+            eq(spsHostProjectShares.companyId, project.companyId),
+            eq(spsHostProjectShares.projectId, project.id),
+          ))
+          .then((rows) => rows[0] ?? null);
+        const share = existing
+          ? await db
+            .update(spsHostProjectShares)
+            .set({
+              sharePath: req.body.sharePath,
+              status: "active",
+              updatedAt: now,
+            })
+            .where(eq(spsHostProjectShares.id, existing.id))
+            .returning()
+            .then((rows) => rows[0]!)
+          : await db
+            .insert(spsHostProjectShares)
+            .values({
+              companyId: project.companyId,
+              projectId: project.id,
+              sharePath: req.body.sharePath,
+              createdByUserId: actorUserId(req) ?? "local-board",
+            })
+            .returning()
+            .then((rows) => rows[0]!);
+        await logActivity(db, {
+          companyId: project.companyId,
+          actorType: "user",
+          actorId: actorUserId(req) ?? "local-board",
+          action: existing ? "sps_host_project_share.updated" : "sps_host_project_share.created",
+          entityType: "project",
+          entityId: project.id,
+          details: { shareId: share.id, hostNodeId: share.hostNodeId ?? null },
+        });
+        res.json({
+          id: share.id,
+          projectId: share.projectId,
+          hostNodeId: share.hostNodeId,
+          sharePath: share.sharePath,
+          status: share.status,
+          createdAt: share.createdAt,
+          updatedAt: share.updatedAt,
+        });
       });
     },
   );
@@ -834,68 +843,70 @@ export function spsNodeRoutes(db: Db) {
       assertSpsHostProjectShareOwner(req);
       const project = await getProjectShareProject(req.params.projectId as string);
       assertCompanyAccess(req, project.companyId);
-      const [share, node] = await Promise.all([
-        db
+      return withSpsPluginArtifactMutation(options.artifactMaintenance, async () => {
+        const [share, node] = await Promise.all([
+          db
+            .select()
+            .from(spsHostProjectShares)
+            .where(and(
+              eq(spsHostProjectShares.companyId, project.companyId),
+              eq(spsHostProjectShares.projectId, project.id),
+            ))
+            .then((rows) => rows[0] ?? null),
+          getNode(req.params.nodeId as string),
+        ]);
+        if (!share || share.status !== "active") throw badRequest("Configure this Host project share before granting Member source access");
+        if (node.companyId !== project.companyId || (share.hostNodeId && node.id === share.hostNodeId)) {
+          throw badRequest("Choose an approved Member SPS Node for Host project source access");
+        }
+        if (node.status !== "active" || !node.keyVerifiedAt || !node.transportPublicKey) {
+          throw badRequest("This Member SPS Node must be active and publish a transport public key before it can receive project source access");
+        }
+        const now = new Date();
+        const existing = await db
           .select()
-          .from(spsHostProjectShares)
+          .from(spsHostProjectShareNodeGrants)
           .where(and(
-            eq(spsHostProjectShares.companyId, project.companyId),
-            eq(spsHostProjectShares.projectId, project.id),
+            eq(spsHostProjectShareNodeGrants.shareId, share.id),
+            eq(spsHostProjectShareNodeGrants.nodeId, node.id),
           ))
-          .then((rows) => rows[0] ?? null),
-        getNode(req.params.nodeId as string),
-      ]);
-      if (!share || share.status !== "active") throw badRequest("Configure this Host project share before granting Member source access");
-      if (node.companyId !== project.companyId || (share.hostNodeId && node.id === share.hostNodeId)) {
-        throw badRequest("Choose an approved Member SPS Node for Host project source access");
-      }
-      if (node.status !== "active" || !node.keyVerifiedAt || !node.transportPublicKey) {
-        throw badRequest("This Member SPS Node must be active and publish a transport public key before it can receive project source access");
-      }
-      const now = new Date();
-      const existing = await db
-        .select()
-        .from(spsHostProjectShareNodeGrants)
-        .where(and(
-          eq(spsHostProjectShareNodeGrants.shareId, share.id),
-          eq(spsHostProjectShareNodeGrants.nodeId, node.id),
-        ))
-        .then((rows) => rows[0] ?? null);
-      const grant = existing
-        ? await db
-          .update(spsHostProjectShareNodeGrants)
-          .set({
-            credentialAlgorithm: req.body.credentialAlgorithm,
-            credentialEnvelope: req.body.credentialEnvelope,
-            grantedByUserId: actorUserId(req) ?? "local-board",
-            revokedAt: null,
-            updatedAt: now,
-          })
-          .where(eq(spsHostProjectShareNodeGrants.id, existing.id))
-          .returning()
-          .then((rows) => rows[0]!)
-        : await db
-          .insert(spsHostProjectShareNodeGrants)
-          .values({
-            companyId: project.companyId,
-            shareId: share.id,
-            nodeId: node.id,
-            credentialAlgorithm: req.body.credentialAlgorithm,
-            credentialEnvelope: req.body.credentialEnvelope,
-            grantedByUserId: actorUserId(req) ?? "local-board",
-          })
-          .returning()
-          .then((rows) => rows[0]!);
-      await logActivity(db, {
-        companyId: project.companyId,
-        actorType: "user",
-        actorId: actorUserId(req) ?? "local-board",
-        action: "sps_host_project_share.node_granted",
-        entityType: "sps_node",
-        entityId: node.id,
-        details: { projectId: project.id, shareId: share.id },
+          .then((rows) => rows[0] ?? null);
+        const grant = existing
+          ? await db
+            .update(spsHostProjectShareNodeGrants)
+            .set({
+              credentialAlgorithm: req.body.credentialAlgorithm,
+              credentialEnvelope: req.body.credentialEnvelope,
+              grantedByUserId: actorUserId(req) ?? "local-board",
+              revokedAt: null,
+              updatedAt: now,
+            })
+            .where(eq(spsHostProjectShareNodeGrants.id, existing.id))
+            .returning()
+            .then((rows) => rows[0]!)
+          : await db
+            .insert(spsHostProjectShareNodeGrants)
+            .values({
+              companyId: project.companyId,
+              shareId: share.id,
+              nodeId: node.id,
+              credentialAlgorithm: req.body.credentialAlgorithm,
+              credentialEnvelope: req.body.credentialEnvelope,
+              grantedByUserId: actorUserId(req) ?? "local-board",
+            })
+            .returning()
+            .then((rows) => rows[0]!);
+        await logActivity(db, {
+          companyId: project.companyId,
+          actorType: "user",
+          actorId: actorUserId(req) ?? "local-board",
+          action: "sps_host_project_share.node_granted",
+          entityType: "sps_node",
+          entityId: node.id,
+          details: { projectId: project.id, shareId: share.id },
+        });
+        res.json({ id: grant.id, nodeId: grant.nodeId, grantedAt: grant.updatedAt });
       });
-      res.json({ id: grant.id, nodeId: grant.nodeId, grantedAt: grant.updatedAt });
     },
   );
 
@@ -903,37 +914,39 @@ export function spsNodeRoutes(db: Db) {
     assertSpsHostProjectShareOwner(req);
     const project = await getProjectShareProject(req.params.projectId as string);
     assertCompanyAccess(req, project.companyId);
-    const share = await db
-      .select()
-      .from(spsHostProjectShares)
-      .where(and(
-        eq(spsHostProjectShares.companyId, project.companyId),
-        eq(spsHostProjectShares.projectId, project.id),
-      ))
-      .then((rows) => rows[0] ?? null);
-    if (!share) throw notFound("SPS Host project share not found");
-    const now = new Date();
-    const revoked = await db
-      .update(spsHostProjectShareNodeGrants)
-      .set({ revokedAt: now, updatedAt: now })
-      .where(and(
-        eq(spsHostProjectShareNodeGrants.shareId, share.id),
-        eq(spsHostProjectShareNodeGrants.nodeId, req.params.nodeId as string),
-        isNull(spsHostProjectShareNodeGrants.revokedAt),
-      ))
-      .returning()
-      .then((rows) => rows[0] ?? null);
-    if (!revoked) throw notFound("SPS Host project source access grant not found");
-    await logActivity(db, {
-      companyId: project.companyId,
-      actorType: "user",
-      actorId: actorUserId(req) ?? "local-board",
-      action: "sps_host_project_share.node_revoked",
-      entityType: "sps_node",
-      entityId: revoked.nodeId,
-      details: { projectId: project.id, shareId: share.id },
+    return withSpsPluginArtifactMutation(options.artifactMaintenance, async () => {
+      const share = await db
+        .select()
+        .from(spsHostProjectShares)
+        .where(and(
+          eq(spsHostProjectShares.companyId, project.companyId),
+          eq(spsHostProjectShares.projectId, project.id),
+        ))
+        .then((rows) => rows[0] ?? null);
+      if (!share) throw notFound("SPS Host project share not found");
+      const now = new Date();
+      const revoked = await db
+        .update(spsHostProjectShareNodeGrants)
+        .set({ revokedAt: now, updatedAt: now })
+        .where(and(
+          eq(spsHostProjectShareNodeGrants.shareId, share.id),
+          eq(spsHostProjectShareNodeGrants.nodeId, req.params.nodeId as string),
+          isNull(spsHostProjectShareNodeGrants.revokedAt),
+        ))
+        .returning()
+        .then((rows) => rows[0] ?? null);
+      if (!revoked) throw notFound("SPS Host project source access grant not found");
+      await logActivity(db, {
+        companyId: project.companyId,
+        actorType: "user",
+        actorId: actorUserId(req) ?? "local-board",
+        action: "sps_host_project_share.node_revoked",
+        entityType: "sps_node",
+        entityId: revoked.nodeId,
+        details: { projectId: project.id, shareId: share.id },
+      });
+      res.status(204).end();
     });
-    res.status(204).end();
   });
 
   router.post("/companies/:companyId/sps-nodes", async (req, res) => {
@@ -959,45 +972,51 @@ export function spsNodeRoutes(db: Db) {
     if (!node.keyVerifiedAt) {
       throw forbidden("SPS Node must complete a signed heartbeat before approval");
     }
-    const now = new Date();
-    const updated = await db
-      .update(spsNodes)
-      .set({
-        status: "active",
-        approvedAt: now,
-        approvedByUserId: actorUserId(req),
-        revokedAt: null,
-        updatedAt: now,
-      })
-      .where(eq(spsNodes.id, node.id))
-      .returning()
-      .then((rows) => rows[0]!);
-    await logNodeMutation(req, {
-      companyId: node.companyId,
-      action: "sps_node.approved",
-      nodeId: node.id,
+    return withSpsPluginArtifactMutation(options.artifactMaintenance, async () => {
+      const now = new Date();
+      const updated = await db
+        .update(spsNodes)
+        .set({
+          status: "active",
+          approvedAt: now,
+          approvedByUserId: actorUserId(req),
+          revokedAt: null,
+          updatedAt: now,
+        })
+        .where(eq(spsNodes.id, node.id))
+        .returning()
+        .then((rows) => rows[0]!);
+      await logNodeMutation(req, {
+        companyId: node.companyId,
+        action: "sps_node.approved",
+        nodeId: node.id,
+      });
+      res.json(updated);
     });
-    res.json(updated);
   });
 
   router.post("/sps-nodes/:nodeId/revoke", async (req, res) => {
     const node = await getNode(req.params.nodeId as string);
     await assertSpsNodeAdmin(req, node.companyId);
-    const updated = await revokeNodeExecutionAccess(req, node, {
-      action: "sps_node.revoked",
-      reason: "SPS Node access was revoked while this command was running.",
+    return withSpsPluginArtifactMutation(options.artifactMaintenance, async () => {
+      const updated = await revokeNodeExecutionAccess(req, node, {
+        action: "sps_node.revoked",
+        reason: "SPS Node access was revoked while this command was running.",
+      });
+      res.json(updated);
     });
-    res.json(updated);
   });
 
   router.post("/sps-nodes/:nodeId/disconnect", async (req, res) => {
     const node = await getNode(req.params.nodeId as string);
     await assertSpsNodeOwner(req, node);
-    const updated = await revokeNodeExecutionAccess(req, node, {
-      action: "sps_node.disconnected",
-      reason: "This SPS Desktop Node was disconnected by its computer owner.",
+    return withSpsPluginArtifactMutation(options.artifactMaintenance, async () => {
+      const updated = await revokeNodeExecutionAccess(req, node, {
+        action: "sps_node.disconnected",
+        reason: "This SPS Desktop Node was disconnected by its computer owner.",
+      });
+      res.json(updated);
     });
-    res.json(updated);
   });
 
   router.put("/sps-nodes/:nodeId/agent-grants/:agentId", async (req, res) => {

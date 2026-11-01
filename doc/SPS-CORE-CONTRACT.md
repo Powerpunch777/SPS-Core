@@ -85,6 +85,21 @@ Host-local mappings. No cleanup approval or Source/Runner authority follows.
 The public API, SDK, Source DB schema and Host-local path privacy boundary are
 unchanged; raw routes, credentials and local folders do not cross this channel.
 
+The actual app also supplies that same process-local coordinator to Workspace
+Source create/update/delete/grant/revoke, retained project-share routes,
+Node/member revocation, Node approval and project/Workspace cascade removal.
+Existing authority checks run before admission; the admitted async operation is
+counted through its awaited SQL settlement and audit work. Workspace deletion
+joins before its worker/execution drain, and service-level project/Workspace
+deletes also join before SQL. Busy operations fail with the existing fixed
+technical409 conflict rather than waiting, cancelling work or granting access;
+ordinary reads remain available. Private factory callers that omit the optional
+coordinator retain legacy behavior, not a claim of coordinated coverage.
+This is application admission in one owned Core, not a database-wide lock or
+protection from arbitrary same-user/DB administration. Native uncertain claims,
+complete execution ownership, artifact eligibility, current Host approval,
+selective removal and Desktop Settings qualification remain separate requirements.
+
 The product composition additionally persists removal and approved-upgrade
 intents before destructive package mutations, and reconciles them before normal
 plugin startup. Pending operations deny unrelated activation/replacement.

@@ -42,12 +42,15 @@ import { COMPANY_IMPORT_ROUTE_PATH } from "./company-import-paths.js";
 import { spsWorkspaceExecutionRoutes } from "./sps-workspace-execution.js";
 import { spsWorkspaceExecutionControlService, SpsWorkspaceExecutionCleanupPendingError } from "../services/sps-workspace-execution-control.js";
 import { SpsWorkspacePluginRuntimeUnavailableError, type SpsWorkspacePluginWorkers } from "../services/sps-workspace-plugin-workers.js";
+import type { SpsPluginArtifactMaintenance } from "../services/sps-plugin-artifact-maintenance.js";
+import { withSpsPluginArtifactMutation } from "../services/sps-plugin-artifact-mutation.js";
 
 export function companyRoutes(db: Db, storage?: StorageService, dependencies: {
   workspaceWorkers?: Pick<SpsWorkspacePluginWorkers, "withWorkspaceMutation">;
+  artifactMaintenance?: SpsPluginArtifactMaintenance;
 } = {}) {
   const router = Router();
-  const svc = companyService(db);
+  const svc = companyService(db, { artifactMaintenance: dependencies.artifactMaintenance });
   const agents = agentService(db);
   const portability = companyPortabilityService(db, storage);
   const access = accessService(db);
@@ -571,47 +574,49 @@ export function companyRoutes(db: Db, storage?: StorageService, dependencies: {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
     assertBoard(req);
-    const workers = dependencies.workspaceWorkers;
-    if (!workers) {
-      res.status(503).json({ error: "Workspace runtime cleanup is unavailable.", code: "workspace_cleanup_unavailable" });
-      return;
-    }
-    let executionSnapshot: { state: string; epoch: string; revision: number } | undefined;
-    try {
-      await workers.withWorkspaceMutation(companyId, async () => {
-        const current = await executionControl.get(companyId);
-        const stopped = await executionControl.transition(companyId, "stop", req.actor?.userId ?? "local-board", current.revision);
-        const latest = await executionControl.get(companyId);
-        executionSnapshot = { state: latest.state, epoch: latest.epoch, revision: latest.revision };
-        if (latest.state !== "stopped" || latest.epoch !== stopped.epoch || latest.revision !== stopped.revision) {
-          throw conflict("Workspace execution state changed. Refresh before retrying.");
-        }
-        const pending = Object.values(latest.pending).some(value => value !== 0);
-        if (stopped.cancellationFailures.length > 0 || pending) {
-          res.status(503).json({ error: "Workspace execution cleanup is still pending.",
-            code: "workspace_cleanup_pending", execution: executionSnapshot });
-          return;
-        }
-        const company = await svc.remove(companyId, { epoch: stopped.epoch, revision: stopped.revision });
-        if (!company) {
-          res.status(404).json({ error: "Company not found" });
-          return;
-        }
-        res.json({ ok: true });
-      });
-    } catch (error) {
-      const errorCode = error && typeof error === "object" && "code" in error
-        ? (error as { code?: unknown }).code : undefined;
-      if (error instanceof SpsWorkspacePluginRuntimeUnavailableError
-        || error instanceof SpsWorkspaceExecutionCleanupPendingError
-        || errorCode === "sps_workspace_plugin_runtime_unavailable"
-        || errorCode === "workspace_execution_cleanup_pending") {
-        res.status(503).json({ error: "Workspace execution cleanup is still pending.",
-          code: "workspace_cleanup_pending", ...(executionSnapshot ? { execution: executionSnapshot } : {}) });
+    return withSpsPluginArtifactMutation(dependencies.artifactMaintenance, async () => {
+      const workers = dependencies.workspaceWorkers;
+      if (!workers) {
+        res.status(503).json({ error: "Workspace runtime cleanup is unavailable.", code: "workspace_cleanup_unavailable" });
         return;
       }
-      throw error;
-    }
+      let executionSnapshot: { state: string; epoch: string; revision: number } | undefined;
+      try {
+        await workers.withWorkspaceMutation(companyId, async () => {
+          const current = await executionControl.get(companyId);
+          const stopped = await executionControl.transition(companyId, "stop", req.actor?.userId ?? "local-board", current.revision);
+          const latest = await executionControl.get(companyId);
+          executionSnapshot = { state: latest.state, epoch: latest.epoch, revision: latest.revision };
+          if (latest.state !== "stopped" || latest.epoch !== stopped.epoch || latest.revision !== stopped.revision) {
+            throw conflict("Workspace execution state changed. Refresh before retrying.");
+          }
+          const pending = Object.values(latest.pending).some(value => value !== 0);
+          if (stopped.cancellationFailures.length > 0 || pending) {
+            res.status(503).json({ error: "Workspace execution cleanup is still pending.",
+              code: "workspace_cleanup_pending", execution: executionSnapshot });
+            return;
+          }
+          const company = await svc.remove(companyId, { epoch: stopped.epoch, revision: stopped.revision });
+          if (!company) {
+            res.status(404).json({ error: "Company not found" });
+            return;
+          }
+          res.json({ ok: true });
+        });
+      } catch (error) {
+        const errorCode = error && typeof error === "object" && "code" in error
+          ? (error as { code?: unknown }).code : undefined;
+        if (error instanceof SpsWorkspacePluginRuntimeUnavailableError
+          || error instanceof SpsWorkspaceExecutionCleanupPendingError
+          || errorCode === "sps_workspace_plugin_runtime_unavailable"
+          || errorCode === "workspace_execution_cleanup_pending") {
+          res.status(503).json({ error: "Workspace execution cleanup is still pending.",
+            code: "workspace_cleanup_pending", ...(executionSnapshot ? { execution: executionSnapshot } : {}) });
+          return;
+        }
+        throw error;
+      }
+    });
   });
 
   return router;

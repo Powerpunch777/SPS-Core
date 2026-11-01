@@ -33,6 +33,8 @@ import { parseProjectExecutionWorkspacePolicy } from "./execution-workspace-poli
 import { mergeProjectWorkspaceRuntimeConfig, readProjectWorkspaceRuntimeConfig } from "./project-workspace-runtime-config.js";
 import { resolveManagedProjectWorkspaceDir } from "../home-paths.js";
 import { getWorkplaneRuntimeProfile } from "./workplane-profile.js";
+import type { SpsPluginArtifactMaintenance } from "./sps-plugin-artifact-maintenance.js";
+import { withSpsPluginArtifactMutation } from "./sps-plugin-artifact-mutation.js";
 
 type ProjectRow = typeof projects.$inferSelect;
 type ProjectWorkspaceRow = typeof projectWorkspaces.$inferSelect;
@@ -557,7 +559,7 @@ async function ensureSinglePrimaryWorkspace(
     );
 }
 
-export function projectService(db: Db) {
+export function projectService(db: Db, options: { artifactMaintenance?: SpsPluginArtifactMaintenance } = {}) {
   const createProject = async (
     companyId: string,
     data: Omit<typeof projects.$inferInsert, "companyId"> & { goalIds?: string[] },
@@ -875,7 +877,7 @@ export function projectService(db: Db) {
     },
 
     remove: (id: string) =>
-      db
+      withSpsPluginArtifactMutation(options.artifactMaintenance, () => db
         .delete(projects)
         .where(eq(projects.id, id))
         .returning()
@@ -883,7 +885,7 @@ export function projectService(db: Db) {
           const row = rows[0] ?? null;
           if (!row) return null;
           return { ...row, urlKey: deriveProjectUrlKey(row.name, row.id) };
-        }),
+        })),
 
     listWorkspaces: async (projectId: string): Promise<ProjectWorkspace[]> => {
       const rows = await db
