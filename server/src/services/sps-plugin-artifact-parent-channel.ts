@@ -1,5 +1,7 @@
-import { randomUUID } from "node:crypto";
-import type { createSpsPluginArtifactReferenceReader, SpsPluginArtifactReferenceScope } from "./sps-plugin-artifact-references.js";
+import { createHash, randomUUID } from "node:crypto";
+import path from "node:path";
+import type { createSpsPluginArtifactReferenceReader } from "./sps-plugin-artifact-references.js";
+import { captureSpsPluginArtifactReferencePath } from "./sps-plugin-artifact-reference-path.js";
 
 const REQUEST = "sps.plugin-artifacts.request";
 const RESPONSE = "sps.plugin-artifacts.response";
@@ -13,14 +15,48 @@ type Channel = {
   on(event: string, listener: (message?: unknown) => void): unknown;
   removeListener(event: string, listener: (message?: unknown) => void): unknown;
 };
-type Request = { v: 1; kind: typeof REQUEST; channelId: string; id: string; transactionId: string; operation: "begin" | "check" | "end" };
+type Request = { v: 1; kind: typeof REQUEST; channelId: string; id: string; transactionId: string; operation: "begin" | "check" | "end"; parentPaths?: unknown };
+type ParentPath = { source: string; ownerId: string; state: string; path: string; kind: "file" | "directory" };
+
+function parentPaths(value: unknown): readonly ParentPath[] {
+  if (!Array.isArray(value) || value.length > 4096 || Reflect.ownKeys(value).length !== value.length + 1
+    || Object.keys(value).length !== value.length) throw new Error(FAILURE);
+  const entries = Object.getOwnPropertyDescriptors(value);
+  for (let index = 0; index < value.length; index++) {
+    if (!entries[index]?.enumerable || !("value" in entries[index])) throw new Error(FAILURE);
+  }
+  const seen = new Set<string>();
+  const text = (value: unknown): value is string => typeof value === "string" && value.length > 0
+    && value.length <= 256 && !/[\u0000-\u001f\u007f]/.test(value);
+  const result = Object.freeze(Array.from({ length: value.length }, (_, index) => {
+    const item: unknown = entries[index].value;
+    if (!item || typeof item !== "object" || Array.isArray(item) || Object.getPrototypeOf(item) !== Object.prototype) throw new Error(FAILURE);
+    const fields = Object.getOwnPropertyDescriptors(item);
+    if (Reflect.ownKeys(fields).length !== 5 || ["source", "ownerId", "state", "path", "kind"]
+      .some(key => !fields[key]?.enumerable || !("value" in fields[key]))) throw new Error(FAILURE);
+    const reference = item as ParentPath;
+    if (!text(reference.source) || !text(reference.ownerId) || !text(reference.state)
+      || typeof reference.path !== "string" || !reference.path || reference.path.length > 32_768
+      || /[\u0000-\u001f\u007f]/.test(reference.path) || !path.isAbsolute(reference.path)
+      || path.resolve(reference.path) !== reference.path || !["file", "directory"].includes(reference.kind)) throw new Error(FAILURE);
+    const result = { source: reference.source, ownerId: reference.ownerId, state: reference.state, path: reference.path, kind: reference.kind };
+    const key = JSON.stringify(result);
+    if (seen.has(key)) throw new Error(FAILURE);
+    seen.add(key);
+    return Object.freeze(result);
+  }));
+  if (Buffer.byteLength(JSON.stringify(result), "utf8") > 4 * 1024 * 1024) throw new Error(FAILURE);
+  return result;
+}
 
 function request(value: unknown): Request | null {
   try {
     if (!value || typeof value !== "object" || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) return null;
     const fields = Object.getOwnPropertyDescriptors(value);
-    if (Reflect.ownKeys(fields).length !== 6
-      || ["v", "kind", "channelId", "id", "transactionId", "operation"].some(key => !fields[key]?.enumerable || !("value" in fields[key]))) return null;
+    const names = ["v", "kind", "channelId", "id", "transactionId", "operation"];
+    if (fields.operation?.value === "begin" && Object.hasOwn(fields, "parentPaths")) names.push("parentPaths");
+    if (Reflect.ownKeys(fields).length !== names.length
+      || names.some(key => !fields[key]?.enumerable || !("value" in fields[key]))) return null;
     const input = value as Request;
     if (input.v !== 1 || input.kind !== REQUEST || typeof input.channelId !== "string" || !UUID.test(input.channelId)
       || typeof input.id !== "string" || !UUID.test(input.id) || typeof input.transactionId !== "string"
@@ -37,7 +73,7 @@ export function createSpsPluginArtifactParentChannel(reader: ReturnType<typeof c
   }
   const channelId = randomUUID();
   let closed = false;
-  let active: { transactionId: string; scope: SpsPluginArtifactReferenceScope | null; poisoned: boolean;
+  let active: { transactionId: string; scope: { assertCurrent(): Promise<void> } | null; poisoned: boolean;
     endRequest: Request | null; release(): void; checks: Promise<void>; finished: Promise<void> } | null = null;
   const seen = new Set<string>();
   const transactions = new Set<string>();
@@ -75,17 +111,33 @@ export function createSpsPluginArtifactParentChannel(reader: ReturnType<typeof c
       transactions.add(input.transactionId);
       let release!: () => void;
       const held = new Promise<void>(resolve => { release = resolve; });
-      const owner = { transactionId: input.transactionId, scope: null as SpsPluginArtifactReferenceScope | null,
+      const owner = { transactionId: input.transactionId, scope: null as { assertCurrent(): Promise<void> } | null,
         poisoned: false, endRequest: null as Request | null, release, checks: Promise.resolve(), finished: Promise.resolve() };
       active = owner;
       let snapshotEntered = false;
       owner.finished = (async () => {
         let success = false;
         try {
+          const parent = Object.hasOwn(input, "parentPaths") ? parentPaths(input.parentPaths) : undefined;
           await reader.withSnapshot(async scope => {
-            owner.scope = scope;
+            const captures = new Map<string, Awaited<ReturnType<typeof captureSpsPluginArtifactReferencePath>>>();
+            const canonicalParent = [];
+            for (const reference of parent ?? []) {
+              const key = JSON.stringify([reference.path, reference.kind]);
+              if (!captures.has(key)) captures.set(key, await captureSpsPluginArtifactReferencePath(reference.path, reference.kind));
+              canonicalParent.push(Object.freeze({ ...reference, canonicalPath: captures.get(key)!.canonicalPath }));
+            }
+            owner.scope = parent === undefined ? scope : Object.freeze({ async assertCurrent() {
+              await scope.assertCurrent();
+              for (const capture of captures.values()) await capture.assertCurrent();
+            } });
+            if (parent !== undefined) await owner.scope.assertCurrent();
             snapshotEntered = true;
-            const snapshot = { coverage: scope.coverage, fingerprint: scope.fingerprint, references: scope.references };
+            const snapshot = parent === undefined
+              ? { coverage: scope.coverage, fingerprint: scope.fingerprint, references: scope.references }
+              : { coverage: "core-and-parent-paths", fingerprint: createHash("sha256")
+                .update(JSON.stringify([scope.fingerprint, canonicalParent])).digest("hex"), references: scope.references,
+              parentPaths: Object.freeze(canonicalParent) };
             if (Buffer.byteLength(JSON.stringify(snapshot), "utf8") > MAX_SNAPSHOT_BYTES) {
               owner.poisoned = true;
               // No snapshot escaped; a normal negative begin can release safely.
@@ -96,6 +148,8 @@ export function createSpsPluginArtifactParentChannel(reader: ReturnType<typeof c
             catch { owner.poisoned = true; }
             await held;
             await owner.checks;
+            if (owner.poisoned || closed || channel.connected !== true) throw new Error(FAILURE);
+            if (parent !== undefined) await owner.scope.assertCurrent();
             if (owner.poisoned || closed || channel.connected !== true) throw new Error(FAILURE);
           });
           success = true;

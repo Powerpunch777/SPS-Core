@@ -14,7 +14,14 @@ approval flows, or a particular development process mandatory Core behavior.
 Confirmed scope (2026-10-28): support packages built, reviewed and approved for
 SPS solution delivery. Public Marketplace discovery/publishing/sales are retired;
 internal Registry and package verification/lifecycle remain Core. New Plugin
-Builder work waits for its separate handoff after Core completion. Full untrusted
+Builder design, code, UI and implementation work belong to the separate public
+`Powerpunch777/SPS-MY-PluginBuilder` repository and its v15 design. Parallel work
+there is authorized, but is not part of this Core completion task. Older bundled
+Builder compatibility code is not its authoritative design. Do not add Builder
+workflow or copy private Core source into that repository. Before deciding
+Builder behavior, follow that repository's current `docs/design/README.md` and
+linked integrated specification, not old Core Builder descriptions or chat.
+Full untrusted
 OS containment is deferred, with experiments preserved; same-user workers are
 not a security sandbox. Preserve SDK/Runner extensibility and all existing
 capability, grant, Secret, file, communication and process-ownership controls.

@@ -8,7 +8,9 @@ SPS runs reviewed and approved solutions produced through its own delivery
 business. Core remains technically extensible through the SDK and Runner
 contracts, but does not provide a public Plugin marketplace. Internal Registry,
 package verification, lifecycle and recovery remain supported without Plugin
-Builder. New Builder work and full untrusted-code OS containment are deferred;
+Builder. New Builder work is independently maintained in the separate public
+[SPS-MY-PluginBuilder repository](https://github.com/Powerpunch777/SPS-MY-PluginBuilder)
+under its v15 design, not in this private Core. Full untrusted-code OS containment is deferred;
 same-user Plugin processes must not be described as a security sandbox.
 
 AI is optional. Plugins may implement ordinary UI, storage and automation

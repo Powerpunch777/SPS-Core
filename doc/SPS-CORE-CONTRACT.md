@@ -5,8 +5,12 @@ Status: current engineering contract
 Confirmed product scope (2026-10-28): SPS operates reviewed and approved packages
 from its own solution-delivery business, without public Plugin publishing,
 distribution, sales or discovery. Preserve the internal Registry, package
-verification, installation/update/rollback, SDK and Runner contracts. Plugin
-Builder is a separate future handoff and is not a Core completion prerequisite.
+verification, installation/update/rollback, SDK and Runner contracts.
+New Builder design, source and UI live in the separate public
+[SPS-MY-PluginBuilder repository](https://github.com/Powerpunch777/SPS-MY-PluginBuilder)
+under its v15 design. Its independently authorized parallel work is not a Core
+completion prerequisite or permission to implement Builder workflow here. The
+older bundled Builder remains a compatibility surface, not that design's source.
 Full untrusted-code OS containment is deferred; its research is retained. Existing
 capability/grant checks, Secret and file mediation, Workspace boundaries and
 truthful process ownership/recovery remain required. The execution computer
@@ -44,6 +48,14 @@ termination remains the recovery boundary. The bounded strict protocol adds no
 HTTP/SDK endpoint, Host approval, deletion authority or complete Desktop
 reference coverage. Desktop must separately compose its own admission and
 references before any cleanup decision. A send callback is not an end receipt.
+
+A private begin may additionally supply up to4096 parent-path references
+(4MiB). Exact fields are copied, canonical local path observations use the same
+existing Core helper, and the response binds them to its fingerprint with
+`core-and-parent-paths` coverage. Checks and end revalidate their identities,
+including missing-path appearance. This authenticates neither the parent's
+completeness nor Host authority: Desktop still owns complete reference discovery
+and current account/Host binding. No automatic admission/removal policy follows.
 
 The product composition additionally persists removal and approved-upgrade
 intents before destructive package mutations, and reconciles them before normal
