@@ -57,6 +57,13 @@ including missing-path appearance. This authenticates neither the parent's
 completeness nor Host authority: Desktop still owns complete reference discovery
 and current account/Host binding. No automatic admission/removal policy follows.
 
+Parent-path observation may retain ordinary file hardlinks used by pnpm launch
+dependencies. Their file identity, size, timestamps and link count must remain
+unchanged through check/end; symbolic links and linked directory ancestry remain
+rejected. This private read-only option is not used by Core's own artifact
+reference reader and grants no managed-file ownership or removal eligibility.
+Deletion/package-integrity checks retain their separate single-link rules.
+
 The product composition additionally persists removal and approved-upgrade
 intents before destructive package mutations, and reconciles them before normal
 plugin startup. Pending operations deny unrelated activation/replacement.

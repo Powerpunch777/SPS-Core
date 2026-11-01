@@ -124,7 +124,11 @@ export function createSpsPluginArtifactParentChannel(reader: ReturnType<typeof c
             const canonicalParent = [];
             for (const reference of parent ?? []) {
               const key = JSON.stringify([reference.path, reference.kind]);
-              if (!captures.has(key)) captures.set(key, await captureSpsPluginArtifactReferencePath(reference.path, reference.kind));
+              // Parent launch inputs include pnpm's hardlinked loader files.
+              // This only retains read references; removal ownership stays
+              // separate. Identity, link count and metadata must remain fixed.
+              if (!captures.has(key)) captures.set(key, await captureSpsPluginArtifactReferencePath(reference.path,
+                reference.kind, { allowFileHardlinks: true }));
               canonicalParent.push(Object.freeze({ ...reference, canonicalPath: captures.get(key)!.canonicalPath }));
             }
             owner.scope = parent === undefined ? scope : Object.freeze({ async assertCurrent() {

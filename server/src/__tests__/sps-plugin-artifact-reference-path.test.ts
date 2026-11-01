@@ -141,6 +141,28 @@ describe("Host-private artifact reference path observation", () => {
     await expect(result.assertCurrent()).rejects.toThrow(message);
   });
 
+  it("can retain a read-only parent hardlink but rejects later link-count or content changes", async () => {
+    const { root, file } = await fixture();
+    const alias = path.join(root, "dependency-store-link");
+    await fs.link(file, alias);
+    const linked = await capture(file, "file", { allowFileHardlinks: true });
+    await linked.assertCurrent();
+    await expect(capture(file, "file")).rejects.toThrow(message);
+    await fs.link(file, path.join(root, "additional-link"));
+    await expect(linked.assertCurrent()).rejects.toThrow(message);
+    const recaptured = await capture(file, "file", { allowFileHardlinks: true });
+    await fs.appendFile(alias, "changed through a different hardlink\n");
+    await expect(recaptured.assertCurrent()).rejects.toThrow(message);
+  });
+
+  it("does not let the parent hardlink option permit directory links", async () => {
+    const { root, outside, links } = await fixture();
+    const linked = path.join(root, "parent-linked");
+    await fs.symlink(outside, linked, process.platform === "win32" ? "junction" : "dir");
+    links.push(linked);
+    await expect(capture(path.join(linked, "keep.txt"), "file", { allowFileHardlinks: true })).rejects.toThrow(message);
+  });
+
   it.each([false, true])("rejects a linked directory ancestor (dangling: %s) without touching its target", async dangling => {
     const { root, outside, sentinel, links } = await fixture();
     const linked = path.join(root, "linked");

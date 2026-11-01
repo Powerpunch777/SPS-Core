@@ -32,18 +32,19 @@ async function lstat(absolute: string): Promise<BigIntStats | null> {
   }
 }
 
-function assertKind(stats: BigIntStats, kind: Kind): void {
-  if (stats.isSymbolicLink() || (kind === "directory" ? !stats.isDirectory() : !stats.isFile() || stats.nlink !== 1n)) {
+function assertKind(stats: BigIntStats, kind: Kind, allowFileHardlinks: boolean): void {
+  if (stats.isSymbolicLink() || (kind === "directory" ? !stats.isDirectory()
+    : !stats.isFile() || stats.nlink < 1n || !allowFileHardlinks && stats.nlink !== 1n)) {
     throw unavailable();
   }
 }
 
-async function captureAncestry(absolute: string, kind: Kind): Promise<CapturedPath[]> {
+async function captureAncestry(absolute: string, kind: Kind, allowFileHardlinks: boolean): Promise<CapturedPath[]> {
   const captured: CapturedPath[] = [];
   for (let current = absolute;; current = path.dirname(current)) {
     const expected = current === absolute ? kind : "directory";
     const stats = await lstat(current);
-    if (stats) assertKind(stats, expected);
+    if (stats) assertKind(stats, expected, allowFileHardlinks);
     captured.push({ absolute: current, kind: expected, stats });
     if (path.dirname(current) === current) {
       if (!stats || !stats.isDirectory()) throw unavailable();
@@ -53,14 +54,14 @@ async function captureAncestry(absolute: string, kind: Kind): Promise<CapturedPa
   return captured;
 }
 
-async function recheck(captured: CapturedPath[]): Promise<void> {
+async function recheck(captured: CapturedPath[], allowFileHardlinks: boolean): Promise<void> {
   for (const original of captured) {
     const current = await lstat(original.absolute);
     if (!original.stats) {
       if (current) throw unavailable();
     } else {
       if (!current) throw unavailable();
-      assertKind(current, original.kind);
+      assertKind(current, original.kind, allowFileHardlinks);
       const fields = original.kind === "file" ? fileFields : identityFields;
       if (!fields.every(key => original.stats![key] === current[key])) throw unavailable();
     }
@@ -73,23 +74,25 @@ async function recheck(captured: CapturedPath[]): Promise<void> {
 export async function captureSpsPluginArtifactReferencePath(
   absolute: string,
   kind: Kind,
+  options: Readonly<{ allowFileHardlinks?: boolean }> = {},
 ): Promise<Readonly<{ canonicalPath: string; assertCurrent(): Promise<void> }>> {
   try {
     assertPlainAbsolute(absolute);
     if (kind !== "file" && kind !== "directory") throw unavailable();
-    const original = await captureAncestry(absolute, kind);
+    const allowFileHardlinks = options.allowFileHardlinks === true;
+    const original = await captureAncestry(absolute, kind, allowFileHardlinks);
     const existing = original.find(entry => entry.stats)!;
     const canonicalExisting = await fs.realpath(existing.absolute);
     const suffix = path.relative(existing.absolute, absolute);
     const canonicalPath = path.resolve(canonicalExisting, suffix);
     assertPlainAbsolute(canonicalPath);
-    const canonical = await captureAncestry(canonicalPath, kind);
+    const canonical = await captureAncestry(canonicalPath, kind, allowFileHardlinks);
     const resolved = canonical.find(entry => entry.absolute === canonicalExisting);
     if (!resolved?.stats || !sameIdentity(existing.stats!, resolved.stats)) throw unavailable();
     const assertCurrent = async (): Promise<void> => {
       try {
-        await recheck(original);
-        await recheck(canonical);
+        await recheck(original, allowFileHardlinks);
+        await recheck(canonical, allowFileHardlinks);
         if (await fs.realpath(existing.absolute) !== canonicalExisting) throw unavailable();
       } catch { throw unavailable(); }
     };

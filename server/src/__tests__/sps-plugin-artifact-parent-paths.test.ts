@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { link, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -156,6 +156,25 @@ describe("Core private plugin artifact parent paths", () => {
     await vi.waitFor(() => expect(channel.response(ID_2, "check")).toBeDefined());
     expect(channel.response(ID_2, "check")).toMatchObject({ ok: false, errorCode: FAILURE });
     expect(await end(channel, ID_3)).toMatchObject({ ok: false, errorCode: FAILURE });
+  });
+
+  it("retains unchanged parent dependency hardlinks and denies changed link counts", async () => {
+    const { root, channel } = await fixture();
+    const file = path.join(root, "loader.mjs");
+    await writeFile(file, "dependency bytes, never imported");
+    await link(file, path.join(root, "store-link"));
+    const paths = [parentPath(file)];
+    expect(await begin(channel, paths)).toMatchObject({ ok: true,
+      snapshot: { parentPaths: [{ ...paths[0], canonicalPath: file }] } });
+    channel.request("check", ID_2);
+    await vi.waitFor(() => expect(channel.response(ID_2, "check")).toMatchObject({ ok: true }));
+    expect(await end(channel, ID_3)).toMatchObject({ ok: true });
+
+    expect((await begin(channel, paths, ID_4, TX_2)).ok).toBe(true);
+    await link(file, path.join(root, "new-link"));
+    expect(await end(channel, "77777777-7777-4777-8777-777777777777", TX_2))
+      .toMatchObject({ ok: false, errorCode: FAILURE });
+    expect(await readFile(file, "utf8")).toBe("dependency bytes, never imported");
   });
 
   it("rejects a linked parent directory on check and end", async () => {
