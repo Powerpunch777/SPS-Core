@@ -7,6 +7,7 @@ import { createSpsPluginArtifactMaintenance } from "../services/sps-plugin-artif
 import { createSpsPluginArtifactParentChannel } from "../services/sps-plugin-artifact-parent-channel.js";
 import { createSpsPluginArtifactReferenceReader, type SpsPluginArtifactReferenceScope,
   type SpsPluginArtifactReferenceReaders } from "../services/sps-plugin-artifact-references.js";
+import { projectSpsSourceArtifactInventory, type SpsSourceArtifactInventory } from "../services/sps-source-artifact-inventory.js";
 
 const TX = "11111111-1111-4111-8111-111111111111";
 const TX_2 = "22222222-2222-4222-8222-222222222222";
@@ -52,7 +53,7 @@ afterEach(async () => {
   roots.clear();
 });
 
-async function fixture() {
+async function fixture(readSourceInventory?: () => Promise<SpsSourceArtifactInventory>) {
   const root = await mkdtemp(path.join(os.tmpdir(), "sps-artifact-parent-channel-"));
   roots.add(root);
   const maintenance = createSpsPluginArtifactMaintenance();
@@ -63,6 +64,7 @@ async function fixture() {
     readWorkers: () => [],
     readPreparations: () => [],
     readRegistryStages: async () => [],
+    ...(readSourceInventory ? { readSourceInventory } : {}),
   };
   const reader = createSpsPluginArtifactReferenceReader({ localPluginDir: root, maintenance, readers });
   const channel = new FakeChannel();
@@ -92,6 +94,44 @@ function deferred() {
 }
 
 describe("Core private plugin artifact parent channel", () => {
+  it("returns Source inventory only on explicit supported begin and keeps legacy response shape", async () => {
+    const inventory = projectSpsSourceArtifactInventory({ sources: [], grants: [] });
+    const { channel } = await fixture(async () => inventory);
+    channel.request("begin", ID, TX, { sourceInventory: true });
+    await vi.waitFor(() => expect(channel.response(ID, "begin")).toMatchObject({ ok: true,
+      snapshot: { sourceInventory: inventory } }));
+    channel.request("end", ID_2);
+    await vi.waitFor(() => expect(channel.response(ID_2, "end")).toMatchObject({ ok: true }));
+    channel.request("begin", ID_3, TX_2);
+    await vi.waitFor(() => {
+      expect(channel.response(ID_3, "begin", TX_2)?.ok).toBe(true);
+      expect(channel.response(ID_3, "begin", TX_2)?.snapshot).not.toHaveProperty("sourceInventory");
+    });
+    channel.request("end", "66666666-6666-4666-8666-666666666666", TX_2);
+    await vi.waitFor(() => expect(channel.response("66666666-6666-4666-8666-666666666666", "end", TX_2)).toMatchObject({ ok: true }));
+  });
+
+  it("rejects requested Source coverage when the reader lacks it, without exposing a partial snapshot", async () => {
+    const { channel, maintenance } = await fixture();
+    channel.request("begin", ID, TX, { sourceInventory: true });
+    await vi.waitFor(() => expect(channel.response(ID, "begin")).toMatchObject({ ok: false }));
+    expect(channel.response(ID, "begin")).not.toHaveProperty("snapshot");
+    await maintenance.withActivity(async () => {});
+  });
+
+  it("invalidates Source inventory changes during the actual held transaction", async () => {
+    let inventory = projectSpsSourceArtifactInventory({ sources: [], grants: [] });
+    const { channel } = await fixture(async () => inventory);
+    channel.request("begin", ID, TX, { sourceInventory: true });
+    await vi.waitFor(() => expect(channel.response(ID, "begin")?.ok).toBe(true));
+    inventory = projectSpsSourceArtifactInventory({ sources: [{ kind: "workspace", id: TX, resourceId: TX,
+      workspaceId: TX_2, route: null, status: "disabled", revision: "2026-11-01T00:00:00.000Z" }], grants: [] });
+    channel.request("check", ID_2);
+    await vi.waitFor(() => expect(channel.response(ID_2, "check")?.ok).toBe(false));
+    channel.request("end", ID_3);
+    await vi.waitFor(() => expect(channel.response(ID_3, "end")?.ok).toBe(false));
+  });
+
   it("never admits a previously completed transaction again, even with a fresh request ID", async () => {
     const { channel, maintenance } = await fixture();
     channel.request("begin", ID);

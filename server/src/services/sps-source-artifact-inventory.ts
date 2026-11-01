@@ -70,21 +70,28 @@ function routeFingerprint(value: unknown): string | null {
 }
 
 /** Private declarative inventory: no display names, routes, credentials or local paths escape. */
-export function projectSpsSourceArtifactInventory(input: unknown): SpsSourceArtifactInventory {
+function normalizeInventory(input: unknown, projected: boolean): SpsSourceArtifactInventory {
   try {
-    const root = record(input, ["sources", "grants"]);
+    const root = record(input, ["sources", "grants", ...(projected ? ["fingerprint"] : [])]);
+    const timestamp = (value: unknown) => {
+      if (projected && typeof value !== "string") return fail();
+      return date(value);
+    };
+    const routeField = projected ? "routeFingerprint" : "route";
     const sourceIds = new Map<string, string>(), resources = new Set<string>();
     const sources = rows(root.sources, MAX_SOURCES).map(value => {
-      const row = record(value, ["kind", "id", "workspaceId", "resourceId", "route", "status", "revision"]);
+      const row = record(value, ["kind", "id", "workspaceId", "resourceId", routeField, "status", "revision"]);
       const category = kind(row.kind), sourceId = id(row.id), workspaceId = id(row.workspaceId), resourceId = id(row.resourceId);
       const key = `${category}:${sourceId}`, resourceKey = `${category}:${workspaceId}:${resourceId}`;
       if (sourceIds.has(key) || resources.has(resourceKey) || category === "workspace" && sourceId !== resourceId
         || typeof row.status !== "string" || !row.status || row.status.length > 64 || /[\u0000-\u001f\u007f\uFFFD]/.test(row.status)) return fail();
-      const route = routeFingerprint(row.route);
+      const routeValue = row[routeField];
+      if (projected && routeValue !== null && (typeof routeValue !== "string" || !/^[a-f0-9]{64}$/.test(routeValue))) return fail();
+      const route = projected ? routeValue as string | null : routeFingerprint(routeValue);
       if (category === "project" && route === null) return fail();
       sourceIds.set(key, workspaceId); resources.add(resourceKey);
       return Object.freeze({ kind: category, id: sourceId, workspaceId, resourceId,
-        status: row.status, routeFingerprint: route, revision: date(row.revision) });
+        status: row.status, routeFingerprint: route, revision: timestamp(row.revision) });
     });
     const grantIds = new Set<string>(), grantTargets = new Set<string>();
     const grants = rows(root.grants, MAX_GRANTS).map(value => {
@@ -94,14 +101,25 @@ export function projectSpsSourceArtifactInventory(input: unknown): SpsSourceArti
       if (grantIds.has(key) || grantTargets.has(target) || sourceIds.get(`${category}:${sourceId}`) !== workspaceId) return fail();
       grantIds.add(key); grantTargets.add(target);
       return Object.freeze({ kind: category, id: grantId, workspaceId, sourceId, nodeId,
-        revokedAt: row.revokedAt === null ? null : date(row.revokedAt), revision: date(row.revision) });
+        revokedAt: row.revokedAt === null ? null : timestamp(row.revokedAt), revision: timestamp(row.revision) });
     });
     sources.sort((a, b) => compare(`${a.kind}:${a.id}`, `${b.kind}:${b.id}`));
     grants.sort((a, b) => compare(`${a.kind}:${a.id}`, `${b.kind}:${b.id}`));
     const serialized = JSON.stringify([sources, grants]);
-    if (Buffer.byteLength(serialized, "utf8") > 6 * 1024 * 1024) return fail();
-    return Object.freeze({ sources: Object.freeze(sources), grants: Object.freeze(grants), fingerprint: hash(serialized) });
+    const fingerprint = hash(serialized);
+    if (Buffer.byteLength(JSON.stringify({ sources, grants, fingerprint }), "utf8") > 6 * 1024 * 1024) return fail();
+    if (projected && root.fingerprint !== fingerprint) return fail();
+    return Object.freeze({ sources: Object.freeze(sources), grants: Object.freeze(grants), fingerprint });
   } catch { return fail(); }
+}
+
+export function projectSpsSourceArtifactInventory(input: unknown): SpsSourceArtifactInventory {
+  return normalizeInventory(input, false);
+}
+
+/** Validate the private parent DTO without accepting raw routes or trusting its hash claim. */
+export function requireSpsSourceArtifactInventory(input: unknown): SpsSourceArtifactInventory {
+  return normalizeInventory(input, true);
 }
 
 /** All retained Workspaces, including disabled sources and revoked grants. Read-only and bounded. */

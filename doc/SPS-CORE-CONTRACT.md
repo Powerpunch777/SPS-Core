@@ -72,9 +72,18 @@ and credential envelopes are not returned; the guard uses opaque IDs, status,
 route hashes and revision/revocation timestamps. A malformed relationship,
 unavailable DB or changed fingerprint rejects the observation. This detects
 metadata changes, not complete Desktop mapping or credential reconciliation.
-It does not fence every Source mutation/cascade, export the inventory through
-parent IPC, approve cleanup or replace Source/Runner authorization. The public
-API, SDK, Source DB schema and Host-local path privacy boundary are unchanged.
+An explicit private `begin` request with `sourceInventory:true` may return that
+sanitized inventory alongside the held reference snapshot. Both producer and
+consumer require exact fields, canonical IDs/timestamps, valid relationships and
+a recomputed fingerprint; limits are4096 Sources,16384 grants and6MiB for the
+inventory body, within the existing8MiB combined response bound. Missing or
+invalid coverage rejects the request, never falls back to an empty inventory.
+Legacy requests do not acquire the new response field. Metadata changes also
+invalidate subsequent checks/end; this is still a change detector, not a fence
+over every Source mutation/cascade. Desktop separately reconciles its protected
+Host-local mappings. No cleanup approval or Source/Runner authority follows.
+The public API, SDK, Source DB schema and Host-local path privacy boundary are
+unchanged; raw routes, credentials and local folders do not cross this channel.
 
 The product composition additionally persists removal and approved-upgrade
 intents before destructive package mutations, and reconciles them before normal

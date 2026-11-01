@@ -443,7 +443,7 @@ export async function createApp(
         return loader.readPreparedArtifactReferences();
       },
       readRegistryStages: () => artifactReferenceStages.readArtifactReferences(),
-      readSourceFingerprint: async () => (await readSpsSourceArtifactInventory(db)).fingerprint,
+      readSourceInventory: () => readSpsSourceArtifactInventory(db),
     },
   });
   api.use(

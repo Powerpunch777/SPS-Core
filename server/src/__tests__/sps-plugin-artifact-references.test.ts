@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { PluginRecord } from "../compat/paperclip/shared.js";
 import { createSpsPluginArtifactMaintenance } from "../services/sps-plugin-artifact-maintenance.js";
+import { projectSpsSourceArtifactInventory } from "../services/sps-source-artifact-inventory.js";
 import { createSpsPluginArtifactReferenceReader, type SpsPluginArtifactReferenceReaders,
   type SpsPluginArtifactReferenceScope } from "../services/sps-plugin-artifact-references.js";
 
@@ -123,6 +124,27 @@ describe("Core-only coherent artifact reference scopes", () => {
       await expect(reader.withSnapshot(caller)).rejects.toMatchObject(unavailable);
       expect(caller).not.toHaveBeenCalled();
     }
+  });
+
+  it("exposes only validated private Source inventory and rechecks it through callback exit", async () => {
+    const { readers, reader } = await fixture();
+    let inventory = projectSpsSourceArtifactInventory({ sources: [], grants: [] });
+    readers.readSourceInventory = async () => inventory;
+    await reader.withSnapshot(async scope => {
+      expect(scope.sourceInventory).toEqual(inventory);
+      expect(scope.sourceInventory).not.toBe(inventory);
+      expect(Object.isFrozen(scope.sourceInventory)).toBe(true);
+      inventory = projectSpsSourceArtifactInventory({ sources: [{ kind: "workspace",
+        id: "11111111-1111-4111-8111-111111111111", workspaceId: "22222222-2222-4222-8222-222222222222",
+        resourceId: "11111111-1111-4111-8111-111111111111", status: "disabled", route: null,
+        revision: "2026-11-01T00:00:00.000Z" }], grants: [] });
+    }).then(() => { throw new Error("Changed inventory must reject callback exit"); }, error => {
+      expect(error).toMatchObject(unavailable);
+    });
+    readers.readSourceInventory = async () => ({ ...inventory, credentialEnvelope: "not permitted" }) as never;
+    const caller = vi.fn(async () => {});
+    await expect(reader.withSnapshot(caller)).rejects.toMatchObject(unavailable);
+    expect(caller).not.toHaveBeenCalled();
   });
 
   it("detects missing paths appearing and an actual launch file replacement during a scope", async () => {

@@ -8,6 +8,7 @@ import type { PreparedPluginArtifactReference } from "./plugin-loader.js";
 import type { RegistryStageArtifactReference } from "./registry-staging.js";
 import type { SpsPluginArtifactMaintenance } from "./sps-plugin-artifact-maintenance.js";
 import { captureSpsPluginArtifactReferencePath } from "./sps-plugin-artifact-reference-path.js";
+import { requireSpsSourceArtifactInventory, type SpsSourceArtifactInventory } from "./sps-source-artifact-inventory.js";
 
 const LIMIT = 60_000;
 const text = z.string().min(1).max(256).regex(/^[^\u0000-\u001f\u007f]+$/);
@@ -40,6 +41,7 @@ export type SpsPluginArtifactReferenceScope = Readonly<{
   references: readonly Readonly<SpsPluginArtifactPathReference & { canonicalPath: string }>[];
   /** A change key, not filesystem ownership, Host approval or a deletion permit. */
   fingerprint: string;
+  sourceInventory?: SpsSourceArtifactInventory;
   assertCurrent(): Promise<void>;
 }>;
 
@@ -52,6 +54,7 @@ export interface SpsPluginArtifactReferenceReaders {
   readRegistryStages(): Promise<readonly RegistryStageArtifactReference[]>;
   /** Private guard only; not complete Source reconciliation or a cleanup permit. */
   readSourceFingerprint?(): Promise<string>;
+  readSourceInventory?(): Promise<SpsSourceArtifactInventory>;
 }
 
 function rows<T>(value: readonly T[]): readonly T[] {
@@ -148,12 +151,16 @@ export function createSpsPluginArtifactReferenceReader(options: {
   readers: SpsPluginArtifactReferenceReaders;
 }) {
   const root = absolutePath.parse(options.localPluginDir);
-  const sourceFingerprint = async () => {
-    if (options.readers.readSourceFingerprint === undefined) return null;
+  const readSources = async () => {
     try {
+      if (options.readers.readSourceInventory !== undefined) {
+        const inventory = requireSpsSourceArtifactInventory(await options.readers.readSourceInventory());
+        return { fingerprint: inventory.fingerprint, inventory };
+      }
+      if (options.readers.readSourceFingerprint === undefined) return { fingerprint: null, inventory: null };
       const value = await options.readers.readSourceFingerprint();
       if (typeof value !== "string" || !/^[a-f0-9]{64}$/.test(value)) throw unavailable();
-      return value;
+      return { fingerprint: value, inventory: null };
     } catch { throw unavailable(); }
   };
   return Object.freeze({
@@ -163,7 +170,7 @@ export function createSpsPluginArtifactReferenceReader(options: {
         let active = true;
         try {
           const references = await observeReferences(root, options.readers);
-          const sources = await sourceFingerprint();
+          const sources = await readSources();
           const captures = new Map<string, Awaited<ReturnType<typeof captureSpsPluginArtifactReferencePath>>>();
           const capture = async (referencePath: string, kind: "file" | "directory") => {
             const key = JSON.stringify([referencePath, kind]);
@@ -180,17 +187,20 @@ export function createSpsPluginArtifactReferenceReader(options: {
             canonical.push(Object.freeze({ ...reference, canonicalPath: observed.canonicalPath }));
           }
           const signature = JSON.stringify(references);
-          const fingerprint = createHash("sha256").update(JSON.stringify([root, canonical, sources])).digest("hex");
+          const fingerprint = createHash("sha256").update(JSON.stringify([root, canonical, sources.fingerprint])).digest("hex");
           const assertCurrent = async () => {
             if (!active) throw unavailable();
             if (JSON.stringify(await observeReferences(root, options.readers)) !== signature) throw unavailable();
-            if (await sourceFingerprint() !== sources) throw unavailable();
+            const currentSources = await readSources();
+            if (currentSources.fingerprint !== sources.fingerprint
+              || (currentSources.inventory === null) !== (sources.inventory === null)) throw unavailable();
             try { for (const observed of captures.values()) await observed.assertCurrent(); }
             catch { throw unavailable(); }
             if (!active) throw unavailable();
           };
           const scope: SpsPluginArtifactReferenceScope = Object.freeze({ coverage: "core-only",
-            references: Object.freeze(canonical), fingerprint, assertCurrent });
+            references: Object.freeze(canonical), fingerprint,
+            ...(sources.inventory ? { sourceInventory: sources.inventory } : {}), assertCurrent });
           await assertCurrent();
           const result = await action(scope);
           await assertCurrent();
