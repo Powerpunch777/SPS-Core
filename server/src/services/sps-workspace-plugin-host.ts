@@ -13,6 +13,7 @@ import type { WorkerToHostHandlers } from "../compat/paperclip/control-plane.js"
 // part of the Workspace worker contract. Missing methods fail explicitly.
 const METHODS: readonly WorkerToHostMethodName[] = [
   "config.get", "state.get", "state.set", "state.delete",
+  "agents.list",
   "entities.upsert", "entities.list", "inbox.publish", "inbox.update", "inbox.withdraw",
   "localFolders.declarations", "localFolders.status", "localFolders.list",
   "localFolders.readText", "localFolders.writeTextAtomic", "localFolders.deleteFile",

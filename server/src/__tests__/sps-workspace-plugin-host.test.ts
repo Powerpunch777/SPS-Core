@@ -14,6 +14,34 @@ const manifest: PaperclipPluginManifestV1 = {
 };
 
 describe("SPS Workspace Plugin Host handlers", () => {
+  it("lists Agents only with declared read capability and the exact current Workspace invocation", async () => {
+    const list = vi.fn(async () => [{ id: "existing-agent", companyId: workspaceA }]);
+    const services = { agents: { list } } as unknown as HostServices;
+    const context = { invocationScope: { companyId: workspaceA } } satisfies WorkerHostCallContext;
+    const handlers = createSpsWorkspacePluginHostHandlers({ workspaceId: workspaceA, pluginId,
+      manifest: { ...manifest, capabilities: [...manifest.capabilities, "agents.read"] }, services,
+      readConfig: async () => ({}) });
+    expect(handlers["agents.list"]).toBeTypeOf("function");
+    for (const [params, callContext] of [
+      [{ companyId: workspaceA }, undefined],
+      [{ companyId: workspaceA }, { invocationScope: { companyId: workspaceB } }],
+      [{ companyId: workspaceA }, { invocationScope: { companyId: workspaceA }, invalidInvocationScope: true }],
+      [{ companyId: workspaceB }, context], [{}, context], [null, context],
+    ] as const) {
+      await expect(handlers["agents.list"]!(params as never, callContext)).rejects.toThrow();
+    }
+    expect(list).not.toHaveBeenCalled();
+    await expect(handlers["agents.list"]!({ companyId: workspaceA, limit: 100 }, context))
+      .resolves.toEqual([{ id: "existing-agent", companyId: workspaceA }]);
+    expect(list).toHaveBeenCalledExactlyOnceWith({ companyId: workspaceA, limit: 100 });
+    const denied = createSpsWorkspacePluginHostHandlers({ workspaceId: workspaceA, pluginId, manifest,
+      services, readConfig: async () => ({}) });
+    await expect(denied["agents.list"]!({ companyId: workspaceA }, context)).rejects.toThrow();
+    expect(list).toHaveBeenCalledTimes(1);
+    for (const operation of ["agents.get", "agents.pause", "agents.resume", "agents.invoke", "agents.sessions.create"]) {
+      expect(Object.hasOwn(handlers, operation)).toBe(false);
+    }
+  });
   it("requires the fixed Workspace context and scopes config reads to its closure", async () => {
     const readConfig = vi.fn(async () => ({ selected: workspaceA }));
     const handlers = createSpsWorkspacePluginHostHandlers({
