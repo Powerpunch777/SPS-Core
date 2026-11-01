@@ -77,6 +77,7 @@ import {
   type PluginRecoveryState,
 } from "./sps-plugin-recovery.js";
 import type { SpsPluginPackageOperations } from "./sps-plugin-package-operations.js";
+import { createSpsPluginArtifactOwnership, type SpsPluginArtifactAllocation } from "./sps-plugin-artifact-ownership.js";
 
 const execFileAsync = promisify(execFile);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -1351,8 +1352,35 @@ export function pluginLoader(
   const manifestValidator = pluginManifestValidator();
   const capabilityValidator = pluginCapabilityValidator();
   const log = logger.child({ service: "plugin-loader" });
+  const artifactOwnership = createSpsPluginArtifactOwnership(localPluginDir);
   const initialLoadReadiness = createPluginInitialLoadReadiness();
   const hostVersion = runtimeServices?.instanceInfo.hostVersion;
+
+  async function allocateArtifact(kind: "install" | "upgrade", pluginId: string | null = null) {
+    try {
+      const allocation = await artifactOwnership.allocate(kind, pluginId);
+      return { root: allocation.root, allocation };
+    } catch {
+      // Legacy linked storage or an unavailable optional record store must not
+      // break installation. A separate UUID allocation has no cleanup witness.
+      const root = kind === "install" ? path.join(localPluginDir, ".install-staging", randomUUID())
+        : path.join(localPluginDir, ".upgrade-staging", pluginId!, randomUUID());
+      await mkdir(root, { recursive: true });
+      log.warn("plugin-loader: artifact ownership observation unavailable; new files remain protected");
+      return { root, allocation: null };
+    }
+  }
+
+  async function observeOwnedArtifact(allocation: SpsPluginArtifactAllocation, discovered: DiscoveredPlugin) {
+    try {
+      await artifactOwnership.seal(allocation, { pluginKey: discovered.manifest!.id,
+        packageName: discovered.packageName, version: discovered.version });
+    } catch {
+      // Unsupported/link-containing or interrupted observations stay protected.
+      // Cleanup eligibility must not become a new package execution requirement.
+      log.warn({ pluginKey: discovered.manifest!.id }, "plugin-loader: artifact cleanup inventory unavailable; files remain protected");
+    }
+  }
 
   async function assertPageRoutePathsAvailable(manifest: PaperclipPluginManifestV1): Promise<void> {
     const requestedRoutePaths = getDeclaredPageRoutePaths(manifest);
@@ -1719,12 +1747,8 @@ export function pluginLoader(
     // is still being parsed, imported, and capability-checked. Keep both npm
     // and local development candidates in a private staging directory until
     // the lifecycle commits the replacement.
-    const stagingDir = path.join(
-      localPluginDir,
-      ".upgrade-staging",
-      pluginId,
-      randomUUID(),
-    );
+    const staging = await allocateArtifact("upgrade", pluginId);
+    const stagingDir = staging.root;
     let stagedLocalPath: string | undefined;
 
     try {
@@ -1757,6 +1781,8 @@ export function pluginLoader(
           `Upgrade failed: new manifest ID '${newManifest.id}' does not match existing plugin ID '${oldManifest.id}'`,
         );
       }
+
+      if (staging.allocation) await observeOwnedArtifact(staging.allocation, discovered);
 
       return { oldManifest, newManifest, discovered };
     } catch (error) {
@@ -2047,9 +2073,8 @@ export function pluginLoader(
       assertRuntimeAllowed("plugin installation");
       const performInstall = async () => {
         const ownsStagingRoot = Boolean(installOptions.packageName && !installOptions.localPath);
-        const stagingRoot = ownsStagingRoot
-          ? path.join(localPluginDir, ".install-staging", randomUUID())
-          : null;
+        const staging = ownsStagingRoot ? await allocateArtifact("install") : null;
+        const stagingRoot = staging?.root ?? null;
         let commitMayHaveBeenAttempted = false;
         try {
           if (stagingRoot) await mkdir(stagingRoot, { recursive: true });
@@ -2058,6 +2083,7 @@ export function pluginLoader(
             : installOptions);
           const manifest = discovered.manifest!;
           await options.packageOperations?.assertClear(undefined, manifest.id);
+          if (staging?.allocation) await observeOwnedArtifact(staging.allocation, discovered);
 
           // Persist the exact package root used for validation. npm packages
           // are installed under their UUID-owned staging root so npm never

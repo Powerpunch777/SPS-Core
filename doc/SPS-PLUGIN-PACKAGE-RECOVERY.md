@@ -200,3 +200,41 @@ The boundary check and its3regression tests passed; the combined lifecycle
 removal/upgrade selection passed28/28, and final server `tsc --noEmit` passed.
 Source0285ff7 Linux serialized3/4 job123349007577 also ran the real PostgreSQL
 journal suite:6/6passed with no skips. Other exact-candidate gates remain separate.
+
+## Host-Reviewed Artifact Cleanup Foundation
+
+The user-approved follow-up is a Settings list with explicit Host selection and
+confirmation, not automatic garbage collection. That list and deletion path are
+not implemented by the allocation/inventory foundation below.
+
+New Core-owned npm installs and prepared upgrades attempt to exclusively create
+their existing UUID-scoped artifact roots through the ownership store. A Host-local
+allocation record binds the storage/root filesystem identities and exact
+relative path. After ordinary package validation, an independent static-only
+inventory records every regular file's size/hash and empty directories. A
+separate exclusive verified record binds that observation to package identity.
+The store never adopts an existing directory, accepts a caller-created ticket,
+imports code during observation, or issues a deletion permit.
+
+The private `.artifact-ownership` sibling is not an execution path or portable
+Registry approval. Copies in a different storage/root identity do not become
+valid ownership. Incomplete records, links/hardlinks, changed trees, unsupported
+inventories and preexisting packages remain protected from the future cleanup
+tool. Legacy linked storage or an unavailable optional record store retains the
+ordinary UUID allocation path without generating cleanup ownership. Inventory
+failure does not reject an otherwise valid existing plugin
+execution contract; it leaves no complete cleanup certificate. Existing explicit
+uninstall and failed-uncommitted-candidate cleanup keep their original rules.
+
+Pending/completed package journals, current Registry paths, retained rollback
+stages, active Workers/starts, shared mutation fencing, fresh Host authority,
+review-bound selection, actual removal and Settings UI still need composition.
+An inventory hash or an allocation record alone must never substitute for them.
+These same-user records are neither an OS sandbox nor cryptographic evidence
+against arbitrary code already running as that user.
+
+Local verification covers actual file identities/bytes, restart reads, forged
+tickets, foreign Host copies, replaced roots, links, incomplete records and
+strict metadata validation. Real loader tests preserve UUID layouts, existing
+source/active bytes, commit-response-loss artifacts and normal link-containing
+package compatibility while withholding cleanup evidence for those links.

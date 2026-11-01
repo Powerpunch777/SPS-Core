@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, rename, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -23,6 +23,7 @@ vi.mock("../services/plugin-registry.js", () => ({
 import { pluginLoader, resolvePluginPackageRoot, requiresSharedPluginArtifactCleanup } from "../services/plugin-loader.js";
 import { withPluginPackageMutationPermit } from "../services/sps-plugin-package-maintenance.js";
 import type { SpsPluginPackageOperations } from "../services/sps-plugin-package-operations.js";
+import { createSpsPluginArtifactOwnership } from "../services/sps-plugin-artifact-ownership.js";
 
 const pluginId = "a7f19aec-4724-4bca-9ddf-7358b5bdbdd1";
 const activeManifest = {
@@ -171,10 +172,60 @@ describe("pluginLoader private npm artifacts", () => {
     ]);
     expect((installedRows[0]!.input as Record<string, unknown>).packagePath).toBe(first.packagePath);
     expect((installedRows[1]!.input as Record<string, unknown>).packagePath).toBe(second.packagePath);
+    const ownership = createSpsPluginArtifactOwnership(localPluginDir);
+    const firstWitness = await ownership.read(firstRelative.split("/")[1]!);
+    const secondWitness = await ownership.read(secondRelative.split("/")[1]!);
+    expect(firstWitness.package).toEqual({ pluginKey: "sps.private-npm-a", packageName: first.packageName, version: "1.2.0" });
+    expect(secondWitness.package).toEqual({ pluginKey: "sps.private-npm-b", packageName: second.packageName, version: "2.3.0" });
     expect(await readFile(path.join(first.packagePath, "artifact-marker.txt"), "utf8")).toBe(firstMarker);
     expect(await readFile(path.join(localPluginDir, "package.json"), "utf8")).toBe(rootPackageJson);
     expect(await readFile(path.join(localPluginDir, "node_modules", "@sps", "private-npm-a", "active-marker.txt"), "utf8"))
       .toBe("root-active-copy");
+  });
+
+  it("keeps a valid link-containing package usable but does not certify it for manual cleanup", async () => {
+    createNpmRunner();
+    const external = path.join(root, "external-project");
+    await mkdir(external);
+    await writeFile(path.join(external, "keep.txt"), "caller work");
+    execFileMock.mockImplementationOnce((...args: unknown[]) => {
+      const commandArgs = args[1] as string[];
+      const callback = args[3] as (error: Error | null, stdout?: string, stderr?: string) => void;
+      const prefix = commandArgs[commandArgs.indexOf("--prefix") + 1]!;
+      void writeFakePackage(prefix, "@sps/linked-private", "1.0.0").then(async packageRoot => {
+        await symlink(external, path.join(packageRoot, "linked-work"), process.platform === "win32" ? "junction" : "dir");
+        callback(null, "", "");
+      }).catch(error => callback(error));
+      return {};
+    });
+    const installed = await createLoader().installPlugin({ packageName: "@sps/linked-private" });
+    const id = path.relative(localPluginDir, installed.packagePath).split(path.sep)[1]!;
+    await expect(createSpsPluginArtifactOwnership(localPluginDir).read(id)).rejects.toThrow();
+    expect(await readFile(path.join(external, "keep.txt"), "utf8")).toBe("caller work");
+    expect(installedRows).toHaveLength(1);
+  });
+
+  it("preserves existing linked storage compatibility without issuing cleanup ownership", async () => {
+    createNpmRunner();
+    const physical = path.join(root, "physical-plugins");
+    await rename(localPluginDir, physical);
+    await symlink(physical, localPluginDir, process.platform === "win32" ? "junction" : "dir");
+    const installed = await createLoader().installPlugin({ packageName: "@sps/linked-storage" });
+    expect(await readFile(path.join(installed.packagePath, "artifact-marker.txt"), "utf8")).toBe("@sps/linked-storage@1.0.0");
+    expect(await readFile(path.join(physical, "node_modules", "@sps", "private-npm-a", "active-marker.txt"), "utf8")).toBe("root-active-copy");
+    const id = path.relative(localPluginDir, installed.packagePath).split(path.sep)[1]!;
+    await expect(createSpsPluginArtifactOwnership(localPluginDir).read(id)).rejects.toThrow("ownership");
+    expect(installedRows).toHaveLength(1);
+  });
+
+  it("does not overwrite an unavailable private inventory store or make it a runtime prerequisite", async () => {
+    createNpmRunner();
+    const sentinel = path.join(localPluginDir, ".artifact-ownership");
+    await writeFile(sentinel, "unavailable store must be preserved");
+    const installed = await createLoader().installPlugin({ packageName: "@sps/unavailable-inventory" });
+    expect(await readFile(path.join(installed.packagePath, "artifact-marker.txt"), "utf8")).toBe("@sps/unavailable-inventory@1.0.0");
+    expect(await readFile(sentinel, "utf8")).toBe("unavailable store must be preserved");
+    expect(installedRows).toHaveLength(1);
   });
 
   it("removes only its owned staging root after validation or transaction failure", async () => {
@@ -240,6 +291,9 @@ describe("pluginLoader private npm artifacts", () => {
     expect(await readFile(path.join(referencedPath, "artifact-marker.txt"), "utf8"))
       .toBe("@sps/private-npm-uncertain@1.0.0");
     expect(resolvePluginPackageRoot({ packagePath: referencedPath } as never, localPluginDir)).toBe(referencedPath);
+    const allocationId = path.relative(localPluginDir, referencedPath).split(path.sep)[1]!;
+    const witness = await createSpsPluginArtifactOwnership(localPluginDir).read(allocationId);
+    expect(witness.package.packageName).toBe("@sps/private-npm-uncertain");
   });
 
   it("still cleans a private install when the transaction callback rejects before COMMIT", async () => {
