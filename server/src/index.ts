@@ -34,6 +34,7 @@ import { createApp } from "./app.js";
 import { shutdownSpsModelBroker } from "./services/sps-model-broker.js";
 import { attachSpsOwnedShutdown } from "./services/sps-owned-shutdown.js";
 import { requireSpsOwnedListenPort } from "./services/sps-owned-listen-port.js";
+import { createSpsPluginArtifactParentChannel } from "./services/sps-plugin-artifact-parent-channel.js";
 import { createSpsNativeHostManagement, type SpsNativeHostManagement } from "./services/sps-native-host-management.js";
 import { createSpsNativeParentEnrollmentService, type SpsNativeParentEnrollment } from "./services/sps-native-parent-enrollment.js";
 import { createSpsNativeParentIngress } from "./services/sps-native-parent-ingress.js";
@@ -786,7 +787,14 @@ export async function startServer(): Promise<StartedServer> {
     }
   };
   const pluginWorkerManager = createPluginWorkerManager();
+  let pluginArtifactParentChannel: ReturnType<typeof createSpsPluginArtifactParentChannel> | undefined;
   const app = await createApp(db as any, {
+    onPluginArtifactReferenceReader: reader => {
+      if (process.env.SPS_DESKTOP_ARTIFACT_CHANNEL === "1" && process.env.SPS_DESKTOP_OWNED_SHUTDOWN_PIPE === "1"
+        && process.connected === true && typeof process.send === "function") {
+        pluginArtifactParentChannel = createSpsPluginArtifactParentChannel(reader, process as Parameters<typeof createSpsPluginArtifactParentChannel>[1]);
+      }
+    },
     onNativePluginRuntime: runtime => { nativePluginRuntime = runtime; },
     onNativeNodeRuntime: runtime => { nativeNodeRuntime = runtime; },
     uiMode,
@@ -1284,6 +1292,7 @@ export async function startServer(): Promise<StartedServer> {
   
   {
     const shutdown = async (signal: "SIGINT" | "SIGTERM") => {
+      pluginArtifactParentChannel?.dispose();
       try { await nativeWorkspaceChannel?.dispose(); }
       catch {
         process.exitCode = 1;

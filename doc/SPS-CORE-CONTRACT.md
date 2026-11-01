@@ -34,6 +34,17 @@ plugins. The maintenance action is joined by shutdown. These are graceful local
 coordination guarantees, not crash-atomic package journaling, descendant-process
 containment, or protection from arbitrary same-user filesystem access.
 
+An explicitly enabled, directly owned Desktop child can expose its private
+Core-only artifact reference snapshot over the inherited parent IPC channel.
+The begin/check/end transaction holds the existing non-draining maintenance
+scope across Main's actual callback. End acknowledgement follows final
+reference validation and scope release. Lost replies, disconnection or listener
+disposal never unlock an exposed scope by timeout; exact owned process
+termination remains the recovery boundary. The bounded strict protocol adds no
+HTTP/SDK endpoint, Host approval, deletion authority or complete Desktop
+reference coverage. Desktop must separately compose its own admission and
+references before any cleanup decision. A send callback is not an end receipt.
+
 The product composition additionally persists removal and approved-upgrade
 intents before destructive package mutations, and reconciles them before normal
 plugin startup. Pending operations deny unrelated activation/replacement.
