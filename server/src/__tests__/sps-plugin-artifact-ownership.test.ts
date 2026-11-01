@@ -1,21 +1,39 @@
-import { mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { link, lstat, mkdir, mkdtemp, opendir, readFile, readdir, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createSpsPluginArtifactOwnership,
   parseSpsOwnedPluginArtifact,
 } from "../services/sps-plugin-artifact-ownership.js";
 
-const roots: string[] = [];
+vi.mock("node:fs/promises", async importOriginal => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return { ...actual, opendir: vi.fn(actual.opendir) };
+});
+
+const roots: Array<{ root: string; temp: string; dev: bigint; ino: bigint; birthtimeNs: bigint }> = [];
 afterEach(async () => {
-  for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
+  vi.mocked(opendir).mockReset();
+  for (const owned of roots.splice(0)) {
+    const stats = await lstat(owned.root, { bigint: true });
+    expect(path.isAbsolute(owned.root) && path.dirname(owned.root) === owned.temp
+      && path.basename(owned.root).startsWith("sps-artifact-owner-")).toBe(true);
+    expect(stats.isDirectory() && !stats.isSymbolicLink()).toBe(true);
+    expect(await realpath(owned.root)).toBe(owned.root);
+    expect([stats.dev, stats.ino, stats.birthtimeNs]).toEqual([owned.dev, owned.ino, owned.birthtimeNs]);
+    await rm(owned.root, { recursive: true, force: true });
+  }
 });
 const metadata = { pluginKey: "test.artifact", packageName: "@test/artifact", version: "1.0.0" };
 const pluginId = "fca72de0-75ac-4be1-8ff5-4c8cfeaa6eef";
 async function fixture() {
-  const root = await realpath(await mkdtemp(path.join(os.tmpdir(), "sps-artifact-owner-")));
-  roots.push(root);
+  const temp = await realpath(os.tmpdir());
+  const owned = await mkdtemp(path.join(temp, "sps-artifact-owner-"));
+  const stats = await lstat(owned, { bigint: true });
+  roots.push({ root: owned, temp, dev: stats.dev, ino: stats.ino, birthtimeNs: stats.birthtimeNs });
+  const root = path.join(owned, "storage");
+  await mkdir(root);
   return { root, store: createSpsPluginArtifactOwnership(root) };
 }
 async function populate(root: string) {
@@ -24,6 +42,130 @@ async function populate(root: string) {
 }
 
 describe("Host-local Plugin artifact ownership", () => {
+  it("lists missing ownership records without creating storage or record directories", async () => {
+    const { root, store } = await fixture();
+    const missing = path.join(root, "missing", "storage");
+    expect(await createSpsPluginArtifactOwnership(missing).listAllocatedIds()).toEqual([]);
+    await expect(lstat(path.join(root, "missing"))).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await store.listAllocatedIds()).toEqual([]);
+    expect(await readdir(root)).toEqual([]);
+    await mkdir(path.join(root, ".artifact-ownership"));
+    expect(await store.listAllocatedIds()).toEqual([]);
+  });
+
+  it("lists paired and allocation-only IDs once in sorted order without verifying artifact bytes", async () => {
+    const { root, store } = await fixture();
+    const complete = await store.allocate("install");
+    await populate(complete.root);
+    const witness = await store.seal(complete, metadata);
+    const incomplete = await store.allocate("upgrade", pluginId);
+    const incompleteId = path.basename(incomplete.root);
+    const allocationFile = path.join(root, ".artifact-ownership", `${incompleteId}.allocation.json`);
+    await writeFile(allocationFile, "{incomplete");
+    await writeFile(path.join(complete.root, "package", "manifest.js"), "changed bytes\n");
+    await rename(incomplete.root, `${incomplete.root}.preserved`);
+    expect(await store.listAllocatedIds()).toEqual([witness.allocation.id, incompleteId].sort());
+    expect(await createSpsPluginArtifactOwnership(root).listAllocatedIds()).toEqual([witness.allocation.id, incompleteId].sort());
+    expect(await readFile(allocationFile, "utf8")).toBe("{incomplete");
+    expect(await readFile(path.join(complete.root, "package", "manifest.js"), "utf8")).toBe("changed bytes\n");
+    await expect(store.read(incompleteId)).rejects.toThrow();
+  });
+
+  it("rejects verified records without their allocation record", async () => {
+    const { root, store } = await fixture();
+    const ticket = await store.allocate("install");
+    await populate(ticket.root);
+    const witness = await store.seal(ticket, metadata);
+    await rm(path.join(root, ".artifact-ownership", `${witness.allocation.id}.allocation.json`));
+    await expect(store.listAllocatedIds()).rejects.toThrow("ownership");
+  });
+
+  it.each(["notes.txt", "invalid.allocation.json", `${pluginId}.allocation.json.extra`, `${pluginId.toUpperCase()}.allocation.json`])(
+    "rejects unknown or noncanonical record filename %s", async name => {
+      const { root, store } = await fixture();
+      const records = path.join(root, ".artifact-ownership");
+      await mkdir(records);
+      await writeFile(path.join(records, name), "keep");
+      await expect(store.listAllocatedIds()).rejects.toThrow("ownership");
+      expect(await readFile(path.join(records, name), "utf8")).toBe("keep");
+    },
+  );
+
+  it.each(["directory", "junction", "hardlink"])("rejects a record that is a %s", async kind => {
+    const { root, store } = await fixture();
+    const records = path.join(root, ".artifact-ownership");
+    await mkdir(records);
+    const record = path.join(records, `${pluginId}.allocation.json`);
+    const outside = path.join(root, "outside");
+    await mkdir(outside);
+    const sentinel = path.join(outside, "keep.txt");
+    await writeFile(sentinel, "keep");
+    if (kind === "directory") await mkdir(record);
+    else if (kind === "junction") await symlink(outside, record, process.platform === "win32" ? "junction" : "dir");
+    else await link(sentinel, record);
+    await expect(store.listAllocatedIds()).rejects.toThrow("ownership");
+    expect(await readFile(sentinel, "utf8")).toBe("keep");
+  });
+
+  it.each(["storage", "records"])("rejects a linked %s ancestry without creating or adopting records", async kind => {
+    const { root, store } = await fixture();
+    const records = path.join(root, ".artifact-ownership");
+    await mkdir(records);
+    const source = kind === "storage" ? root : records;
+    const preserved = `${source}.preserved`;
+    await rename(source, preserved);
+    await symlink(preserved, source, process.platform === "win32" ? "junction" : "dir");
+    await expect(store.listAllocatedIds()).rejects.toThrow("ownership");
+    expect(await readdir(kind === "storage" ? path.join(preserved, ".artifact-ownership") : preserved)).toEqual([]);
+  });
+
+  it.each(["storage", "records", "membership"])("rejects changed %s during enumeration", async kind => {
+    const { root, store } = await fixture();
+    const ticket = await store.allocate("install");
+    const id = path.basename(ticket.root);
+    const records = path.join(root, ".artifact-ownership");
+    const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+    vi.mocked(opendir).mockImplementationOnce(actual.opendir).mockImplementationOnce(async directoryPath => {
+      if (kind === "storage") {
+        await rename(root, `${root}.preserved`);
+        await mkdir(root);
+        await rename(path.join(`${root}.preserved`, ".artifact-ownership"), records);
+      } else if (kind === "records") {
+        await rename(records, `${records}.preserved`);
+        await mkdir(records);
+        await rename(path.join(`${records}.preserved`, `${id}.allocation.json`), path.join(records, `${id}.allocation.json`));
+      } else await writeFile(path.join(records, `${pluginId}.allocation.json`), "{incomplete");
+      return actual.opendir(directoryPath);
+    });
+    await expect(store.listAllocatedIds()).rejects.toThrow("ownership");
+    expect(await readFile(path.join(records, `${id}.allocation.json`), "utf8")).toContain(id);
+  });
+
+  it("bounds streamed entry count without silently truncating the allocation list", async () => {
+    const { root, store } = await fixture();
+    await store.allocate("install");
+    const actual = await vi.importActual<typeof import("node:fs/promises")>("node:fs/promises");
+    let emitted = 0;
+    vi.mocked(opendir).mockImplementationOnce(async directoryPath => {
+      const directory = await actual.opendir(directoryPath);
+      const entry = (await directory.read())!;
+      // Exercise the bound without creating 60,001 files; the directory handle is real and owned.
+      directory[Symbol.asyncIterator] = async function* () {
+        try {
+          for (let i = 0; i <= 60_000; i++) {
+            entry.name = `00000000-0000-4000-8000-${i.toString(16).padStart(12, "0")}.allocation.json`;
+            emitted++;
+            yield entry;
+          }
+        } finally { await directory.close(); }
+      };
+      return directory;
+    });
+    await expect(store.listAllocatedIds()).rejects.toThrow("ownership");
+    expect(emitted).toBe(60_001);
+    expect((await readdir(path.join(root, ".artifact-ownership"))).length).toBe(1);
+  });
+
   it("persists exact newly allocated install bytes without importing executable metadata", async () => {
     const { root, store } = await fixture();
     const ticket = await store.allocate("install");

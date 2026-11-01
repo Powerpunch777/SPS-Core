@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { constants } from "node:fs";
-import { lstat, mkdir, open, realpath } from "node:fs/promises";
+import { constants, type BigIntStats } from "node:fs";
+import { lstat, mkdir, open, opendir, realpath } from "node:fs/promises";
 import path from "node:path";
 import { z } from "zod/v3";
 import {
@@ -37,6 +37,8 @@ export type SpsOwnedPluginArtifact = {
 };
 export type SpsPluginArtifactAllocation = Readonly<{ root: string }>;
 const unavailable = () => new Error("Plugin artifact ownership is unavailable; preserve its files.");
+const MAX_RECORD_ENTRIES = 60_000;
+const recordName = /^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.(allocation|verified)\.json$/;
 const equal = (left: unknown, right: unknown) => JSON.stringify(left) === JSON.stringify(right);
 const identity = (stats: { dev: bigint; ino: bigint; birthtimeNs: bigint }) => ({
   dev: String(stats.dev), ino: String(stats.ino), birthtimeNs: String(stats.birthtimeNs),
@@ -129,6 +131,59 @@ export function createSpsPluginArtifactOwnership(storageRoot: string) {
   }
 
   return {
+    /** Record IDs only, including incomplete allocations; NOT byte verification or deletion authority. */
+    async listAllocatedIds(): Promise<string[]> {
+      let before: BigIntStats;
+      try { before = await lstat(recordsRoot, { bigint: true }); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+        throw error;
+      }
+      const storageIdentity = await directoryIdentity(root);
+      const recordsIdentity = await directoryIdentity(recordsRoot);
+      if (!equal(identity(before), recordsIdentity)) throw unavailable();
+
+      async function captureEntries() {
+        const names = new Set<string>();
+        const directory = await opendir(recordsRoot);
+        for await (const entry of directory) {
+          if (names.size >= MAX_RECORD_ENTRIES || names.has(entry.name)) throw unavailable();
+          const match = recordName.exec(entry.name);
+          if (!match || !z.string().uuid().safeParse(match[1]).success) throw unavailable();
+          names.add(entry.name);
+        }
+        const entries = new Map<string, BigIntStats>();
+        for (const name of names) {
+          const stats = await lstat(path.join(recordsRoot, name), { bigint: true });
+          if (!stats.isFile() || stats.isSymbolicLink() || stats.nlink !== 1n
+            || stats.size > 32n * 1024n * 1024n) throw unavailable();
+          entries.set(name, stats);
+        }
+        return entries;
+      }
+
+      const entries = await captureEntries();
+      const afterEntries = await captureEntries();
+      if (!equal(await directoryIdentity(root), storageIdentity)
+        || !equal(await directoryIdentity(recordsRoot), recordsIdentity)) throw unavailable();
+      const after = await lstat(recordsRoot, { bigint: true });
+      const unchanged = (left: BigIntStats, right: BigIntStats) =>
+        equal(identity(left), identity(right)) && left.size === right.size && left.nlink === right.nlink
+        && left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs;
+      if (!after.isDirectory() || after.isSymbolicLink() || !unchanged(before, after)
+        || entries.size !== afterEntries.size) throw unavailable();
+      const allocated = new Set<string>();
+      const verified = new Set<string>();
+      for (const [name, stats] of entries) {
+        const current = afterEntries.get(name);
+        if (!current || !unchanged(stats, current)) throw unavailable();
+        const match = recordName.exec(name)!;
+        (match[2] === "allocation" ? allocated : verified).add(match[1]!);
+      }
+      for (const id of verified) if (!allocated.has(id)) throw unavailable();
+      return [...allocated].sort();
+    },
+
     async allocate(kind: "install" | "upgrade", pluginRecordId: string | null = null): Promise<SpsPluginArtifactAllocation> {
       if (kind !== "install" && kind !== "upgrade") throw unavailable();
       if ((kind === "install" && pluginRecordId !== null)

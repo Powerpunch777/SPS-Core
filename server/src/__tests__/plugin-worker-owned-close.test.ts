@@ -1,5 +1,6 @@
 import { EventEmitter } from "node:events";
 import { PassThrough, Writable } from "node:stream";
+import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { PaperclipPluginManifestV1 } from "@paperclipai/shared";
 
@@ -98,7 +99,8 @@ describe("Plugin worker owned-scope closure", () => {
     adapter.prepare.mockReturnValue(undefined); adapter.spawn.mockReturnValue(helper);
     adapter.owner.mockImplementation(child => child === helper ? owner : null);
     const manager = createPluginWorkerManager();
-    const handle = await manager.startWorker("example.owned", options);
+    const entrypointPath = path.resolve("fixture-unused");
+    const handle = await manager.startWorker("example.owned", { ...options, entrypointPath });
     const exited = vi.fn(), crashed = vi.fn();
     handle.on("exit", exited); handle.on("crash", crashed);
     helper.close(); failed = true; closure.reject(new Error("private helper failure"));
@@ -106,6 +108,9 @@ describe("Plugin worker owned-scope closure", () => {
     expect(handle.diagnostics().pid).toBe(43);
     expect(exited).not.toHaveBeenCalled(); expect(crashed).not.toHaveBeenCalled();
     await expect(handle.start()).rejects.toThrow(/previous process/);
+    expect(manager.readArtifactReferences!()).toEqual([
+      expect.objectContaining({ pluginId: "example.owned", entrypointPath, starting: false }),
+    ]);
     await expect(manager.shutdown()).rejects.toThrow();
     expect(manager.getWorker("example.owned")).toBe(handle);
     expect(helper.kill).not.toHaveBeenCalled();
@@ -117,6 +122,7 @@ describe("Plugin worker owned-scope closure", () => {
     adapter.spawn.mockClear(); adapter.owner.mockReturnValue(null);
     const manager = createPluginWorkerManager();
     const starting = manager.startWorker("example.owned", options);
+    expect(() => manager.readArtifactReferences!()).toThrow(/reference is unavailable/);
     const rejected = expect(starting).rejects.toThrow(/stopped|stopping/);
     const stopping = manager.stopWorker("example.owned");
     preparation.resolve();

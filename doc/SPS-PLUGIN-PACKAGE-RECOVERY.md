@@ -238,3 +238,28 @@ tickets, foreign Host copies, replaced roots, links, incomplete records and
 strict metadata validation. Real loader tests preserve UUID layouts, existing
 source/active bytes, commit-response-loss artifacts and normal link-containing
 package compatibility while withholding cleanup evidence for those links.
+
+### Read-Only Ownership And Worker References
+
+`listAllocatedIds()` now enumerates existing private allocation IDs without
+creating storage. It includes allocation-only IDs: these can be incomplete,
+unreadable or no longer present and are not verified cleanup candidates.
+Unknown/noncanonical names, orphan verified records, non-regular or linked
+record entries, excessive counts and changing directory/file identities reject
+the enumeration. The caller must still use `read()` and current inventory
+verification; a returned ID grants no byte ownership or deletion authority.
+
+The actual Worker manager exposes optional Host-private
+`readArtifactReferences()`, not a public SDK method or HTTP diagnostic field.
+Each admitted handle captures its entrypoint path and opaque owner ID before
+initialization. Only the launch path is fixed; other startup options retain
+their previous behavior. Host and Workspace handles remain separate. Starts,
+backoff, stopped handles that can restart and unconfirmed closes keep their
+reference until the owning manager actually removes the handle. Shutdown or
+unresolvable launch inputs make reference reads unavailable, not an empty list.
+
+These are private launch-input references, not resolved filesystem identities
+or a coherent multi-source maintenance snapshot. Cleanup must still compose
+DB/journal/Registry/preparation references, canonicalize and verify paths, and
+hold the real mutation fence with fresh Host authority. No remove API, UI,
+automatic collection or additional execution permission is supplied here.

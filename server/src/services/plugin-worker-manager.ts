@@ -21,6 +21,7 @@
 import type { ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
+import path from "node:path";
 import { createInterface, type Interface as ReadlineInterface } from "node:readline";
 import type { PaperclipPluginManifestV1 } from "@paperclipai/shared";
 import {
@@ -369,6 +370,16 @@ export interface WorkerDiagnostics {
   nextRestartAt: number | null;
 }
 
+/** Host-private tracked launch reference, not package ownership or deletion authority. */
+export interface PluginWorkerArtifactReference {
+  readonly ownerId: string;
+  readonly pluginId: string;
+  readonly workspaceId: string | null;
+  readonly entrypointPath: string;
+  readonly status: WorkerStatus;
+  readonly starting: boolean;
+}
+
 // ---------------------------------------------------------------------------
 // PluginWorkerManager — manages all plugin workers
 // ---------------------------------------------------------------------------
@@ -442,6 +453,13 @@ export interface PluginWorkerManager {
   diagnostics(): WorkerDiagnostics[];
 
   /**
+   * All retained handles, including stopped handles that can restart and starts
+   * or unconfirmed closes. Paths are private launch inputs, not FS identities.
+   * Cleanup must canonicalize/recheck them under its separate mutation fence.
+   */
+  readArtifactReferences?(): readonly PluginWorkerArtifactReference[];
+
+  /**
    * Send an RPC call to a specific plugin worker.
    *
    * @throws if the worker is not running
@@ -489,6 +507,7 @@ function createPluginWorkerHandleInternal(
   options: WorkerStartOptions,
   canStart: () => boolean,
   ownerWorkspaceId?: string,
+  entrypointPath: string = options.entrypointPath,
 ): PluginWorkerHandle {
   const log = logger.child({ service: "plugin-worker", pluginId, ...(ownerWorkspaceId ? { workspaceId: ownerWorkspaceId } : {}) });
   const emitter = new EventEmitter();
@@ -1224,7 +1243,7 @@ function createPluginWorkerHandleInternal(
       TZ: process.env.TZ ?? "UTC",
     };
 
-    const child = spawnPluginWorkerProcess(options.entrypointPath, {
+    const child = spawnPluginWorkerProcess(entrypointPath, {
       execArgv: options.execArgv ?? [],
       env: workerEnv,
     });
@@ -2192,6 +2211,7 @@ export function createPluginWorkerManager(
 ): PluginWorkerManager {
   const log = logger.child({ service: "plugin-worker-manager" });
   const workers = new Map<string, PluginWorkerHandle>();
+  const artifactReferences = new WeakMap<PluginWorkerHandle, { ownerId: string; entrypointPath: string }>();
   /** Per-owner startup locks to prevent concurrent spawn races. */
   const startupLocks = new Map<string, Promise<PluginWorkerHandle>>();
   const stoppingPlugins = new Set<string>();
@@ -2251,12 +2271,15 @@ export function createPluginWorkerManager(
     }
 
     const startOptions = owner.workspaceId === null ? options : { ...options, autoRestart: false };
+    const entrypointPath = startOptions.entrypointPath;
     const handle = createPluginWorkerHandleInternal(
       owner.pluginId,
       startOptions,
       () => canStartOwner(owner) && workers.get(key) === handle,
       owner.workspaceId ?? undefined,
+      entrypointPath,
     );
+    artifactReferences.set(handle, { ownerId: randomUUID(), entrypointPath });
     workers.set(key, handle);
 
     if (managerOptions?.onWorkerEvent) {
@@ -2495,6 +2518,20 @@ export function createPluginWorkerManager(
 
     diagnostics(): WorkerDiagnostics[] {
       return Array.from(workers.values()).map((h) => h.diagnostics());
+    },
+
+    readArtifactReferences(): readonly PluginWorkerArtifactReference[] {
+      if (closed) throw new Error("Plugin artifact references are unavailable during shutdown.");
+      return Object.freeze([...workers.entries()].sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+        .map(([key, handle]) => {
+          const reference = artifactReferences.get(handle);
+          if (!reference || typeof reference.entrypointPath !== "string" || !path.isAbsolute(reference.entrypointPath)
+            || reference.entrypointPath.includes("\0") || reference.entrypointPath.length > 32_768) {
+            throw new Error("Plugin artifact launch reference is unavailable; preserve its files.");
+          }
+          return Object.freeze({ ...reference, pluginId: handle.pluginId,
+            workspaceId: handle.workspaceId ?? null, status: handle.status, starting: startupLocks.has(key) });
+        }));
     },
 
     call<M extends HostToWorkerMethodName>(
