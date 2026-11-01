@@ -2147,16 +2147,25 @@ export function pluginLoader(
     async installPlugin(installOptions: PluginInstallOptions): Promise<DiscoveredPlugin> {
       assertRuntimeAllowed("plugin installation");
       const performInstall = async () => {
+        const reference = beginPreparationReference("pending-install");
         const ownsStagingRoot = Boolean(installOptions.packageName && !installOptions.localPath);
-        const staging = ownsStagingRoot ? await allocateArtifact("install") : null;
-        const stagingRoot = staging?.root ?? null;
+        let staging: Awaited<ReturnType<typeof allocateArtifact>> | null = null;
+        let stagingRoot: string | null = null;
         let commitMayHaveBeenAttempted = false;
         try {
+          if (ownsStagingRoot) {
+            reference.allocationEntered = true;
+            staging = await allocateArtifact("install");
+            stagingRoot = staging.root;
+            reference.artifactRoot = stagingRoot;
+          }
           if (stagingRoot) await mkdir(stagingRoot, { recursive: true });
           const discovered = await fetchAndValidate(stagingRoot
             ? { ...installOptions, installDir: stagingRoot }
             : installOptions);
           const manifest = discovered.manifest!;
+          reference.pluginId = manifest.id;
+          reference.artifactRoot ??= discovered.packagePath;
           await options.packageOperations?.assertClear(undefined, manifest.id);
           if (staging?.allocation) await observeOwnedArtifact(staging.allocation, discovered);
 
@@ -2164,6 +2173,7 @@ export function pluginLoader(
           // are installed under their UUID-owned staging root so npm never
           // reifies the shared active node_modules tree during a new install.
           const installDb = manifest.database ? migrationDb : db;
+          reference.phase = "committing";
           await installDb.transaction(async (tx) => {
             const txDb = tx as unknown as Db;
             const txRegistry = pluginRegistryService(txDb);
@@ -2192,6 +2202,7 @@ export function pluginLoader(
             // cannot prove that the registry did not adopt this package.
             commitMayHaveBeenAttempted = true;
           });
+          preparationReferences.delete(reference.ownerId);
 
           log.info(
             {
@@ -2209,8 +2220,16 @@ export function pluginLoader(
           // uncertain artifact available for recovery rather than deleting a
           // package that the registry may already reference.
           if (stagingRoot && !commitMayHaveBeenAttempted) {
-            await rm(stagingRoot, { recursive: true, force: true });
+            try {
+              await rm(stagingRoot, { recursive: true, force: true });
+              reference.cleanupConfirmed = true;
+            } catch (cleanupError) {
+              reference.phase = "uncertain";
+              throw cleanupError;
+            }
           }
+          if (commitMayHaveBeenAttempted || (reference.allocationEntered && !reference.cleanupConfirmed)) reference.phase = "uncertain";
+          else preparationReferences.delete(reference.ownerId);
           throw error;
         }
       };

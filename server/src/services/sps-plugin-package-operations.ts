@@ -1,4 +1,4 @@
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq, isNotNull, isNull } from "drizzle-orm";
 import { isDeepStrictEqual } from "node:util";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { z } from "zod/v3";
@@ -31,6 +31,11 @@ export type SpsPluginUpgradeOperation = {
   databaseMayChange: boolean; approvedMigrationPlanHash: string | null; backupFile: string | null;
 };
 export type SpsPendingPackageOperation = SpsPluginPackageOperation | SpsPluginUpgradeOperation;
+export type SpsRetainedPluginArtifactReview = {
+  id: string; pluginId: string; pluginKey: string;
+  snapshot: PluginRecord; candidate: PluginRecord; backupFile: string | null;
+  outcome: "review_required";
+};
 
 export interface SpsPluginUpgradeJournal {
   begin(snapshot: PluginRecord, candidate: PluginRecord, options: {
@@ -44,6 +49,8 @@ export interface SpsPluginPackageOperations {
   beginUninstall(snapshot: PluginRecord, removeData: boolean): Promise<SpsPluginPackageOperation>;
   pendingForPlugin(pluginId: string): Promise<SpsPendingPackageOperation | null>;
   listPending(): Promise<SpsPendingPackageOperation[]>;
+  /** Host-private protection references, not package trust or deletion authority. */
+  listRetainedArtifactReviews?(): Promise<SpsRetainedPluginArtifactReview[]>;
   assertClear(pluginId?: string, pluginKey?: string): Promise<void>;
   complete(operationId: string, outcome?: SpsPluginUpgradeOutcome): Promise<void>;
   upgrade?: SpsPluginUpgradeJournal;
@@ -60,6 +67,30 @@ const upgradeSchema = z.object({
   phase: z.enum(["prepared", "committing", "committed", "activation_entered", "rollback_required"]),
   databaseMayChange: z.boolean(), approvedMigrationPlanHash: z.string().nullable(), backupFile: z.string().nullable(),
 });
+
+const completedUpgradeSchema = upgradeSchema.extend({
+  phase: z.enum(["succeeded", "rolled_back", "review_required"]),
+}).strict();
+const completedUpgradeRowSchema = z.object({
+  id: z.string().uuid(), pluginId: z.string().uuid(), pluginKey: z.string().min(1),
+  kind: z.literal("upgrade"), activePluginId: z.null(), completedAt: z.date(), removeData: z.literal(false),
+  snapshotJson: completedUpgradeSchema,
+}).passthrough();
+const retainedReviewsUnavailable = () => new Error("Plugin retained artifact review records are invalid or unavailable; artifacts were preserved.");
+
+function decodeCompletedUpgradeReview(row: typeof spsPluginPackageOperations.$inferSelect): SpsRetainedPluginArtifactReview | null {
+  const parsed = completedUpgradeRowSchema.safeParse(row);
+  if (!parsed.success) throw retainedReviewsUnavailable();
+  const { pluginId, pluginKey, snapshotJson: data } = parsed.data;
+  if ([data.previous, data.candidate].some(snapshot => snapshot.id !== pluginId
+    || snapshot.pluginKey !== pluginKey || snapshot.manifestJson.id !== pluginKey)) throw retainedReviewsUnavailable();
+  if (data.phase !== "review_required") return null;
+  // Preserve the persisted records and private backup path, including metadata
+  // outside the recovery schema. This does not inspect or execute package bytes.
+  const persisted = row.snapshotJson as unknown as { previous: PluginRecord; candidate: PluginRecord; backupFile: string | null };
+  return { id: row.id, pluginId, pluginKey, snapshot: persisted.previous, candidate: persisted.candidate,
+    backupFile: persisted.backupFile, outcome: "review_required" };
+}
 
 function decode(row: typeof spsPluginPackageOperations.$inferSelect): SpsPendingPackageOperation {
   const upgraded = row.kind === "upgrade" ? upgradeSchema.safeParse(row.snapshotJson) : null;
@@ -180,6 +211,23 @@ export function createSpsPluginPackageOperations(db: Db): SpsPluginPackageOperat
     async listPending() {
       const rows = await db.select().from(table).where(isNull(table.completedAt)).orderBy(table.createdAt);
       return rows.map(decode);
+    },
+    async listRetainedArtifactReviews() {
+      // Do not filter JSON phases in SQL: an unknown/malformed completed upgrade
+      // could conceal a retained review and must make the whole read unavailable.
+      const rows = await db.select().from(table).where(and(eq(table.kind, "upgrade"), isNotNull(table.completedAt)))
+        .orderBy(table.createdAt, table.id).limit(60_001);
+      if (!Array.isArray(rows) || rows.length > 60_000) throw retainedReviewsUnavailable();
+      const ids = new Set<string>();
+      const retained: SpsRetainedPluginArtifactReview[] = [];
+      for (const row of rows) {
+        const review = decodeCompletedUpgradeReview(row);
+        const identity = row.id.toLowerCase();
+        if (ids.has(identity)) throw retainedReviewsUnavailable();
+        ids.add(identity);
+        if (review) retained.push(review);
+      }
+      return retained;
     },
     async assertClear(pluginId, pluginKey) {
       if (!pluginId && !pluginKey) throw new Error("Plugin package authority selector is missing.");

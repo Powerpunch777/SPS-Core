@@ -1,6 +1,10 @@
 import path from "node:path";
+import os from "node:os";
+import { mkdtemp, rm, stat } from "node:fs/promises";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createApp } from "../app.js";
+import { createPluginWorkerManager } from "../services/plugin-worker-manager.js";
+import type { createSpsPluginArtifactReferenceReader } from "../services/sps-plugin-artifact-references.js";
 
 const mocks = vi.hoisted(() => {
   const calls: string[] = [];
@@ -12,10 +16,12 @@ const mocks = vi.hoisted(() => {
       options?: { installMissing?: boolean };
     }>,
     registry: {
+      list: vi.fn(async () => []),
       getByKey: vi.fn(),
       getById: vi.fn(),
     },
     loader: {
+      readPreparedArtifactReferences: vi.fn(() => []),
       installPlugin: vi.fn(),
       loadAll: vi.fn(),
     },
@@ -146,8 +152,8 @@ function setRecoveryEnvironment(mode: string | undefined) {
   process.env.SPS_BUNDLED_PLUGIN_REFRESH_PATHS = bundledRefreshPath;
 }
 
-async function createTestApp() {
-  return createApp({} as never, {
+async function createTestApp(overrides: Partial<Parameters<typeof createApp>[1]> = {}, db = {} as never) {
+  return createApp(db, {
     uiMode: "none",
     serverPort: 3100,
     storageService: {} as never,
@@ -158,6 +164,7 @@ async function createTestApp() {
     authReady: true,
     companyDeletionEnabled: false,
     pluginWorkerManager: mocks.workerManager as never,
+    ...overrides,
   });
 }
 
@@ -192,6 +199,39 @@ afterEach(() => {
 });
 
 describe("createApp plugin recovery startup contract", () => {
+  it.each([true, false])("composes the private Core-only reference reader with supported Worker owner %s", async supported => {
+    setRecoveryEnvironment("all-disabled");
+    const root = await mkdtemp(path.join(os.tmpdir(), "sps-app-artifact-references-"));
+    const manager = supported ? createPluginWorkerManager() : mocks.workerManager;
+    const query: any = {};
+    query.from = vi.fn(() => query); query.where = vi.fn(() => query); query.orderBy = vi.fn(() => query);
+    query.limit = vi.fn(async () => []);
+    query.then = (resolve: (rows: unknown[]) => unknown, reject: (error: unknown) => unknown) => Promise.resolve([]).then(resolve, reject);
+    const db = { select: vi.fn(() => query) };
+    let reader!: ReturnType<typeof createSpsPluginArtifactReferenceReader>;
+    const app = await createTestApp({ localPluginDir: path.join(root, "packages"), registryStagingDir: path.join(root, "stages"),
+      pluginWorkerManager: manager as never, onPluginArtifactReferenceReader: value => { reader = value; } }, db as never);
+    try {
+      expect(reader).toBeDefined();
+      const action = vi.fn(async (scope: { coverage: string; references: readonly unknown[]; assertCurrent(): Promise<void> }) => {
+        expect(scope.coverage).toBe("core-only");
+        expect(scope.references).toEqual([]);
+        await scope.assertCurrent();
+      });
+      if (supported) {
+        await reader.withSnapshot(action);
+        expect(action).toHaveBeenCalledOnce();
+        expect(mocks.registry.list).toHaveBeenCalled();
+        expect(mocks.loader.readPreparedArtifactReferences).toHaveBeenCalled();
+      } else {
+        await expect(reader.withSnapshot(action)).rejects.toMatchObject({ code: "SPS_PLUGIN_ARTIFACT_REFERENCES_UNAVAILABLE" });
+        expect(action).not.toHaveBeenCalled();
+      }
+      await expect(stat(path.join(root, "packages"))).rejects.toMatchObject({ code: "ENOENT" });
+      await expect(stat(path.join(root, "stages"))).rejects.toMatchObject({ code: "ENOENT" });
+    } finally { await app.locals.paperclipShutdown(); await rm(root, { recursive: true, force: true }); }
+  });
+
   it("suppresses bundle install/refresh/load and every plugin runtime startup effect in all-disabled mode", async () => {
     setRecoveryEnvironment("all-disabled");
 

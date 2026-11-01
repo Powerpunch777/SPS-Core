@@ -360,3 +360,49 @@ cross-process Desktop Preview/restore coordination, fresh Host confirmation,
 bounded review handles, actual removal and Settings UI are still unfinished.
 A custom Worker manager without the private coordinator cannot be assumed fully
 fenced. No new cleanup endpoint or public SDK access is provided by this step.
+
+### Core-Only Reference Observation
+
+The app now composes a private reference reader from every Plugin record
+(including softly uninstalled paths), pending uninstall/upgrade snapshots,
+completed `review_required` old/candidate/backup records, actual Worker launch
+references, loader preparation/uncertain-install roots and the strict Registry
+stage reader. Completed upgrade rows are validated before deciding whether they
+are retained reviews; unknown outcomes or malformed records never mean empty.
+Existing pending-operation recovery and completion semantics are unchanged.
+
+Initial installs now retain their allocation before the first await. A lost
+COMMIT response protects its original owned root (or a borrowed local package
+path) until the loader closes. Known acknowledgement hands protection to the DB;
+known pre-COMMIT rejection releases only after its own cleanup confirms. Failure
+to resolve/clean an allocation remains unavailable, not an empty reference set.
+
+Observation runs inside the non-draining maintenance coordinator. Every source
+is mandatory and reread before/after the caller; ordering alone is not a change.
+The scope is frozen and expires on return. Existing file/directory and original/
+canonical ancestor identities are rechecked; missing descendants stay references
+and their later appearance invalidates the scope. Actual Windows case aliases
+are identity-verified. Links, unsupported network/device paths or changed
+identities make the whole observation unavailable. No package code is imported
+and no storage is created to inspect an absent root. A fingerprint is a reference
+change key, never a filesystem ownership record or confirmation/deletion permit.
+
+Coverage is explicitly `core-only`. The private app callback is neither an HTTP
+route nor public SDK access. Desktop Preview/restore processes, fresh Host review,
+current allocation inventory, candidate eligibility and deletion remain separate
+mandatory work. Unsupported custom Worker owners fail closed instead of gaining
+coverage through the app's fallback coordinator.
+
+Workspace and Native UI resolvers now share the existing Host rule: only a
+null/undefined package path uses legacy lookup. Empty, relative, malformed or
+missing explicit paths cannot select a different package. Normal legacy and
+absolute Windows case-alias behavior remain supported. Eight Native UI
+regressions failed before the correction and seventeen passed after it.
+
+The final fourteen-file selection passed253/254 with one unavailable8.3 skip;
+all thirty workspace typechecks/full build passed. Actual isolated source
+Desktop no-AI install/update, rollback, state/events/Workspace Job, A/B and
+capability isolation and Host restart passed again, with all3 Main processes,
+6 output streams and exact temporary data closed/cleaned normally. Snapshot
+source callbacks and retained-journal DB queries in focused tests are synthetic;
+they are not live-SQL crash evidence, physical or installed-candidate qualification.

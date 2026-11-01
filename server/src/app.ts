@@ -71,6 +71,8 @@ import { logger } from "./middleware/logger.js";
 import { DEFAULT_LOCAL_PLUGIN_DIR, pluginLoader } from "./services/plugin-loader.js";
 import { createSpsPluginPackageOperations } from "./services/sps-plugin-package-operations.js";
 import { createSpsPluginArtifactMaintenance } from "./services/sps-plugin-artifact-maintenance.js";
+import { createSpsPluginArtifactReferenceReader, SpsPluginArtifactReferencesUnavailableError } from "./services/sps-plugin-artifact-references.js";
+import { registryStagingService } from "./services/registry-staging.js";
 import { createPluginWorkerManager, type PluginWorkerManager } from "./services/plugin-worker-manager.js";
 import { createSpsNativePluginRuntime } from "./services/sps-native-plugin-runtime.js";
 import { createSpsWorkspacePluginWorkers } from "./services/sps-workspace-plugin-workers.js";
@@ -189,6 +191,8 @@ export async function createApp(
     registryStagingDir?: string;
     pluginMigrationDb?: Db;
     pluginWorkerManager?: PluginWorkerManager;
+    /** Host-private Core-only observation; not an HTTP/SDK cleanup capability. */
+    onPluginArtifactReferenceReader?: (reader: ReturnType<typeof createSpsPluginArtifactReferenceReader>) => void;
     onNativePluginRuntime?: (runtime: ReturnType<typeof createSpsNativePluginRuntime>) => void;
     onNativeNodeRuntime?: (runtime: ReturnType<typeof createSpsNativeNodeRuntime>) => void;
     betterAuthHandler?: express.RequestHandler;
@@ -412,6 +416,34 @@ export async function createApp(
     workerManager,
     scheduler,
   });
+  const registryStagingRoot = opts.registryStagingDir ?? path.join(
+    process.env.PAPERCLIP_HOME?.trim() || path.join(opts.localPluginDir ?? DEFAULT_LOCAL_PLUGIN_DIR, ".."),
+    "registry-staging",
+  );
+  const artifactReferenceStages = registryStagingService(registryStagingRoot, artifactMaintenance);
+  const artifactReferenceReader = createSpsPluginArtifactReferenceReader({
+    localPluginDir: path.resolve(opts.localPluginDir ?? DEFAULT_LOCAL_PLUGIN_DIR),
+    maintenance: artifactMaintenance,
+    readers: {
+      listPlugins: () => pluginRegistry.list(),
+      listPending: () => packageOperations.listPending(),
+      listRetainedReviews: () => {
+        if (!packageOperations.listRetainedArtifactReviews) throw new SpsPluginArtifactReferencesUnavailableError();
+        return packageOperations.listRetainedArtifactReviews();
+      },
+      readWorkers: () => {
+        if (workerManager.artifactMaintenance !== artifactMaintenance || !workerManager.readArtifactReferences) {
+          throw new SpsPluginArtifactReferencesUnavailableError();
+        }
+        return workerManager.readArtifactReferences();
+      },
+      readPreparations: () => {
+        if (!loader.readPreparedArtifactReferences) throw new SpsPluginArtifactReferencesUnavailableError();
+        return loader.readPreparedArtifactReferences();
+      },
+      readRegistryStages: () => artifactReferenceStages.readArtifactReferences(),
+    },
+  });
   api.use(
     pluginRoutes(
       db,
@@ -423,12 +455,7 @@ export async function createApp(
       { runtime: memoryProviderRuntime },
       {
         artifactMaintenance,
-        stagingRoot: opts.registryStagingDir
-          ?? path.join(
-            process.env.PAPERCLIP_HOME?.trim()
-              || path.join(opts.localPluginDir ?? DEFAULT_LOCAL_PLUGIN_DIR, ".."),
-            "registry-staging",
-          ),
+        stagingRoot: registryStagingRoot,
       },
       lifecycle,
       { diagnostics: canonicalPluginDiagnostics },
@@ -780,6 +807,7 @@ export async function createApp(
   });
 
   opts.onNativePluginRuntime?.(nativePluginRuntime);
+  opts.onPluginArtifactReferenceReader?.(artifactReferenceReader);
   opts.onNativeNodeRuntime?.(nativeNodeRuntime);
   return app;
 }

@@ -909,6 +909,25 @@ describe("SPS Workspace Plugin worker factory", () => {
     } finally { await factory.shutdown(); await manager.shutdown(); }
   });
 
+  it("does not substitute a legacy Workspace package for an invalid explicit path", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "sps-workspace-explicit-root-"));
+    const legacy = path.join(root, "node_modules", ...plugin.packageName.split("/"));
+    const fs = await import("node:fs/promises");
+    await mkdir(legacy, { recursive: true });
+    await writeFile(path.join(legacy, "worker.js"), "throw new Error('resolver must not execute this fixture');");
+    const input = { ...plugin, manifestJson: { ...manifest,
+      entrypoints: { ...manifest.entrypoints, workspaceWorker: "./worker.js" } } };
+    try {
+      for (const invalid of ["", " ", "relative-package", path.join(root, "missing"), 123]) {
+        await expect(resolveSpsWorkspacePluginEntrypoint({ ...input, packagePath: invalid } as PluginRecord, root)).rejects.toThrow(/unavailable/i);
+      }
+      for (const absent of [null, undefined]) {
+        await expect(resolveSpsWorkspacePluginEntrypoint({ ...input, packagePath: absent } as PluginRecord, root))
+          .resolves.toBe(await fs.realpath(path.join(legacy, "worker.js")));
+      }
+    } finally { await rm(root, { recursive: true, force: true }); }
+  });
+
   it("resolves only regular files inside the declared package entry and rejects traversal without fallback", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "sps-workspace-entry-"));
     const packageDir = path.join(root, "pkg");

@@ -359,6 +359,17 @@ describe("pluginLoader private npm artifacts", () => {
     db.transaction.mockRejectedValueOnce(new Error("transaction rejected"));
     await expect(loader.installPlugin({ packageName: "@sps/private-npm-db-failure" })).rejects.toThrow("transaction rejected");
     expect(await readdir(path.join(localPluginDir, ".install-staging")).catch(() => [])).toEqual([]);
+    expect(loader.readPreparedArtifactReferences!()).toEqual([]);
+  });
+
+  it("retains an install allocation before its first await and releases only after acknowledged registration", async () => {
+    createNpmRunner();
+    const loader = createLoader();
+    const installing = loader.installPlugin({ packageName: "@sps/install-reference" });
+    expect(() => loader.readPreparedArtifactReferences!()).toThrow(/unavailable/);
+    await installing;
+    expect(loader.readPreparedArtifactReferences!()).toEqual([]);
+    expect(installedRows).toHaveLength(1);
   });
 
   it("retains a committed staged artifact if the catalog wrapper fails after commit", async () => {
@@ -375,6 +386,7 @@ describe("pluginLoader private npm artifacts", () => {
     expect(await readFile(path.join(installed[0]!.packageRoot, "artifact-marker.txt"), "utf8"))
       .toBe("@sps/private-npm-committed@1.0.0");
     expect((installedRows[0]!.input as Record<string, unknown>).packagePath).toBe(installed[0]!.packageRoot);
+    expect(loader.readPreparedArtifactReferences!()).toEqual([]);
   });
 
   it("preserves the registry's package when the transaction response is lost after its callback", async () => {
@@ -400,6 +412,24 @@ describe("pluginLoader private npm artifacts", () => {
     const allocationId = path.relative(localPluginDir, referencedPath).split(path.sep)[1]!;
     const witness = await createSpsPluginArtifactOwnership(localPluginDir).read(allocationId);
     expect(witness.package.packageName).toBe("@sps/private-npm-uncertain");
+    expect(loader.readPreparedArtifactReferences!()).toMatchObject([
+      { pluginId: "sps.private-npm-uncertain", artifactRoot: installed[0]!.prefix, phase: "uncertain" },
+    ]);
+  });
+
+  it("protects a borrowed local package after a lost install response without claiming ownership", async () => {
+    const packagePath = await writeFakePackage(path.join(root, "borrowed-source"), "@sps/local-uncertain", "1.0.0");
+    const loader = createLoader();
+    db.transaction.mockImplementationOnce(async (callback: (tx: unknown) => Promise<unknown>) => {
+      await callback({});
+      throw new Error("local install response lost");
+    });
+    await expect(loader.installPlugin({ localPath: packagePath })).rejects.toThrow("local install response lost");
+    expect(loader.readPreparedArtifactReferences!()).toMatchObject([
+      { pluginId: "sps.local-uncertain", artifactRoot: packagePath, phase: "uncertain" },
+    ]);
+    expect(await readFile(path.join(packagePath, "artifact-marker.txt"), "utf8")).toBe("@sps/local-uncertain@1.0.0");
+    await expect(readdir(path.join(localPluginDir, ".artifact-ownership"))).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("still cleans a private install when the transaction callback rejects before COMMIT", async () => {
@@ -412,6 +442,7 @@ describe("pluginLoader private npm artifacts", () => {
 
     expect(installed).toHaveLength(1);
     expect(await readdir(path.join(localPluginDir, ".install-staging"))).toEqual([]);
+    expect(loader.readPreparedArtifactReferences!()).toEqual([]);
     expect(await readFile(path.join(localPluginDir, "node_modules", "@sps", "private-npm-a", "active-marker.txt"), "utf8"))
       .toBe("root-active-copy");
   });

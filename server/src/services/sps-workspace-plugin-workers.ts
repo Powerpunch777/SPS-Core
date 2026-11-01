@@ -48,8 +48,12 @@ export async function resolveSpsWorkspacePluginEntrypoint(plugin: PluginRecord, 
     || /[\\\x00-\x1f\x7f]/.test(entry) || /^[a-z][a-z0-9+.-]*:/i.test(entry)
     || entry.split("/").includes("..")) throw unavailable();
   const packagePath = (plugin as PluginRecord & { packagePath?: string | null }).packagePath;
+  const hasExplicitPackagePath = packagePath !== null && packagePath !== undefined;
   let roots: string[];
-  if (packagePath) roots = [packagePath];
+  if (hasExplicitPackagePath) {
+    if (typeof packagePath !== "string" || !path.isAbsolute(packagePath)) throw unavailable();
+    roots = [packagePath];
+  }
   else {
     if (!/^(?:@[a-z0-9._~-]+\/)?[a-z0-9._~-]+$/i.test(plugin.packageName)) throw unavailable();
     roots = [path.join(localPluginDir, "node_modules", ...plugin.packageName.split("/")),
@@ -64,7 +68,7 @@ export async function resolveSpsWorkspacePluginEntrypoint(plugin: PluginRecord, 
       if (!inside(root, resolved) || !(await stat(resolved)).isFile()) throw unavailable();
       return resolved;
     } catch (error) {
-      if (packagePath || (error as NodeJS.ErrnoException)?.code !== "ENOENT") throw unavailable();
+      if (hasExplicitPackagePath || (error as NodeJS.ErrnoException)?.code !== "ENOENT") throw unavailable();
     }
   }
   throw unavailable();

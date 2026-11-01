@@ -55,7 +55,10 @@ function safeSegments(value: unknown, maxLength: number): string[] {
 }
 
 function packageRoot(localPluginDir: string, plugin: PluginUiPackage): string {
-  if (typeof plugin.packagePath === "string" && plugin.packagePath.trim()) return path.resolve(plugin.packagePath);
+  if (plugin.packagePath !== null && plugin.packagePath !== undefined) {
+    if (typeof plugin.packagePath !== "string" || !plugin.packagePath.trim() || !path.isAbsolute(plugin.packagePath)) throw unavailable();
+    return path.resolve(plugin.packagePath);
+  }
   const packageName = plugin.packageName;
   if (typeof packageName !== "string" || !/^(?:@[A-Za-z0-9._-]+\/)?[A-Za-z0-9._-]+$/.test(packageName)) throw unavailable();
   const installed = path.resolve(localPluginDir, "node_modules", ...packageName.split("/"));
@@ -67,7 +70,7 @@ async function existingPackageRoot(localPluginDir: string, plugin: PluginUiPacka
   let candidate = packageRoot(localPluginDir, plugin);
   try { await fs.lstat(candidate); }
   catch {
-    if (plugin.packagePath) throw unavailable();
+    if (plugin.packagePath !== null && plugin.packagePath !== undefined) throw unavailable();
     const direct = path.resolve(localPluginDir, ...plugin.packageName.split("/"));
     if (!isInside(path.resolve(localPluginDir), direct)) throw unavailable();
     try { await fs.lstat(direct); candidate = direct; }
