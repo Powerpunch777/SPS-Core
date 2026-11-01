@@ -951,6 +951,15 @@ new compatible Core/SDK release is published.
 
 ## Migration Direction
 
+An owned Desktop launch (`SPS_DESKTOP_OWNED_SHUTDOWN_PIPE=1`) keeps its configured
+HTTP port. Core checks availability before opening or initializing its database
+and rejects `SPS_DESKTOP_PORT_UNAVAILABLE` rather than silently selecting another
+endpoint. The CLI doctor may inspect/create ordinary configured directories;
+this preflight is not a claim of zero filesystem access by the whole launcher.
+The real listen still rejects a later bind race; probing is not a reservation.
+Ordinary standalone Core retains its existing automatic-port behavior. No
+conflicting process is stopped, adopted or granted Desktop authority.
+
 1. Isolate legacy reads and writes behind compatibility modules.
 2. Add neutral SPS-owned storage and execution contracts alongside them.
 3. Migrate bundled plugins and Desktop to the neutral contracts.

@@ -430,6 +430,21 @@ describe("startServer authenticated auth origin setup", () => {
       serverPort: 3211,
     });
   });
+
+  it("refuses an owned Desktop port conflict before opening the database or constructing the app", async () => {
+    const previous = process.env.SPS_DESKTOP_OWNED_SHUTDOWN_PIPE;
+    process.env.SPS_DESKTOP_OWNED_SHUTDOWN_PIPE = "1";
+    detectPortMock.mockResolvedValueOnce(3211);
+    try {
+      await expect(startServer()).rejects.toMatchObject({ code: "SPS_DESKTOP_PORT_UNAVAILABLE" });
+      expect(createDbMock).not.toHaveBeenCalled();
+      expect(createAppMock).not.toHaveBeenCalled();
+      expect(fakeServer.listen).not.toHaveBeenCalled();
+    } finally {
+      if (previous === undefined) delete process.env.SPS_DESKTOP_OWNED_SHUTDOWN_PIPE;
+      else process.env.SPS_DESKTOP_OWNED_SHUTDOWN_PIPE = previous;
+    }
+  });
 });
 
 describe("startServer PAPERCLIP_API_URL handling", () => {

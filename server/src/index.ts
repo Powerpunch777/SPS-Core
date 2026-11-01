@@ -33,6 +33,7 @@ import detectPort from "detect-port";
 import { createApp } from "./app.js";
 import { shutdownSpsModelBroker } from "./services/sps-model-broker.js";
 import { attachSpsOwnedShutdown } from "./services/sps-owned-shutdown.js";
+import { requireSpsOwnedListenPort } from "./services/sps-owned-listen-port.js";
 import { createSpsNativeHostManagement, type SpsNativeHostManagement } from "./services/sps-native-host-management.js";
 import { createSpsNativeParentEnrollmentService, type SpsNativeParentEnrollment } from "./services/sps-native-parent-enrollment.js";
 import { createSpsNativeParentIngress } from "./services/sps-native-parent-ingress.js";
@@ -125,6 +126,10 @@ export async function startServer(): Promise<StartedServer> {
   // a specific product name. Plugin minimumHostVersion checks must never run
   // against an implicit or stale desktop version.
   const hostVersion = configuredHostVersion || "0.0.0";
+  // Fail before database startup on an owned Desktop port collision. The later
+  // actual listen still rejects a bind race; it never falls back to another port.
+  const ownedDesktopListenPort = process.env.SPS_DESKTOP_OWNED_SHUTDOWN_PIPE === "1"
+    ? await requireSpsOwnedListenPort(config.port, detectPort) : null;
   initTelemetry({ enabled: config.telemetryEnabled });
   if (process.env.PAPERCLIP_SECRETS_PROVIDER === undefined) {
     process.env.PAPERCLIP_SECRETS_PROVIDER = config.secretsProvider;
@@ -536,7 +541,7 @@ export async function startServer(): Promise<StartedServer> {
   }
 
   const requestedListenPort = config.port;
-  const listenPort = await detectPort(requestedListenPort);
+  const listenPort = ownedDesktopListenPort ?? await detectPort(requestedListenPort);
   if (config.authBaseUrlMode === "explicit" && config.authPublicBaseUrl) {
     config.authPublicBaseUrl = rewriteLocalUrlPort(config.authPublicBaseUrl, listenPort);
   }
