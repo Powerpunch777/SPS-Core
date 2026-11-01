@@ -1691,6 +1691,10 @@ export interface WorkerToHostMethods {
     params: { agentId: string; companyId: string; taskKey?: string; reason?: string; context?: AgentSessionContext },
     result: { sessionId: string; agentId: string; companyId: string; status: "active" | "closed"; createdAt: string; context?: AgentSessionContext; lastRunId: string | null; lastError: string | null },
   ];
+  "agents.sessions.ensure": [
+    params: import("./types.js").AgentSessionEnsureInput,
+    result: import("./types.js").AgentSessionEnsureResult,
+  ];
   "agents.sessions.list": [
     params: { agentId: string; companyId: string },
     result: Array<{ sessionId: string; agentId: string; companyId: string; status: "active" | "closed"; createdAt: string; context?: AgentSessionContext; lastRunId: string | null; lastError: string | null }>,

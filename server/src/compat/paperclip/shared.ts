@@ -30,6 +30,7 @@ export {
   upsertSpsHostProjectShareSchema,
 } from "@paperclipai/shared";
 export type {
+  AgentSessionContext,
   JsonSchema,
   PaperclipPluginManifestV1,
   SpsMemberDevice,

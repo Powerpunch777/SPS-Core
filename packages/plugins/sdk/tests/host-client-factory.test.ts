@@ -498,4 +498,29 @@ describe("createHostClientHandlers invocation company scope", () => {
     await expect(allowed["agents.sessions.cancel"](params)).resolves.toMatchObject({ termination: "pending" });
     expect(cancel).toHaveBeenCalledWith(params);
   });
+
+  it("gates session ensure with the existing create capability and delegates only ensure", async () => {
+    const sessionId = "77777777-7777-4777-8777-777777777777";
+    const ensure = vi.fn(async () => ({ sessionId, created: false }));
+    const create = vi.fn(async () => ({ sessionId: "unexpected" }));
+    const services = { agentSessions: { ensure, create } } as unknown as HostServices;
+    const params = {
+      agentId: "agent-a", companyId: "company-a", taskKey: "plugin:sps.example:session:key",
+      expectedSessionId: sessionId,
+    };
+    const denied = createHostClientHandlers({ pluginId: "sps.example", capabilities: [], services });
+    await expect(denied["agents.sessions.ensure"](params)).rejects.toBeInstanceOf(CapabilityDeniedError);
+    expect(ensure).not.toHaveBeenCalled();
+
+    const allowed = createHostClientHandlers({ pluginId: "sps.example", capabilities: ["agent.sessions.create"], services });
+    await expect(allowed["agents.sessions.ensure"]({ ...params, companyId: "company-b" }, {
+      invocationScope: { companyId: "company-a" },
+    })).rejects.toBeInstanceOf(InvocationScopeDeniedError);
+    expect(ensure).not.toHaveBeenCalled();
+    await expect(allowed["agents.sessions.ensure"](params, {
+      invocationScope: { companyId: "company-a" },
+    })).resolves.toEqual({ sessionId, created: false });
+    expect(ensure).toHaveBeenCalledExactlyOnceWith(params);
+    expect(create).not.toHaveBeenCalled();
+  });
 });

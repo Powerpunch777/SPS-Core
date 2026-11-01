@@ -17,6 +17,7 @@ const manifest: PaperclipPluginManifestV1 = {
 
 const methods = [
   ["agents.sessions.create", "create", { agentId: "agent-a", companyId: workspaceA }],
+  ["agents.sessions.ensure", "ensure", { agentId: "agent-a", companyId: workspaceA, taskKey: "plugin:key" }],
   ["agents.sessions.list", "list", { agentId: "agent-a", companyId: workspaceA }],
   ["agents.sessions.sendMessage", "sendMessage", { sessionId: "session-a", companyId: workspaceA, prompt: "hello" }],
   ["agents.sessions.getRun", "getRun", { sessionId: "session-a", companyId: workspaceA, runId: "run-a" }],
@@ -24,6 +25,7 @@ const methods = [
 ] as const;
 const capabilityFor: Record<SessionMethod, string> = {
   "agents.sessions.create": "agent.sessions.create",
+  "agents.sessions.ensure": "agent.sessions.create",
   "agents.sessions.list": "agent.sessions.list",
   "agents.sessions.sendMessage": "agent.sessions.send",
   "agents.sessions.getRun": "agent.sessions.read",

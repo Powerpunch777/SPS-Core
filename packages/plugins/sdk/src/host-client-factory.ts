@@ -316,6 +316,7 @@ export interface HostServices {
 
   /** Provides `agents.sessions.create`, `agents.sessions.list`, `agents.sessions.sendMessage`, `agents.sessions.close`. */
   agentSessions: {
+    ensure(params: WorkerToHostMethods["agents.sessions.ensure"][0]): Promise<WorkerToHostMethods["agents.sessions.ensure"][1]>;
     getRun(params: WorkerToHostMethods["agents.sessions.getRun"][0]): Promise<WorkerToHostMethods["agents.sessions.getRun"][1]>;
     cancel(params: WorkerToHostMethods["agents.sessions.cancel"][0]): Promise<WorkerToHostMethods["agents.sessions.cancel"][1]>;
     create(params: WorkerToHostMethods["agents.sessions.create"][0]): Promise<WorkerToHostMethods["agents.sessions.create"][1]>;
@@ -551,6 +552,7 @@ const METHOD_CAPABILITY_MAP: Record<WorkerToHostMethodName, PluginCapability | n
 
   // Agent Sessions
   "agents.sessions.create": "agent.sessions.create",
+  "agents.sessions.ensure": "agent.sessions.create",
   "agents.sessions.list": "agent.sessions.list",
   "agents.sessions.sendMessage": "agent.sessions.send",
   "agents.sessions.getRun": "agent.sessions.read",
@@ -1163,6 +1165,9 @@ export function createHostClientHandlers(
     // Agent Sessions
     "agents.sessions.create": gated("agents.sessions.create", async (params) => {
       return services.agentSessions.create(params);
+    }),
+    "agents.sessions.ensure": gated("agents.sessions.ensure", async (params) => {
+      return services.agentSessions.ensure(params);
     }),
     "agents.sessions.list": gated("agents.sessions.list", async (params) => {
       return services.agentSessions.list(params);

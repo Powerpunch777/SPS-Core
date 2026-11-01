@@ -88,15 +88,43 @@ stale, invalid or cross-Workspace invocation scope is rejected before delegation
 This does not expose global Agent mutation/invocation, grant execution permission,
 assert provider readiness, or introduce workflow roles.
 
-The lane additionally admits `agents.sessions.create`, `list`, `sendMessage`,
-`getRun` and `cancel` under their existing five capabilities. Each requires the
-exact live Host-issued invocation, Workspace and plugin. A Host-process callback
-is captured from that invocation (never supplied over worker RPC), and a bounded
-async scope expires when the nested call finishes. Scoped services recheck this
-authority around reads and before writes, wakeup or cancellation; a retained
-callback cannot outlive its invocation. Session creation rejects foreign task-key
-namespaces, empty suffixes, invalid text and keys over 1,024 UTF-8 bytes. Existing
-general Host workers retain their explicit legacy service path.
+The lane additionally admits six session operations: `ensure`, `create`, `list`,
+`sendMessage`, `getRun` and `cancel`. `ensure` and `create` both use the existing
+`agent.sessions.create` capability; the other operations retain their existing
+per-method capabilities. Each requires the exact live Host-issued invocation,
+Workspace and plugin. A Host-process callback is captured from that invocation
+(never supplied over worker RPC), and a bounded async scope expires when the
+nested call finishes. Scoped services recheck this authority around reads and
+before writes, wakeup or cancellation; a retained callback cannot outlive its
+invocation. Session keys use the plugin-owned
+`plugin:<pluginKey>:session:<suffix>` namespace, require a non-empty suffix, and
+are bounded to 1,024 UTF-8 bytes. Context is optional and does not require an
+issue. Invalid Unicode/control characters in keys are rejected. When supplied,
+referenced project, project workspace and issue must belong
+to the same Workspace and agree on their project; reusing a key also requires an
+exact match with its saved context.
+
+`ensure` requires a task key and accepts an optional UUID `expectedSessionId`,
+which is canonicalized to lowercase. If the key already exists, a supplied ID
+must match that row before it can be reused. A mismatched ID, or a missing row
+when an expected ID was supplied, fails before insertion. Without an expected ID,
+a missing key creates a session and returns its ID with `created: true`; a
+matching reusable row returns `created: false`. Multiple matching rows are
+ambiguous and fail closed. A retained row that is closed, has a different
+adapter, or has a different context also fails closed for explicit review rather
+than being silently reset or replaced.
+
+`create` and `ensure` serialize on the parent Agent row and choose the adapter
+from that locked current row before insertion. This prevents a delayed legacy
+adapter read from creating an old-adapter twin across an adapter change. This is
+not a permanent tombstone, a lease, or send-message deduplication. Older Hosts
+must reject the unknown RPC; no create/list fallback is added. The compatibility facade remains
+optional and does not make issue context mandatory. General Host workers retain
+their legacy session lifecycle, including close/reset and row-delete key release,
+on their existing path. The Workspace operations do not change the existing
+`getRun`/`cancel`/bounded `output`, Host raw session-feed or No-AI boundaries, and
+do not assert provider readiness or actual AI execution.
+
 The invocation callback is an admission check, not a lease over heartbeat's
 internal awaits or a rollback/cancellation of already admitted work. Revocation
 while wakeup is pending can reject its response even though a run was queued or

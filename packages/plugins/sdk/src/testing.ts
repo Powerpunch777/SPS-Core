@@ -37,6 +37,7 @@ import type {
   PluginWorkspaceInput,
   PluginExecutionWorkspaceMetadata,
   AgentSession,
+  AgentSessionEnsureInput,
   AgentSessionEvent,
   PluginLocalFolderEntry,
   PluginLocalFolderStatus,
@@ -545,6 +546,21 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
   const localFolderFiles = new Map<string, string>();
 
   const sessions = new Map<string, AgentSession>();
+  const sessionTaskKeys = new Map<string, {
+    sessionId: string;
+    adapterType: string;
+    context: AgentSession["context"] | null;
+  }>();
+  const sessionReferenceUuidPattern = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
+  const sessionTaskKeyFor = (companyId: string, agentId: string, taskKey: string) => JSON.stringify([companyId, agentId, taskKey]);
+  const normalizedSessionContext = (context?: AgentSession["context"]): AgentSession["context"] | null => {
+    const normalized = {
+      ...(context?.projectId ? { projectId: context.projectId } : {}),
+      ...(context?.projectWorkspaceId ? { projectWorkspaceId: context.projectWorkspaceId } : {}),
+      ...(context?.issueId ? { issueId: context.issueId } : {}),
+    };
+    return Object.keys(normalized).length ? normalized : null;
+  };
   const sessionRuns = new Map<string, { sessionId: string; cancelled: boolean }>();
   const sessionEventCallbacks = new Map<string, (event: AgentSessionEvent) => void>();
 
@@ -2373,7 +2389,78 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
             lastError: null,
           };
           sessions.set(session.sessionId, session);
+          if (opts?.taskKey) {
+            sessionTaskKeys.set(sessionTaskKeyFor(cid, agentId, opts.taskKey), {
+              sessionId: session.sessionId,
+              adapterType: agent.adapterType,
+              context: normalizedSessionContext(opts.context),
+            });
+          }
           return session;
+        },
+        async ensure(agentId: string, companyId: string, opts: Pick<AgentSessionEnsureInput, "taskKey" | "expectedSessionId" | "context">) {
+          requireCapability(manifest, capabilitySet, "agent.sessions.create");
+          const expectedSessionId = opts.expectedSessionId;
+          if (expectedSessionId !== undefined && (typeof expectedSessionId !== "string"
+            || !sessionReferenceUuidPattern.test(expectedSessionId))) {
+            throw new Error("Expected session ID must be a UUID");
+          }
+          const canonicalExpectedSessionId = expectedSessionId?.toLowerCase();
+          if (opts.context !== undefined) {
+            const context = opts.context as unknown;
+            const supportedKeys = ["projectId", "projectWorkspaceId", "issueId"];
+            if (!context || typeof context !== "object" || Array.isArray(context)
+              || Object.entries(context).some(([key, value]) => !supportedKeys.includes(key)
+                || typeof value !== "string" || !sessionReferenceUuidPattern.test(value))) {
+              throw new Error("Session context must contain only supported UUID references");
+            }
+          }
+          const prefix = `plugin:${manifest.id}:session:`;
+          if (typeof opts?.taskKey !== "string" || !opts.taskKey.startsWith(prefix) || !opts.taskKey.slice(prefix.length).trim()
+            || Buffer.byteLength(opts.taskKey, "utf8") > 1_024 || /[\p{Surrogate}\x00-\x1f\x7f\ufffd]/u.test(opts.taskKey)) {
+            throw new Error("Session taskKey must be a bounded, non-empty key owned by this plugin");
+          }
+          const cid = requireCompanyId(companyId);
+          const agent = agents.get(agentId);
+          if (!isInCompany(agent, cid)) throw new Error(`Agent not found: ${agentId}`);
+          const taskKey = sessionTaskKeyFor(cid, agentId, opts.taskKey);
+          const remembered = sessionTaskKeys.get(taskKey);
+          if (remembered) {
+            const knownSession = sessions.get(remembered.sessionId);
+            const context = normalizedSessionContext(opts.context);
+            if (canonicalExpectedSessionId !== undefined && canonicalExpectedSessionId !== remembered.sessionId) {
+              throw new Error("Expected session ID does not match the remembered task key; explicit review is required");
+            }
+            if (!knownSession || knownSession.status !== "active"
+              || remembered.adapterType !== agent.adapterType
+              || JSON.stringify(remembered.context) !== JSON.stringify(context)) {
+              throw new Error("Session configuration changed or is closed; explicit review is required");
+            }
+            return { sessionId: knownSession.sessionId, created: false };
+          }
+          if (canonicalExpectedSessionId !== undefined) {
+            throw new Error("Expected session is no longer available; explicit review is required");
+          }
+          // This fake checks context shape/UUIDs only; it cannot resolve database references.
+          // It models memory state, not database idempotency; legacy Host close can delete rows.
+          const session: AgentSession = {
+            sessionId: randomUUID(),
+            agentId,
+            companyId: cid,
+            status: "active",
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+            context: opts.context,
+            lastRunId: null,
+            lastError: null,
+          };
+          sessions.set(session.sessionId, session);
+          sessionTaskKeys.set(taskKey, {
+            sessionId: session.sessionId,
+            adapterType: agent.adapterType,
+            context: normalizedSessionContext(opts.context),
+          });
+          return { sessionId: session.sessionId, created: true };
         },
         async list(agentId, companyId) {
           requireCapability(manifest, capabilitySet, "agent.sessions.list");

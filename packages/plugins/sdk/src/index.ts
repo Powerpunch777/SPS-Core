@@ -337,6 +337,8 @@ export type {
   PluginPlatformThreadSendInput,
   PluginPlatformStateInput,
   AgentSession,
+  AgentSessionEnsureInput,
+  AgentSessionEnsureResult,
   AgentSessionEvent,
   AgentSessionSendResult,
   PluginGoalsClient,

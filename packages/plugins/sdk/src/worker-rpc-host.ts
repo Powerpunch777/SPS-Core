@@ -72,6 +72,7 @@ import type {
   EventFilter,
   AgentSessionEvent,
   AgentSessionContext,
+  AgentSessionEnsureInput,
 } from "./types.js";
 import { createPluginPlatformClient } from "./platform-client.js";
 import type {
@@ -1216,6 +1217,15 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
         },
 
         sessions: {
+          async ensure(agentId: string, companyId: string, opts: Pick<AgentSessionEnsureInput, "taskKey" | "expectedSessionId" | "context">) {
+            return callHost("agents.sessions.ensure", {
+              agentId,
+              companyId,
+              taskKey: opts.taskKey,
+              expectedSessionId: opts.expectedSessionId,
+              context: opts.context,
+            });
+          },
           async getRun(sessionId: string, companyId: string, runId: string) {
             return callHost("agents.sessions.getRun", { sessionId, companyId, runId });
           },

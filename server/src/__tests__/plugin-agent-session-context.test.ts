@@ -20,7 +20,8 @@ import {
 } from "./helpers/embedded-postgres.js";
 import { buildHostServices } from "../services/plugin-host-services.js";
 import { preserveSpsSessionCancellationContext } from "../services/sps-agent-session-runs.js";
-import { withSpsWorkspaceAgentSessionInvocation } from "../services/sps-workspace-agent-session-invocation.js";
+import { assertSpsWorkspaceAgentSessionInvocation, withSpsWorkspaceAgentSessionInvocation } from "../services/sps-workspace-agent-session-invocation.js";
+import { spsAgentSessionCreationService } from "../services/sps-agent-session-creation.js";
 import { publishLiveEvent } from "../services/live-events.js";
 
 // Mock heartbeatService to avoid launching agent processes in this host-service test.
@@ -224,6 +225,7 @@ describePostgres("plugin agent session context", () => {
     const { companyId, pluginId, services, agentId, session, run } = fixture;
     const args = {
       create: { agentId, companyId },
+      ensure: { agentId, companyId, taskKey: `plugin:${manifest().id}:session:ensure-scope` },
       list: { agentId, companyId },
       sendMessage: { sessionId: session.sessionId, companyId, prompt: "scoped message" },
       getRun: { sessionId: session.sessionId, companyId, runId: run.id },
@@ -233,6 +235,7 @@ describePostgres("plugin agent session context", () => {
       args,
       call: {
         create: () => services.agentSessions.create(args.create),
+        ensure: () => services.agentSessions.ensure(args.ensure),
         list: () => services.agentSessions.list(args.list),
         sendMessage: () => services.agentSessions.sendMessage(args.sendMessage),
         getRun: () => services.agentSessions.getRun(args.getRun),
@@ -244,7 +247,7 @@ describePostgres("plugin agent session context", () => {
     };
   }
 
-  const scopedSessionMethods = ["create", "list", "sendMessage", "getRun", "cancel"] as const;
+  const scopedSessionMethods = ["create", "ensure", "list", "sendMessage", "getRun", "cancel"] as const;
 
   it("exposes bounded Agent configuration without executing or widening the Workspace", async () => {
     const { services, companyId } = await seedCompanyAndPlugin();
@@ -328,6 +331,170 @@ describePostgres("plugin agent session context", () => {
       taskKey: storedSession?.taskKey,
       spsPluginConversation: { pluginKey: fixture.pluginManifest.id, sessionId: session.sessionId },
     });
+  });
+
+  it("ensures one durable session for concurrent exact keys and recovers it through reconstructed services", async () => {
+    const fixture = await seedCompanyAndPlugin({ workspaceScoped: true });
+    const agentId = await seedAgent(fixture.companyId);
+    const params = { companyId: fixture.companyId, agentId, taskKey: `plugin:${fixture.pluginManifest.id}:session:durable` };
+    const results = await Promise.all(Array.from({ length: 8 }, () =>
+      inSessionInvocation(fixture.companyId, fixture.pluginId, () => fixture.services.agentSessions.ensure(params))));
+    expect(results.filter(result => result.created)).toHaveLength(1);
+    expect(new Set(results.map(result => result.sessionId)).size).toBe(1);
+    expect(Object.keys(results[0]!).sort()).toEqual(["created", "sessionId"]);
+    const reconstructed = buildHostServices(db, fixture.pluginId, fixture.pluginManifest.id, createEventBusStub(), undefined,
+      { manifest: fixture.pluginManifest, workspaceId: fixture.companyId });
+    activeServices.push(reconstructed);
+    await expect(inSessionInvocation(fixture.companyId, fixture.pluginId, () => reconstructed.agentSessions.ensure(params)))
+      .resolves.toEqual({ sessionId: results[0]!.sessionId, created: false });
+    expect(await db.select().from(agentTaskSessions)).toHaveLength(1);
+    expect(mockWakeup).not.toHaveBeenCalled();
+  });
+
+  it("recovers a committed ensure after authority rejects the response, without creating a second session", async () => {
+    const fixture = await seedCompanyAndPlugin({ workspaceScoped: true });
+    const agentId = await seedAgent(fixture.companyId);
+    const params = { companyId: fixture.companyId, agentId, taskKey: `plugin:${fixture.pluginManifest.id}:session:lost-response` };
+    let checks = 0;
+    await expect(inSessionInvocation(fixture.companyId, fixture.pluginId, () => fixture.services.agentSessions.ensure(params), async () => {
+      // Check7 follows transaction commit, before the service returns its ID.
+      if (++checks === 7) throw new Error("response authority expired");
+    })).rejects.toThrow("response authority expired");
+    const rows = await db.select().from(agentTaskSessions);
+    expect(rows).toHaveLength(1);
+    await expect(inSessionInvocation(fixture.companyId, fixture.pluginId, () => fixture.services.agentSessions.ensure(params)))
+      .resolves.toEqual({ sessionId: rows[0]!.id, created: false });
+    expect(await db.select().from(agentTaskSessions)).toHaveLength(1);
+  });
+
+  it("does not let a delayed legacy Agent read insert an old-adapter twin after ensure", async () => {
+    const fixture = await seedCompanyAndPlugin({ workspaceScoped: true });
+    const agentId = await seedAgent(fixture.companyId);
+    const params = { companyId: fixture.companyId, agentId, taskKey: `plugin:${fixture.pluginManifest.id}:session:adapter-race` };
+    let readStarted!: () => void;
+    let releaseRead!: () => void;
+    const started = new Promise<void>(resolve => { readStarted = resolve; });
+    const gate = new Promise<void>(resolve => { releaseRead = resolve; });
+    const delayed = spsAgentSessionCreationService(db, fixture.pluginManifest.id, async id => {
+      const agent = await db.select().from(agents).where(eq(agents.id, id)).then(rows => rows[0] ?? null);
+      readStarted();
+      await gate;
+      return agent;
+    }, companyId => assertSpsWorkspaceAgentSessionInvocation(fixture.pluginId, companyId));
+    const legacy = inSessionInvocation(fixture.companyId, fixture.pluginId, () => delayed.create(params))
+      .then(() => null, error => error);
+    await started;
+    let ensured!: { sessionId: string; created: boolean };
+    try {
+      await db.update(agents).set({ adapterType: "new-adapter" }).where(eq(agents.id, agentId));
+      ensured = await inSessionInvocation(fixture.companyId, fixture.pluginId, () => fixture.services.agentSessions.ensure(params));
+    } finally { releaseRead(); }
+    const error = await legacy;
+    expect(error?.cause?.code ?? error?.code).toBe("23505");
+    const rows = await db.select().from(agentTaskSessions);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ id: ensured.sessionId, adapterType: "new-adapter", taskKey: params.taskKey });
+    expect(mockWakeup).not.toHaveBeenCalled();
+  });
+
+  it("rolls back an ensure revoked after insert and permits a later authorized attempt", async () => {
+    const fixture = await seedCompanyAndPlugin({ workspaceScoped: true });
+    const agentId = await seedAgent(fixture.companyId);
+    const params = { companyId: fixture.companyId, agentId, taskKey: `plugin:${fixture.pluginManifest.id}:session:rolled-back` };
+    let checks = 0;
+    await expect(inSessionInvocation(fixture.companyId, fixture.pluginId, () => fixture.services.agentSessions.ensure(params), async () => {
+      // Check6 follows INSERT inside the still-open transaction.
+      if (++checks === 6) throw new Error("insert authority expired");
+    })).rejects.toThrow("insert authority expired");
+    expect(await db.select().from(agentTaskSessions)).toHaveLength(0);
+    await expect(inSessionInvocation(fixture.companyId, fixture.pluginId, () => fixture.services.agentSessions.ensure(params)))
+      .resolves.toMatchObject({ created: true });
+    expect(await db.select().from(agentTaskSessions)).toHaveLength(1);
+    expect(mockWakeup).not.toHaveBeenCalled();
+  });
+
+  it.each(["closed", "session-adapter", "agent-adapter", "ambiguous"])("rejects %s ensure state without replacing its session", async change => {
+    const fixture = await seedCompanyAndPlugin({ workspaceScoped: true });
+    const agentId = await seedAgent(fixture.companyId);
+    const params = { companyId: fixture.companyId, agentId, taskKey: `plugin:${fixture.pluginManifest.id}:session:review` };
+    const first = await inSessionInvocation(fixture.companyId, fixture.pluginId, () => fixture.services.agentSessions.ensure(params));
+    if (change === "closed") await db.update(agentTaskSessions).set({ status: "closed", closedAt: new Date() }).where(eq(agentTaskSessions.id, first.sessionId));
+    if (change === "session-adapter") await db.update(agentTaskSessions).set({ adapterType: "other" }).where(eq(agentTaskSessions.id, first.sessionId));
+    if (change === "agent-adapter") await db.update(agents).set({ adapterType: "other" }).where(eq(agents.id, agentId));
+    if (change === "ambiguous") await db.insert(agentTaskSessions).values({ companyId: fixture.companyId, agentId,
+      adapterType: "other", taskKey: params.taskKey });
+    await expect(inSessionInvocation(fixture.companyId, fixture.pluginId, () => fixture.services.agentSessions.ensure(params)))
+      .rejects.toThrow(/review is required/);
+    const rows = await db.select().from(agentTaskSessions);
+    expect(rows).toHaveLength(change === "ambiguous" ? 2 : 1);
+    expect(rows.some(row => row.id === first.sessionId)).toBe(true);
+    expect(mockWakeup).not.toHaveBeenCalled();
+  });
+
+  it("does not share ensure keys between Agents or silently change retained context", async () => {
+    const fixture = await seedCompanyAndPlugin({ workspaceScoped: true });
+    const agentId = await seedAgent(fixture.companyId);
+    const otherAgentId = await seedAgent(fixture.companyId);
+    const taskKey = `plugin:${fixture.pluginManifest.id}:session:same-key`;
+    const first = await inSessionInvocation(fixture.companyId, fixture.pluginId, () => fixture.services.agentSessions.ensure({ companyId: fixture.companyId, agentId, taskKey }));
+    const second = await inSessionInvocation(fixture.companyId, fixture.pluginId, () => fixture.services.agentSessions.ensure({ companyId: fixture.companyId, agentId: otherAgentId, taskKey }));
+    expect(second.sessionId).not.toBe(first.sessionId);
+    await db.update(agentTaskSessions).set({ contextJson: { projectId: randomUUID() } }).where(eq(agentTaskSessions.id, first.sessionId));
+    await expect(inSessionInvocation(fixture.companyId, fixture.pluginId, () => fixture.services.agentSessions.ensure({ companyId: fixture.companyId, agentId, taskKey })))
+      .rejects.toThrow(/review is required/);
+    expect(await db.select().from(agentTaskSessions)).toHaveLength(2);
+    expect(mockWakeup).not.toHaveBeenCalled();
+  });
+
+  it("validates ensure stable keys and foreign context before recording any session", async () => {
+    const fixture = await seedCompanyAndPlugin({ workspaceScoped: true });
+    const agentId = await seedAgent(fixture.companyId);
+    for (const taskKey of [undefined, "", `plugin:foreign:session:key`, `plugin:${fixture.pluginManifest.id}:session:`, `plugin:${fixture.pluginManifest.id}:session:${"x".repeat(1024)}`]) {
+      await expect(inSessionInvocation(fixture.companyId, fixture.pluginId, () =>
+        fixture.services.agentSessions.ensure({ companyId: fixture.companyId, agentId, taskKey: taskKey as string }))).rejects.toThrow();
+    }
+    for (const context of [null, [], "bad", { unsupported: "ignored" }, { projectId: "not-a-uuid" }]) {
+      await expect(inSessionInvocation(fixture.companyId, fixture.pluginId, () => fixture.services.agentSessions.ensure({
+        companyId: fixture.companyId, agentId, taskKey: `plugin:${fixture.pluginManifest.id}:session:bad-context`, context: context as never,
+      }))).rejects.toThrow("Session context");
+    }
+    await expect(inSessionInvocation(fixture.companyId, fixture.pluginId, () => fixture.services.agentSessions.ensure({
+      companyId: fixture.companyId, agentId, taskKey: `plugin:${fixture.pluginManifest.id}:session:context`, context: { projectId: randomUUID() },
+    }))).rejects.toThrow("Project not found");
+    expect(await db.select().from(agentTaskSessions)).toHaveLength(0);
+    expect(mockWakeup).not.toHaveBeenCalled();
+  });
+
+  it("preserves explicit legacy close deletion semantics rather than inventing a permanent ensure tombstone", async () => {
+    const fixture = await seedCompanyAndPlugin();
+    const agentId = await seedAgent(fixture.companyId);
+    const params = { companyId: fixture.companyId, agentId, taskKey: `plugin:${fixture.pluginManifest.id}:session:explicit-close` };
+    const first = await fixture.services.agentSessions.ensure(params);
+    await fixture.services.agentSessions.close({ companyId: fixture.companyId, sessionId: first.sessionId });
+    expect(await db.select().from(agentTaskSessions)).toHaveLength(0);
+    await expect(fixture.services.agentSessions.ensure({ ...params, expectedSessionId: first.sessionId }))
+      .rejects.toThrow(/explicit review is required/);
+    expect(await db.select().from(agentTaskSessions)).toHaveLength(0);
+    const second = await fixture.services.agentSessions.ensure(params);
+    expect(second.created).toBe(true);
+    expect(second.sessionId).not.toBe(first.sessionId);
+    expect(mockWakeup).not.toHaveBeenCalled();
+  });
+
+  it("checks a known expected session ID before any creation and never adopts a different ID", async () => {
+    const fixture = await seedCompanyAndPlugin({ workspaceScoped: true });
+    const agentId = await seedAgent(fixture.companyId);
+    const params = { companyId: fixture.companyId, agentId, taskKey: `plugin:${fixture.pluginManifest.id}:session:expected-id` };
+    const ensure = (expectedSessionId?: string) => inSessionInvocation(fixture.companyId, fixture.pluginId, () =>
+      fixture.services.agentSessions.ensure({ ...params, ...(expectedSessionId !== undefined ? { expectedSessionId } : {}) }));
+    await expect(ensure(randomUUID())).rejects.toThrow(/explicit review is required/);
+    await expect(ensure("invalid")).rejects.toThrow("Expected session ID must be a UUID");
+    expect(await db.select().from(agentTaskSessions)).toHaveLength(0);
+    const first = await ensure();
+    await expect(ensure(first.sessionId.toUpperCase())).resolves.toEqual({ sessionId: first.sessionId, created: false });
+    await expect(ensure(randomUUID())).rejects.toThrow(/explicit review is required/);
+    expect(await db.select().from(agentTaskSessions)).toHaveLength(1);
+    expect(mockWakeup).not.toHaveBeenCalled();
   });
 
   it("rechecks Workspace authority after the awaited session read and before wakeup", async () => {

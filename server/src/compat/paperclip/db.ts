@@ -23,6 +23,8 @@ export {
   authSessions,
   authUsers,
   projects,
+  projectWorkspaces,
+  issues,
   spsAgentNodeBindings,
   spsDashboardLayoutItems,
   spsHostProjectShareNodeGrants,

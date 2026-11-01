@@ -1953,6 +1953,19 @@ export interface AgentSession {
   lastError: string | null;
 }
 
+export interface AgentSessionEnsureInput {
+  agentId: string;
+  companyId: string;
+  taskKey: string;
+  expectedSessionId?: string;
+  context?: AgentSessionContext;
+}
+
+export interface AgentSessionEnsureResult {
+  sessionId: string;
+  created: boolean;
+}
+
 /**
  * A streaming event received during a session's `sendMessage` call.
  * Delivered via JSON-RPC notifications from host to worker.
@@ -2003,6 +2016,13 @@ export interface PluginAgentSessionsClient {
     reason?: string;
     context?: AgentSessionContext;
   }): Promise<AgentSession>;
+
+  /** Return the active session for this plugin-owned key or create it. Requires `agent.sessions.create`. */
+  ensure(agentId: string, companyId: string, opts: {
+    taskKey: string;
+    expectedSessionId?: string;
+    context?: AgentSessionContext;
+  }): Promise<AgentSessionEnsureResult>;
 
   /** List active sessions for an agent owned by this plugin. Requires `agent.sessions.list`. */
   list(agentId: string, companyId: string): Promise<AgentSession[]>;

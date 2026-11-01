@@ -83,6 +83,7 @@ import { isCoreManagedMemoryLifecycleSubscription } from "./memory-providers.js"
 import { spsPluginExecutionService } from "./sps-plugin-execution.js";
 import { spsWorkspaceSurfaceService } from "./sps-workspace-surfaces.js";
 import { spsAgentSessionRunService } from "./sps-agent-session-runs.js";
+import { spsAgentSessionCreationService } from "./sps-agent-session-creation.js";
 import { assertSpsWorkspaceAgentSessionInvocation } from "./sps-workspace-agent-session-invocation.js";
 import { spsExecutionHistoryService } from "./sps-execution-history.js";
 import { describeSpsAgentExecution } from "./sps-agent-execution-descriptor.js";
@@ -653,16 +654,7 @@ export function buildHostServices(
     }
   };
 
-  const sessionTaskKey = (value: unknown): string => {
-    const prefix = `plugin:${pluginKey}:session:`;
-    if (value === undefined) return `${prefix}${randomUUID()}`;
-    if (typeof value !== "string" || !value.startsWith(prefix) || !value.slice(prefix.length).trim()
-      || Buffer.byteLength(value, "utf8") > 1_024 || /[\x00-\x1f\x7f\ufffd]/u.test(value)
-      || [...value].some(char => char.length === 1 && char.charCodeAt(0) >= 0xd800 && char.charCodeAt(0) <= 0xdfff)) {
-      throw new Error("Session taskKey must be a bounded, non-empty key owned by this plugin");
-    }
-    return value;
-  };
+  const sessionCreation = spsAgentSessionCreationService(db, pluginKey, agentId => agents.getById(agentId), assertSessionAuthority);
 
   const optionalLifecycleReference = (value: unknown, field: string): string | null => {
     if (value == null) return null;
@@ -2952,121 +2944,13 @@ export function buildHostServices(
       },
       async create(params) {
         const companyId = ensureCompanyId(params.companyId);
-        await assertSessionAuthority(companyId);
-        const taskKey = sessionTaskKey(params.taskKey);
         await ensurePluginAvailableForCompany(companyId);
-        const agent = await agents.getById(params.agentId);
-        await assertSessionAuthority(companyId);
-        requireInCompany("Agent", agent, companyId);
-
-        let normalizedContext: import("@paperclipai/shared").AgentSessionContext | null = null;
-        if (params.context) {
-          const { projectId, projectWorkspaceId, issueId } = params.context;
-
-          let validatedProjectId = projectId || null;
-          if (projectId) {
-            const project = await db
-              .select()
-              .from(projectsTable)
-              .where(and(eq(projectsTable.id, projectId), eq(projectsTable.companyId, companyId)))
-              .then((rows) => rows[0] ?? null);
-            if (!project) {
-              throw new Error("Project not found");
-            }
-          }
-
-          let workspaceProjectId: string | null = null;
-          if (projectWorkspaceId) {
-            const workspace = await db
-              .select()
-              .from(projectWorkspacesTable)
-              .where(and(eq(projectWorkspacesTable.id, projectWorkspaceId), eq(projectWorkspacesTable.companyId, companyId)))
-              .then((rows) => rows[0] ?? null);
-            if (!workspace) {
-              throw new Error("Project workspace not found");
-            }
-            workspaceProjectId = workspace.projectId;
-          }
-
-          let issueProjectId: string | null = null;
-          if (issueId) {
-            const issue = await db
-              .select()
-              .from(issuesTable)
-              .where(and(eq(issuesTable.id, issueId), eq(issuesTable.companyId, companyId)))
-              .then((rows) => rows[0] ?? null);
-            if (!issue) {
-              throw new Error("Issue not found");
-            }
-            issueProjectId = issue.projectId;
-          }
-
-          if (projectWorkspaceId && projectId && workspaceProjectId !== projectId) {
-            throw new Error("Workspace does not belong to the project");
-          }
-
-          if (issueId && projectId && issueProjectId !== projectId) {
-            throw new Error("Issue does not belong to the project");
-          }
-
-          if (!validatedProjectId) {
-            if (workspaceProjectId && issueProjectId) {
-              if (workspaceProjectId !== issueProjectId) {
-                throw new Error("Workspace and issue point to different projects");
-              }
-              validatedProjectId = workspaceProjectId;
-            } else if (workspaceProjectId) {
-              validatedProjectId = workspaceProjectId;
-            } else if (issueProjectId) {
-              validatedProjectId = issueProjectId;
-            }
-          }
-
-          const builtContext: import("@paperclipai/shared").AgentSessionContext = {};
-          if (validatedProjectId) {
-            builtContext.projectId = validatedProjectId;
-          }
-          if (projectWorkspaceId) {
-            builtContext.projectWorkspaceId = projectWorkspaceId;
-          }
-          if (issueId) {
-            builtContext.issueId = issueId;
-          }
-
-          if (Object.keys(builtContext).length > 0) {
-            normalizedContext = builtContext;
-          }
-        }
-
-        await assertSessionAuthority(companyId);
-        const row = await db
-          .insert(agentTaskSessionsTable)
-          .values({
-            companyId,
-            agentId: params.agentId,
-            adapterType: agent!.adapterType,
-            taskKey,
-            sessionParamsJson: null,
-            sessionDisplayId: null,
-            contextJson: normalizedContext,
-            lastRunId: null,
-            lastError: null,
-          })
-          .returning()
-          .then((rows) => rows[0]);
-
-        await assertSessionAuthority(companyId);
-        return {
-          sessionId: row!.id,
-          agentId: params.agentId,
-          companyId,
-          status: "active" as const,
-          createdAt: row!.createdAt.toISOString(),
-          updatedAt: row!.updatedAt.toISOString(),
-          context: row!.contextJson ?? undefined,
-          lastRunId: row!.lastRunId,
-          lastError: row!.lastError,
-        };
+        return sessionCreation.create({ ...params, companyId });
+      },
+      async ensure(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        return sessionCreation.ensure({ ...params, companyId });
       },
 
       async list(params) {
