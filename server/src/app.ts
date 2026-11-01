@@ -72,6 +72,7 @@ import { DEFAULT_LOCAL_PLUGIN_DIR, pluginLoader } from "./services/plugin-loader
 import { createSpsPluginPackageOperations } from "./services/sps-plugin-package-operations.js";
 import { createSpsPluginArtifactMaintenance } from "./services/sps-plugin-artifact-maintenance.js";
 import { createSpsPluginArtifactReferenceReader, SpsPluginArtifactReferencesUnavailableError } from "./services/sps-plugin-artifact-references.js";
+import { readSpsSourceArtifactInventory } from "./services/sps-source-artifact-inventory.js";
 import { registryStagingService } from "./services/registry-staging.js";
 import { createPluginWorkerManager, type PluginWorkerManager } from "./services/plugin-worker-manager.js";
 import { createSpsNativePluginRuntime } from "./services/sps-native-plugin-runtime.js";
@@ -442,6 +443,7 @@ export async function createApp(
         return loader.readPreparedArtifactReferences();
       },
       readRegistryStages: () => artifactReferenceStages.readArtifactReferences(),
+      readSourceFingerprint: async () => (await readSpsSourceArtifactInventory(db)).fingerprint,
     },
   });
   api.use(

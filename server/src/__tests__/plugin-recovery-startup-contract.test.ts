@@ -207,7 +207,11 @@ describe("createApp plugin recovery startup contract", () => {
     query.from = vi.fn(() => query); query.where = vi.fn(() => query); query.orderBy = vi.fn(() => query);
     query.limit = vi.fn(async () => []);
     query.then = (resolve: (rows: unknown[]) => unknown, reject: (error: unknown) => unknown) => Promise.resolve([]).then(resolve, reject);
-    const db = { select: vi.fn(() => query) };
+    const select = vi.fn(() => query);
+    const db = { select, transaction: vi.fn(async (action, options) => {
+      expect(options).toEqual({ isolationLevel: "repeatable read", accessMode: "read only" });
+      return action({ select });
+    }) };
     let reader!: ReturnType<typeof createSpsPluginArtifactReferenceReader>;
     const app = await createTestApp({ localPluginDir: path.join(root, "packages"), registryStagingDir: path.join(root, "stages"),
       pluginWorkerManager: manager as never, onPluginArtifactReferenceReader: value => { reader = value; } }, db as never);
@@ -223,6 +227,7 @@ describe("createApp plugin recovery startup contract", () => {
         expect(action).toHaveBeenCalledOnce();
         expect(mocks.registry.list).toHaveBeenCalled();
         expect(mocks.loader.readPreparedArtifactReferences).toHaveBeenCalled();
+        expect(db.transaction).toHaveBeenCalled();
       } else {
         await expect(reader.withSnapshot(action)).rejects.toMatchObject({ code: "SPS_PLUGIN_ARTIFACT_REFERENCES_UNAVAILABLE" });
         expect(action).not.toHaveBeenCalled();

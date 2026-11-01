@@ -108,6 +108,23 @@ describe("Core-only coherent artifact reference scopes", () => {
     await maintenance.withActivity(async () => {});
   });
 
+  it("binds an optional all-Workspace Source fingerprint and rejects changes or unavailable reads", async () => {
+    const { readers, reader } = await fixture();
+    let fingerprint = "a".repeat(64);
+    readers.readSourceFingerprint = async () => fingerprint;
+    let first = "";
+    await reader.withSnapshot(async scope => { first = scope.fingerprint; });
+    fingerprint = "b".repeat(64);
+    await reader.withSnapshot(async scope => { expect(scope.fingerprint).not.toBe(first); });
+    await expect(reader.withSnapshot(async () => { fingerprint = "c".repeat(64); })).rejects.toMatchObject(unavailable);
+    for (const broken of [async () => "", async () => undefined, async () => { throw new Error("private DB details"); }]) {
+      readers.readSourceFingerprint = broken as () => Promise<string>;
+      const caller = vi.fn(async () => {});
+      await expect(reader.withSnapshot(caller)).rejects.toMatchObject(unavailable);
+      expect(caller).not.toHaveBeenCalled();
+    }
+  });
+
   it("detects missing paths appearing and an actual launch file replacement during a scope", async () => {
     const { root, state, reader } = await fixture();
     const worker = path.join(root, "worker.js");

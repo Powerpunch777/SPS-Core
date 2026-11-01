@@ -64,6 +64,18 @@ rejected. This private read-only option is not used by Core's own artifact
 reference reader and grants no managed-file ownership or removal eligibility.
 Deletion/package-integrity checks retain their separate single-link rules.
 
+The private artifact reader also binds a bounded read-only inventory fingerprint
+of all retained Workspace Sources and legacy project shares/grants in the owned
+database. Reads use one repeatable-read, read-only transaction and do not filter
+disabled Sources or revoked grants. Display names, local paths, raw UNC routes
+and credential envelopes are not returned; the guard uses opaque IDs, status,
+route hashes and revision/revocation timestamps. A malformed relationship,
+unavailable DB or changed fingerprint rejects the observation. This detects
+metadata changes, not complete Desktop mapping or credential reconciliation.
+It does not fence every Source mutation/cascade, export the inventory through
+parent IPC, approve cleanup or replace Source/Runner authorization. The public
+API, SDK, Source DB schema and Host-local path privacy boundary are unchanged.
+
 The product composition additionally persists removal and approved-upgrade
 intents before destructive package mutations, and reconciles them before normal
 plugin startup. Pending operations deny unrelated activation/replacement.

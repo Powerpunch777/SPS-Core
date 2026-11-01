@@ -50,6 +50,8 @@ export interface SpsPluginArtifactReferenceReaders {
   readWorkers(): readonly PluginWorkerArtifactReference[];
   readPreparations(): readonly PreparedPluginArtifactReference[];
   readRegistryStages(): Promise<readonly RegistryStageArtifactReference[]>;
+  /** Private guard only; not complete Source reconciliation or a cleanup permit. */
+  readSourceFingerprint?(): Promise<string>;
 }
 
 function rows<T>(value: readonly T[]): readonly T[] {
@@ -146,6 +148,14 @@ export function createSpsPluginArtifactReferenceReader(options: {
   readers: SpsPluginArtifactReferenceReaders;
 }) {
   const root = absolutePath.parse(options.localPluginDir);
+  const sourceFingerprint = async () => {
+    if (options.readers.readSourceFingerprint === undefined) return null;
+    try {
+      const value = await options.readers.readSourceFingerprint();
+      if (typeof value !== "string" || !/^[a-f0-9]{64}$/.test(value)) throw unavailable();
+      return value;
+    } catch { throw unavailable(); }
+  };
   return Object.freeze({
     async withSnapshot<T>(action: (scope: SpsPluginArtifactReferenceScope) => Promise<T>): Promise<T> {
       if (typeof action !== "function") throw new TypeError("Plugin artifact observation requires an action.");
@@ -153,6 +163,7 @@ export function createSpsPluginArtifactReferenceReader(options: {
         let active = true;
         try {
           const references = await observeReferences(root, options.readers);
+          const sources = await sourceFingerprint();
           const captures = new Map<string, Awaited<ReturnType<typeof captureSpsPluginArtifactReferencePath>>>();
           const capture = async (referencePath: string, kind: "file" | "directory") => {
             const key = JSON.stringify([referencePath, kind]);
@@ -169,10 +180,11 @@ export function createSpsPluginArtifactReferenceReader(options: {
             canonical.push(Object.freeze({ ...reference, canonicalPath: observed.canonicalPath }));
           }
           const signature = JSON.stringify(references);
-          const fingerprint = createHash("sha256").update(JSON.stringify([root, canonical])).digest("hex");
+          const fingerprint = createHash("sha256").update(JSON.stringify([root, canonical, sources])).digest("hex");
           const assertCurrent = async () => {
             if (!active) throw unavailable();
             if (JSON.stringify(await observeReferences(root, options.readers)) !== signature) throw unavailable();
+            if (await sourceFingerprint() !== sources) throw unavailable();
             try { for (const observed of captures.values()) await observed.assertCurrent(); }
             catch { throw unavailable(); }
             if (!active) throw unavailable();
