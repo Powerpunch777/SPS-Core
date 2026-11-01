@@ -7,6 +7,7 @@ import {
 } from "../compat/paperclip/plugin-sdk.js";
 import type { PaperclipPluginManifestV1 } from "../compat/paperclip/shared.js";
 import type { WorkerToHostHandlers } from "../compat/paperclip/control-plane.js";
+import { withSpsWorkspaceAgentSessionInvocation } from "./sps-workspace-agent-session-invocation.js";
 
 // This lane exposes neutral, tenant-selected services. Host lifecycle/tool/event
 // registration, raw SQL, direct outbound HTTP and raw secret resolution are not
@@ -14,6 +15,7 @@ import type { WorkerToHostHandlers } from "../compat/paperclip/control-plane.js"
 const METHODS: readonly WorkerToHostMethodName[] = [
   "config.get", "state.get", "state.set", "state.delete",
   "agents.list",
+  "agents.sessions.create", "agents.sessions.list", "agents.sessions.sendMessage", "agents.sessions.getRun", "agents.sessions.cancel",
   "entities.upsert", "entities.list", "inbox.publish", "inbox.update", "inbox.withdraw",
   "localFolders.declarations", "localFolders.status", "localFolders.list",
   "localFolders.readText", "localFolders.writeTextAtomic", "localFolders.deleteFile",
@@ -61,6 +63,11 @@ export function createSpsWorkspacePluginHostHandlers(input: {
             // Host store despite this process having a fixed tenant owner.
             if (selected.scopeKind !== "company" || selected.scopeId !== workspaceId) throw deny();
           } else if (selected.companyId !== workspaceId) throw deny();
+        }
+        if (method.startsWith("agents.sessions.")) {
+          if (typeof context.assertCurrentInvocation !== "function") throw deny();
+          return withSpsWorkspaceAgentSessionInvocation({ workspaceId, pluginId,
+            assertCurrent: context.assertCurrentInvocation }, () => handler(params, context));
         }
         return handler(params, context);
       },

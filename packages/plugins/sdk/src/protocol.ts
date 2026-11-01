@@ -310,6 +310,8 @@ export interface PluginInvocationContext {
 export interface WorkerHostCallContext {
   invocationScope?: PluginInvocationScope | null;
   invalidInvocationScope?: boolean;
+  /** Host-process liveness check for this exact invocation. Never sent over RPC. */
+  assertCurrentInvocation?: () => Promise<void>;
   /** Host-process callback from an authenticated Native invocation. Never sent over RPC. */
   readNativeConnectivity?: () => Promise<PluginSpsConnectivity>;
 }

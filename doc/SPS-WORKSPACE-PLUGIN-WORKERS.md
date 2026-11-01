@@ -85,8 +85,37 @@ Core event bus; disposing one worker never clears another worker's subscriptions
 
 Agent listing reuses the existing Host service and capability checks. Missing,
 stale, invalid or cross-Workspace invocation scope is rejected before delegation.
-This does not expose Agent mutation, invocation or session methods in this lane,
-grant execution permission, assert provider readiness, or introduce workflow roles.
+This does not expose global Agent mutation/invocation, grant execution permission,
+assert provider readiness, or introduce workflow roles.
+
+The lane additionally admits `agents.sessions.create`, `list`, `sendMessage`,
+`getRun` and `cancel` under their existing five capabilities. Each requires the
+exact live Host-issued invocation, Workspace and plugin. A Host-process callback
+is captured from that invocation (never supplied over worker RPC), and a bounded
+async scope expires when the nested call finishes. Scoped services recheck this
+authority around reads and before writes, wakeup or cancellation; a retained
+callback cannot outlive its invocation. Session creation rejects foreign task-key
+namespaces, empty suffixes, invalid text and keys over 1,024 UTF-8 bytes. Existing
+general Host workers retain their explicit legacy service path.
+The invocation callback is an admission check, not a lease over heartbeat's
+internal awaits or a rollback/cancellation of already admitted work. Revocation
+while wakeup is pending can reject its response even though a run was queued or
+started. That outcome is ambiguous, not proof that execution never began.
+
+`getRun.output` is additive: queued/running is `not_ready`; only a succeeded run's
+own persisted `resultJson.summary` may be `available`. Missing, invalid or oversized
+summaries are `withheld`. The maximum is 65,536 UTF-8 bytes before and after existing
+common-pattern redaction, without truncation. No other adapter-result fields or
+raw log streams are returned by that output contract. Redaction is not a universal
+secret/DLP guarantee. Older Hosts may omit the field. Scoped Workspace services
+do not subscribe to the legacy Host raw Agent Session event feed.
+
+Run lookup and cancellation still require the exact plugin-owned session, Agent,
+Workspace and persisted conversation binding. A cancellation request is not exit
+evidence: existing local-process and signed Node closure requirements remain.
+This is not durable session-ensure or message idempotency; ambiguous sends must
+not be automatically replayed. Plugin session layouts, roles, memory strategy and
+real-provider qualification remain separate from this generic platform contract.
 
 Stopping a Workspace joins only its owned processes and startup work. An
 unconfirmed child close retains the exact handle and services and prevents

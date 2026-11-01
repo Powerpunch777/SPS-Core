@@ -763,7 +763,10 @@ describe("plugin-worker-manager stderr failure context", () => {
       expect(authority.assertCurrent).toHaveBeenCalledTimes(4);
       expect(companiesGet).toHaveBeenCalledWith(
         { companyId: "company-1" },
-        { invocationScope: { companyId: "company-1" } },
+        expect.objectContaining({
+          invocationScope: { companyId: "company-1" },
+          assertCurrentInvocation: expect.any(Function),
+        }),
       );
       await expect(handle.call("getData", {
         key: "probe",
@@ -808,6 +811,98 @@ describe("plugin-worker-manager stderr failure context", () => {
       expect(missingScopeAuthority.assertCurrent).not.toHaveBeenCalled();
       expect(companiesGet).toHaveBeenCalledTimes(1);
     } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
+  it("keeps the current-invocation callback Host-only and rejects it after the RPC finishes", async () => {
+    let retainedAssertCurrentInvocation: (() => Promise<void>) | undefined;
+    const companiesGet = vi.fn(async (params: { companyId: string }, context?: {
+      assertCurrentInvocation?: () => Promise<void>;
+    }) => {
+      retainedAssertCurrentInvocation = context?.assertCurrentInvocation;
+      return createTestCompany(params.companyId);
+    });
+    const handle = createPluginWorkerHandle("test.plugin", {
+      entrypointPath: INVOCATION_SCOPE_WORKER_ENTRYPOINT,
+      manifest: TEST_MANIFEST,
+      config: {},
+      instanceInfo: { instanceId: "instance-1", hostVersion: "1.0.0" },
+      apiVersion: 1,
+      hostHandlers: { "companies.get": companiesGet },
+    });
+
+    try {
+      await handle.start();
+      const result = await handle.call("getData", {
+        key: "probe",
+        companyId: "company-1",
+        params: { mode: "echo", requestedCompanyId: "company-1" },
+      } as HostToWorkerMethods["getData"][0], undefined, { assertCurrent: () => undefined });
+
+      expect(result).toMatchObject({ id: "company-1" });
+      expect(retainedAssertCurrentInvocation).toEqual(expect.any(Function));
+      expect(JSON.stringify(result)).not.toContain("assertCurrentInvocation");
+      await expect(retainedAssertCurrentInvocation!()).rejects.toMatchObject({
+        code: PLUGIN_RPC_ERROR_CODES.INVOCATION_SCOPE_DENIED,
+        message: "Plugin invocation authority is no longer current",
+      });
+    } finally {
+      await handle.stop().catch(() => undefined);
+    }
+  });
+
+  it("rejects a nested RPC when its Host-only callback observes authority revoked during the handler", async () => {
+    let enteredHandler!: () => void;
+    let releaseHandler!: () => void;
+    const handlerEntered = new Promise<void>((resolve) => { enteredHandler = resolve; });
+    const handlerGate = new Promise<void>((resolve) => { releaseHandler = resolve; });
+    let authorityRevoked = false;
+    const currentInvocationChecks: Array<Promise<void>> = [];
+    const companiesGet = vi.fn(async (params: { companyId: string }, context?: {
+      assertCurrentInvocation?: () => Promise<void>;
+    }) => {
+      enteredHandler();
+      await handlerGate;
+      const check = context?.assertCurrentInvocation?.() ?? Promise.resolve();
+      currentInvocationChecks.push(check);
+      await check;
+      return createTestCompany(params.companyId);
+    });
+    const handle = createPluginWorkerHandle("test.plugin", {
+      entrypointPath: INVOCATION_SCOPE_WORKER_ENTRYPOINT,
+      manifest: TEST_MANIFEST,
+      config: {},
+      instanceInfo: { instanceId: "instance-1", hostVersion: "1.0.0" },
+      apiVersion: 1,
+      hostHandlers: { "companies.get": companiesGet },
+    });
+
+    try {
+      await handle.start();
+      const call = handle.call("getData", {
+        key: "probe",
+        companyId: "company-1",
+        params: { mode: "echo", requestedCompanyId: "company-1" },
+      } as HostToWorkerMethods["getData"][0], undefined, {
+        assertCurrent: () => {
+          if (authorityRevoked) throw new Error("revoked");
+        },
+      });
+
+      await handlerEntered;
+      authorityRevoked = true;
+      releaseHandler();
+      await expect(call).rejects.toMatchObject({
+        code: PLUGIN_RPC_ERROR_CODES.INVOCATION_SCOPE_DENIED,
+        message: "Plugin invocation authority is no longer current",
+      });
+      await expect(Promise.all(currentInvocationChecks)).rejects.toMatchObject({
+        code: PLUGIN_RPC_ERROR_CODES.INVOCATION_SCOPE_DENIED,
+      });
+      expect(companiesGet).toHaveBeenCalledTimes(1);
+    } finally {
+      releaseHandler();
       await handle.stop().catch(() => undefined);
     }
   });
@@ -932,7 +1027,10 @@ describe("plugin-worker-manager stderr failure context", () => {
       expect(acceptedTerminal).toHaveBeenCalledExactlyOnceWith("response");
       expect(companiesGet).toHaveBeenCalledExactlyOnceWith(
         { companyId: workspaceA },
-        { invocationScope: { companyId: workspaceA } },
+        expect.objectContaining({
+          invocationScope: { companyId: workspaceA },
+          assertCurrentInvocation: expect.any(Function),
+        }),
       );
 
       const deniedCalls = [

@@ -38,7 +38,7 @@ describe("SPS Workspace Plugin Host handlers", () => {
       services, readConfig: async () => ({}) });
     await expect(denied["agents.list"]!({ companyId: workspaceA }, context)).rejects.toThrow();
     expect(list).toHaveBeenCalledTimes(1);
-    for (const operation of ["agents.get", "agents.pause", "agents.resume", "agents.invoke", "agents.sessions.create"]) {
+    for (const operation of ["agents.get", "agents.pause", "agents.resume", "agents.invoke", "agents.sessions.close"]) {
       expect(Object.hasOwn(handlers, operation)).toBe(false);
     }
   });

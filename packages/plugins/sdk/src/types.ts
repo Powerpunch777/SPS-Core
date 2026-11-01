@@ -1990,6 +1990,10 @@ export interface AgentSessionRunState {
   error: string | null;
   /** Additive metadata; absent on older development Hosts. */
   execution?: PluginSpsExecution;
+  /** Additive bounded answer; absent on older Hosts. Never the raw adapter result. */
+  output?: Readonly<{ state: "available"; text: string }>
+    | Readonly<{ state: "not_ready"; text: null }>
+    | Readonly<{ state: "withheld"; text: null; reason: "missing" | "invalid" | "too_large" | "not_successful" }>;
 }
 
 export interface PluginAgentSessionsClient {

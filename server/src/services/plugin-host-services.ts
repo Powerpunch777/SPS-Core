@@ -83,6 +83,7 @@ import { isCoreManagedMemoryLifecycleSubscription } from "./memory-providers.js"
 import { spsPluginExecutionService } from "./sps-plugin-execution.js";
 import { spsWorkspaceSurfaceService } from "./sps-workspace-surfaces.js";
 import { spsAgentSessionRunService } from "./sps-agent-session-runs.js";
+import { assertSpsWorkspaceAgentSessionInvocation } from "./sps-workspace-agent-session-invocation.js";
 import { spsExecutionHistoryService } from "./sps-execution-history.js";
 import { describeSpsAgentExecution } from "./sps-agent-execution-descriptor.js";
 import { findActiveServerAdapter } from "../adapters/registry.js";
@@ -641,6 +642,26 @@ export function buildHostServices(
   const ensureCompanyId = (companyId?: string) => {
     if (!companyId) throw new Error("companyId is required for this operation");
     return companyId;
+  };
+
+  const assertSessionAuthority = async (companyId: string) => {
+    if (disposed) throw new Error("Host services have been disposed");
+    if (options.workspaceId !== undefined) {
+      if (companyId !== options.workspaceId) throw new Error("Workspace Agent Session invocation is unavailable or expired.");
+      await assertSpsWorkspaceAgentSessionInvocation(pluginId, companyId);
+      if (disposed) throw new Error("Host services have been disposed");
+    }
+  };
+
+  const sessionTaskKey = (value: unknown): string => {
+    const prefix = `plugin:${pluginKey}:session:`;
+    if (value === undefined) return `${prefix}${randomUUID()}`;
+    if (typeof value !== "string" || !value.startsWith(prefix) || !value.slice(prefix.length).trim()
+      || Buffer.byteLength(value, "utf8") > 1_024 || /[\x00-\x1f\x7f\ufffd]/u.test(value)
+      || [...value].some(char => char.length === 1 && char.charCodeAt(0) >= 0xd800 && char.charCodeAt(0) <= 0xdfff)) {
+      throw new Error("Session taskKey must be a bounded, non-empty key owned by this plugin");
+    }
+    return value;
   };
 
   const optionalLifecycleReference = (value: unknown, field: string): string | null => {
@@ -2919,20 +2940,24 @@ export function buildHostServices(
     agentSessions: {
       async getRun(params) {
         const companyId = ensureCompanyId(params.companyId);
+        await assertSessionAuthority(companyId);
         await ensurePluginAvailableForCompany(companyId);
-        return spsAgentSessionRunService(db, pluginKey, runId => heartbeat.cancelRun(runId)).getRun({ ...params, companyId });
+        return spsAgentSessionRunService(db, pluginKey, runId => heartbeat.cancelRun(runId), () => assertSessionAuthority(companyId)).getRun({ ...params, companyId });
       },
       async cancel(params) {
         const companyId = ensureCompanyId(params.companyId);
+        await assertSessionAuthority(companyId);
         await ensurePluginAvailableForCompany(companyId);
-        return spsAgentSessionRunService(db, pluginKey, runId => heartbeat.cancelRun(runId)).cancel({ ...params, companyId });
+        return spsAgentSessionRunService(db, pluginKey, runId => heartbeat.cancelRun(runId), () => assertSessionAuthority(companyId)).cancel({ ...params, companyId });
       },
       async create(params) {
         const companyId = ensureCompanyId(params.companyId);
+        await assertSessionAuthority(companyId);
+        const taskKey = sessionTaskKey(params.taskKey);
         await ensurePluginAvailableForCompany(companyId);
         const agent = await agents.getById(params.agentId);
+        await assertSessionAuthority(companyId);
         requireInCompany("Agent", agent, companyId);
-        const taskKey = params.taskKey ?? `plugin:${pluginKey}:session:${randomUUID()}`;
 
         let normalizedContext: import("@paperclipai/shared").AgentSessionContext | null = null;
         if (params.context) {
@@ -3013,6 +3038,7 @@ export function buildHostServices(
           }
         }
 
+        await assertSessionAuthority(companyId);
         const row = await db
           .insert(agentTaskSessionsTable)
           .values({
@@ -3029,6 +3055,7 @@ export function buildHostServices(
           .returning()
           .then((rows) => rows[0]);
 
+        await assertSessionAuthority(companyId);
         return {
           sessionId: row!.id,
           agentId: params.agentId,
@@ -3044,6 +3071,7 @@ export function buildHostServices(
 
       async list(params) {
         const companyId = ensureCompanyId(params.companyId);
+        await assertSessionAuthority(companyId);
         await ensurePluginAvailableForCompany(companyId);
         const rows = await db
           .select()
@@ -3057,6 +3085,7 @@ export function buildHostServices(
           )
           .orderBy(desc(agentTaskSessionsTable.createdAt));
 
+        await assertSessionAuthority(companyId);
         return rows.map((row) => ({
           sessionId: row.id,
           agentId: row.agentId,
@@ -3076,6 +3105,7 @@ export function buildHostServices(
         }
 
         const companyId = ensureCompanyId(params.companyId);
+        await assertSessionAuthority(companyId);
         await ensurePluginAvailableForCompany(companyId);
 
         // Verify session exists and belongs to this plugin
@@ -3090,6 +3120,7 @@ export function buildHostServices(
             ),
           )
           .then((rows) => rows[0] ?? null);
+        await assertSessionAuthority(companyId);
         if (!session) throw new Error(`Session not found: ${params.sessionId}`);
 
         const run = await heartbeat.wakeup(session.agentId, {
@@ -3107,6 +3138,7 @@ export function buildHostServices(
           requestedByActorType: "system",
           requestedByActorId: pluginId,
         });
+        await assertSessionAuthority(companyId);
         if (!run) throw new Error("Agent wakeup was skipped by heartbeat policy");
 
         await db
@@ -3120,10 +3152,11 @@ export function buildHostServices(
             ),
           );
 
+        await assertSessionAuthority(companyId);
         // Subscribe to live events and forward to the plugin worker as notifications.
         // Track the subscription so it can be cleaned up on dispose() if the run
         // never reaches a terminal status (hang, crash, network partition).
-        if (notifyWorker) {
+        if (notifyWorker && options.workspaceId === undefined) {
           const TERMINAL_STATUSES = new Set(["succeeded", "interrupted", "failed", "cancelled", "timed_out"]);
           let terminalDelivered = false;
           let terminalDeliveryInProgress = false;

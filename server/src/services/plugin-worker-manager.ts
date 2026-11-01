@@ -926,17 +926,23 @@ function createPluginWorkerHandleInternal(
     }
   }
 
-  function nativeConnectivityContext(invocationId: string, entry: ActiveInvocation): Pick<WorkerHostCallContext, "readNativeConnectivity"> {
-    if (!entry.authority?.readNativeConnectivity) return {};
+  function currentInvocationContext(invocationId: string, entry: ActiveInvocation): Pick<WorkerHostCallContext, "readNativeConnectivity" | "assertCurrentInvocation"> {
+    if (!entry.authority) return {};
+    const assertCurrentInvocation = async () => {
+      if (activeInvocations.get(invocationId) !== entry) throw invocationDenied();
+      await assertInvocationCurrent(entry);
+      if (activeInvocations.get(invocationId) !== entry) throw invocationDenied();
+    };
     return {
-      readNativeConnectivity: async () => {
-        if (activeInvocations.get(invocationId) !== entry) throw invocationDenied();
-        await assertInvocationCurrent(entry);
-        const result = await entry.authority!.readNativeConnectivity!();
-        await assertInvocationCurrent(entry);
-        if (activeInvocations.get(invocationId) !== entry) throw invocationDenied();
-        return result;
-      },
+      assertCurrentInvocation,
+      ...(entry.authority.readNativeConnectivity ? {
+        readNativeConnectivity: async () => {
+          await assertCurrentInvocation();
+          const result = await entry.authority!.readNativeConnectivity!();
+          await assertCurrentInvocation();
+          return result;
+        },
+      } : {}),
     };
   }
 
@@ -966,7 +972,7 @@ function createPluginWorkerHandleInternal(
       } catch {
         return { invalidInvocationScope: true };
       }
-      return { invocationScope: ownedEntry.scope, ...nativeConnectivityContext(invocationId, ownedEntry) };
+      return { invocationScope: ownedEntry.scope, ...currentInvocationContext(invocationId, ownedEntry) };
     }
 
     if (invocationId?.startsWith(GUARDED_INVOCATION_PREFIX) && !activeInvocations.get(invocationId)?.authority) {
@@ -986,7 +992,7 @@ function createPluginWorkerHandleInternal(
         return { invalidInvocationScope: true };
       }
     }
-    return { invocationScope: entry.scope, ...nativeConnectivityContext(invocationId, entry) };
+    return { invocationScope: entry.scope, ...currentInvocationContext(invocationId, entry) };
   }
 
   /**

@@ -20,6 +20,7 @@ import {
 } from "./helpers/embedded-postgres.js";
 import { buildHostServices } from "../services/plugin-host-services.js";
 import { preserveSpsSessionCancellationContext } from "../services/sps-agent-session-runs.js";
+import { withSpsWorkspaceAgentSessionInvocation } from "../services/sps-workspace-agent-session-invocation.js";
 import { publishLiveEvent } from "../services/live-events.js";
 
 // Mock heartbeatService to avoid launching agent processes in this host-service test.
@@ -129,6 +130,7 @@ describePostgres("plugin agent session context", () => {
 
   async function seedCompanyAndPlugin(options: {
     companyId?: string;
+    workspaceScoped?: boolean;
     notifyWorker?: (method: string, params: unknown) => void;
   } = {}) {
     const companyId = options.companyId ?? randomUUID();
@@ -156,6 +158,7 @@ describePostgres("plugin agent session context", () => {
 
     const services = buildHostServices(db, pluginId, pluginManifest.id, createEventBusStub(), options.notifyWorker, {
       manifest: pluginManifest,
+      ...(options.workspaceScoped ? { workspaceId: companyId } : {}),
     });
     activeServices.push(services);
 
@@ -188,6 +191,61 @@ describePostgres("plugin agent session context", () => {
     return { ...fixture, agentId, session, run, params: { companyId: fixture.companyId, sessionId: session.sessionId, runId: run.id } };
   }
 
+  async function seedScopedSessionRun(status = "running") {
+    const fixture = await seedCompanyAndPlugin({ workspaceScoped: true });
+    const agentId = await seedAgent(fixture.companyId);
+    const session = await inSessionInvocation(fixture.companyId, fixture.pluginId, () =>
+      fixture.services.agentSessions.create({ agentId, companyId: fixture.companyId }));
+    const taskKey = await db.select({ taskKey: agentTaskSessions.taskKey })
+      .from(agentTaskSessions).where(eq(agentTaskSessions.id, session.sessionId)).then(rows => rows[0]!.taskKey);
+    const run = await db.insert(heartbeatRuns).values({ companyId: fixture.companyId, agentId, status,
+      contextSnapshot: { taskKey, spsPluginConversation: { pluginKey: fixture.pluginManifest.id, sessionId: session.sessionId } },
+    }).returning().then(rows => rows[0]!);
+    return { ...fixture, agentId, session, run, params: { companyId: fixture.companyId, sessionId: session.sessionId, runId: run.id } };
+  }
+
+  function inSessionInvocation<T>(
+    workspaceId: string,
+    pluginId: string,
+    action: () => Promise<T>,
+    assertCurrent: () => void | Promise<void> = async () => {},
+  ) {
+    return withSpsWorkspaceAgentSessionInvocation({ workspaceId, pluginId, assertCurrent }, action);
+  }
+
+  function sessionOperations(fixture: {
+    companyId: string;
+    pluginId: string;
+    services: ReturnType<typeof buildHostServices>;
+    agentId: string;
+    session: { sessionId: string };
+    run: { id: string };
+  }) {
+    const { companyId, pluginId, services, agentId, session, run } = fixture;
+    const args = {
+      create: { agentId, companyId },
+      list: { agentId, companyId },
+      sendMessage: { sessionId: session.sessionId, companyId, prompt: "scoped message" },
+      getRun: { sessionId: session.sessionId, companyId, runId: run.id },
+      cancel: { sessionId: session.sessionId, companyId, runId: run.id },
+    };
+    return {
+      args,
+      call: {
+        create: () => services.agentSessions.create(args.create),
+        list: () => services.agentSessions.list(args.list),
+        sendMessage: () => services.agentSessions.sendMessage(args.sendMessage),
+        getRun: () => services.agentSessions.getRun(args.getRun),
+        cancel: () => services.agentSessions.cancel(args.cancel),
+      },
+      inScope: (method: keyof typeof args, workspaceId = companyId, callerPluginId = pluginId) =>
+        inSessionInvocation(workspaceId, callerPluginId, () =>
+          (services.agentSessions[method] as (params: typeof args[typeof method]) => Promise<unknown>)(args[method])),
+    };
+  }
+
+  const scopedSessionMethods = ["create", "list", "sendMessage", "getRun", "cancel"] as const;
+
   it("exposes bounded Agent configuration without executing or widening the Workspace", async () => {
     const { services, companyId } = await seedCompanyAndPlugin();
     const agentId = await seedAgent(companyId);
@@ -196,6 +254,210 @@ describePostgres("plugin agent session context", () => {
       adapterRegistration: "registered", executionOwner: "adapter", authorization: "recheck_on_dispatch", readiness: "unknown", node: null });
     await expect(services.agents.describeExecution({ agentId, companyId: randomUUID() })).rejects.toThrow("Agent not found");
     expect(mockWakeup).not.toHaveBeenCalled();
+  });
+
+  it.each(scopedSessionMethods)("requires a live Workspace Agent Session scope for %s", async method => {
+    const fixture = await seedScopedSessionRun();
+    const { call } = sessionOperations(fixture);
+
+    await expect(call[method]()).rejects.toThrow();
+    if (method === "create") {
+      expect(await db.select().from(agentTaskSessions)).toHaveLength(1);
+    }
+    expect(mockWakeup).not.toHaveBeenCalled();
+  });
+
+  it.each(scopedSessionMethods)("rejects foreign Workspace and Plugin scopes for %s", async method => {
+    const fixture = await seedScopedSessionRun();
+    const { args, inScope } = sessionOperations(fixture);
+    const foreignCompanyId = randomUUID();
+    await db.insert(companies).values({
+      id: foreignCompanyId,
+      name: "Foreign Workspace",
+      issuePrefix: issuePrefix(foreignCompanyId),
+      requireBoardApprovalForNewAgents: false,
+    });
+    const foreignArgs = { ...args[method], companyId: foreignCompanyId } as typeof args[typeof method];
+    const serviceMethod = fixture.services.agentSessions[method] as (params: typeof foreignArgs) => Promise<unknown>;
+
+    await expect(inSessionInvocation(foreignCompanyId, fixture.pluginId, () => serviceMethod(foreignArgs))).rejects.toThrow();
+    await expect(inScope(method, fixture.companyId, randomUUID())).rejects.toThrow();
+    expect(mockWakeup).not.toHaveBeenCalled();
+  });
+
+  it("round-trips all five session methods in its Workspace and persists the real run", async () => {
+    const fixture = await seedCompanyAndPlugin({ workspaceScoped: true });
+    const agentId = await seedAgent(fixture.companyId);
+    const session = await inSessionInvocation(fixture.companyId, fixture.pluginId, () =>
+      fixture.services.agentSessions.create({ agentId, companyId: fixture.companyId,
+        taskKey: `plugin:${fixture.pluginManifest.id}:session:roundtrip` }));
+    const listed = await inSessionInvocation(fixture.companyId, fixture.pluginId, () =>
+      fixture.services.agentSessions.list({ agentId, companyId: fixture.companyId }));
+    expect(listed.map(item => item.sessionId)).toContain(session.sessionId);
+
+    mockWakeup.mockImplementationOnce(async (wokenAgentId: string, wake: Record<string, any>) =>
+      db.insert(heartbeatRuns).values({
+        companyId: fixture.companyId,
+        agentId: wokenAgentId,
+        status: "running",
+        contextSnapshot: wake.contextSnapshot,
+      }).returning().then(rows => rows[0]!));
+    const sent = await inSessionInvocation(fixture.companyId, fixture.pluginId, () =>
+      fixture.services.agentSessions.sendMessage({
+        companyId: fixture.companyId,
+        sessionId: session.sessionId,
+        prompt: "Hello from this Workspace",
+      }));
+    expect(mockWakeup).toHaveBeenCalledOnce();
+
+    const runState = await inSessionInvocation(fixture.companyId, fixture.pluginId, () =>
+      fixture.services.agentSessions.getRun({ companyId: fixture.companyId, sessionId: session.sessionId, runId: sent.runId }));
+    expect(runState).toMatchObject({ runId: sent.runId, status: "running", output: { state: "not_ready", text: null } });
+
+    mockCancelRun.mockImplementationOnce(async (runId: string) => {
+      await db.update(heartbeatRuns).set({ status: "cancelled", finishedAt: new Date() }).where(eq(heartbeatRuns.id, runId));
+    });
+    const cancelled = await inSessionInvocation(fixture.companyId, fixture.pluginId, () =>
+      fixture.services.agentSessions.cancel({ companyId: fixture.companyId, sessionId: session.sessionId, runId: sent.runId }));
+    expect(cancelled).toMatchObject({ status: "cancelled", cancellationRequested: true, termination: "pending" });
+
+    const [storedSession] = await db.select().from(agentTaskSessions).where(eq(agentTaskSessions.id, session.sessionId));
+    const [storedRun] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, sent.runId));
+    expect(storedSession?.lastRunId).toBe(sent.runId);
+    expect(storedRun?.contextSnapshot).toMatchObject({
+      taskKey: storedSession?.taskKey,
+      spsPluginConversation: { pluginKey: fixture.pluginManifest.id, sessionId: session.sessionId },
+    });
+  });
+
+  it("rechecks Workspace authority after the awaited session read and before wakeup", async () => {
+    const fixture = await seedScopedSessionRun();
+    let assertCalls = 0;
+    const assertCurrent = vi.fn(async () => {
+      assertCalls += 1;
+      if (assertCalls === 3) throw new Error("Workspace invocation was revoked");
+    });
+    const selectSpy = vi.spyOn(db, "select");
+
+    try {
+      await expect(inSessionInvocation(fixture.companyId, fixture.pluginId, () =>
+        fixture.services.agentSessions.sendMessage({
+          companyId: fixture.companyId,
+          sessionId: fixture.session.sessionId,
+          prompt: "must not wake after revocation",
+        }), assertCurrent)).rejects.toThrow();
+      expect(assertCalls).toBeGreaterThanOrEqual(3);
+      expect(selectSpy).toHaveBeenCalled();
+      expect(mockWakeup).not.toHaveBeenCalled();
+    } finally {
+      selectSpy.mockRestore();
+    }
+  });
+
+  it("does not insert a session when Workspace authority is revoked after the Agent read", async () => {
+    const fixture = await seedCompanyAndPlugin({ workspaceScoped: true });
+    const agentId = await seedAgent(fixture.companyId);
+    let assertCalls = 0;
+    const assertCurrent = vi.fn(async () => {
+      assertCalls += 1;
+      // Calls 1 and 2 are invocation/service preflight; call 3 follows the awaited Agent read and precedes insert.
+      if (assertCalls === 3) throw new Error("Workspace invocation was revoked after Agent read");
+    });
+
+    await expect(inSessionInvocation(fixture.companyId, fixture.pluginId, () =>
+      fixture.services.agentSessions.create({ agentId, companyId: fixture.companyId }), assertCurrent)).rejects.toThrow();
+    expect(assertCalls).toBe(3);
+    expect(await db.select().from(agentTaskSessions)).toHaveLength(0);
+  });
+
+  it("rolls back a queued cancellation marker if Workspace authority is revoked after the marker write", async () => {
+    const fixture = await seedScopedSessionRun("queued");
+    let assertCalls = 0;
+    const assertCurrent = vi.fn(async () => {
+      assertCalls += 1;
+      // Calls 1-8 enter and validate the scope/session/run; 9 follows the locked row read;
+      // call 10 is immediately after the transaction writes its cancellation marker.
+      if (assertCalls === 10) throw new Error("Workspace invocation was revoked after marker write");
+    });
+
+    await expect(inSessionInvocation(fixture.companyId, fixture.pluginId, () =>
+      fixture.services.agentSessions.cancel(fixture.params), assertCurrent)).rejects.toThrow();
+    expect(assertCalls).toBe(10);
+    const [storedRun] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, fixture.run.id));
+    expect(storedRun?.status).toBe("queued");
+    expect(storedRun?.contextSnapshot).not.toHaveProperty("spsSessionCancellationRequested");
+    expect(mockCancelRun).not.toHaveBeenCalled();
+  });
+
+  it("validates task keys on regular and Workspace Hosts without persisting foreign or malformed keys", async () => {
+    const { companyId, pluginId, pluginManifest, services } = await seedCompanyAndPlugin();
+    const agentId = await seedAgent(companyId);
+    const prefix = `plugin:${pluginManifest.id}:session:`;
+    const invalidTaskKeys = [
+      `plugin:another-plugin:session:foreign`,
+      prefix,
+      `${prefix}${"x".repeat(1024)}`,
+      `${prefix}before\u0001after`,
+      `${prefix}\uD800`,
+    ];
+
+    for (const taskKey of invalidTaskKeys) {
+      await expect(services.agentSessions.create({ agentId, companyId, taskKey })).rejects.toThrow();
+    }
+    expect(await db.select().from(agentTaskSessions)).toHaveLength(0);
+
+    const validTaskKey = `${prefix}unicode-한🙂`;
+    const session = await services.agentSessions.create({ agentId, companyId, taskKey: validTaskKey });
+    const [row] = await db.select().from(agentTaskSessions).where(eq(agentTaskSessions.id, session.sessionId));
+    expect(row?.taskKey).toBe(validTaskKey);
+    expect(row?.taskKey.startsWith(prefix)).toBe(true);
+    expect(row?.taskKey.slice(prefix.length)).not.toBe("");
+    expect(Buffer.byteLength(row!.taskKey, "utf8")).toBeLessThanOrEqual(1024);
+
+    const scopedServices = buildHostServices(db, pluginId, pluginManifest.id, createEventBusStub(), undefined,
+      { manifest: pluginManifest, workspaceId: companyId });
+    activeServices.push(scopedServices);
+    const foreignKey = "plugin:foreign-plugin:session:workspace-forbidden";
+    await expect(inSessionInvocation(companyId, pluginId, () =>
+      scopedServices.agentSessions.create({ agentId, companyId, taskKey: foreignKey }))).rejects.toThrow();
+    const scopedRows = await db.select().from(agentTaskSessions).where(eq(agentTaskSessions.companyId, companyId));
+    expect(scopedRows.map(scopedRow => scopedRow.taskKey)).toEqual([validTaskKey]);
+  });
+
+  it("returns only a bounded, redacted persisted summary for the exact succeeded session run", async () => {
+    const fixture = await seedScopedSessionRun("succeeded");
+    const secondSession = await inSessionInvocation(fixture.companyId, fixture.pluginId, () =>
+      fixture.services.agentSessions.create({ agentId: fixture.agentId, companyId: fixture.companyId }));
+    const secret = "adapter-secret-value";
+    const summary = `Answer: {\"apiKey\":\"${secret}\"}`;
+    await db.update(heartbeatRuns).set({
+      resultJson: { summary },
+      stdoutExcerpt: "raw stdout secret",
+      stderrExcerpt: "raw stderr secret",
+      usageJson: { providerRaw: "raw adapter metadata" },
+      sessionIdAfter: "raw-adapter-session-id",
+    }).where(eq(heartbeatRuns.id, fixture.run.id));
+
+    const result = await inSessionInvocation(fixture.companyId, fixture.pluginId, () =>
+      fixture.services.agentSessions.getRun(fixture.params));
+    expect(result.output).toMatchObject({ state: "available" });
+    if (result.output?.state !== "available") throw new Error("Expected a persisted summary");
+    expect(Buffer.byteLength(result.output.text, "utf8")).toBeLessThanOrEqual(65_536);
+    expect(result.output.text).toContain("***REDACTED***");
+    expect(result.output.text).not.toContain(secret);
+    for (const rawField of ["resultJson", "stdoutExcerpt", "stderrExcerpt", "usageJson", "sessionIdAfter"]) {
+      expect(result).not.toHaveProperty(rawField);
+    }
+    for (const rawValue of [secret, "raw stdout secret", "raw stderr secret", "raw adapter metadata", "raw-adapter-session-id"]) {
+      expect(JSON.stringify(result)).not.toContain(rawValue);
+    }
+    await db.update(heartbeatRuns).set({ resultJson: { summary: "x".repeat(70_000) } }).where(eq(heartbeatRuns.id, fixture.run.id));
+    await expect(inSessionInvocation(fixture.companyId, fixture.pluginId, () =>
+      fixture.services.agentSessions.getRun(fixture.params))).resolves.toMatchObject({
+      output: { state: "withheld", text: null, reason: "too_large" },
+    });
+    await expect(inSessionInvocation(fixture.companyId, fixture.pluginId, () =>
+      fixture.services.agentSessions.getRun({ ...fixture.params, sessionId: secondSession.sessionId }))).rejects.toThrow();
   });
 
   it("reads only the exact owned session run, without output, paths or adapter secrets", async () => {
