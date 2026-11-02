@@ -22,6 +22,7 @@ describe("codex inactivity monitor (integration: real subprocess)", () => {
       const timeoutMs = 250;
       const logs: Array<{ stream: string; chunk: string }> = [];
       let killTarget: { pid: number | null; processGroupId: number | null } | null = null;
+      const spawnedPid: { value: number | null } = { value: null };
       let monitorFired = false;
       let terminationSignal: NodeJS.Signals | null = null;
       let sigkillTimer: ReturnType<typeof setTimeout> | null = null;
@@ -69,6 +70,7 @@ describe("codex inactivity monitor (integration: real subprocess)", () => {
           graceSec: 1,
           onSpawn: async (meta) => {
             killTarget = { pid: meta.pid, processGroupId: meta.processGroupId };
+            spawnedPid.value = meta.pid;
           },
           onLog: async (stream, chunk) => {
             logs.push({ stream, chunk });
@@ -81,8 +83,23 @@ describe("codex inactivity monitor (integration: real subprocess)", () => {
         expect(monitorFired, "monitor should fire when codex goes silent").toBe(true);
         // Process was killed by our signal, not by hitting timeoutSec.
         expect(proc.timedOut).toBe(false);
-        expect(["SIGTERM", "SIGKILL"]).toContain(proc.signal);
+        if (process.platform === "win32") {
+          expect(proc.signal === null && proc.exitCode === 1).toBe(true);
+        } else {
+          expect(["SIGTERM", "SIGKILL"]).toContain(proc.signal);
+        }
         expect(["SIGTERM", "SIGKILL"]).toContain(terminationSignal);
+        const childPid = spawnedPid.value;
+        expect(childPid).toBeTypeOf("number");
+        if (typeof childPid !== "number") throw new Error("Child PID was not captured");
+        let pidStillExists = false;
+        try {
+          process.kill(childPid, 0);
+          pidStillExists = true;
+        } catch (error) {
+          expect((error as NodeJS.ErrnoException).code).toBe("ESRCH");
+        }
+        expect(pidStillExists).toBe(false);
         // The errorMessage shape mirrors the AdapterExecutionResult that
         // execute.ts will produce for this case.
         expect(formatOutputInactivityMonitorErrorMessage(elapsedMs)).toMatch(
