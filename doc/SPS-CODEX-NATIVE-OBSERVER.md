@@ -5,6 +5,10 @@ Date: 2026-11-02
 Status: internal read-only transport and metadata validation, not an activated
 execution engine, public SDK API, or native child execution qualification.
 
+Follow-up: [paused goal state qualification](SPS-CODEX-PAUSED-GOAL-STATE.md)
+reuses the internal transport in a separate empty-profile diagnostic. The
+read-only client itself still cannot create threads, goals, or turns.
+
 ## Why This Exists
 
 The separate Builder v15 workflow requires one persistent supervisor session

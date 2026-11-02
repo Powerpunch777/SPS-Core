@@ -26,12 +26,14 @@ function bound(value: number | undefined, fallback: number, min: number, max: nu
  * Read-only JSONL transport for a caller-owned, isolated app-server process.
  * This does not start a model, authorize child tools, or establish tenant scope.
  */
-export function createCodexAppServerReadClient(options: {
+export type CodexAppServerReadClientOptions = {
   input: Readable;
   output: Writable;
   timeoutMs?: number;
   maxFrameBytes?: number;
-}) {
+};
+
+function createClient(options: CodexAppServerReadClientOptions, methods: ReadonlySet<string>) {
   const { input, output } = options;
   const timeoutMs = bound(options.timeoutMs, 10_000, 10, 60_000);
   const maxFrameBytes = bound(options.maxFrameBytes, 1024 * 1024, 256, 8 * 1024 * 1024);
@@ -180,12 +182,69 @@ export function createCodexAppServerReadClient(options: {
       }
       return handshake;
     },
-    request(method: CodexAppServerReadMethod, params: Record<string, unknown>): Promise<unknown> {
-      if (!initialized || !READ_METHODS.has(method)) {
-        return Promise.reject(new Error("Codex observer only permits initialized read requests."));
+    request(method: string, params: Record<string, unknown>): Promise<unknown> {
+      if (!initialized || !methods.has(method)) {
+        return Promise.reject(new Error("Codex observer only permits initialized allowlisted requests."));
       }
       return send(method, params);
     },
     close() { stop(); },
+  };
+}
+
+export function createCodexAppServerReadClient(options: CodexAppServerReadClientOptions) {
+  const client = createClient(options, READ_METHODS);
+  return { ...client, request: (method: CodexAppServerReadMethod, params: Record<string, unknown>) => client.request(method, params) };
+}
+
+export type CodexAppServerStateProbeMethod = "thread/start" | "thread/resume"
+  | "thread/goal/get" | "thread/goal/set" | "thread/goal/clear";
+const STATE_PROBE_METHODS = new Set<string>([
+  "thread/start", "thread/resume", "thread/goal/get", "thread/goal/set", "thread/goal/clear",
+]);
+
+function pausedGoalParams(params: Record<string, unknown>): Record<string, unknown> {
+  const fields: Record<string, unknown> = {};
+  for (const key of Reflect.ownKeys(params)) {
+    if (typeof key !== "string" || !["threadId", "status", "objective", "tokenBudget"].includes(key)) {
+      throw new Error("Invalid paused goal probe fields.");
+    }
+    const descriptor = Object.getOwnPropertyDescriptor(params, key);
+    if (!descriptor?.enumerable || !own(descriptor, "value")) throw new Error("Invalid paused goal probe data.");
+    fields[key] = descriptor.value;
+  }
+  if (fields.status !== "paused") throw new Error("The state probe only writes paused goals.");
+  if (typeof fields.threadId !== "string" || !/^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/.test(fields.threadId)) {
+    throw new Error("Invalid paused goal probe thread identity.");
+  }
+  if (own(fields, "objective")) {
+    const value = fields.objective;
+    if (typeof value !== "string" || !value.trim() || value.length > 8000
+      || [...value].length > 4000 || [...value].some(char => {
+        const code = char.codePointAt(0)!;
+        return code >= 0xd800 && code <= 0xdfff || code < 0x20 && ![9, 10, 13].includes(code) || code >= 0x7f && code <= 0x9f;
+      })) throw new Error("Invalid paused goal probe objective.");
+  }
+  if (own(fields, "tokenBudget") && fields.tokenBudget !== null
+    && (typeof fields.tokenBudget !== "number" || !Number.isSafeInteger(fields.tokenBudget) || fields.tokenBudget < 1)) {
+    throw new Error("Invalid paused goal probe budget.");
+  }
+  return fields;
+}
+
+/** Internal no-model diagnostic only; caller must supply a newly-owned empty profile. */
+export function createCodexAppServerStateProbeClient(options: CodexAppServerReadClientOptions) {
+  const client = createClient(options, STATE_PROBE_METHODS);
+  return {
+    ...client,
+    request(method: CodexAppServerStateProbeMethod, params: Record<string, unknown>): Promise<unknown> {
+      if (!record(params)) return Promise.reject(new TypeError("State probe parameters must be an object."));
+      // An active native goal could trigger work. This diagnostic never activates one.
+      if (method === "thread/goal/set") {
+        try { return client.request(method, pausedGoalParams(params)); }
+        catch { return Promise.reject(new Error("Invalid paused goal state probe request.")); }
+      }
+      return client.request(method, params);
+    },
   };
 }
