@@ -1,4 +1,4 @@
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq, isNull, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { plugins, pluginState } from "@paperclipai/db";
 import type {
@@ -14,6 +14,55 @@ import { notFound } from "../errors.js";
 
 /** Default namespace used when the plugin does not specify one. */
 const DEFAULT_NAMESPACE = "default";
+
+export type PluginStateExpectation =
+  | { exists: false }
+  | { exists: true; value: unknown };
+
+function validateExpectation(value: unknown): PluginStateExpectation {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError("Plugin state expectation must be a plain record");
+  }
+
+  let prototype: object | null;
+  let keys: PropertyKey[];
+  try {
+    prototype = Object.getPrototypeOf(value);
+    keys = Reflect.ownKeys(value);
+  } catch {
+    throw new TypeError("Plugin state expectation must be a plain record");
+  }
+  if (prototype !== Object.prototype && prototype !== null) {
+    throw new TypeError("Plugin state expectation must be a plain record");
+  }
+
+  const descriptors = new Map<PropertyKey, PropertyDescriptor>();
+  try {
+    for (const key of keys) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor?.enumerable || !("value" in descriptor)) {
+        throw new TypeError("Plugin state expectation must contain enumerable data properties only");
+      }
+      descriptors.set(key, descriptor);
+    }
+  } catch (error) {
+    if (error instanceof TypeError) throw error;
+    throw new TypeError("Plugin state expectation must be a plain record");
+  }
+
+  const exists = descriptors.get("exists")?.value;
+  if (exists === false && keys.length === 1 && keys[0] === "exists") {
+    return { exists: false };
+  }
+  if (exists === true && keys.length === 2 && keys.includes("value") && keys.includes("exists")) {
+    const expectedValue = descriptors.get("value")?.value;
+    if (expectedValue === undefined) {
+      throw new TypeError("Plugin state expectation value cannot be undefined");
+    }
+    return { exists: true, value: expectedValue };
+  }
+  throw new TypeError("Invalid Plugin state expectation");
+}
 
 /**
  * Build the WHERE clause conditions for a scoped state lookup.
@@ -159,6 +208,73 @@ export function pluginStateStore(db: Db) {
             updatedAt: new Date(),
           },
         });
+    },
+
+    /**
+     * Atomically create a missing value or replace a value that still matches
+     * the supplied JSON expectation. Callers must include a revision in their
+     * value when they need ABA detection. This primitive does not provide
+     * multi-key transactions or permission-revocation guarantees.
+     */
+    compareAndSet: async (
+      pluginId: string,
+      input: SetPluginState,
+      rawExpected: PluginStateExpectation,
+    ): Promise<{ swapped: boolean }> => {
+      const expected = validateExpectation(rawExpected);
+      const expectedJson = expected.exists ? JSON.stringify(expected.value) : undefined;
+      if (expected.exists && expectedJson === undefined) {
+        throw new TypeError("Plugin state expectation value must be JSON-serializable");
+      }
+      const valueJson = JSON.stringify(input.value);
+      if (valueJson === undefined) throw new TypeError("Plugin state value must be JSON-serializable");
+
+      await assertPluginExists(pluginId);
+
+      const namespace = input.namespace ?? DEFAULT_NAMESPACE;
+      const scopeId = input.scopeId ?? null;
+      const conditions = scopeConditions(
+        pluginId,
+        input.scopeKind,
+        scopeId,
+        namespace,
+        input.stateKey,
+      );
+
+      if (!expected.exists) {
+        const rows = await db
+          .insert(pluginState)
+          .values({
+            pluginId,
+            scopeKind: input.scopeKind,
+            scopeId,
+            namespace,
+            stateKey: input.stateKey,
+            valueJson: sql`${valueJson}::jsonb`,
+            updatedAt: new Date(),
+          })
+          .onConflictDoNothing({
+            target: [
+              pluginState.pluginId,
+              pluginState.scopeKind,
+              pluginState.scopeId,
+              pluginState.namespace,
+              pluginState.stateKey,
+            ],
+          })
+          .returning({ id: pluginState.id });
+        return { swapped: rows.length > 0 };
+      }
+
+      const rows = await db
+        .update(pluginState)
+        .set({ valueJson: sql`${valueJson}::jsonb`, updatedAt: new Date() })
+        .where(and(
+          conditions,
+          sql`${pluginState.valueJson} = ${expectedJson}::jsonb`,
+        ))
+        .returning({ id: pluginState.id });
+      return { swapped: rows.length > 0 };
     },
 
     /**
