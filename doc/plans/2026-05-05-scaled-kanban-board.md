@@ -1,5 +1,11 @@
 # Scaled Kanban Board Implementation Plan
 
+> **Historical/compatibility design reference (2026-11-02 classification).**
+> [SPS normative baseline](../SPS-DOCUMENTATION-BASELINE-2026-11-02.md) takes precedence over product assumptions below.
+> Paperclip Company/Issue/org/Agent/UI models are compatibility, not mandatory SPS behavior.
+> Do not force Core chrome, Builder, AI or a workflow through this reference; preserve APIs/data pending explicit migration.
+> Documentation classification only; implementation and dated test results are unchanged.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make the Issues Kanban board usable with hundreds of issues by adding compact high-volume rendering, collapsed cold lanes, and per-column reveal controls.

@@ -1,5 +1,11 @@
 # Paperclip Memory Service Plan
 
+> **Historical/compatibility design reference (2026-11-02 classification).**
+> [SPS normative baseline](../SPS-DOCUMENTATION-BASELINE-2026-11-02.md) takes precedence over product assumptions below.
+> Paperclip Company/Issue/org/Agent/UI models are compatibility, not mandatory SPS behavior.
+> Do not force Core chrome, Builder, AI or a workflow through this reference; preserve APIs/data pending explicit migration.
+> Documentation classification only; implementation and dated test results are unchanged.
+
 ## Goal
 
 Define a Paperclip memory service and surface API that can sit above multiple memory backends, while preserving Paperclip's control-plane requirements:

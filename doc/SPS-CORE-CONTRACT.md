@@ -2,22 +2,62 @@
 
 Status: current engineering contract
 
-Confirmed product scope (2026-10-28): SPS operates reviewed and approved packages
-from its own solution-delivery business, without public Plugin publishing,
-distribution, sales or discovery. Preserve the internal Registry, package
-verification, installation/update/rollback, SDK and Runner contracts.
-New Builder design, source and UI live in the separate public
-[SPS-MY-PluginBuilder repository](https://github.com/Powerpunch777/SPS-MY-PluginBuilder)
-under its v15 design. Its independently authorized parallel work is not a Core
-completion prerequisite or permission to implement Builder workflow here. The
-older bundled Builder remains a compatibility surface, not that design's source.
-Full untrusted-code OS containment is deferred; its research is retained. Existing
-capability/grant checks, Secret and file mediation, Workspace boundaries and
-truthful process ownership/recovery remain required. The execution computer
-(Runner) is distinct from an Agent or Target; retained Node protocol names are
-compatibility identifiers. Tailscale and SSH remain the supported network and
-remote-management direction. Older Marketplace feature statements are superseded
-by this policy and must not become release gates.
+## Normative Product Direction (2026-11-02)
+
+The user's reaffirmed architecture is
+[`CORE-PLUGIN-ARCHITECTURE-2026-10-25.md`](https://github.com/Powerpunch777/SPS-Source/blob/codex/sps-core-final-validation/sps-server/docs/design/CORE-PLUGIN-ARCHITECTURE-2026-10-25.md).
+It supersedes the conflicting product-scope limits recorded on 2026-10-28.
+This is the target policy, not a claim that implementation or the user's broader
+goal is complete or resumed. Until separately authorized, this documentation
+alignment does not change runtime code, schemas, tests, or application behavior.
+
+- Core is a workflow-neutral technical platform. AI, Agents, Tasks, Dashboard,
+  Inbox, projects, automation, collaboration, file-browser UI and common plugin
+  chrome are optional; non-AI plugins and an empty Workspace are valid.
+- A Host installs a plugin package once; each Workspace controls its activation
+  and data/settings independently. A Workspace may select zero or one Primary
+  plugin and any number of Extensions. Primary is a UI role, not a privilege
+  tier. Extensions may provide full-screen UI, their own windows, background
+  services, or no UI. Local standalone use is valid; remote Host/Member/Node
+  connectivity is optional.
+- Native System UI for Host, Workspace, Plugin management, security, recovery
+  and updates is independent of plugin UI. No plugin must mount a Core sidebar,
+  Dashboard, Inbox or navigation surface.
+- Workspace pause blocks new work while existing work continues; stop blocks
+  new work and cancels managed work in that Workspace; resume admits new work
+  without automatically replaying canceled or uncertain work. Persisted state
+  survives restart. Other Workspaces remain unaffected.
+- Workspace maximum file-access bounds are optional. When configured, the
+  intended policy covers plugins and their CLI/child processes; when absent,
+  the OS user's normal file access applies, except Core Secret Vault material
+  remains protected. OS-level enforcement is a target, not an implemented or
+  proven guarantee. Resource reporting is observational, not an automatic
+  quota or high-usage shutdown policy.
+- Updates may be checked or downloaded, but applying them is a manual user
+  decision. Backup/reset scopes distinguish Core-managed plugin data from
+  external project files; credentials are excluded by default. Current gaps in
+  export/backup coverage remain gaps and must not be described as complete.
+- A generic public Plugin Builder is optional, not the only creation path.
+  The separate SPS-MY-PluginBuilder v15 design is a reference solution for
+  Builder workflows, not Core product authority. Existing SDK contracts remain;
+  a complete common Preview lifecycle surface is a future direction. Do not
+  invent API support or Builder/Preview licensing decisions here.
+- Marketplace/discovery and broader plugin ecosystem goals are not excluded by
+  the 2026-10-28 personal-only scope. Their implementation and release evidence
+  remain separate from this policy. Retired legacy Marketplace Assistant
+  credentials and execution contexts still fail closed.
+
+Use this policy for product decisions. The implementation/evidence passages
+below describe current behavior and known gaps; they do not narrow the target.
+In particular, older gap audits, plans and acceptance lists are historical
+evidence, not current scope limits. The upstream Paperclip product roadmap is
+not an SPS requirement.
+
+Official Electron security guidance is a design reference for any Electron
+surface, not evidence that SPS already implements these controls:
+[Electron Security](https://www.electronjs.org/docs/latest/tutorial/security).
+In particular, remote content must not receive Node integration; renderer
+isolation/sandboxing and IPC sender validation are security boundaries to verify.
 
 Plugins may opt into a dedicated Workspace UI/action worker and per-Workspace
 runtime configuration. The ownership, authorization, compatibility and cleanup
@@ -636,10 +676,12 @@ Core owns these cross-workflow contracts:
    slots, diagnostics, and rollback.
 6. Generic durable storage and events exposed through versioned plugin host
    services.
-7. Internal Registry metadata and Host-authorized approved package management.
-   Desktop materializes the trusted local catalog. Public discovery and
-   Marketplace Assistant execution are retired; old scoped credentials remain
-   rejected rather than gaining ordinary Core authority.
+7. Package metadata, trust evidence, Registry foundations and Host-authorized
+   package management. Desktop materializes the trusted local catalog. Broader
+   public discovery/ecosystem goals remain product direction, not a claim of
+   current implementation. Retired Marketplace Assistant execution and old
+   scoped credentials remain rejected rather than gaining ordinary Core
+   authority.
 8. Backup, update compatibility, and recovery primitives. SPS Desktop owns the
    complete transfer-bundle and empty-Host restore orchestration.
 
@@ -706,7 +748,13 @@ Plugins own domain semantics, including:
 
 A bundled plugin may be enabled by default without becoming a Core invariant.
 
-### Empty Workspaces and Native Recovery
+### Empty Workspaces and Native Recovery: Implementation Snapshot (Partial)
+
+The following records behavior verified in the current implementation. It is
+not a limit on the normative Primary/Extension, standalone presentation, or
+independent Native System UI goals above. Compatibility chrome and incomplete
+manifest/presentation contracts are implementation gaps, not required product
+behavior.
 
 A successfully loaded empty or terminated-only Agent list leaves the neutral
 Workspace home usable; Agent registration is an explicit action, not an automatic

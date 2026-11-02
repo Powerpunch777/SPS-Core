@@ -1,5 +1,10 @@
 # Zod package upgrade and v3 compatibility resource bounds
 
+> **Design alignment, 2026-11-02:** [Normative product baseline](SPS-DOCUMENTATION-BASELINE-2026-11-02.md).
+> This is a scoped implementation contract or dated evidence, not completion of the full target.
+> Optional AI/UI, independent Native management, Plugin-owned workflow/UI and OS-enforced Vault/file protection remain goals.
+> Same-user process ownership and Source/grant checks are not an OS sandbox. No API/runtime change or goal resumption here.
+
 Current implementation (2026-10-29) supersedes the previous Zod3 mitigation.
 Core's six workspace consumers pin official `zod` **4.6.6** and use the
 official **`zod/v3`** compatibility entrypoint, including the internal SDK's `z`

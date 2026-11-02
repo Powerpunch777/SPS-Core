@@ -1,5 +1,10 @@
 # Optional process-session input ordering
 
+> **Design alignment, 2026-11-02:** [Normative product baseline](SPS-DOCUMENTATION-BASELINE-2026-11-02.md).
+> This is a scoped implementation contract or dated evidence, not completion of the full target.
+> Optional AI/UI, independent Native management, Plugin-owned workflow/UI and OS-enforced Vault/file protection remain goals.
+> Same-user process ownership and Source/grant checks are not an OS sandbox. No API/runtime change or goal resumption here.
+
 The sandbox adapter process-session bridge is optional execution plumbing. It
 does not require AI, a particular provider, Native connectivity, or an OS sandbox.
 Existing adapter and authenticated local-proxy contracts are unchanged.

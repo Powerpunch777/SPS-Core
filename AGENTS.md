@@ -5,26 +5,42 @@ Guidance for human and AI contributors working in SPS Core.
 ## 1. Purpose
 
 SPS Core is the workflow-neutral platform runtime embedded by SPS Desktop. It
-provides identity, durable storage, Host and Node execution, Agent adapter
-plumbing, plugin lifecycle, recovery, and other shared safety boundaries.
+provides identity, durable storage, Host and Node execution, optional Agent
+adapter plumbing, plugin lifecycle, recovery, and other shared safety boundaries.
 
-Workflow semantics belong to plugins. Do not make Rooms, Tasks, org charts,
-approval flows, or a particular development process mandatory Core behavior.
+Workflow semantics belong to plugins. Do not make AI, Agents, Rooms, Tasks, org
+charts, approval flows, dashboards, inboxes, common plugin chrome, or a particular
+development process mandatory Core behavior.
 
-Confirmed scope (2026-10-28): support packages built, reviewed and approved for
-SPS solution delivery. Public Marketplace discovery/publishing/sales are retired;
-internal Registry and package verification/lifecycle remain Core. New Plugin
-Builder design, code, UI and implementation work belong to the separate public
-`Powerpunch777/SPS-MY-PluginBuilder` repository and its v15 design. Parallel work
-there is authorized, but is not part of this Core completion task. Older bundled
-Builder compatibility code is not its authoritative design. Do not add Builder
-workflow or copy private Core source into that repository. Before deciding
-Builder behavior, follow that repository's current `docs/design/README.md` and
-linked integrated specification, not old Core Builder descriptions or chat.
-Full untrusted
-OS containment is deferred, with experiments preserved; same-user workers are
-not a security sandbox. Preserve SDK/Runner extensibility and all existing
-capability, grant, Secret, file, communication and process-ownership controls.
+The current product authority is the 2026-10-25 Core–Plugin architecture,
+reaffirmed by the user on 2026-11-02 and summarized in
+[`doc/SPS-CORE-CONTRACT.md`](doc/SPS-CORE-CONTRACT.md). It supersedes conflicting
+2026-10-28 personal-only, no-public-Marketplace and deferred-OS-target limits.
+These are product goals, not claims of completed implementation or resumed
+broader work. Do not infer runtime, schema, test, or release changes from this
+documentation decision.
+
+Host installs a package once; Workspace activation and data/settings are
+independent. Each Workspace may have zero or one Primary UI plugin and any
+number of Extensions. Primary is not a privilege tier; Extensions may be
+full-screen, headless, background, or independent-window plugins. Local
+standalone operation is valid and remote connectivity is optional. Native System
+UI and recovery remain independent of plugin UI. Pause/stop/resume state is
+durable and canceled/uncertain work is never automatically replayed. Optional
+file bounds and Core Vault protection are target policies; same-user workers
+are not an OS sandbox, and no unimplemented OS enforcement may be claimed.
+Resource observation is not an automatic quota.
+
+Plugin Builder is optional. The separate public
+`Powerpunch777/SPS-MY-PluginBuilder` v15 design is a reference solution for
+Builder workflow, not Core product authority. Keep Builder-specific workflows
+out of Core and never copy private Core source into that repository. Existing
+SDK exports remain implemented contracts; the remaining common Preview lifecycle
+APIs and Builder/Preview licensing require separate decisions. Do not invent
+support. Marketplace ecosystem goals are not retired by the 2026-10-28 scope note,
+but existing retired Marketplace Assistant credentials and contexts must still
+fail closed. Implementation evidence and remaining gaps are in the Core
+contract and roadmap; they do not redefine policy.
 
 ## 2. Read This First
 

@@ -1,5 +1,11 @@
 # Billing Ledger and Reporting
 
+> **Historical/compatibility design reference (2026-11-02 classification).**
+> [SPS normative baseline](../SPS-DOCUMENTATION-BASELINE-2026-11-02.md) takes precedence over product assumptions below.
+> Paperclip Company/Issue/org/Agent/UI models are compatibility, not mandatory SPS behavior.
+> Do not force Core chrome, Builder, AI or a workflow through this reference; preserve APIs/data pending explicit migration.
+> Documentation classification only; implementation and dated test results are unchanged.
+
 ## Context
 
 Paperclip currently stores model spend in `cost_events` and operational run state in `heartbeat_runs`.

@@ -10,16 +10,24 @@ Agents and humans modifying `ui/` treat this file as the source of truth for des
 
 ## Product stance
 
-SPS is a local-first desktop platform for building custom AI workspaces. Core owns identity, Host lifecycle, Workspace isolation, plugin lifecycle, recovery paths, and a stable application shell. Plugins own workflow-specific navigation, dashboards, pages, and behavior. Every screen must make its owner clear: Core surfaces remain available for recovery, while plugin surfaces disappear when their provider is disabled.
+SPS is a local-first, workflow-neutral desktop platform for building custom
+workspaces, including non-AI workspaces. The product direction in
+[`doc/SPS-CORE-CONTRACT.md`](doc/SPS-CORE-CONTRACT.md) follows the user-reaffirmed
+2026-10-25 Core–Plugin architecture: AI, Agents, Dashboard, Inbox and common
+plugin chrome are optional. A Workspace may have no Primary plugin, one Primary,
+and any number of Extensions; Primary is a presentation role, not a privilege
+tier. Plugins own workflow-specific navigation, dashboards, pages and behavior.
+Native System UI and recovery stay available independently of plugin UI.
+These are target product rules, not claims that the current application fully
+implements them.
 
-The desktop shell uses cool neutral surfaces, restrained SPS blue accents, compact information density, and independently scrolling panes. Rounded framing clarifies containment without turning every section into a card. The approved reference is the SPS Workbench Open Design project and its `SPS-UI-DESIGN-SPEC.md`.
+The retained desktop compatibility shell uses cool neutral surfaces, restrained accents, compact information density, and independently scrolling panes. These tokens apply to Core-owned system/compatibility surfaces, not arbitrary Plugin UI. The prior SPS Workbench Open Design project is historical reference, not authority to restore rolled-back UI or force a common Core frame.
 
-The stable application shell above describes shared technical primitives, not
-mandatory navigation on every Plugin screen. The SPS baseline's no-Shell
-Workspace entry is deliberately unframed and does not mount the retained common
-navigation. Existing selected-Plugin pages and explicit Dashboard/Inbox/settings
-routes retain compatibility chrome until the standalone presentation contract
-is delivered. Native Core Settings remains independent of these working screens.
+The application shell describes shared technical primitives, not mandatory
+navigation on every Plugin screen. No Plugin screen must mount a Core sidebar,
+Dashboard or Inbox. Current baseline pages and retained routes may still show
+compatibility chrome; that is implementation history, not the target design.
+Native Core Settings remains independent of Plugin screens.
 
 ## The token layer (where visual values live)
 

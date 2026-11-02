@@ -1,5 +1,11 @@
 # Prior art: PAP-280 design-token audit (branch `PAP-282-playground`, not on master)
 
+> **Historical/compatibility design reference (2026-11-02 classification).**
+> [SPS normative baseline](../SPS-DOCUMENTATION-BASELINE-2026-11-02.md) takes precedence over product assumptions below.
+> Paperclip Company/Issue/org/Agent/UI models are compatibility, not mandatory SPS behavior.
+> Do not force Core chrome, Builder, AI or a workflow through this reference; preserve APIs/data pending explicit migration.
+> Documentation classification only; implementation and dated test results are unchanged.
+
 A previous audit/relink pass ran against this codebase in mid-2026. Its code never merged to master, but its findings are directly reusable by the token audit. Read this before Phase 1.
 
 ## Key findings to inherit

@@ -1,5 +1,11 @@
 # COMPONENT-INVENTORY.md — Component Inventory (Phase 1)
 
+> **Historical/compatibility design reference (2026-11-02 classification).**
+> [SPS normative baseline](../SPS-DOCUMENTATION-BASELINE-2026-11-02.md) takes precedence over product assumptions below.
+> Paperclip Company/Issue/org/Agent/UI models are compatibility, not mandatory SPS behavior.
+> Do not force Core chrome, Builder, AI or a workflow through this reference; preserve APIs/data pending explicit migration.
+> Documentation classification only; implementation and dated test results are unchanged.
+
 Run scope: `ui/src/components/` and `ui/src/pages/` on branch `design/token-extraction`. Read-only audit — no source files modified.
 
 **All consolidation, merge, and shadcn-swap recommendations in this document are RECOMMENDATIONS ONLY.** Per `GOAL-PROMPT.md` and `DESIGN.md`, no component merges, deletions, or swaps happen in this run. They become human-approved follow-up runs ("Run 2"/"Run 3").
