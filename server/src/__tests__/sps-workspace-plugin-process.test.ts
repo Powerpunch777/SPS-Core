@@ -87,13 +87,14 @@ const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity 
 rl.on("line", (line) => {
   const message = JSON.parse(line);
   if (message.id != null && !message.method && pending.has(String(message.id))) {
-    const done = pending.get(String(message.id)); pending.delete(String(message.id)); done(message.result); return;
+    const done = pending.get(String(message.id)); pending.delete(String(message.id));
+    done(message.error ? { hostError: message.error } : message.result); return;
   }
   if (message.method === "initialize") {
     startupConfig = message.params.config;
     hostCall("config.get", {}, undefined, (config) => {
       startupHostConfig = config;
-      send({ jsonrpc: "2.0", id: message.id, result: { ok: true, supportedMethods: ["getData", "performAction"] } });
+      send({ jsonrpc: "2.0", id: message.id, result: { ok: true, supportedMethods: ["getData", "performAction", "executeTool"] } });
     });
     return;
   }
@@ -102,6 +103,15 @@ rl.on("line", (line) => {
     const invocationId = message.paperclipInvocation && message.paperclipInvocation.id;
     hostCall("config.get", {}, invocationId, (config) => {
       send({ jsonrpc: "2.0", id: message.id, result: { pid: process.pid, counter, startupConfig, startupHostConfig, hostConfig: config } });
+    });
+    return;
+  }
+  if (message.method === "executeTool") {
+    const invocationId = message.paperclipInvocation && message.paperclipInvocation.id;
+    hostCall("state.get", { scopeKind: "company", scopeId: message.params.runContext.companyId,
+      namespace: "fixture", stateKey: "tool-read" }, invocationId, (value) => {
+      send({ jsonrpc: "2.0", id: message.id, result: { data: { pid: process.pid,
+        context: message.params.runContext, value } } });
     });
     return;
   }
@@ -126,6 +136,62 @@ describe("SPS Workspace Plugin real process lifecycle", () => {
     }
   });
   afterEach(() => vi.clearAllMocks());
+
+  it("runs tools in real tenant processes and rechecks authority across their Host RPC calls", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "sps-workspace-process-"));
+    const entrypoint = path.join(root, "workspace.cjs");
+    await writeFile(entrypoint, fixtureSource(), "utf8");
+    const manager = createPluginWorkerManager();
+    let permitted = true;
+    let revokeDuringRead = false;
+    let reads = 0;
+    const factory = createSpsWorkspacePluginWorkers({} as any, manager, {
+      localPluginDir: root, resolveEntrypoint: async () => entrypoint,
+      buildServices: (_record, workspaceId) => ({ dispose: () => undefined,
+        state: { get: async () => { reads += 1; if (revokeDuringRead) permitted = false; return workspaceId; } },
+      } as any),
+    });
+    const context = (companyId: string) => ({ companyId,
+      agentId: "44444444-4444-4444-8444-444444444444", runId: "55555555-5555-4555-8555-555555555555",
+      sessionId: "66666666-6666-4666-8666-666666666666" });
+    const toolCall = (companyId: string, selected = context(companyId)) => factory.call(companyId, pluginId,
+      "executeTool", { toolName: "fixture.read", parameters: {}, runContext: selected }, 5_000,
+      { boundWorkspaceId: companyId, assertCurrent: async () => { if (!permitted) throw new Error("run revoked"); } });
+    let factoryClosed = false;
+    let managerClosed = false;
+    try {
+      const a = await toolCall(workspaceA) as any;
+      const b = await toolCall(workspaceB) as any;
+      expect(a.data).toMatchObject({ context: context(workspaceA), value: workspaceA });
+      expect(b.data).toMatchObject({ context: context(workspaceB), value: workspaceB });
+      expect(a.data.pid).not.toBe(b.data.pid);
+      expect(manager.getWorker(pluginId)).toBeUndefined();
+      expect(reads).toBe(2);
+      await expect(toolCall(workspaceA, context(workspaceB))).rejects.toThrow();
+      expect(reads).toBe(2);
+      for (const missing of ["agentId", "runId", "sessionId"]) {
+        const incomplete = { ...context(workspaceA) } as Record<string, string>;
+        delete incomplete[missing];
+        await expect(toolCall(workspaceA, incomplete as any)).rejects.toThrow();
+      }
+      const unreadable = Object.defineProperty(context(workspaceA), "sessionId", {
+        enumerable: true, get() { throw new Error("session getter must not execute"); },
+      });
+      await expect(toolCall(workspaceA, unreadable)).rejects.not.toThrow("session getter must not execute");
+      expect(reads).toBe(2);
+      revokeDuringRead = true;
+      await expect(toolCall(workspaceA)).rejects.toThrow();
+      expect(reads).toBe(3);
+      expect(manager.getWorkspaceWorker(workspaceB, pluginId)?.status).toBe("running");
+      await factory.shutdown(); factoryClosed = true;
+      await manager.shutdown(); managerClosed = true;
+    } finally {
+      try { if (!factoryClosed) { await factory.shutdown(); factoryClosed = true; } } catch { /* preserve fixture */ }
+      try { if (!managerClosed) { await manager.shutdown(); managerClosed = true; } } catch { /* preserve fixture */ }
+      if (factoryClosed && managerClosed && path.dirname(root) === path.resolve(os.tmpdir())
+        && path.basename(root).startsWith("sps-workspace-process-")) await rm(root, { recursive: true, force: true });
+    }
+  }, 60_000);
 
   it("keeps real Workspace and legacy processes isolated across stop, resume and stale invalidation", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "sps-workspace-process-"));

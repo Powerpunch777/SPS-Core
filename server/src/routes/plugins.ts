@@ -50,7 +50,7 @@ import { pluginDatabaseService } from "../services/plugin-database.js";
 import { listReadyMemoryProviders } from "../services/memory-providers.js";
 import type { CompanyMemoryProviderRuntime } from "../services/memory-provider-runtime.js";
 import { createPluginToolAccessService, pluginRequiresExplicitToolGrant } from "../services/plugin-tool-access.js";
-import { resolvePluginSessionToolScope } from "../services/plugin-session-tool-scope.js";
+import { resolvePluginSessionToolContext } from "../services/plugin-session-tool-scope.js";
 import {
   resolvePluginCompanyActivation,
   setPluginCompanyActivation,
@@ -87,6 +87,7 @@ import type { PluginWorkerManager, WorkerInvocationAuthority } from "../compat/p
 import type { SpsWorkspacePluginWorkers } from "../services/sps-workspace-plugin-workers.js";
 import type { PluginStreamBus } from "../services/plugin-stream-bus.js";
 import type { PluginToolDispatcher } from "../services/plugin-tool-dispatcher.js";
+import type { RegisteredTool } from "../services/plugin-tool-registry.js";
 import type { PluginCanonicalDiagnostics } from "../services/plugin-canonical-diagnostics.js";
 import type { BetterAuthSessionResult } from "../auth/better-auth.js";
 import { getSpsWorkspaceExecutionControl, assertSpsWorkspaceExecutionActive } from "../services/sps-workspace-execution-control.js";
@@ -117,7 +118,7 @@ import {
   extractSecretRefPathsFromConfig,
   PLUGIN_SECRET_REFS_DISABLED_MESSAGE,
 } from "../services/plugin-secrets-handler.js";
-import { badRequest, forbidden, notFound, unauthorized, unprocessable } from "../errors.js";
+import { HttpError, badRequest, forbidden, notFound, unauthorized, unprocessable } from "../errors.js";
 import {
   isPluginRecoveryDisableRequest,
   isPluginRecoveryStatusRequest,
@@ -982,6 +983,62 @@ export function pluginRoutes(
     }
   }
 
+  async function callWorkspacePluginTool(
+    req: Request,
+    plugin: { id: string; pluginKey: string; status: string; manifestJson: PaperclipPluginManifestV1 },
+    tool: RegisteredTool,
+    parameters: unknown,
+    runContext: ToolRunContext,
+    session: Readonly<{ pluginKey: string; sessionId: string }> | null,
+  ) {
+    const workers = bridgeDeps?.workspaceWorkers;
+    if (!workers || !toolDeps) throw new Error("Workspace Plugin tool worker is unavailable.");
+    const assertActor = () => {
+      if (req.actor.type !== "agent" || req.actor.source !== "agent_jwt"
+        || req.actor.agentId !== runContext.agentId || req.actor.companyId !== runContext.companyId
+        || req.actor.runId !== runContext.runId) {
+        throw forbidden("Workspace tools require the exact run-bound Agent identity.");
+      }
+      assertCompanyAccess(req, runContext.companyId);
+    };
+    assertActor();
+    const boundSession = session ?? await resolvePluginSessionToolContext(db, runContext);
+    if (!boundSession || boundSession.pluginKey !== plugin.pluginKey || tool.pluginId !== plugin.pluginKey
+      || tool.pluginDbId !== plugin.id) throw forbidden("Workspace tools require their own active Plugin Agent session.");
+    const verifiedContext = Object.freeze({ ...runContext, sessionId: boundSession.sessionId });
+    const authority: WorkerInvocationAuthority = {
+      boundWorkspaceId: runContext.companyId,
+      assertCurrent: async () => {
+        assertActor();
+        const currentPlugin = await resolvePlugin(registry, plugin.id);
+        if (!currentPlugin || currentPlugin.status !== "ready" || currentPlugin.pluginKey !== plugin.pluginKey
+          || !currentPlugin.manifestJson.entrypoints.workspaceWorker) {
+          throw forbidden("Workspace tool plugin is no longer available.");
+        }
+        await assertCompanyPluginEnabled(currentPlugin, runContext.companyId);
+        const currentTool = toolDeps.toolDispatcher.getTool(tool.namespacedName);
+        if (!currentTool || currentTool.pluginDbId !== plugin.id || currentTool.pluginId !== plugin.pluginKey
+          || currentTool.name !== tool.name || currentTool.namespacedName !== tool.namespacedName) {
+          throw forbidden("Workspace tool registration changed.");
+        }
+        const currentSession = await resolvePluginSessionToolContext(db, runContext);
+        if (!currentSession || currentSession.pluginKey !== boundSession.pluginKey
+          || currentSession.sessionId !== boundSession.sessionId) {
+          throw forbidden("Workspace tool Agent run or session is no longer active.");
+        }
+        if (!await toolAccess.isAllowed({ companyId: runContext.companyId, plugin: currentPlugin, agentId: runContext.agentId })) {
+          throw forbidden("Workspace tool access is no longer allowed.");
+        }
+        if (memoryDeps && !await memoryDeps.runtime.isSelectedProviderTool({
+          companyId: runContext.companyId, pluginDbId: plugin.id, toolName: tool.name,
+        })) throw forbidden("Workspace tool provider selection changed.");
+      },
+    };
+    return workers.call(runContext.companyId, plugin.id, "executeTool", {
+      toolName: tool.name, parameters, runContext: verifiedContext,
+    }, 30_000, authority);
+  }
+
   async function assertPluginCompanyAdministrator(req: Request, companyId: string): Promise<void> {
     assertBoard(req);
     assertCompanyAccess(req, companyId);
@@ -1499,7 +1556,7 @@ export function pluginRoutes(
       return;
     }
 
-    const { tool, parameters, runContext } = body;
+    const { tool, parameters, runContext: requestedRunContext } = body;
 
     // Validate required fields
     if (!tool || typeof tool !== "string") {
@@ -1507,22 +1564,30 @@ export function pluginRoutes(
       return;
     }
 
-    if (!runContext || typeof runContext !== "object") {
+    if (!requestedRunContext || typeof requestedRunContext !== "object" || Array.isArray(requestedRunContext)) {
       res.status(400).json({ error: '"runContext" is required and must be an object' });
       return;
     }
 
-    if (![runContext.agentId, runContext.runId, runContext.companyId].every(value => typeof value === "string" && value.trim())
-      || (runContext.projectId !== undefined && (typeof runContext.projectId !== "string" || !runContext.projectId))) {
+    if (![requestedRunContext.agentId, requestedRunContext.runId, requestedRunContext.companyId].every(value => typeof value === "string" && value.trim())
+      || (requestedRunContext.projectId !== undefined && (typeof requestedRunContext.projectId !== "string" || !requestedRunContext.projectId))) {
       res.status(400).json({
         error: '"runContext" must include agentId, runId, companyId, and an optional valid projectId',
       });
       return;
     }
 
+    // Only server-verified session identity may reach a Workspace tool. Extra
+    // request fields (including sessionId/role) are not authority or RPC input.
+    const runContext: ToolRunContext = Object.freeze({
+      agentId: requestedRunContext.agentId, runId: requestedRunContext.runId, companyId: requestedRunContext.companyId,
+      ...(requestedRunContext.projectId === undefined ? {} : { projectId: requestedRunContext.projectId }),
+    });
+
     assertAgentToolRunIdentity(req, runContext);
     assertCompanyAccess(req, runContext.companyId);
     let sessionPluginKey: string | null = null;
+    let sessionContext: Readonly<{ pluginKey: string; sessionId: string }> | null = null;
     if (runContext.projectId === undefined) {
       if (req.actor.type !== "agent" || req.actor.source !== "agent_jwt"
         || req.actor.agentId !== runContext.agentId || req.actor.companyId !== runContext.companyId
@@ -1530,7 +1595,8 @@ export function pluginRoutes(
         res.status(403).json({ error: "Projectless tools require the exact active Plugin Agent session." });
         return;
       }
-      sessionPluginKey = await resolvePluginSessionToolScope(db, runContext);
+      sessionContext = await resolvePluginSessionToolContext(db, runContext);
+      sessionPluginKey = sessionContext?.pluginKey ?? null;
       if (!sessionPluginKey) {
         res.status(403).json({ error: "Projectless tools require the exact active Plugin Agent session." });
         return;
@@ -1611,11 +1677,9 @@ export function pluginRoutes(
     }
 
     try {
-      const result = await toolDeps.toolDispatcher.executeTool(
-        tool,
-        parameters ?? {},
-        runContext,
-      );
+      const result = toolPlugin?.manifestJson.entrypoints.workspaceWorker
+        ? await callWorkspacePluginTool(req, toolPlugin, registeredTool, parameters ?? {}, runContext, sessionContext)
+        : await toolDeps.toolDispatcher.executeTool(tool, parameters ?? {}, runContext);
       await toolAccess.record({
         companyId: runContext.companyId,
         pluginId: registeredTool.pluginDbId,
@@ -1627,6 +1691,8 @@ export function pluginRoutes(
       });
       res.json(result);
     } catch (err) {
+      const authorityDenied = (err instanceof HttpError && err.status === 403)
+        || (err instanceof JsonRpcCallError && err.code === PLUGIN_RPC_ERROR_CODES.INVOCATION_SCOPE_DENIED);
       const message = err instanceof Error ? err.message : String(err);
       await toolAccess.record({
         companyId: runContext.companyId,
@@ -1635,9 +1701,14 @@ export function pluginRoutes(
         runId: runContext.runId,
         projectId: runContext.projectId ?? null,
         toolName: registeredTool.namespacedName,
-        status: "failed",
+        status: authorityDenied ? "denied" : "failed",
         errorCode: "PLUGIN_TOOL_EXECUTION_FAILED",
       });
+
+      if (authorityDenied) {
+        res.status(403).json({ error: "Plugin tool invocation authority is no longer current." });
+        return;
+      }
 
       // Distinguish between "worker not running" (502) and other errors (500)
       if (message.includes("not running") || message.includes("worker")) {

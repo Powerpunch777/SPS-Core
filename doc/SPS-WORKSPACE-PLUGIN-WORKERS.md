@@ -84,7 +84,7 @@ read-only Agent listing with `agents.read` and the exact fixed Workspace,
 declared local folders, SPS execution/history, connectivity, model broker,
 granted runs/artifacts, lifecycle publication and activity logging. The SDK's
 capability and underlying service authorization still apply. Generic SQL, direct
-HTTP, raw secret resolution, event subscriptions, tools, jobs and global lifecycle
+HTTP, raw secret resolution, event subscriptions, dynamic tool registration, jobs and global lifecycle
 registration are unavailable in this lane. Lifecycle publication reaches the
 Core event bus; disposing one worker never clears another worker's subscriptions.
 
@@ -92,6 +92,59 @@ Agent listing reuses the existing Host service and capability checks. Missing,
 stale, invalid or cross-Workspace invocation scope is rejected before delegation.
 This does not expose global Agent mutation/invocation, grant execution permission,
 assert provider readiness, or introduce workflow roles.
+
+### Agent tool invocation (2026-11-02 development contract)
+
+An installed, manifest-declared tool owned by a package with `workspaceWorker`
+is dispatched to that exact Workspace worker, never the global Host worker.
+The existing tool endpoint and declared tool capability/Agent grant rules are
+reused; this does not permit dynamic Host registrations from a Workspace worker.
+Missing worker support fails instead of falling back to legacy dispatch.
+
+The caller must be the exact run-bound `agent_jwt` identity. Core verifies the
+active Agent, running non-cancelled run, matching active Plugin Agent session,
+plugin activation and tool access. The session must belong to this plugin even
+when retained Core project context is present. No Core project is required.
+Extra caller fields such as `sessionId` and `role` are discarded. The server
+injects the DB-verified optional `ToolRunContext.sessionId` into an immutable
+outbound context; legacy tool dispatch does not receive an invented session ID.
+
+The invocation captures these identities and rechecks run/session, registration,
+plugin activation, explicit tool grant and selected-provider eligibility when
+the Worker uses Host RPC. Workspace execution epoch, package/config policy and
+process ownership retain their existing fences. Cancellation or revocation
+observed by a check fails the call without automatic retry. This is not a
+transaction-wide lock over every authorization row or proof that a direct
+same-user process cannot bypass the Host entirely.
+
+Core does not label the caller Lead, CTO or Worker. A plugin must enforce those
+roles, specification approval and project-specific rights itself before exposing
+workflow mutations. A `sessionId` supplied in ordinary tool parameters is never
+equivalent to the verified invocation context. Older Hosts may lack this lane
+and the optional session field; do not infer support from a version string.
+
+Development verification for this increment used Node 24.22.1:
+
+```text
+node node_modules/typescript/bin/tsc -p packages/plugins/sdk/tsconfig.json
+node node_modules/typescript/bin/tsc --noEmit -p server/tsconfig.json
+node node_modules/vitest/vitest.mjs run --project @paperclipai/server server/src/__tests__/sps-workspace-plugin-tools.test.ts server/src/__tests__/plugin-routes-authz.test.ts server/src/__tests__/sps-workspace-plugin-process.test.ts server/src/__tests__/sps-workspace-plugin-workers.test.ts server/src/__tests__/sps-workspace-agent-sessions.test.ts server/src/__tests__/plugin-worker-manager.test.ts server/src/__tests__/plugin-worker-workspace-owner.test.ts --reporter=dot
+```
+
+Both type checks exited 0; the selected seven files passed 185/185 tests. These
+include 17 new Express route cases and two real-child-process lifecycle cases.
+The new process case checks tenant-specific PIDs/state reads and refusal after
+authority is revoked during a Host RPC, without starting a global worker. Route
+cases use DB-row fixtures and mocked policy/grant services, not actual Google
+tokens or a full production database. They check that an admitted handler is
+entered, a later authority check rejects it before writing, and a fixed denied
+audit entry is recorded without copying the raw RPC error.
+
+The first real-process attempt exposed both runtime method allowlists that still
+rejected `executeTool`; both were extended narrowly, retaining required
+Workspace authority and canonical Agent/run/session IDs. This evidence does not
+qualify the whole Core suite, actual Builder authoring, live AI, Desktop UI,
+an installed/signed release, a physical second PC or an OS sandbox.
 
 The lane additionally admits six session operations: `ensure`, `create`, `list`,
 `sendMessage`, `getRun` and `cancel`. `ensure` and `create` both use the existing

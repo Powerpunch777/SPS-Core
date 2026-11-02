@@ -229,6 +229,19 @@ function assertWorkspaceId(workspaceId: string): void {
   if (!WORKSPACE_ID_PATTERN.test(workspaceId)) throw new TypeError("Workspace worker requires a valid Workspace ID");
 }
 
+function hasWorkspaceToolContext(params: unknown, workspaceId: string): boolean {
+  const field = (value: unknown, key: string): unknown => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    return descriptor?.enumerable && "value" in descriptor ? descriptor.value : undefined;
+  };
+  const context = field(params, "runContext");
+  return field(context, "companyId") === workspaceId && ["agentId", "runId", "sessionId"].every(key => {
+    const value = field(context, key);
+    return typeof value === "string" && WORKSPACE_ID_PATTERN.test(value);
+  });
+}
+
 /**
  * A pending RPC call waiting for a response from the worker.
  */
@@ -2100,7 +2113,8 @@ function createPluginWorkerHandleInternal(
     ): Promise<HostToWorkerMethods[M][1]> {
       if (ownerWorkspaceId !== undefined) {
         const allowedHealthCheck = method === "health" && authority === undefined;
-        const allowedWorkspaceInvocation = (method === "getData" || method === "performAction")
+        const allowedWorkspaceInvocation = (method === "getData" || method === "performAction"
+          || method === "executeTool" && hasWorkspaceToolContext(params, ownerWorkspaceId))
           && authority?.boundWorkspaceId === ownerWorkspaceId;
         if (!allowedHealthCheck && !allowedWorkspaceInvocation) {
           void Promise.resolve((authority?.onTerminal ?? terminalObserver)?.("not_dispatched")).catch(() => undefined);
@@ -2592,8 +2606,9 @@ export function createPluginWorkerManager(
       terminalObserver?: (reason: "response" | "worker_exit" | "not_dispatched") => void,
     ): Promise<HostToWorkerMethods[M][1]> {
       assertWorkspaceId(workspaceId);
+      const validToolContext = method !== "executeTool" || hasWorkspaceToolContext(params, workspaceId);
       if (!authority || authority.boundWorkspaceId !== workspaceId
-        || (method !== "getData" && method !== "performAction")) {
+        || !validToolContext || (method !== "getData" && method !== "performAction" && method !== "executeTool")) {
         rejectTerminal(authority?.onTerminal ?? terminalObserver);
         return Promise.reject(new JsonRpcCallError({
           code: PLUGIN_RPC_ERROR_CODES.INVOCATION_SCOPE_DENIED,

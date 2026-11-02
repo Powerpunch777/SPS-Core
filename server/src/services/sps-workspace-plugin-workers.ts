@@ -380,7 +380,7 @@ export function createSpsWorkspacePluginWorkers(db: Db, manager: PluginWorkerMan
     && (runtimes.has(key) || locks.has(key))).length);
 
   return Object.freeze({
-    async call<M extends "getData" | "performAction">(workspaceId: string, pluginId: string, method: M,
+    async call<M extends "getData" | "performAction" | "executeTool">(workspaceId: string, pluginId: string, method: M,
       params: HostToWorkerMethods[M][0], timeoutMs: number, authority: WorkerInvocationAuthority): Promise<HostToWorkerMethods[M][1]> {
       if (closed || catalogMutationActive || mutatingPlugins.has(pluginId) || mutatingWorkspaces.has(workspaceId)
         || authority.signal?.aborted || authority.boundWorkspaceId !== workspaceId) throw unavailable();

@@ -271,6 +271,9 @@ export interface ToolRunContext {
   /** UUID of the retained project, when present. Projectless calls are limited
    * to the invoking plugin's verified active Agent session. */
   projectId?: string;
+  /** Verified active Plugin Agent session, injected by the dedicated Workspace
+   * tool lane. Never take a session claim from tool parameters as authority. */
+  sessionId?: string;
 }
 
 /**
