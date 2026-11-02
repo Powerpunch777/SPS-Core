@@ -1404,6 +1404,22 @@ export function buildHostServices(
           value: params.value,
         });
       },
+      async compareAndSet(params, assertCurrentInvocation) {
+        const companyId = ensureCompanyId(params.scopeId);
+        if (params.scopeKind !== "company" || typeof assertCurrentInvocation !== "function") {
+          throw badRequest("Conditional state storage requires a current Workspace invocation.");
+        }
+        return db.transaction(async tx => {
+          await assertCurrentInvocation();
+          const result = await pluginStateStore(tx).compareAndSet(pluginId, {
+            scopeKind: "company", scopeId: companyId, namespace: params.namespace,
+            stateKey: params.stateKey, value: params.value,
+          }, params.expected);
+          // Revocation observed after SQL must roll back instead of committing it.
+          await assertCurrentInvocation();
+          return result;
+        });
+      },
       async delete(params) {
         await stateStore.delete(pluginId, params.scopeKind as any, params.stateKey, {
           scopeId: params.scopeId,

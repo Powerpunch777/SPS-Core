@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createDb, plugins, type Db } from "@paperclipai/db";
 import { pluginStateStore, type PluginStateExpectation } from "../services/plugin-state-store.js";
+import { buildHostServices } from "../services/plugin-host-services.js";
+import { createPluginEventBus } from "../services/plugin-event-bus.js";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 
 describe("conditional Plugin state input", () => {
@@ -111,5 +113,23 @@ databaseSuite("atomic conditional Plugin state on PostgreSQL", () => {
       .toEqual({ swapped: false });
     expect(await store.get(pluginId, input.scopeKind, input.stateKey, input)).toBeNull();
     await expect(store.compareAndSet(randomUUID(), { ...input, value: "new" }, { exists: false })).rejects.toMatchObject({ status: 404 });
+  });
+
+  it("rolls back SQL when the trusted invocation is revoked before the transaction returns", async () => {
+    const store = pluginStateStore(db), input = key();
+    const services = buildHostServices(db, pluginId, `sps.state-fixture-${pluginId}`, createPluginEventBus(), undefined, { workspaceId: scopeId });
+    let checks = 0;
+    const revoked = async () => { if (++checks === 2) throw new Error("fixture invocation revoked"); };
+    try {
+      await expect(services.state.compareAndSet!({ ...input, value: { revision: "not-committed" }, expected: { exists: false } }, revoked))
+        .rejects.toThrow("fixture invocation revoked");
+      expect(checks).toBe(2);
+      expect(await store.get(pluginId, input.scopeKind, input.stateKey, input)).toBeNull();
+      await store.set(pluginId, { ...input, value: { revision: "original" } });
+      checks = 0;
+      await expect(services.state.compareAndSet!({ ...input, value: { revision: "not-committed" },
+        expected: { exists: true, value: { revision: "original" } } }, revoked)).rejects.toThrow("fixture invocation revoked");
+      expect(await store.get(pluginId, input.scopeKind, input.stateKey, input)).toEqual({ revision: "original" });
+    } finally { services.dispose(); }
   });
 });

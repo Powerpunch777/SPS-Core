@@ -115,7 +115,7 @@ function scopeConditions(
  * @see PLUGIN_SPEC.md §15.1 — Capabilities: Plugin State
  * @see PLUGIN_SPEC.md §21.3 — `plugin_state` table
  */
-export function pluginStateStore(db: Db) {
+export function pluginStateStore(db: Db | Parameters<Parameters<Db["transaction"]>[0]>[0]) {
   // -----------------------------------------------------------------------
   // Internal helpers
   // -----------------------------------------------------------------------

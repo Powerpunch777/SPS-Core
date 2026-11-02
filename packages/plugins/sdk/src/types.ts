@@ -1094,6 +1094,10 @@ export interface PluginStateClient {
    */
   set(input: ScopeKey, value: unknown): Promise<void>;
 
+  /** Optional Host feature. No fallback to an unconditional write is safe. */
+  compareAndSet?(input: ScopeKey & { scopeKind: "company"; scopeId: string },
+    expected: { exists: false } | { exists: true; value: unknown }, value: unknown): Promise<{ swapped: boolean }>;
+
   /**
    * Delete a state value. No-ops silently if the entry does not exist
    * (idempotent by design — safe to call without prior `get()`).

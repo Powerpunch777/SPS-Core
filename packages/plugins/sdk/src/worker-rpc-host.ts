@@ -732,6 +732,10 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
           });
         },
 
+        async compareAndSet(input, expected, value) {
+          return callHost("state.compareAndSet", { ...input, expected, value });
+        },
+
         async delete(input: ScopeKey): Promise<void> {
           await callHost("state.delete", {
             scopeKind: input.scopeKind,

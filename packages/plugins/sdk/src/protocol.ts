@@ -1119,6 +1119,11 @@ export interface WorkerToHostMethods {
     params: { scopeKind: string; scopeId?: string; namespace?: string; stateKey: string; value: unknown },
     result: void,
   ];
+  "state.compareAndSet": [
+    params: { scopeKind: "company"; scopeId: string; namespace?: string; stateKey: string; value: unknown;
+      expected: { exists: false } | { exists: true; value: unknown } },
+    result: { swapped: boolean },
+  ];
   "state.delete": [
     params: { scopeKind: string; scopeId?: string; namespace?: string; stateKey: string },
     result: void,

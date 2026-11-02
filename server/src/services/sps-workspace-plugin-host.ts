@@ -13,7 +13,7 @@ import { withSpsWorkspaceAgentSessionInvocation } from "./sps-workspace-agent-se
 // registration, raw SQL, direct outbound HTTP and raw secret resolution are not
 // part of the Workspace worker contract. Missing methods fail explicitly.
 const METHODS: readonly WorkerToHostMethodName[] = [
-  "config.get", "state.get", "state.set", "state.delete",
+  "config.get", "state.get", "state.set", "state.compareAndSet", "state.delete",
   "agents.list",
   "agents.sessions.create", "agents.sessions.ensure", "agents.sessions.list", "agents.sessions.sendMessage", "agents.sessions.getRun", "agents.sessions.getRequest", "agents.sessions.cancel",
   "entities.upsert", "entities.list", "inbox.publish", "inbox.update", "inbox.withdraw",
@@ -50,6 +50,13 @@ export function createSpsWorkspacePluginHostHandlers(input: {
         if (context?.invalidInvocationScope || context?.invocationScope?.companyId !== workspaceId) throw deny();
         if (method !== "config.get" && method !== "sps.connectivity.current" && method !== "localFolders.declarations") {
           if (!params || typeof params !== "object" || Array.isArray(params)) throw deny();
+          if (method === "state.compareAndSet") {
+            if (![Object.prototype, null].includes(Object.getPrototypeOf(params))) throw deny();
+            for (const key of ["scopeKind", "scopeId"]) {
+              const field = Object.getOwnPropertyDescriptor(params, key);
+              if (!field?.enumerable || !("value" in field)) throw deny();
+            }
+          }
           const selected = params as Record<string, unknown>;
           if (method === "entities.upsert") {
             if (selected.scopeKind !== "company" || selected.scopeId !== workspaceId
