@@ -316,6 +316,7 @@ export interface HostServices {
 
   /** Provides `agents.sessions.create`, `agents.sessions.list`, `agents.sessions.sendMessage`, `agents.sessions.close`. */
   agentSessions: {
+    getRequest(params: WorkerToHostMethods["agents.sessions.getRequest"][0]): Promise<WorkerToHostMethods["agents.sessions.getRequest"][1]>;
     ensure(params: WorkerToHostMethods["agents.sessions.ensure"][0]): Promise<WorkerToHostMethods["agents.sessions.ensure"][1]>;
     getRun(params: WorkerToHostMethods["agents.sessions.getRun"][0]): Promise<WorkerToHostMethods["agents.sessions.getRun"][1]>;
     cancel(params: WorkerToHostMethods["agents.sessions.cancel"][0]): Promise<WorkerToHostMethods["agents.sessions.cancel"][1]>;
@@ -556,6 +557,7 @@ const METHOD_CAPABILITY_MAP: Record<WorkerToHostMethodName, PluginCapability | n
   "agents.sessions.list": "agent.sessions.list",
   "agents.sessions.sendMessage": "agent.sessions.send",
   "agents.sessions.getRun": "agent.sessions.read",
+  "agents.sessions.getRequest": "agent.sessions.read",
   "agents.sessions.cancel": "agent.sessions.cancel",
   "agents.sessions.close": "agent.sessions.close",
 
@@ -1163,6 +1165,7 @@ export function createHostClientHandlers(
     }),
 
     // Agent Sessions
+    "agents.sessions.getRequest": gated("agents.sessions.getRequest", async params => services.agentSessions.getRequest(params)),
     "agents.sessions.create": gated("agents.sessions.create", async (params) => {
       return services.agentSessions.create(params);
     }),

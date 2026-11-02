@@ -2357,6 +2357,10 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
         },
       },
       sessions: {
+        async getRequest() {
+          requireCapability(manifest, capabilitySet, "agent.sessions.read");
+          throw new Error("Durable session dispatch receipts require a database-backed Host; this in-memory fake does not model crash recovery");
+        },
         async getRun(sessionId, companyId, runId) {
           requireCapability(manifest, capabilitySet, "agent.sessions.read");
           const session = sessions.get(sessionId);
@@ -2471,6 +2475,7 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
         },
         async sendMessage(sessionId, companyId, opts) {
           requireCapability(manifest, capabilitySet, "agent.sessions.send");
+          if (opts.requestId !== undefined) throw new Error("Durable session dispatch receipts require a database-backed Host; this in-memory fake does not model crash recovery");
           const session = sessions.get(sessionId);
           if (!session || session.status !== "active") throw new Error(`Session not found or closed: ${sessionId}`);
           if (session.companyId !== companyId) throw new Error(`Session not found: ${sessionId}`);

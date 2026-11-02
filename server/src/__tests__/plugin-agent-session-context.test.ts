@@ -11,6 +11,9 @@ import {
   projectWorkspaces,
   issues,
   agentTaskSessions,
+  agentWakeupRequests,
+  spsSessionDispatches,
+  spsWorkspaceExecutionControl,
   activityLog,
   heartbeatRuns,
 } from "@paperclipai/db";
@@ -22,6 +25,7 @@ import { buildHostServices } from "../services/plugin-host-services.js";
 import { preserveSpsSessionCancellationContext } from "../services/sps-agent-session-runs.js";
 import { assertSpsWorkspaceAgentSessionInvocation, withSpsWorkspaceAgentSessionInvocation } from "../services/sps-workspace-agent-session-invocation.js";
 import { spsAgentSessionCreationService } from "../services/sps-agent-session-creation.js";
+import { spsSessionDispatchService, validateSessionDispatch } from "../services/sps-session-dispatches.js";
 import { publishLiveEvent } from "../services/live-events.js";
 
 // Mock heartbeatService to avoid launching agent processes in this host-service test.
@@ -115,13 +119,16 @@ describePostgres("plugin agent session context", () => {
 
     // Clean up in FK-safe order: child-first, parent-last
     await db.delete(activityLog);
+    await db.delete(spsSessionDispatches);
     await db.delete(agentTaskSessions);
+    await db.delete(agentWakeupRequests);
     await db.delete(issues);
     await db.delete(projectWorkspaces);
     await db.delete(projects);
     await db.delete(heartbeatRuns);
     await db.delete(agents);
     await db.delete(plugins);
+    await db.delete(spsWorkspaceExecutionControl);
     await db.delete(companies);
   });
 
@@ -1255,6 +1262,144 @@ describePostgres("plugin agent session context", () => {
 
     const [dbRow] = await db.select().from(agentTaskSessions).where(eq(agentTaskSessions.id, session.sessionId));
     expect(dbRow?.lastError).toBe("Observed fallback error");
+  });
+
+  async function dispatchFixture() {
+    const fixture = await seedCompanyAndPlugin();
+    const agentId = await seedAgent(fixture.companyId);
+    const session = await fixture.services.agentSessions.create({ agentId, companyId: fixture.companyId });
+    const stored = await db.select().from(agentTaskSessions).where(eq(agentTaskSessions.id, session.sessionId)).then(rows => rows[0]!);
+    const input = { companyId: fixture.companyId, sessionId: session.sessionId, requestId: randomUUID(), prompt: "A durable turn" };
+    const service = spsSessionDispatchService(db, fixture.pluginId, fixture.pluginManifest.id, async () => {});
+    const wake = vi.fn(async (key: string) => {
+      const run = await db.insert(heartbeatRuns).values({ companyId: fixture.companyId, agentId, status: "running",
+        contextSnapshot: { taskKey: stored.taskKey, spsPluginConversation: {
+          pluginKey: fixture.pluginManifest.id, sessionId: session.sessionId, requestId: input.requestId,
+        } },
+      }).returning().then(rows => rows[0]!);
+      await db.insert(agentWakeupRequests).values({ companyId: fixture.companyId, agentId, source: "automation",
+        status: "queued", requestedByActorId: fixture.pluginId, idempotencyKey: key, runId: run.id });
+      return run;
+    });
+    return { ...fixture, agentId, session, input, service, wake };
+  }
+
+  it("durably deduplicates a request across Host service instances without rewaking", async () => {
+    const f = await dispatchFixture();
+    const first = await f.service.dispatch(f.input, f.wake);
+    const restarted = spsSessionDispatchService(db, f.pluginId, f.pluginManifest.id, async () => {});
+    expect(await restarted.dispatch(f.input, f.wake)).toEqual({ runId: first.runId, replayed: true });
+    expect(await restarted.getRequest(f.input)).toEqual({ requestId: f.input.requestId, state: "submitted", runId: first.runId });
+    expect(f.wake).toHaveBeenCalledTimes(1);
+    const rows = await db.select().from(spsSessionDispatches);
+    expect(rows).toHaveLength(1);
+    expect(JSON.stringify(rows)).not.toContain(f.input.prompt);
+  });
+
+  it("concurrent duplicate requests reserve once and never replay a pending dispatch", async () => {
+    const f = await dispatchFixture();
+    let release!: () => void, signal!: () => void;
+    const started = new Promise<void>(resolve => { signal = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const first = f.service.dispatch(f.input, async key => { signal(); await gate; return f.wake(key); });
+    await started;
+    await expect(f.service.dispatch(f.input, f.wake)).rejects.toThrow(/unresolved/);
+    release();
+    const receipt = await first;
+    expect(await f.service.dispatch(f.input, f.wake)).toMatchObject({ runId: receipt.runId, replayed: true });
+    expect(f.wake).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects request ID reuse with a different prompt, reason or session", async () => {
+    const f = await dispatchFixture();
+    await f.service.dispatch(f.input, f.wake);
+    const other = await f.services.agentSessions.create({ companyId: f.companyId, agentId: f.agentId });
+    for (const patch of [{ prompt: "Different" }, { reason: "Different" }, { sessionId: other.sessionId }]) {
+      await expect(f.service.dispatch({ ...f.input, ...patch }, f.wake)).rejects.toThrow(/unresolved/);
+    }
+    expect(f.wake).toHaveBeenCalledTimes(1);
+  });
+
+  it("recovers a scheduler acceptance after the wakeup response is lost", async () => {
+    const f = await dispatchFixture();
+    await expect(f.service.dispatch(f.input, async key => { await f.wake(key); throw new Error("lost body"); })).rejects.toThrow(/unresolved/);
+    const receipt = await f.service.getRequest(f.input);
+    expect(receipt).toMatchObject({ state: "submitted", requestId: f.input.requestId });
+    expect(receipt?.runId).toBeTruthy();
+    expect(await f.service.dispatch(f.input, f.wake)).toEqual({ runId: receipt!.runId, replayed: true });
+    expect(f.wake).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a crash-before-wakeup reservation uncertain and blocks automatic continuation", async () => {
+    const f = await dispatchFixture();
+    const failed = vi.fn(async () => { throw new Error("connection lost before result"); });
+    await expect(f.service.dispatch(f.input, failed)).rejects.toThrow(/unresolved/);
+    expect(await f.service.getRequest(f.input)).toEqual({ requestId: f.input.requestId, state: "uncertain", runId: null });
+    await expect(f.service.dispatch(f.input, failed)).rejects.toThrow(/unresolved/);
+    await expect(f.service.dispatch({ ...f.input, requestId: randomUUID() }, f.wake)).rejects.toThrow(/unresolved/);
+    expect(failed).toHaveBeenCalledTimes(1);
+    expect(f.wake).not.toHaveBeenCalled();
+  });
+
+  it("request lookup rejects other tenants, plugins and sessions", async () => {
+    const f = await dispatchFixture();
+    await f.service.dispatch(f.input, f.wake);
+    const other = await f.services.agentSessions.create({ companyId: f.companyId, agentId: f.agentId });
+    await expect(f.service.getRequest({ ...f.input, sessionId: other.sessionId })).rejects.toThrow(/unresolved/);
+    await expect(f.service.getRequest({ ...f.input, companyId: randomUUID() })).rejects.toThrow(/unresolved/);
+    const foreign = spsSessionDispatchService(db, randomUUID(), "sps.other-plugin", async () => {});
+    await expect(foreign.getRequest(f.input)).rejects.toThrow(/unresolved/);
+    expect(await f.service.getRequest({ ...f.input, requestId: randomUUID() })).toBeNull();
+  });
+
+  it("session deletion retains a request tombstone and cannot authorize a resend in a new session", async () => {
+    const f = await dispatchFixture();
+    await f.service.dispatch(f.input, f.wake);
+    await f.services.agentSessions.close({ companyId: f.companyId, sessionId: f.session.sessionId });
+    expect(await db.select().from(spsSessionDispatches)).toHaveLength(1);
+    await expect(f.service.getRequest(f.input)).rejects.toThrow(/unresolved/);
+    const next = await f.services.agentSessions.create({ companyId: f.companyId, agentId: f.agentId });
+    await expect(f.service.dispatch({ ...f.input, sessionId: next.sessionId }, f.wake)).rejects.toThrow(/unresolved/);
+    expect(f.wake).toHaveBeenCalledTimes(1);
+  });
+
+  it("stores accepted state after revocation but never returns it to a stale invocation", async () => {
+    const f = await dispatchFixture();
+    let active = true;
+    const scoped = spsSessionDispatchService(db, f.pluginId, f.pluginManifest.id, async () => { if (!active) throw new Error("scope retired"); });
+    await expect(scoped.dispatch(f.input, async key => { const run = await f.wake(key); active = false; return run; })).rejects.toThrow(/unresolved/);
+    await expect(scoped.getRequest(f.input)).rejects.toThrow(/scope retired/);
+    expect(await f.service.getRequest(f.input)).toMatchObject({ state: "submitted" });
+    expect(f.wake).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses to attribute an unrelated scheduler run to a durable request", async () => {
+    const f = await dispatchFixture();
+    const run = await db.insert(heartbeatRuns).values({ companyId: f.companyId, agentId: f.agentId, status: "running", contextSnapshot: {} })
+      .returning().then(rows => rows[0]!);
+    await expect(f.service.dispatch(f.input, async () => run)).rejects.toThrow(/unresolved/);
+    expect(await f.service.getRequest(f.input)).toMatchObject({ state: "uncertain", runId: null });
+  });
+
+  it("validates bounded request input before scheduling", () => {
+    const input = { companyId: randomUUID(), sessionId: randomUUID(), requestId: randomUUID(), prompt: "ok" };
+    expect(validateSessionDispatch(input)).toMatch(/^[0-9a-f]{64}$/);
+    for (const patch of [{ requestId: "wrong" }, { prompt: "" }, { prompt: "x".repeat(49 * 1024) }, { prompt: "\u0000" }, { reason: "bad\nreason" }]) {
+      expect(() => validateSessionDispatch({ ...input, ...patch })).toThrow();
+    }
+  });
+
+  it("does not reserve a new request while the Workspace is paused or stopped", async () => {
+    const f = await dispatchFixture();
+    await db.insert(spsWorkspaceExecutionControl).values({ companyId: f.companyId, state: "paused" });
+    await expect(f.service.dispatch(f.input, f.wake)).rejects.toThrow(/unresolved/);
+    expect(await f.service.getRequest(f.input)).toBeNull();
+    expect(f.wake).not.toHaveBeenCalled();
+    await db.update(spsWorkspaceExecutionControl).set({ state: "running" }).where(eq(spsWorkspaceExecutionControl.companyId, f.companyId));
+    const receipt = await f.service.dispatch(f.input, f.wake);
+    await db.update(spsWorkspaceExecutionControl).set({ state: "stopped" }).where(eq(spsWorkspaceExecutionControl.companyId, f.companyId));
+    expect(await f.service.dispatch(f.input, f.wake)).toMatchObject({ runId: receipt.runId, replayed: true });
+    expect(f.wake).toHaveBeenCalledTimes(1);
   });
 
   it("remains backward compatible storing null context when omitted", async () => {

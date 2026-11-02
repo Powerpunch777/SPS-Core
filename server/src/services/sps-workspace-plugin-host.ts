@@ -15,7 +15,7 @@ import { withSpsWorkspaceAgentSessionInvocation } from "./sps-workspace-agent-se
 const METHODS: readonly WorkerToHostMethodName[] = [
   "config.get", "state.get", "state.set", "state.delete",
   "agents.list",
-  "agents.sessions.create", "agents.sessions.ensure", "agents.sessions.list", "agents.sessions.sendMessage", "agents.sessions.getRun", "agents.sessions.cancel",
+  "agents.sessions.create", "agents.sessions.ensure", "agents.sessions.list", "agents.sessions.sendMessage", "agents.sessions.getRun", "agents.sessions.getRequest", "agents.sessions.cancel",
   "entities.upsert", "entities.list", "inbox.publish", "inbox.update", "inbox.withdraw",
   "localFolders.declarations", "localFolders.status", "localFolders.list",
   "localFolders.readText", "localFolders.writeTextAtomic", "localFolders.deleteFile",

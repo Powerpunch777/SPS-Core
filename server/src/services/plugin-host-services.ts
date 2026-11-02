@@ -84,6 +84,7 @@ import { spsPluginExecutionService } from "./sps-plugin-execution.js";
 import { spsWorkspaceSurfaceService } from "./sps-workspace-surfaces.js";
 import { spsAgentSessionRunService } from "./sps-agent-session-runs.js";
 import { spsAgentSessionCreationService } from "./sps-agent-session-creation.js";
+import { spsSessionDispatchService } from "./sps-session-dispatches.js";
 import { assertSpsWorkspaceAgentSessionInvocation } from "./sps-workspace-agent-session-invocation.js";
 import { spsExecutionHistoryService } from "./sps-execution-history.js";
 import { describeSpsAgentExecution } from "./sps-agent-execution-descriptor.js";
@@ -655,6 +656,10 @@ export function buildHostServices(
   };
 
   const sessionCreation = spsAgentSessionCreationService(db, pluginKey, agentId => agents.getById(agentId), assertSessionAuthority);
+  const sessionDispatches = spsSessionDispatchService(db, pluginId, pluginKey, async companyId => {
+    await assertSessionAuthority(companyId);
+    await ensurePluginAvailableForCompany(companyId);
+  });
 
   const optionalLifecycleReference = (value: unknown, field: string): string | null => {
     if (value == null) return null;
@@ -2930,6 +2935,10 @@ export function buildHostServices(
     },
 
     agentSessions: {
+      async getRequest(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        return sessionDispatches.getRequest({ ...params, companyId });
+      },
       async getRun(params) {
         const companyId = ensureCompanyId(params.companyId);
         await assertSessionAuthority(companyId);
@@ -3007,21 +3016,29 @@ export function buildHostServices(
         await assertSessionAuthority(companyId);
         if (!session) throw new Error(`Session not found: ${params.sessionId}`);
 
-        const run = await heartbeat.wakeup(session.agentId, {
+        const wake = (idempotencyKey?: string) => heartbeat.wakeup(session.agentId, {
           source: "automation",
           triggerDetail: "system",
           reason: params.reason ?? null,
           payload: { prompt: params.prompt },
           contextSnapshot: {
             taskKey: session.taskKey,
-            spsPluginConversation: { pluginKey, sessionId: session.id, message: params.prompt },
+            spsPluginConversation: { pluginKey, sessionId: session.id, message: params.prompt,
+              ...(params.requestId === undefined ? {} : { requestId: params.requestId }) },
             wakeSource: "automation",
             wakeTriggerDetail: "system",
             ...(session.contextJson ? session.contextJson : {}),
           },
           requestedByActorType: "system",
           requestedByActorId: pluginId,
+          ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
         });
+        let run: { id: string } | null;
+        if (params.requestId !== undefined) {
+          const receipt = await sessionDispatches.dispatch({ ...params, companyId, requestId: params.requestId }, wake);
+          if (receipt.replayed) return { runId: receipt.runId };
+          run = { id: receipt.runId };
+        } else run = await wake();
         await assertSessionAuthority(companyId);
         if (!run) throw new Error("Agent wakeup was skipped by heartbeat policy");
 

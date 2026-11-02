@@ -2009,6 +2009,12 @@ export interface AgentSessionRunState {
     | Readonly<{ state: "withheld"; text: null; reason: "missing" | "invalid" | "too_large" | "not_successful" }>;
 }
 
+export interface AgentSessionRequestState {
+  requestId: string;
+  state: "pending" | "submitted" | "uncertain";
+  runId: string | null;
+}
+
 export interface PluginAgentSessionsClient {
   /** Create a new conversational session with an agent. Requires `agent.sessions.create`. */
   create(agentId: string, companyId: string, opts?: {
@@ -2029,6 +2035,8 @@ export interface PluginAgentSessionsClient {
 
   /** Read one owned session run. Requires `agent.sessions.read`. */
   getRun(sessionId: string, companyId: string, runId: string): Promise<AgentSessionRunState>;
+  /** Read a durable admission receipt; null is not permission to replay an uncertain request. */
+  getRequest(sessionId: string, companyId: string, requestId: string): Promise<AgentSessionRequestState | null>;
   /** Request cancellation of this exact run, not the whole Agent or session. */
   cancel(sessionId: string, companyId: string, runId: string): Promise<AgentSessionRunState>;
 
@@ -2040,6 +2048,8 @@ export interface PluginAgentSessionsClient {
   sendMessage(sessionId: string, companyId: string, opts: {
     prompt: string;
     reason?: string;
+    /** Stable caller-generated UUID. Reusing it with different input is rejected. */
+    requestId?: string;
     onEvent?: (event: AgentSessionEvent) => void;
   }): Promise<AgentSessionSendResult>;
 

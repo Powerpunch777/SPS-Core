@@ -320,6 +320,7 @@ export type {
   PluginAuthorizationAuditEntry,
   PluginAgentSessionsClient,
   AgentSessionRunState,
+    AgentSessionRequestState,
   PluginSpsExecutionLane,
   PluginSpsUsageMetric,
   PluginSpsUsageEvidence,

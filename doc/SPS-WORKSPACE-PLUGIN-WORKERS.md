@@ -232,3 +232,40 @@ rewritten. Downgrading code must leave the additive table intact. Older Core
 versions do not implement this entrypoint contract and must not be used with
 packages requiring it; install a compatible package version with the older Core.
 Existing global worker support does not authorize substituting it for this lane.
+
+## Durable Agent Session Dispatch Receipts (Development)
+
+An optional UUID `requestId` on `agents.sessions.sendMessage` uses a separate
+Core-owned receipt, keyed by Workspace, installed Plugin and request ID. A
+SHA-256 digest binds the exact session, prompt and reason without storing those
+prompt bytes in the receipt. A new reservation checks current Workspace
+execution admission and active Plugin-owned session under database locks.
+Concurrent repeats cannot make a second wakeup. A changed payload or session
+for the same key is rejected. Legacy unkeyed sends keep their old behavior.
+
+`agents.sessions.getRequest` reuses `agent.sessions.read` and only exposes
+`requestId`, `pending|submitted|uncertain`, and a run UUID for submitted work.
+Its Workspace invocation and Plugin ownership checks are the same as the
+existing session methods. It may reconcile acceptance from the scheduler's
+committed wakeup/run record. It never creates or starts work. Keyed turns are
+excluded from legacy context coalescing so a different prompt cannot replace
+their dispatch identity. No raw provider output or new workflow role is added.
+
+Migration 0178 adds `sps_session_dispatches`. Receipts survive physical session
+deletion as tombstones; a new session cannot reuse a previously consumed ID.
+A closed/deleted session is not queryable as a live session and lookup fails
+explicitly rather than returning a misleading absent receipt. Explicit Plugin
+or Workspace deletion may remove the owning receipts. Keep the additive table
+on code rollback. Older Hosts do not support the receipt contract: consumers
+must feature-test the explicit lookup before first keyed send, not infer support
+from a Desktop version string or let an older Host silently ignore requestId.
+
+This is at-most-once admission, not an exactly-once provider transaction or an
+execution lease. A crash after reservation and before scheduler acceptance can
+remain unresolved. Neither restart nor a null lookup authorizes automatic
+replay, and an uncertain same-session dispatch blocks a new keyed turn. Caller
+authority can expire after admission: acceptance is still recorded but its
+response is withheld from the stale invocation. The Plugin owns paginated
+conversation storage and human-facing recovery; Core owns the receipt. The
+in-memory SDK fake explicitly refuses durable receipt operations instead of
+pretending to model database concurrency or crash recovery.

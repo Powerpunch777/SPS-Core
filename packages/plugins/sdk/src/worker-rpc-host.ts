@@ -1217,6 +1217,9 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
         },
 
         sessions: {
+          async getRequest(sessionId: string, companyId: string, requestId: string) {
+            return callHost("agents.sessions.getRequest", { sessionId, companyId, requestId });
+          },
           async ensure(agentId: string, companyId: string, opts: Pick<AgentSessionEnsureInput, "taskKey" | "expectedSessionId" | "context">) {
             return callHost("agents.sessions.ensure", {
               agentId,
@@ -1249,6 +1252,7 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
           async sendMessage(sessionId: string, companyId: string, opts: {
             prompt: string;
             reason?: string;
+            requestId?: string;
             onEvent?: (event: AgentSessionEvent) => void;
           }) {
             if (opts.onEvent) {
@@ -1260,6 +1264,7 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
                 companyId,
                 prompt: opts.prompt,
                 reason: opts.reason,
+                requestId: opts.requestId,
               });
             } catch (err) {
               sessionEventCallbacks.delete(sessionId);

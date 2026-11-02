@@ -19,6 +19,7 @@ export {
   spsWorkspacePluginRuntimeConfigs,
   agents,
   agentTaskSessions,
+  spsSessionDispatches,
   heartbeatRuns,
   authSessions,
   authUsers,
