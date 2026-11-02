@@ -1973,6 +1973,19 @@ export interface AgentSessionEnsureResult {
   created: boolean;
 }
 
+export interface AgentSessionExecutionPolicy {
+  mode: "plugin-tools-only-v1";
+  toolNames: readonly string[];
+}
+
+export interface AgentSessionPolicySupport {
+  schemaVersion: 1;
+  modes: readonly "plugin-tools-only-v1"[];
+  enforcement: "dispatch-and-run";
+  readiness: "unknown";
+  osIsolation: "not-certified";
+}
+
 /**
  * A streaming event received during a session's `sendMessage` call.
  * Delivered via JSON-RPC notifications from host to worker.
@@ -2023,6 +2036,8 @@ export interface AgentSessionRequestState {
 }
 
 export interface PluginAgentSessionsClient {
+  /** Describe host policy plumbing; optional for compatibility with older clients. Requires `agent.sessions.read`. */
+  describePolicySupport?(sessionId: string, companyId: string): Promise<AgentSessionPolicySupport>;
   /** Create a new conversational session with an agent. Requires `agent.sessions.create`. */
   create(agentId: string, companyId: string, opts?: {
     taskKey?: string;
@@ -2055,6 +2070,7 @@ export interface PluginAgentSessionsClient {
   sendMessage(sessionId: string, companyId: string, opts: {
     prompt: string;
     reason?: string;
+    executionPolicy?: AgentSessionExecutionPolicy;
     /** Stable caller-generated UUID. Reusing it with different input is rejected. */
     requestId?: string;
     onEvent?: (event: AgentSessionEvent) => void;

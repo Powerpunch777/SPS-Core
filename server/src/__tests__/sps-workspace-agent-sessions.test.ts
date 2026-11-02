@@ -22,6 +22,7 @@ const methods = [
   ["agents.sessions.sendMessage", "sendMessage", { sessionId: "session-a", companyId: workspaceA, prompt: "hello" }],
   ["agents.sessions.getRun", "getRun", { sessionId: "session-a", companyId: workspaceA, runId: "run-a" }],
   ["agents.sessions.getRequest", "getRequest", { sessionId: "session-a", companyId: workspaceA, requestId: "request-a" }],
+  ["agents.sessions.describePolicySupport", "describePolicySupport", { sessionId: "session-a", companyId: workspaceA }],
   ["agents.sessions.cancel", "cancel", { sessionId: "session-a", companyId: workspaceA, runId: "run-a" }],
 ] as const;
 const capabilityFor: Record<SessionMethod, string> = {
@@ -31,6 +32,7 @@ const capabilityFor: Record<SessionMethod, string> = {
   "agents.sessions.sendMessage": "agent.sessions.send",
   "agents.sessions.getRun": "agent.sessions.read",
   "agents.sessions.getRequest": "agent.sessions.read",
+  "agents.sessions.describePolicySupport": "agent.sessions.read",
   "agents.sessions.cancel": "agent.sessions.cancel",
 };
 

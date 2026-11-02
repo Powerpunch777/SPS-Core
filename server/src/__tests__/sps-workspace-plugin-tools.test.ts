@@ -61,6 +61,7 @@ function activeRows(overrides: {
   sessionStatus?: string;
   closedAt?: Date | null;
   sessionId?: string;
+  executionPolicy?: unknown;
 } = {}) {
   const sessionId = overrides.sessionId ?? ids.session;
   return [
@@ -68,7 +69,8 @@ function activeRows(overrides: {
     [{ companyId: ids.company, agentId: ids.agent, status: overrides.runStatus ?? "running", contextSnapshot: {
       taskKey,
       ...(overrides.cancelled ? { spsSessionCancellationRequested: true } : {}),
-      spsPluginConversation: { pluginKey: overrides.pluginKey ?? pluginKey, sessionId, message: "workspace tool request" },
+      spsPluginConversation: { pluginKey: overrides.pluginKey ?? pluginKey, sessionId, message: "workspace tool request",
+        ...(overrides.executionPolicy === undefined ? {} : { executionPolicy: overrides.executionPolicy }) },
     } }],
     [{ id: sessionId, companyId: ids.company, agentId: ids.agent, taskKey, status: overrides.sessionStatus ?? "active", closedAt: overrides.closedAt ?? null }],
   ];
@@ -88,7 +90,8 @@ async function createApp(options: {
   actor?: ReturnType<typeof agentActor>;
   workspaceCall?: (args: unknown[], authority: { assertCurrent(): Promise<void> }) => Promise<unknown>;
   workerUnavailable?: boolean;
-  getTool?: () => ReturnType<typeof registeredTool> | undefined;
+  getTool?: (name: string) => ReturnType<typeof registeredTool> | undefined;
+  tools?: Array<{ name: string }>;
 } = {}) {
   const [{ pluginRoutes }, { errorHandler }] = await Promise.all([
     import("../routes/plugins.js"), import("../middleware/index.js"),
@@ -108,7 +111,7 @@ async function createApp(options: {
   app.use("/api", pluginRoutes(
     fakeDb(options.rows ?? activeRows()) as never,
     { installPlugin: vi.fn() } as never, undefined, undefined,
-    { toolDispatcher: { listToolsForAgent: vi.fn(), getTool, executeTool: legacyExecute } } as never,
+    { toolDispatcher: { listToolsForAgent: vi.fn(() => options.tools ?? []), getTool, executeTool: legacyExecute } } as never,
     options.workerUnavailable ? {} as never : { workspaceWorkers: { call: workspaceCall } } as never,
   ));
   app.use(errorHandler);
@@ -131,6 +134,47 @@ describe("Workspace plugin tool route", () => {
     mocks.registry.listInstalled.mockImplementation(async () => [pluginRecord()]);
     mocks.toolAccess.isAllowed.mockResolvedValue(true);
     mocks.toolAccess.record.mockResolvedValue(undefined);
+  });
+
+  it("enforces the run's allowed tools even when the same Agent has broader plugin access", async () => {
+    const policy = { mode: "plugin-tools-only-v1", toolNames: ["read"] };
+    const { app, workspaceCall, legacyExecute } = await createApp({ rows: activeRows({ executionPolicy: policy }) });
+    await request(app).post("/api/plugins/tools/execute").send(body()).expect(403);
+    expect(workspaceCall).not.toHaveBeenCalled();
+    expect(legacyExecute).not.toHaveBeenCalled();
+    const allowed = { mode: "plugin-tools-only-v1", toolNames: ["write"] };
+    const permitted = await createApp({ rows: [...activeRows({ executionPolicy: allowed }), ...activeRows({ executionPolicy: allowed })] });
+    await request(permitted.app).post("/api/plugins/tools/execute").send(body()).expect(200);
+    expect(permitted.workspaceCall).toHaveBeenCalledOnce();
+  });
+
+  it("cannot escape a restricted session by supplying a project or claiming a different policy", async () => {
+    const policy = { mode: "plugin-tools-only-v1", toolNames: ["read"] };
+    const { app, workspaceCall } = await createApp({ rows: activeRows({ executionPolicy: policy }) });
+    await request(app).post("/api/plugins/tools/execute").send(body({ projectId: ids.company,
+      executionPolicy: { mode: "plugin-tools-only-v1", toolNames: ["write"] } })).expect(403);
+    expect(workspaceCall).not.toHaveBeenCalled();
+  });
+
+  it("filters discovery by the server-owned policy and does not advertise denied tools", async () => {
+    const policy = { mode: "plugin-tools-only-v1", toolNames: ["read"] };
+    const { app } = await createApp({ rows: activeRows({ executionPolicy: policy }),
+      tools: [{ name: `${pluginKey}:read` }, { name: `${pluginKey}:write` }],
+      getTool: name => ({ ...registeredTool(), name: name.endsWith(":read") ? "read" : "write", namespacedName: name }) });
+    const result = await request(app).get("/api/plugins/tools").expect(200);
+    expect(result.body).toEqual([{ name: `${pluginKey}:read` }]);
+  });
+
+  it("denies policy changes while an admitted tool awaits instead of preserving stale permission", async () => {
+    const allowed = { mode: "plugin-tools-only-v1", toolNames: ["write"] };
+    const changed = { mode: "plugin-tools-only-v1", toolNames: ["read"] };
+    const write = vi.fn();
+    const { app } = await createApp({ rows: [...activeRows({ executionPolicy: allowed }), ...activeRows({ executionPolicy: allowed }),
+      ...activeRows({ executionPolicy: changed })], workspaceCall: async (_args, authority) => {
+      await authority.assertCurrent(); write(); return {};
+    } });
+    await request(app).post("/api/plugins/tools/execute").send(body()).expect(403);
+    expect(write).not.toHaveBeenCalled();
   });
 
   it("uses a DB-verified projectless active session, ignoring body session and role", async () => {

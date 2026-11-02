@@ -318,6 +318,7 @@ export interface HostServices {
 
   /** Provides `agents.sessions.create`, `agents.sessions.list`, `agents.sessions.sendMessage`, `agents.sessions.close`. */
   agentSessions: {
+    describePolicySupport?(params: WorkerToHostMethods["agents.sessions.describePolicySupport"][0]): Promise<WorkerToHostMethods["agents.sessions.describePolicySupport"][1]>;
     getRequest(params: WorkerToHostMethods["agents.sessions.getRequest"][0]): Promise<WorkerToHostMethods["agents.sessions.getRequest"][1]>;
     ensure(params: WorkerToHostMethods["agents.sessions.ensure"][0]): Promise<WorkerToHostMethods["agents.sessions.ensure"][1]>;
     getRun(params: WorkerToHostMethods["agents.sessions.getRun"][0]): Promise<WorkerToHostMethods["agents.sessions.getRun"][1]>;
@@ -555,6 +556,7 @@ const METHOD_CAPABILITY_MAP: Record<WorkerToHostMethodName, PluginCapability | n
   "agents.managed.reset": "agents.managed",
 
   // Agent Sessions
+  "agents.sessions.describePolicySupport": "agent.sessions.read",
   "agents.sessions.create": "agent.sessions.create",
   "agents.sessions.ensure": "agent.sessions.create",
   "agents.sessions.list": "agent.sessions.list",
@@ -1235,6 +1237,12 @@ export function createHostClientHandlers(
     }),
 
     // Agent Sessions
+    "agents.sessions.describePolicySupport": gated("agents.sessions.describePolicySupport", async (params) => {
+      if (!services.agentSessions.describePolicySupport) {
+        throw new Error("This Host does not support agent session policy support discovery");
+      }
+      return services.agentSessions.describePolicySupport(params);
+    }),
     "agents.sessions.getRequest": gated("agents.sessions.getRequest", async params => services.agentSessions.getRequest(params)),
     "agents.sessions.create": gated("agents.sessions.create", async (params) => {
       return services.agentSessions.create(params);

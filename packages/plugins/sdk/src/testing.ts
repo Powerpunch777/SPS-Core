@@ -2357,6 +2357,18 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
         },
       },
       sessions: {
+        async describePolicySupport(sessionId, companyId) {
+          requireCapability(manifest, capabilitySet, "agent.sessions.read");
+          const session = sessions.get(sessionId);
+          if (!session || session.companyId !== requireCompanyId(companyId)) throw new Error(`Session not found: ${sessionId}`);
+          return {
+            schemaVersion: 1 as const,
+            modes: [] as const,
+            enforcement: "dispatch-and-run" as const,
+            readiness: "unknown" as const,
+            osIsolation: "not-certified" as const,
+          };
+        },
         async getRequest() {
           requireCapability(manifest, capabilitySet, "agent.sessions.read");
           throw new Error("Durable session dispatch receipts require a database-backed Host; this in-memory fake does not model crash recovery");
@@ -2475,6 +2487,7 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
         },
         async sendMessage(sessionId, companyId, opts) {
           requireCapability(manifest, capabilitySet, "agent.sessions.send");
+          if (opts.executionPolicy !== undefined) throw new Error("Execution policy enforcement is not modeled by the in-memory test harness");
           if (opts.requestId !== undefined) throw new Error("Durable session dispatch receipts require a database-backed Host; this in-memory fake does not model crash recovery");
           const session = sessions.get(sessionId);
           if (!session || session.status !== "active") throw new Error(`Session not found or closed: ${sessionId}`);

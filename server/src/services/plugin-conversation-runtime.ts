@@ -1,13 +1,16 @@
 type RecordValue = Record<string, unknown>;
+import { parseSpsSessionExecutionPolicy } from "@paperclipai/adapter-utils/sps-session-policy";
 
 export function readPluginConversationContext(context: RecordValue) {
   const value = context.spsPluginConversation;
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const conversation = value as RecordValue;
+  const executionPolicy = parseSpsSessionExecutionPolicy(conversation.executionPolicy);
   if (typeof conversation.pluginKey !== "string" || typeof conversation.sessionId !== "string"
     || typeof conversation.message !== "string" || !conversation.message.trim()
     || !String(context.taskKey ?? "").startsWith(`plugin:${conversation.pluginKey}:session:`)) return null;
-  return { pluginKey: conversation.pluginKey, sessionId: conversation.sessionId, message: conversation.message };
+  return { pluginKey: conversation.pluginKey, sessionId: conversation.sessionId, message: conversation.message,
+    ...(executionPolicy ? { executionPolicy } : {}) };
 }
 
 /** Session transport is generic; workflow prompts remain plugin-owned. */

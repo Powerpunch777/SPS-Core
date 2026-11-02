@@ -85,6 +85,9 @@ import { spsWorkspaceSurfaceService } from "./sps-workspace-surfaces.js";
 import { spsAgentSessionRunService } from "./sps-agent-session-runs.js";
 import { spsAgentSessionCreationService } from "./sps-agent-session-creation.js";
 import { spsSessionDispatchService } from "./sps-session-dispatches.js";
+import { createSpsSessionDispatchContext } from "./sps-session-dispatch-context.js";
+import { describeSpsSessionPolicySupport } from "./sps-session-policy.js";
+import { parseSpsSessionExecutionPolicy } from "@paperclipai/adapter-utils/sps-session-policy";
 import { assertSpsWorkspaceAgentSessionInvocation } from "./sps-workspace-agent-session-invocation.js";
 import { spsExecutionHistoryService } from "./sps-execution-history.js";
 import { describeSpsAgentExecution } from "./sps-agent-execution-descriptor.js";
@@ -3008,14 +3011,41 @@ export function buildHostServices(
         }));
       },
 
+      async describePolicySupport(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        await assertSessionAuthority(companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        const support = await describeSpsSessionPolicySupport(db, { ...params, companyId, pluginKey },
+          type => Boolean(findActiveServerAdapter(type)), async () => {
+            await assertSessionAuthority(companyId); await ensurePluginAvailableForCompany(companyId);
+          });
+        const currentPlugin = await registry.getById(pluginId);
+        await assertSessionAuthority(companyId);
+        return currentPlugin?.manifestJson.entrypoints.workspaceWorker ? support : { ...support, modes: [] };
+      },
       async sendMessage(params) {
         if (disposed) {
           throw new Error("Host services have been disposed");
         }
 
         const companyId = ensureCompanyId(params.companyId);
+        const executionPolicy = parseSpsSessionExecutionPolicy(params.executionPolicy);
+        const sendParams = { sessionId: params.sessionId, companyId, prompt: params.prompt,
+          ...(params.reason === undefined ? {} : { reason: params.reason }),
+          ...(params.requestId === undefined ? {} : { requestId: params.requestId }),
+          ...(executionPolicy ? { executionPolicy } : {}) };
         await assertSessionAuthority(companyId);
         await ensurePluginAvailableForCompany(companyId);
+        if (executionPolicy) {
+          if (sendParams.requestId === undefined) throw new Error("Restricted session execution requires a durable request ID.");
+          const support = await describeSpsSessionPolicySupport(db, { companyId, sessionId: sendParams.sessionId, pluginKey },
+            type => Boolean(findActiveServerAdapter(type)), () => assertSessionAuthority(companyId));
+          if (!support.modes.includes(executionPolicy.mode)) throw new Error("This session does not support the requested execution policy; unrestricted fallback is forbidden.");
+          const currentPlugin = await registry.getById(pluginId);
+          if (!currentPlugin?.manifestJson.entrypoints.workspaceWorker) throw new Error("Restricted sessions require invocation-bound Workspace plugin tools.");
+          const declared = new Set(currentPlugin?.manifestJson.tools?.map(tool => tool.name) ?? []);
+          if (executionPolicy.toolNames.some(name => !declared.has(name))) throw new Error("The execution policy names a tool not declared by this plugin.");
+        }
 
         // Verify session exists and belongs to this plugin
         const session = await db
@@ -3023,35 +3053,30 @@ export function buildHostServices(
           .from(agentTaskSessionsTable)
           .where(
             and(
-              eq(agentTaskSessionsTable.id, params.sessionId),
+              eq(agentTaskSessionsTable.id, sendParams.sessionId),
               eq(agentTaskSessionsTable.companyId, companyId),
               sql`starts_with(${agentTaskSessionsTable.taskKey}, ${`plugin:${pluginKey}:session:`})`,
             ),
           )
           .then((rows) => rows[0] ?? null);
         await assertSessionAuthority(companyId);
-        if (!session) throw new Error(`Session not found: ${params.sessionId}`);
+        if (!session) throw new Error(`Session not found: ${sendParams.sessionId}`);
 
         const wake = (idempotencyKey?: string) => heartbeat.wakeup(session.agentId, {
           source: "automation",
           triggerDetail: "system",
-          reason: params.reason ?? null,
-          payload: { prompt: params.prompt },
-          contextSnapshot: {
-            taskKey: session.taskKey,
-            spsPluginConversation: { pluginKey, sessionId: session.id, message: params.prompt,
-              ...(params.requestId === undefined ? {} : { requestId: params.requestId }) },
-            wakeSource: "automation",
-            wakeTriggerDetail: "system",
-            ...(session.contextJson ? session.contextJson : {}),
-          },
+          reason: sendParams.reason ?? null,
+          payload: { prompt: sendParams.prompt },
+          contextSnapshot: createSpsSessionDispatchContext({ pluginKey, sessionId: session.id, taskKey: session.taskKey,
+            prompt: sendParams.prompt, requestId: sendParams.requestId, reason: sendParams.reason, executionPolicy: executionPolicy ?? undefined,
+            sessionContext: session.contextJson as Record<string, unknown> | null }),
           requestedByActorType: "system",
           requestedByActorId: pluginId,
           ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
         });
         let run: { id: string } | null;
-        if (params.requestId !== undefined) {
-          const receipt = await sessionDispatches.dispatch({ ...params, companyId, requestId: params.requestId }, wake);
+        if (sendParams.requestId !== undefined) {
+          const receipt = await sessionDispatches.dispatch({ ...sendParams, requestId: sendParams.requestId }, wake);
           if (receipt.replayed) return { runId: receipt.runId };
           run = { id: receipt.runId };
         } else run = await wake();
@@ -3063,7 +3088,7 @@ export function buildHostServices(
           .set({ lastRunId: run.id, lastError: null, updatedAt: new Date() })
           .where(
             and(
-              eq(agentTaskSessionsTable.id, params.sessionId),
+              eq(agentTaskSessionsTable.id, sendParams.sessionId),
               eq(agentTaskSessionsTable.companyId, companyId),
               sql`starts_with(${agentTaskSessionsTable.taskKey}, ${`plugin:${pluginKey}:session:`})`,
             ),

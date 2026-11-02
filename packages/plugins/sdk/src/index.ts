@@ -340,6 +340,8 @@ export type {
   AgentSession,
   AgentSessionEnsureInput,
   AgentSessionEnsureResult,
+  AgentSessionExecutionPolicy,
+  AgentSessionPolicySupport,
   AgentSessionEvent,
   AgentSessionSendResult,
   PluginGoalsClient,

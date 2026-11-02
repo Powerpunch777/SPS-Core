@@ -11,13 +11,14 @@ describe("SPS registered Host API support snapshot", () => {
     const getter = vi.fn(() => handler);
     const handlers = Object.assign(Object.create({ "sps.runs.cancel": handler }), {
       "sps.connectivity.current": handler,
-      "agents.sessions.getRun": handler, "sps.runtimes.list": handler,
+      "agents.sessions.getRun": handler, "agents.sessions.describePolicySupport": handler,
+      "sps.runtimes.list": handler,
       "sps.runs.dispatch": null, "secrets.resolve": handler, "config.get": handler,
       "agents.sessions.close": handler,
     });
     Object.defineProperty(handlers, "agents.list", { get: getter });
     expect(describeSpsHostSupport(handlers)).toEqual({
-      contractVersion: "1.0", operations: ["agents.sessions.getRun", "sps.connectivity.current", "sps.runtimes.list"],
+      contractVersion: "1.0", operations: ["agents.sessions.describePolicySupport", "agents.sessions.getRun", "sps.connectivity.current", "sps.runtimes.list"],
     });
     expect(handler).not.toHaveBeenCalled();
     expect(getter).not.toHaveBeenCalled();
@@ -35,7 +36,9 @@ describe("SPS registered Host API support snapshot", () => {
     const connectivityHandler = vi.fn(async () => ({ state: "unavailable", transport: "native_tls",
       hostId: null, workspaceId: "11111111-1111-4111-8111-111111111111", authorization: "unknown",
       evidence: "none", observedAt: "2026-10-27T00:00:00.000Z" } as const));
-    const handlers = { "sps.runtimes.list": runtimeHandler, "sps.connectivity.current": connectivityHandler };
+    const policySupportHandler = vi.fn(async () => ({ modes: [] }));
+    const handlers = { "sps.runtimes.list": runtimeHandler, "sps.connectivity.current": connectivityHandler,
+      "agents.sessions.describePolicySupport": policySupportHandler };
     const manifest: PaperclipPluginManifestV1 = {
       id: "test.host-support", apiVersion: 1, version: "0.1.0", displayName: "Host support fixture",
       description: "Disposable transport fixture", author: "SPS", categories: ["automation"],
@@ -49,13 +52,15 @@ describe("SPS registered Host API support snapshot", () => {
     try {
       await handle.start();
       expect(await handle.call("getData", { key: "host-support", params: {} })).toEqual({
-        support: { contractVersion: "1.0", operations: ["sps.connectivity.current", "sps.runtimes.list"] },
+        support: { contractVersion: "1.0", operations: ["agents.sessions.describePolicySupport", "sps.connectivity.current", "sps.runtimes.list"] },
       });
       expect(runtimeHandler).not.toHaveBeenCalled();
       expect(connectivityHandler).not.toHaveBeenCalled();
+      expect(policySupportHandler).not.toHaveBeenCalled();
       await handle.stop();
       delete (handlers as Partial<typeof handlers>)["sps.runtimes.list"];
       delete (handlers as Partial<typeof handlers>)["sps.connectivity.current"];
+      delete (handlers as Partial<typeof handlers>)["agents.sessions.describePolicySupport"];
       await handle.start();
       expect(await handle.call("getData", { key: "host-support", params: {} })).toEqual({
         support: { contractVersion: "1.0", operations: [] },

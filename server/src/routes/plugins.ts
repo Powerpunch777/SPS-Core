@@ -989,7 +989,7 @@ export function pluginRoutes(
     tool: RegisteredTool,
     parameters: unknown,
     runContext: ToolRunContext,
-    session: Readonly<{ pluginKey: string; sessionId: string }> | null,
+    session: Awaited<ReturnType<typeof resolvePluginSessionToolContext>>,
   ) {
     const workers = bridgeDeps?.workspaceWorkers;
     if (!workers || !toolDeps) throw new Error("Workspace Plugin tool worker is unavailable.");
@@ -1005,6 +1005,9 @@ export function pluginRoutes(
     const boundSession = session ?? await resolvePluginSessionToolContext(db, runContext);
     if (!boundSession || boundSession.pluginKey !== plugin.pluginKey || tool.pluginId !== plugin.pluginKey
       || tool.pluginDbId !== plugin.id) throw forbidden("Workspace tools require their own active Plugin Agent session.");
+    if (boundSession.executionPolicy && !boundSession.executionPolicy.toolNames.includes(tool.name)) {
+      throw forbidden("This tool is not allowed by the run's session execution policy.");
+    }
     const verifiedContext = Object.freeze({ ...runContext, sessionId: boundSession.sessionId });
     const authority: WorkerInvocationAuthority = {
       boundWorkspaceId: runContext.companyId,
@@ -1023,7 +1026,9 @@ export function pluginRoutes(
         }
         const currentSession = await resolvePluginSessionToolContext(db, runContext);
         if (!currentSession || currentSession.pluginKey !== boundSession.pluginKey
-          || currentSession.sessionId !== boundSession.sessionId) {
+          || currentSession.sessionId !== boundSession.sessionId
+          || JSON.stringify(currentSession.executionPolicy ?? null) !== JSON.stringify(boundSession.executionPolicy ?? null)
+          || currentSession.executionPolicy && !currentSession.executionPolicy.toolNames.includes(currentTool.name)) {
           throw forbidden("Workspace tool Agent run or session is no longer active.");
         }
         if (!await toolAccess.isAllowed({ companyId: runContext.companyId, plugin: currentPlugin, agentId: runContext.agentId })) {
@@ -1506,10 +1511,13 @@ export function pluginRoutes(
       res.status(403).json({ error: "Agent credentials must include an Agent and company scope." });
       return;
     }
+    const runSession = req.actor.runId ? await resolvePluginSessionToolContext(db, { agentId, companyId, runId: req.actor.runId }) : null;
 
     const authorized = await Promise.all(tools.map(async (descriptor) => {
       const registeredTool = toolDeps.toolDispatcher.getTool(descriptor.name);
       if (!registeredTool) return false;
+      if (runSession?.executionPolicy && (registeredTool.pluginId !== runSession.pluginKey
+        || !runSession.executionPolicy.toolNames.includes(registeredTool.name))) return false;
       if (memoryDeps && !await memoryDeps.runtime.isSelectedProviderTool({
         companyId,
         pluginDbId: registeredTool.pluginDbId,
@@ -1587,7 +1595,15 @@ export function pluginRoutes(
     assertAgentToolRunIdentity(req, runContext);
     assertCompanyAccess(req, runContext.companyId);
     let sessionPluginKey: string | null = null;
-    let sessionContext: Readonly<{ pluginKey: string; sessionId: string }> | null = null;
+    let sessionContext: Awaited<ReturnType<typeof resolvePluginSessionToolContext>> = null;
+    if (req.actor.type === "agent" && req.actor.source === "agent_jwt") {
+      sessionContext = await resolvePluginSessionToolContext(db, runContext);
+      if (sessionContext?.executionPolicy) sessionPluginKey = sessionContext.pluginKey;
+    }
+    if (sessionContext?.executionPolicy && runContext.projectId !== undefined) {
+      res.status(403).json({ error: "Restricted plugin sessions use their verified session scope, not a caller-selected project." });
+      return;
+    }
     if (runContext.projectId === undefined) {
       if (req.actor.type !== "agent" || req.actor.source !== "agent_jwt"
         || req.actor.agentId !== runContext.agentId || req.actor.companyId !== runContext.companyId
@@ -1595,7 +1611,7 @@ export function pluginRoutes(
         res.status(403).json({ error: "Projectless tools require the exact active Plugin Agent session." });
         return;
       }
-      sessionContext = await resolvePluginSessionToolContext(db, runContext);
+      sessionContext ??= await resolvePluginSessionToolContext(db, runContext);
       sessionPluginKey = sessionContext?.pluginKey ?? null;
       if (!sessionPluginKey) {
         res.status(403).json({ error: "Projectless tools require the exact active Plugin Agent session." });
@@ -1618,7 +1634,15 @@ export function pluginRoutes(
       res.status(403).json({ error: "A projectless session can invoke only its own plugin's tools." });
       return;
     }
+    if (sessionContext?.executionPolicy && !sessionContext.executionPolicy.toolNames.includes(registeredTool.name)) {
+      res.status(403).json({ error: "This tool is not allowed by the run's session execution policy." });
+      return;
+    }
     const toolPlugin = await registry.getById(registeredTool.pluginDbId);
+    if (sessionContext?.executionPolicy && !toolPlugin?.manifestJson.entrypoints.workspaceWorker) {
+      res.status(403).json({ error: "Restricted sessions require invocation-bound Workspace plugin tools." });
+      return;
+    }
     if (sessionPluginKey && (!toolPlugin || toolPlugin.pluginKey !== sessionPluginKey)) {
       res.status(403).json({ error: "The session's plugin is unavailable." });
       return;

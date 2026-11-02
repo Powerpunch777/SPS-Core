@@ -64,6 +64,7 @@ import {
   prepareCodexExternalTools,
 } from "./codex-external-tools.js";
 import { SANDBOX_INSTALL_COMMAND } from "../index.js";
+import { applyCodexPluginSessionPolicy } from "./plugin-session-policy.js";
 import {
   CODEX_OUTPUT_INACTIVITY_MONITOR_SIGTERM_GRACE_MS,
   createCodexOutputInactivityMonitor,
@@ -334,6 +335,7 @@ export async function ensureCodexSkillsInjected(
 }
 
 export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
+  ctx = applyCodexPluginSessionPolicy(ctx);
   const executionTarget = readAdapterExecutionTarget({
     executionTarget: ctx.executionTarget,
     legacyRemoteExecution: ctx.executionTransport?.remoteExecution,

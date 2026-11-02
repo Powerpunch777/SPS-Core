@@ -12936,6 +12936,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           return;
         }
         preparePluginConversationContext(context);
+        if (pluginConversation?.executionPolicy && (agent.adapterType !== "codex_local"
+          || executionTarget && executionTarget.kind !== "local" || !externalTools)) {
+          throw new Error("The requested session execution policy is unsupported for this runtime; unrestricted fallback is forbidden.");
+        }
         adapterResult = await adapter.execute({
           runId: run.id,
           agent,

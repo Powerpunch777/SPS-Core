@@ -234,6 +234,7 @@ describePostgres("plugin agent session context", () => {
       create: { agentId, companyId },
       ensure: { agentId, companyId, taskKey: `plugin:${manifest().id}:session:ensure-scope` },
       list: { agentId, companyId },
+      describePolicySupport: { sessionId: session.sessionId, companyId },
       sendMessage: { sessionId: session.sessionId, companyId, prompt: "scoped message" },
       getRun: { sessionId: session.sessionId, companyId, runId: run.id },
       cancel: { sessionId: session.sessionId, companyId, runId: run.id },
@@ -244,6 +245,7 @@ describePostgres("plugin agent session context", () => {
         create: () => services.agentSessions.create(args.create),
         ensure: () => services.agentSessions.ensure(args.ensure),
         list: () => services.agentSessions.list(args.list),
+        describePolicySupport: () => services.agentSessions.describePolicySupport!(args.describePolicySupport),
         sendMessage: () => services.agentSessions.sendMessage(args.sendMessage),
         getRun: () => services.agentSessions.getRun(args.getRun),
         cancel: () => services.agentSessions.cancel(args.cancel),
@@ -254,7 +256,7 @@ describePostgres("plugin agent session context", () => {
     };
   }
 
-  const scopedSessionMethods = ["create", "ensure", "list", "sendMessage", "getRun", "cancel"] as const;
+  const scopedSessionMethods = ["create", "ensure", "list", "describePolicySupport", "sendMessage", "getRun", "cancel"] as const;
 
   it("exposes bounded Agent configuration without executing or widening the Workspace", async () => {
     const { services, companyId } = await seedCompanyAndPlugin();
@@ -264,6 +266,67 @@ describePostgres("plugin agent session context", () => {
       adapterRegistration: "registered", executionOwner: "adapter", authorization: "recheck_on_dispatch", readiness: "unknown", node: null });
     await expect(services.agents.describeExecution({ agentId, companyId: randomUUID() })).rejects.toThrow("Agent not found");
     expect(mockWakeup).not.toHaveBeenCalled();
+  });
+
+  it("refuses unsupported policy execution before scheduling rather than dropping the restriction", async () => {
+    const f = await seedSessionRun();
+    await expect(f.services.agentSessions.describePolicySupport!({ companyId: f.companyId, sessionId: f.session.sessionId }))
+      .resolves.toMatchObject({ modes: [], readiness: "unknown", osIsolation: "not-certified" });
+    await expect(f.services.agentSessions.sendMessage({ companyId: f.companyId, sessionId: f.session.sessionId,
+      requestId: randomUUID(), prompt: "Plan only", executionPolicy: { mode: "plugin-tools-only-v1", toolNames: ["read-plan"] } }))
+      .rejects.toThrow("unrestricted fallback is forbidden");
+    expect(mockWakeup).not.toHaveBeenCalled();
+    expect(await db.select().from(spsSessionDispatches)).toEqual([]);
+  });
+
+  it("requires both a durable ID and plugin-declared tools for restricted dispatch", async () => {
+    const f = await seedSessionRun();
+    await db.update(agents).set({ adapterType: "codex_local" }).where(eq(agents.id, f.agentId));
+    await db.update(plugins).set({ manifestJson: { ...f.pluginManifest, entrypoints: {
+      ...f.pluginManifest.entrypoints, workspaceWorker: "./workspace.js" } } }).where(eq(plugins.id, f.pluginId));
+    const params = { companyId: f.companyId, sessionId: f.session.sessionId, prompt: "Plan only",
+      executionPolicy: { mode: "plugin-tools-only-v1" as const, toolNames: ["read-plan"] } };
+    await expect(f.services.agentSessions.sendMessage(params)).rejects.toThrow("durable request ID");
+    await expect(f.services.agentSessions.sendMessage({ ...params, requestId: randomUUID() })).rejects.toThrow("not declared");
+    expect(mockWakeup).not.toHaveBeenCalled();
+    expect(await db.select().from(spsSessionDispatches)).toEqual([]);
+  });
+
+  it("does not route restricted runs through legacy Host-worker tools", async () => {
+    const f = await seedSessionRun();
+    await db.update(agents).set({ adapterType: "codex_local" }).where(eq(agents.id, f.agentId));
+    await expect(f.services.agentSessions.describePolicySupport!({ companyId: f.companyId, sessionId: f.session.sessionId }))
+      .resolves.toMatchObject({ modes: [] });
+    await expect(f.services.agentSessions.sendMessage({ companyId: f.companyId, sessionId: f.session.sessionId,
+      requestId: randomUUID(), prompt: "Plan only", executionPolicy: { mode: "plugin-tools-only-v1", toolNames: ["read-plan"] } }))
+      .rejects.toThrow("invocation-bound Workspace");
+    expect(mockWakeup).not.toHaveBeenCalled();
+  });
+
+  it("persists the detached exact run policy without changing Agent settings or trusting stored conversation fields", async () => {
+    const f = await seedSessionRun();
+    await db.update(agents).set({ adapterType: "codex_local", adapterConfig: { model: "preserved", cwd: "C:/private" } })
+      .where(eq(agents.id, f.agentId));
+    await db.update(plugins).set({ manifestJson: { ...f.pluginManifest, entrypoints: {
+      ...f.pluginManifest.entrypoints, workspaceWorker: "./workspace.js" }, tools: [{ name: "read-plan", displayName: "Read",
+      description: "Fixture", parametersSchema: { type: "object", properties: {} } }] } }).where(eq(plugins.id, f.pluginId));
+    await db.update(agentTaskSessions).set({ contextJson: { taskKey: "plugin:foreign:session:wrong",
+      spsPluginConversation: { pluginKey: "foreign", executionPolicy: undefined } } as never }).where(eq(agentTaskSessions.id, f.session.sessionId));
+    mockWakeup.mockImplementationOnce(async (agentId: string, wake: Record<string, any>) => db.insert(heartbeatRuns)
+      .values({ companyId: f.companyId, agentId, status: "running", contextSnapshot: wake.contextSnapshot }).returning().then(rows => rows[0]!));
+    const policy = { mode: "plugin-tools-only-v1" as const, toolNames: ["read-plan"] };
+    const requestId = randomUUID();
+    const sending = f.services.agentSessions.sendMessage({ companyId: f.companyId, sessionId: f.session.sessionId,
+      requestId, prompt: "Exact planning request", reason: "plan", executionPolicy: policy });
+    policy.toolNames[0] = "write-code";
+    const result = await sending;
+    const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, result.runId));
+    expect(run!.contextSnapshot!.spsPluginConversation).toEqual({ pluginKey: f.pluginManifest.id,
+      sessionId: f.session.sessionId, requestId, message: "Exact planning request", reason: "plan",
+      executionPolicy: { mode: "plugin-tools-only-v1", toolNames: ["read-plan"] } });
+    const [stored] = await db.select().from(agents).where(eq(agents.id, f.agentId));
+    expect(stored!.adapterConfig).toEqual({ model: "preserved", cwd: "C:/private" });
+    expect(mockWakeup).toHaveBeenCalledOnce();
   });
 
   it.each(scopedSessionMethods)("requires a live Workspace Agent Session scope for %s", async method => {
@@ -1264,17 +1327,19 @@ describePostgres("plugin agent session context", () => {
     expect(dbRow?.lastError).toBe("Observed fallback error");
   });
 
-  async function dispatchFixture() {
+  async function dispatchFixture(executionPolicy?: { mode: "plugin-tools-only-v1"; toolNames: readonly string[] }) {
     const fixture = await seedCompanyAndPlugin();
     const agentId = await seedAgent(fixture.companyId);
     const session = await fixture.services.agentSessions.create({ agentId, companyId: fixture.companyId });
     const stored = await db.select().from(agentTaskSessions).where(eq(agentTaskSessions.id, session.sessionId)).then(rows => rows[0]!);
-    const input = { companyId: fixture.companyId, sessionId: session.sessionId, requestId: randomUUID(), prompt: "A durable turn" };
+    const input = { companyId: fixture.companyId, sessionId: session.sessionId, requestId: randomUUID(), prompt: "A durable turn",
+      ...(executionPolicy ? { executionPolicy, reason: "restricted-plan" } : {}) };
     const service = spsSessionDispatchService(db, fixture.pluginId, fixture.pluginManifest.id, async () => {});
     const wake = vi.fn(async (key: string) => {
       const run = await db.insert(heartbeatRuns).values({ companyId: fixture.companyId, agentId, status: "running",
         contextSnapshot: { taskKey: stored.taskKey, spsPluginConversation: {
           pluginKey: fixture.pluginManifest.id, sessionId: session.sessionId, requestId: input.requestId,
+          ...(executionPolicy ? { executionPolicy, message: input.prompt, reason: input.reason } : {}),
         } },
       }).returning().then(rows => rows[0]!);
       await db.insert(agentWakeupRequests).values({ companyId: fixture.companyId, agentId, source: "automation",
@@ -1294,6 +1359,49 @@ describePostgres("plugin agent session context", () => {
     const rows = await db.select().from(spsSessionDispatches);
     expect(rows).toHaveLength(1);
     expect(JSON.stringify(rows)).not.toContain(f.input.prompt);
+  });
+
+  it("binds a durable restricted request to its exact tool policy across service restarts", async () => {
+    const f = await dispatchFixture({ mode: "plugin-tools-only-v1", toolNames: ["read-plan", "ack-plan"] });
+    const first = await f.service.dispatch(f.input, f.wake);
+    const restarted = spsSessionDispatchService(db, f.pluginId, f.pluginManifest.id, async () => {});
+    await expect(restarted.dispatch({ ...f.input, executionPolicy: { mode: "plugin-tools-only-v1",
+      toolNames: ["ack-plan", "read-plan"] } }, f.wake)).resolves.toEqual({ runId: first.runId, replayed: true });
+    for (const executionPolicy of [undefined, { mode: "plugin-tools-only-v1" as const, toolNames: ["read-plan"] }]) {
+      await expect(restarted.dispatch({ ...f.input, executionPolicy }, f.wake)).rejects.toThrow(/unresolved/);
+    }
+    expect(f.wake).toHaveBeenCalledOnce();
+  });
+
+  it("recovers a lost restricted response only when the stored run retains the exact policy and message", async () => {
+    const f = await dispatchFixture({ mode: "plugin-tools-only-v1", toolNames: ["read-plan"] });
+    await expect(f.service.dispatch(f.input, async key => { await f.wake(key); throw new Error("lost"); })).rejects.toThrow(/unresolved/);
+    const [run] = await db.select().from(heartbeatRuns);
+    const original = structuredClone(run!.contextSnapshot!);
+    for (const patch of [{ executionPolicy: undefined }, { executionPolicy: { mode: "plugin-tools-only-v1", toolNames: ["write-code"] } },
+      { message: "Different message" }, { reason: "Different reason" }]) {
+      await db.update(heartbeatRuns).set({ contextSnapshot: { ...original, spsPluginConversation: {
+        ...(original.spsPluginConversation as Record<string, unknown>), ...patch } } }).where(eq(heartbeatRuns.id, run!.id));
+      await expect(f.service.getRequest(f.input)).rejects.toThrow(/unresolved/);
+    }
+    await db.update(heartbeatRuns).set({ contextSnapshot: original }).where(eq(heartbeatRuns.id, run!.id));
+    await expect(f.service.getRequest(f.input)).resolves.toMatchObject({ state: "submitted", runId: run!.id });
+    expect(f.wake).toHaveBeenCalledOnce();
+  });
+
+  it("refuses an accepted run that dropped the requested execution restriction", async () => {
+    const f = await dispatchFixture({ mode: "plugin-tools-only-v1", toolNames: ["read-plan"] });
+    await expect(f.service.dispatch(f.input, async key => {
+      const run = await f.wake(key);
+      const context = structuredClone(run.contextSnapshot!);
+      delete (context.spsPluginConversation as Record<string, unknown>).executionPolicy;
+      await db.update(heartbeatRuns).set({ contextSnapshot: context }).where(eq(heartbeatRuns.id, run.id));
+      return run;
+    })).rejects.toThrow(/unresolved/);
+    const [receipt] = await db.select().from(spsSessionDispatches);
+    expect(receipt).toMatchObject({ state: "uncertain", runId: null });
+    await expect(f.service.getRequest(f.input)).rejects.toThrow(/unresolved/);
+    expect(f.wake).toHaveBeenCalledOnce();
   });
 
   it("concurrent duplicate requests reserve once and never replay a pending dispatch", async () => {

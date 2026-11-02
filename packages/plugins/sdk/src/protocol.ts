@@ -1688,6 +1688,10 @@ export interface WorkerToHostMethods {
     params: { sessionId: string; companyId: string; requestId: string },
     result: import("./types.js").AgentSessionRequestState | null,
   ];
+  "agents.sessions.describePolicySupport": [
+    params: { sessionId: string; companyId: string },
+    result: import("./types.js").AgentSessionPolicySupport,
+  ];
   "agents.sessions.getRun": [
     params: { sessionId: string; companyId: string; runId: string },
     result: import("./types.js").AgentSessionRunState,
@@ -1709,7 +1713,7 @@ export interface WorkerToHostMethods {
     result: Array<{ sessionId: string; agentId: string; companyId: string; status: "active" | "closed"; createdAt: string; context?: AgentSessionContext; lastRunId: string | null; lastError: string | null }>,
   ];
   "agents.sessions.sendMessage": [
-    params: { sessionId: string; companyId: string; prompt: string; reason?: string; requestId?: string },
+    params: { sessionId: string; companyId: string; prompt: string; reason?: string; requestId?: string; executionPolicy?: import("./types.js").AgentSessionExecutionPolicy },
     result: { runId: string },
   ];
   "agents.sessions.close": [

@@ -1239,6 +1239,9 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
           async cancel(sessionId: string, companyId: string, runId: string) {
             return callHost("agents.sessions.cancel", { sessionId, companyId, runId });
           },
+          async describePolicySupport(sessionId: string, companyId: string) {
+            return callHost("agents.sessions.describePolicySupport", { sessionId, companyId });
+          },
           async create(agentId: string, companyId: string, opts?: { taskKey?: string; reason?: string; context?: AgentSessionContext }) {
             return callHost("agents.sessions.create", {
               agentId,
@@ -1257,6 +1260,7 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
             prompt: string;
             reason?: string;
             requestId?: string;
+            executionPolicy?: import("./types.js").AgentSessionExecutionPolicy;
             onEvent?: (event: AgentSessionEvent) => void;
           }) {
             if (opts.onEvent) {
@@ -1269,6 +1273,7 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
                 prompt: opts.prompt,
                 reason: opts.reason,
                 requestId: opts.requestId,
+                executionPolicy: opts.executionPolicy,
               });
             } catch (err) {
               sessionEventCallbacks.delete(sessionId);

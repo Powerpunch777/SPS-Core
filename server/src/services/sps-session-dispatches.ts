@@ -2,10 +2,11 @@ import { createHash } from "node:crypto";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { agentTaskSessions, agentWakeupRequests, companies, heartbeatRuns, spsSessionDispatches, type Db } from "../compat/paperclip/db.js";
 import { lockSpsWorkspaceExecutionControl } from "./sps-workspace-execution-control.js";
+import { parseSpsSessionExecutionPolicy, type SpsSessionExecutionPolicy } from "@paperclipai/adapter-utils/sps-session-policy";
 
 const uuid = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/;
 type Scope = { companyId: string; sessionId: string; requestId: string };
-type Send = Scope & { prompt: string; reason?: string };
+type Send = Scope & { prompt: string; reason?: string; executionPolicy?: SpsSessionExecutionPolicy };
 type Receipt = { requestId: string; state: "pending" | "submitted" | "uncertain"; runId: string | null };
 const unavailable = () => new Error("Session request is unavailable or unresolved; query the same request before taking further action");
 
@@ -15,7 +16,21 @@ export function validateSessionDispatch(input: Send) {
     || /[\u0000\ufffd]/u.test(input.prompt)
     || input.reason !== undefined && (typeof input.reason !== "string" || Buffer.byteLength(input.reason, "utf8") > 1_024
       || /[\u0000-\u001f\u007f\ufffd]/u.test(input.reason))) throw unavailable();
-  return createHash("sha256").update(JSON.stringify([input.sessionId, input.prompt, input.reason ?? null])).digest("hex");
+  const policy = parseSpsSessionExecutionPolicy(input.executionPolicy);
+  // Preserve legacy request digests byte-for-byte when no policy was requested.
+  const fields = [input.sessionId, input.prompt, input.reason ?? null];
+  const digest = createHash("sha256").update(JSON.stringify(policy ? [...fields, policy] : fields)).digest("hex");
+  return policy ? `policy-v1:${digest}` : digest;
+}
+
+function matchesRestrictedReceipt(row: { requestDigest: string }, input: Scope, conversation: Record<string, unknown> | undefined): boolean {
+  if (!row.requestDigest.startsWith("policy-v1:")) return true;
+  try {
+    if (!conversation || !parseSpsSessionExecutionPolicy(conversation.executionPolicy)) return false;
+    return validateSessionDispatch({ ...input, prompt: conversation.message as string,
+      reason: conversation.reason as string | undefined,
+      executionPolicy: conversation.executionPolicy as SpsSessionExecutionPolicy }) === row.requestDigest;
+  } catch { return false; }
 }
 
 // A durable at-most-once admission receipt, not an exactly-once provider promise.
@@ -59,7 +74,8 @@ export function spsSessionDispatchService(db: Db, pluginId: string, pluginKey: s
         const conversation = run?.contextSnapshot?.spsPluginConversation as Record<string, unknown> | undefined;
         await assertCurrent(input.companyId);
         if (!run || run.contextSnapshot?.taskKey !== session.taskKey || conversation?.pluginKey !== pluginKey
-          || conversation.sessionId !== input.sessionId || conversation.requestId !== input.requestId) throw unavailable();
+          || conversation.sessionId !== input.sessionId || conversation.requestId !== input.requestId
+          || !matchesRestrictedReceipt(row, input, conversation)) throw unavailable();
         const updated = await db.update(spsSessionDispatches).set({ state: "submitted", runId: run.id, updatedAt: new Date() })
           .where(and(conditions(input), inArray(spsSessionDispatches.state, ["pending", "uncertain"]))).returning();
         row = updated[0] ?? await db.select().from(spsSessionDispatches).where(conditions(input)).then(rows => rows[0]!);
@@ -70,7 +86,7 @@ export function spsSessionDispatchService(db: Db, pluginId: string, pluginKey: s
   }
   async function dispatch(input: Send, wake: (key: string) => Promise<{ id: string } | null>): Promise<{ runId: string; replayed: boolean }> {
     const requestDigest = validateSessionDispatch(input);
-    await owned(input);
+    const ownedSession = await owned(input);
     const claim = await db.transaction(async tx => {
       const control = await lockSpsWorkspaceExecutionControl(tx, input.companyId);
       const session = await tx.select().from(agentTaskSessions).where(and(eq(agentTaskSessions.id, input.sessionId),
@@ -116,7 +132,9 @@ export function spsSessionDispatchService(db: Db, pluginId: string, pluginKey: s
         eq(heartbeatRuns.companyId, input.companyId))).then(rows => rows[0]);
       const conversation = accepted?.contextSnapshot?.spsPluginConversation as Record<string, unknown> | undefined;
       if (!accepted || conversation?.pluginKey !== pluginKey || conversation.sessionId !== input.sessionId
-        || conversation.requestId !== input.requestId) throw unavailable();
+        || conversation.requestId !== input.requestId
+        || accepted.agentId !== ownedSession.agentId || accepted.contextSnapshot?.taskKey !== ownedSession.taskKey
+        || !matchesRestrictedReceipt({ requestDigest }, input, conversation)) throw unavailable();
       // Persist acceptance even if caller authority was revoked while wakeup ran.
       // No stale caller receives it; subsequent reads still recheck authority.
       await db.update(spsSessionDispatches).set({ state: "submitted", runId: run.id, updatedAt: new Date() })
