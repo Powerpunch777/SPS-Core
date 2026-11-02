@@ -438,7 +438,7 @@ function aggregateLoadState(contributions: PluginUiContribution[]): "loading" | 
  * who consume slots via `usePluginSlots()` automatically get module loading
  * without extra wiring.
  */
-function usePluginModuleLoader(contributions: PluginUiContribution[] | undefined) {
+export function usePluginModuleLoader(contributions: PluginUiContribution[] | undefined) {
   const [, setTick] = useState(0);
 
   useEffect(() => {

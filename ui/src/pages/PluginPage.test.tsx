@@ -10,12 +10,14 @@ const mockPluginsApi = vi.hoisted(() => ({
 }));
 
 const mockSetBreadcrumbs = vi.hoisted(() => vi.fn());
+const mockModuleLoader = vi.hoisted(() => vi.fn());
 const mockParams = vi.hoisted(() => ({
   companyPrefix: "PAP" as string | undefined,
   pluginId: undefined as string | undefined,
   pluginRoutePath: undefined as string | undefined,
   "*": undefined as string | undefined,
 }));
+const mockOutletContext = vi.hoisted(() => ({ current: null as unknown }));
 
 vi.mock("@/api/plugins", () => ({
   pluginsApi: mockPluginsApi,
@@ -37,6 +39,7 @@ vi.mock("@/context/CompanyContext", () => ({
 vi.mock("@/lib/router", () => ({
   Link: ({ to, children }: { to: string; children: React.ReactNode }) => <a href={to}>{children}</a>,
   Navigate: () => null,
+  useOutletContext: () => mockOutletContext.current,
   useParams: () => mockParams,
   useSearchParams: () => [new URLSearchParams(), vi.fn()],
 }));
@@ -45,6 +48,7 @@ vi.mock("@/plugins/slots", async () => {
   const actual = await vi.importActual<typeof import("@/plugins/slots")>("@/plugins/slots");
   return {
     resolveRouteSidebarSlot: actual.resolveRouteSidebarSlot,
+    usePluginModuleLoader: mockModuleLoader,
     PluginSlotMount: ({ slot }: { slot: { displayName: string } }) => (
       <div data-testid="plugin-slot-mount">{slot.displayName}</div>
     ),
@@ -116,6 +120,7 @@ describe("PluginPage", () => {
     mockParams.pluginId = undefined;
     mockParams.pluginRoutePath = undefined;
     mockParams["*"] = undefined;
+    mockOutletContext.current = null;
     document.head.querySelectorAll('meta[name^="sps-"]').forEach((element) => element.remove());
   });
 
@@ -292,6 +297,73 @@ describe("PluginPage", () => {
     await act(async () => {
       root.unmount();
     });
+  });
+
+  it("uses contributions already validated by the matching Workspace layout without refetching", async () => {
+    mockParams.pluginRoutePath = "wiki";
+    document.head.insertAdjacentHTML(
+      "beforeend",
+      '<meta name="sps-basic-mode" content="true"><meta name="sps-core-baseline-mode" content="true">',
+    );
+    mockOutletContext.current = {
+      source: "sps-workspace-layout",
+      companyId: "company-1",
+      contributions: [pageContribution()],
+    };
+
+    const root = await renderPage(container);
+
+    expect(mockPluginsApi.listUiContributions).not.toHaveBeenCalled();
+    expect(container.querySelector('[data-testid="plugin-slot-mount"]')?.textContent).toBe("Wiki");
+    expect(mockModuleLoader).toHaveBeenLastCalledWith([pageContribution()]);
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it("ignores Workspace layout metadata for a different company and uses the resolved company query", async () => {
+    mockParams.pluginRoutePath = "wiki";
+    mockOutletContext.current = {
+      source: "sps-workspace-layout",
+      companyId: "company-other",
+      contributions: [pageContribution({ slots: [{
+        type: "page",
+        id: "other-wiki-page",
+        displayName: "Other Company Wiki",
+        exportName: "OtherWikiPage",
+        routePath: "wiki",
+      }] })],
+    };
+    mockPluginsApi.listUiContributions.mockResolvedValue([pageContribution()]);
+
+    const root = await renderPage(container);
+
+    expect(mockPluginsApi.listUiContributions).toHaveBeenCalledTimes(1);
+    expect(mockPluginsApi.listUiContributions).toHaveBeenCalledWith("company-1");
+    expect(container.querySelector('[data-testid="plugin-slot-mount"]')?.textContent).toBe("Wiki");
+    expect(container.textContent).not.toContain("Other Company Wiki");
+
+    await act(async () => {
+      root.unmount();
+    });
+  });
+
+  it("loads only the selected standalone plugin module and adds no Back chrome on its id route", async () => {
+    mockParams.pluginId = "plugin-wiki";
+    document.head.insertAdjacentHTML("beforeend",
+      '<meta name="sps-basic-mode" content="true"><meta name="sps-core-baseline-mode" content="true">');
+    const selected = pageContribution();
+    mockOutletContext.current = {
+      source: "sps-workspace-layout", companyId: "company-1",
+      contributions: [selected, { ...pageContribution(), pluginId: "other-plugin", pluginKey: "other.plugin" }],
+    };
+    const root = await renderPage(container);
+    expect(mockPluginsApi.listUiContributions).not.toHaveBeenCalled();
+    expect(mockModuleLoader).toHaveBeenLastCalledWith([selected]);
+    expect(container.querySelector('[data-testid="plugin-slot-mount"]')?.textContent).toBe("Wiki");
+    expect(container.textContent).not.toContain("Back");
+    await act(async () => root.unmount());
   });
 
   it("uses the selected plugin page path as the route-sidebar title", async () => {
