@@ -67,6 +67,8 @@ describe("Codex plugin session runtime policy", () => {
       "-c", 'approval_policy="never"',
       "-c", 'web_search="disabled"',
       "-c", 'mcp_servers.sps-plugin-session.enabled_tools=["list_plugin_tools", "execute_plugin_tool"]',
+      "-c", 'mcp_servers.sps-plugin-session.tools.list_plugin_tools.approval_mode="approve"',
+      "-c", 'mcp_servers.sps-plugin-session.tools.execute_plugin_tool.approval_mode="approve"',
       "--disable", "shell_tool",
       "--disable", "multi_agent",
       "--disable", "plugins",
@@ -78,6 +80,13 @@ describe("Codex plugin session runtime policy", () => {
       "--disable", "code_mode_host",
       "--disable", "image_generation",
       "--disable", "workspace_dependencies",
+    ]);
+    const approvalOverrides = Array.isArray(guarded.config.extraArgs)
+      ? guarded.config.extraArgs.filter((arg: unknown) => typeof arg === "string"
+        && arg.startsWith("mcp_servers.") && arg.includes(".approval_mode=")) : null;
+    expect(approvalOverrides).toEqual([
+      'mcp_servers.sps-plugin-session.tools.list_plugin_tools.approval_mode="approve"',
+      'mcp_servers.sps-plugin-session.tools.execute_plugin_tool.approval_mode="approve"',
     ]);
     expect(ctx.config).toEqual(configBefore);
     expect(ctx.context).toEqual(contextBefore);

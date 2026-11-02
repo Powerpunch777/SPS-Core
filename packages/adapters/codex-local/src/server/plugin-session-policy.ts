@@ -9,6 +9,8 @@ const CODEX_PLUGIN_SESSION_ARGS = [
   "-c", 'approval_policy="never"',
   "-c", 'web_search="disabled"',
   "-c", 'mcp_servers.sps-plugin-session.enabled_tools=["list_plugin_tools", "execute_plugin_tool"]',
+  "-c", 'mcp_servers.sps-plugin-session.tools.list_plugin_tools.approval_mode="approve"',
+  "-c", 'mcp_servers.sps-plugin-session.tools.execute_plugin_tool.approval_mode="approve"',
   ...[
     "shell_tool",
     "multi_agent",
