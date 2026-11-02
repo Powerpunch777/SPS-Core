@@ -1,4 +1,4 @@
-import { z } from "zod";
+import { z } from "zod/v3";
 import {
   EXTERNAL_OBJECT_LIVENESS_STATES,
   EXTERNAL_OBJECT_MENTION_CONFIDENCES,

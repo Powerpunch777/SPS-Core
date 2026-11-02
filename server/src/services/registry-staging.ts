@@ -1,15 +1,61 @@
 import { createHash } from "node:crypto";
-import { promises as fs } from "node:fs";
+import { constants, promises as fs, type BigIntStats } from "node:fs";
 import path from "node:path";
+import { z } from "zod/v3";
 import {
   assertRegistryRuntimeArtifactMatchesStatic,
   parseRegistryStaticPluginManifest,
   type RegistryStaticPluginManifest,
 } from "./registry-static-manifest.js";
 import type { PluginDatabaseMigrationPlan } from "./plugin-database.js";
+import type { SpsPluginArtifactMaintenance } from "./sps-plugin-artifact-maintenance.js";
 
 const STAGING_INDEX_FILE = "registry-stages.json";
 const SHA256 = /^[a-f0-9]{64}$/;
+const MAX_REFERENCE_INDEX_BYTES = 8 * 1024 * 1024;
+const boundedText = (maximum: number) => z.string().min(1).max(maximum).regex(/^[^\u0000-\u001f\u007f]+$/);
+const referenceVersion = boundedText(128);
+const referenceCapability = boundedText(200);
+const referenceCapabilities = z.array(referenceCapability).max(1000).refine(values => new Set(values).size === values.length);
+const referencePluginId = z.string().regex(/^[a-z0-9][a-z0-9.-]{2,127}$/);
+const referenceMigrationPlan = z.object({
+  pluginId: z.string().uuid(), pluginKey: referencePluginId, targetVersion: referenceVersion,
+  namespaceName: z.string().min(1).max(63).regex(/^[A-Za-z_][A-Za-z0-9_]*$/),
+  hasAppliedMigrations: z.boolean(), requiresHostApproval: z.boolean(), reviewHash: z.string().regex(SHA256),
+  pendingMigrations: z.array(z.object({
+    migrationKey: boundedText(512), checksum: z.string().regex(SHA256),
+    statementCount: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+    operationKinds: z.array(z.enum(["create", "alter", "insert", "update", "comment", "other"])).max(6)
+      .refine(values => new Set(values).size === values.length),
+  }).strict()).max(1000).refine(values => new Set(values.map(value => value.migrationKey)).size === values.length),
+}).strict();
+const referenceRecord = z.object({
+  stageId: z.string().regex(/^[a-f0-9]{32}$/), pluginId: referencePluginId,
+  version: referenceVersion, packageName: boundedText(256), packageRoot: boundedText(32_768),
+  artifactSha256: z.string().regex(SHA256),
+  staticManifest: z.object({
+    schemaVersion: z.literal(1),
+    plugin: z.object({ id: referencePluginId, version: referenceVersion, apiVersion: boundedText(64) }).strict(),
+    runtime: z.object({ manifestEntry: boundedText(512), manifestSha256: z.string().regex(SHA256) }).strict(),
+    capabilities: referenceCapabilities, permissionsDigest: z.string().regex(SHA256),
+  }).strict(),
+  source: z.object({ registryId: boundedText(128), kind: z.enum(["local", "git", "official"]), releaseLocator: boundedText(2048) }).strict(),
+  status: z.enum(["staged", "review_pending", "registered"]),
+  review: z.object({
+    pluginRecordId: z.string().uuid(), targetVersion: referenceVersion, addedCapabilities: referenceCapabilities,
+    migrationPlan: referenceMigrationPlan.nullable(), requestedAt: z.string().datetime(),
+  }).strict().nullable(),
+  stagedAt: z.string().datetime(),
+}).strict();
+const referenceIndex = z.array(referenceRecord).max(10_000);
+
+/** Host-private protection reference only; neither filesystem ownership nor deletion authority. */
+export interface RegistryStageArtifactReference {
+  readonly stageId: string;
+  readonly pluginId: string;
+  readonly status: RegistryStagedPluginRecord["status"];
+  readonly packageRoot: string;
+}
 
 export interface RegistryStagedPluginRecord {
   stageId: string;
@@ -58,6 +104,139 @@ function stageIdFor(pluginId: string, version: string, artifactSha256: string): 
   return createHash("sha256").update(`${pluginId}\n${version}\n${artifactSha256}`, "utf8").digest("hex").slice(0, 32);
 }
 
+const referencesUnavailable = () => new Error("Registry stage artifact references are unavailable; preserve staged packages.");
+const sameIdentity = (left: BigIntStats, right: BigIntStats) =>
+  left.dev === right.dev && left.ino === right.ino && left.birthtimeNs === right.birthtimeNs;
+const sameMetadata = (left: BigIntStats, right: BigIntStats) => sameIdentity(left, right)
+  && left.size === right.size && left.nlink === right.nlink && left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs;
+
+async function referenceLstat(absolute: string): Promise<BigIntStats | null> {
+  try { return await fs.lstat(absolute, { bigint: true }); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+async function captureReferenceAncestry(absolute: string) {
+  const directories: Array<{ absolute: string; stats: BigIntStats | null }> = [];
+  for (let current = absolute;; current = path.dirname(current)) {
+    const stats = await referenceLstat(current);
+    if (stats && (!stats.isDirectory() || stats.isSymbolicLink())) throw referencesUnavailable();
+    directories.push({ absolute: current, stats });
+    if (path.dirname(current) === current) break;
+  }
+  return directories;
+}
+
+async function captureReferenceDirectories(absolute: string) {
+  const directories = await captureReferenceAncestry(absolute);
+  const existing = directories.find(directory => directory.stats);
+  if (!existing?.stats) throw referencesUnavailable();
+  const canonicalExisting = await fs.realpath(existing.absolute);
+  const canonicalDirectories = await captureReferenceAncestry(canonicalExisting);
+  const resolved = canonicalDirectories[0]!.stats;
+  if (!resolved || !sameIdentity(existing.stats, resolved)) throw referencesUnavailable();
+  // Preserve missing descendants while resolving only an existing, link-free
+  // parent. Windows case/8.3 aliases must identify the same captured directory.
+  const canonicalRoot = path.resolve(canonicalExisting, path.relative(existing.absolute, absolute));
+  return { directories, existing, canonicalExisting, canonicalDirectories, canonicalRoot };
+}
+
+async function recheckReferenceAncestry(directories: Awaited<ReturnType<typeof captureReferenceAncestry>>, membership: boolean) {
+  for (const [index, original] of directories.entries()) {
+    const current = await referenceLstat(original.absolute);
+    if (!original.stats) {
+      if (current) throw referencesUnavailable();
+    } else if (!current || !current.isDirectory() || current.isSymbolicLink()
+      || !(membership && index === 0 ? sameMetadata(original.stats, current) : sameIdentity(original.stats, current))) {
+      throw referencesUnavailable();
+    }
+  }
+}
+
+async function recheckReferenceDirectories(captured: Awaited<ReturnType<typeof captureReferenceDirectories>>, membership = false) {
+  await recheckReferenceAncestry(captured.directories, membership);
+  await recheckReferenceAncestry(captured.canonicalDirectories, membership && captured.directories[0]!.stats !== null);
+  if (await fs.realpath(captured.existing.absolute) !== captured.canonicalExisting) throw referencesUnavailable();
+}
+
+async function readReferenceIndex(indexPath: string, before: BigIntStats): Promise<unknown> {
+  if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1n
+    || before.size > BigInt(MAX_REFERENCE_INDEX_BYTES)) throw referencesUnavailable();
+  const handle = await fs.open(indexPath, constants.O_RDONLY
+    | (process.platform === "win32" ? 0 : constants.O_NOFOLLOW | constants.O_NONBLOCK));
+  try {
+    const opened = await handle.stat({ bigint: true });
+    if (!opened.isFile() || !sameMetadata(before, opened)) throw referencesUnavailable();
+    const buffer = Buffer.alloc(Number(before.size) + 1);
+    let length = 0;
+    for (;;) {
+      const { bytesRead } = await handle.read(buffer, length, buffer.length - length, length);
+      if (bytesRead === 0) break;
+      length += bytesRead;
+      if (length > Number(before.size)) throw referencesUnavailable();
+    }
+    if (length !== Number(before.size) || !sameMetadata(before, await handle.stat({ bigint: true }))) throw referencesUnavailable();
+    const text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(buffer.subarray(0, length));
+    const normalized = (text.startsWith("\uFEFF") ? text.slice(1) : text).replace(/\r\n/g, "\n");
+    const value: unknown = JSON.parse(normalized);
+    // Only the current pretty-JSON writer spelling is readable here, with an
+    // optional final newline/BOM/CRLF. Duplicate (also escaped) keys cannot round-trip.
+    const writerText = JSON.stringify(value, null, 2);
+    if (normalized !== writerText && normalized !== `${writerText}\n`) throw referencesUnavailable();
+    return value;
+  } finally { await handle.close(); }
+}
+
+async function readRegistryArtifactReferences(root: string, indexPath: string): Promise<readonly RegistryStageArtifactReference[]> {
+  try {
+    if (root.length > 32_768 || /[\u0000-\u001f\u007f]/.test(root)) throw referencesUnavailable();
+    const directories = await captureReferenceDirectories(root);
+    const referenceStorageRoot = directories.canonicalRoot;
+    const before = await referenceLstat(indexPath);
+    if (!before) {
+      await recheckReferenceDirectories(directories, true);
+      if (await referenceLstat(indexPath)) throw referencesUnavailable();
+      return Object.freeze([]);
+    }
+    const records = referenceIndex.parse(await readReferenceIndex(indexPath, before));
+    const ids = new Set<string>();
+    for (const record of records) {
+      parseRegistryStaticPluginManifest(record.staticManifest);
+      if (ids.has(record.stageId) || record.stageId !== stageIdFor(record.pluginId, record.version, record.artifactSha256)
+        || record.pluginId !== record.staticManifest.plugin.id || record.version !== record.staticManifest.plugin.version
+        || !path.isAbsolute(record.packageRoot) || path.resolve(record.packageRoot) !== record.packageRoot
+        || path.relative(path.parse(record.packageRoot).root, record.packageRoot).split(path.sep)
+          .some(part => /[:\u0000-\u001f\u007f]|[. ]$/.test(part))
+        || (record.status === "review_pending") !== (record.review !== null)) throw referencesUnavailable();
+      ids.add(record.stageId);
+      if (record.review) {
+        const review = record.review;
+        const plan = review.migrationPlan;
+        if (review.targetVersion !== record.version
+          || review.addedCapabilities.some(capability => !record.staticManifest.capabilities.includes(capability))
+          || plan && (plan.pluginId !== review.pluginRecordId || plan.pluginKey !== record.pluginId || plan.targetVersion !== record.version)) {
+          throw referencesUnavailable();
+        }
+      }
+    }
+    // Missing package directories remain references. Existing links are not adopted.
+    const packageDirectories = [];
+    for (const record of records) {
+      const captured = await captureReferenceDirectories(record.packageRoot);
+      if (!isPathInside(referenceStorageRoot, captured.canonicalRoot)) throw referencesUnavailable();
+      packageDirectories.push(captured);
+    }
+    for (const captured of packageDirectories) await recheckReferenceDirectories(captured);
+    await recheckReferenceDirectories(directories, true);
+    const after = await referenceLstat(indexPath);
+    if (!after || !after.isFile() || after.isSymbolicLink() || !sameMetadata(before, after)) throw referencesUnavailable();
+    return Object.freeze(records.map(({ stageId, pluginId, status, packageRoot }) =>
+      Object.freeze({ stageId, pluginId, status, packageRoot })));
+  } catch { throw referencesUnavailable(); }
+}
+
 function validateStageSource(source: RegistryStagedPluginRecord["source"]): void {
   if (!isPlainObject(source)) throw new Error("Registry stage source must be an object.");
   if (typeof source.registryId !== "string" || source.registryId.length === 0 || source.registryId.length > 128) {
@@ -91,9 +270,13 @@ async function writeIndex(indexPath: string, records: RegistryStagedPluginRecord
  * Packages enter this store only after a safe extractor produced their folder;
  * no dynamic manifest, migration, worker, or plugin code is loaded here.
  */
-export function registryStagingService(stagingRoot: string) {
+export function registryStagingService(stagingRoot: string, artifactMaintenance?: SpsPluginArtifactMaintenance) {
   const root = path.resolve(stagingRoot);
   const indexPath = path.join(root, STAGING_INDEX_FILE);
+  const withArtifactActivity = <Args extends unknown[], Result>(action: (...args: Args) => Promise<Result>) =>
+    async (...args: Args): Promise<Result> => artifactMaintenance
+      ? artifactMaintenance.withActivity(() => action(...args))
+      : action(...args);
 
   async function resolveManagedPackageRoot(packageRoot: string): Promise<string> {
     await fs.mkdir(root, { recursive: true, mode: 0o700 });
@@ -110,6 +293,9 @@ export function registryStagingService(stagingRoot: string) {
   }
 
   return {
+    /** Strict Host-private snapshot; unavailable is never an empty reference set. */
+    readArtifactReferences: async (): Promise<readonly RegistryStageArtifactReference[]> => readRegistryArtifactReferences(root, indexPath),
+
     list: async (): Promise<RegistryStagedPluginRecord[]> => await readIndex(indexPath),
 
     get: async (stageId: string): Promise<RegistryStagedPluginRecord | null> => {
@@ -124,7 +310,7 @@ export function registryStagingService(stagingRoot: string) {
       ) ?? null;
     },
 
-    stage: async (input: {
+    stage: withArtifactActivity(async (input: {
       packageRoot: string;
       artifactSha256: string;
       source: RegistryStagedPluginRecord["source"];
@@ -172,17 +358,17 @@ export function registryStagingService(stagingRoot: string) {
       else records.push(record);
       await writeIndex(indexPath, records);
       return record;
-    },
+    }),
 
-    remove: async (stageId: string): Promise<boolean> => {
+    remove: withArtifactActivity(async (stageId: string): Promise<boolean> => {
       const records = await readIndex(indexPath);
       const next = records.filter((record) => record.stageId !== stageId);
       if (next.length === records.length) return false;
       await writeIndex(indexPath, next);
       return true;
-    },
+    }),
 
-    markReviewPending: async (
+    markReviewPending: withArtifactActivity(async (
       stageId: string,
       review: Omit<RegistryStageReview, "requestedAt">,
     ): Promise<RegistryStagedPluginRecord | null> => {
@@ -201,9 +387,9 @@ export function registryStagingService(stagingRoot: string) {
       records[index] = updated;
       await writeIndex(indexPath, records);
       return updated;
-    },
+    }),
 
-    markRegistered: async (stageId: string): Promise<RegistryStagedPluginRecord | null> => {
+    markRegistered: withArtifactActivity(async (stageId: string): Promise<RegistryStagedPluginRecord | null> => {
       const records = await readIndex(indexPath);
       const index = records.findIndex((record) => record.stageId === stageId);
       if (index < 0) return null;
@@ -216,6 +402,6 @@ export function registryStagingService(stagingRoot: string) {
       records[index] = updated;
       await writeIndex(indexPath, records);
       return updated;
-    },
+    }),
   };
 }

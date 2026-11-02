@@ -1,5 +1,11 @@
 # Agent Management Follow-up Plan (CEO Patch + Config Rollback + Issue↔Approval Linking)
 
+> **Historical/compatibility design reference (2026-11-02 classification).**
+> [SPS normative baseline](../SPS-DOCUMENTATION-BASELINE-2026-11-02.md) takes precedence over product assumptions below.
+> Paperclip Company/Issue/org/Agent/UI models are compatibility, not mandatory SPS behavior.
+> Do not force Core chrome, Builder, AI or a workflow through this reference; preserve APIs/data pending explicit migration.
+> Documentation classification only; implementation and dated test results are unchanged.
+
 Status: Proposed  
 Date: 2026-02-19  
 Context: Follow-up from run `faeab00e-7857-4acc-b2b2-86f6d078adb4`

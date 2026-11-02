@@ -1,5 +1,11 @@
 # Plugin Ideas From OpenCode
 
+> **Historical/compatibility design reference (2026-11-02 classification).**
+> [SPS normative baseline](../SPS-DOCUMENTATION-BASELINE-2026-11-02.md) takes precedence over product assumptions below.
+> Paperclip Company/Issue/org/Agent/UI models are compatibility, not mandatory SPS behavior.
+> Do not force Core chrome, Builder, AI or a workflow through this reference; preserve APIs/data pending explicit migration.
+> Documentation classification only; implementation and dated test results are unchanged.
+
 Status: design report, not a V1 commitment
 
 Paperclip V1 explicitly excludes a plugin framework in [doc/SPEC-implementation.md](../SPEC-implementation.md), but the long-horizon spec says the architecture should leave room for extensions. This report studies the `opencode` plugin system and translates the useful patterns into a Paperclip-shaped design.

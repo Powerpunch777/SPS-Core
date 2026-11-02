@@ -46,6 +46,9 @@ const additionalSerializedServerTests = new Set([
   "server/src/__tests__/project-routes-env.test.ts",
   "server/src/__tests__/redaction.test.ts",
   "server/src/__tests__/routines-e2e.test.ts",
+  "server/src/__tests__/sps-plugin-package-operations-postgres.test.ts",
+  "server/src/__tests__/sps-source-artifact-inventory-db.test.ts",
+  "server/src/__tests__/sps-source-artifact-mutation-db.test.ts",
 ]);
 let invocationIndex = 0;
 const serializedModeName = "serialized";

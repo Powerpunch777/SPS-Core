@@ -1,4 +1,4 @@
-import { z } from "zod";
+import { z } from "zod/v3";
 import {
   ISSUE_TREE_CONTROL_MODES,
   ISSUE_TREE_HOLD_RELEASE_POLICY_STRATEGIES,

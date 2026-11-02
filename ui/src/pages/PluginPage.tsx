@@ -1,5 +1,5 @@
 import { useEffect, useMemo } from "react";
-import { Link, Navigate, useParams, useSearchParams } from "@/lib/router";
+import { Link, Navigate, useOutletContext, useParams, useSearchParams } from "@/lib/router";
 import { useQuery } from "@tanstack/react-query";
 import { useCompany } from "@/context/CompanyContext";
 import { useBreadcrumbs } from "@/context/BreadcrumbContext";
@@ -8,6 +8,7 @@ import { queryKeys } from "@/lib/queryKeys";
 import {
   PluginSlotMount,
   resolveRouteSidebarSlot,
+  usePluginModuleLoader,
   type ResolvedPluginSlot,
 } from "@/plugins/slots";
 import { Button } from "@/components/ui/button";
@@ -16,6 +17,7 @@ import { NotFoundPage } from "./NotFound";
 import { isSpsBasicModeEnabled } from "../lib/sps-basic-mode";
 import { isSpsCoreBaselineModeEnabled } from "../lib/sps-core-baseline-mode";
 import { isWorkplaneModeEnabled } from "../lib/workplane-mode";
+import type { SpsWorkspacePluginPageContext } from "@/components/SpsWorkspaceLayout";
 
 /**
  * Company-context plugin page. Renders a plugin's `page` slot at
@@ -37,6 +39,7 @@ export function PluginPage() {
   const pluginRouteSplat = params["*"];
   const { companies, selectedCompanyId } = useCompany();
   const { setBreadcrumbs } = useBreadcrumbs();
+  const outletContext = useOutletContext<SpsWorkspacePluginPageContext | null>();
   const routeCompany = useMemo(() => {
     if (!routeCompanyPrefix) return null;
     const requested = routeCompanyPrefix.toUpperCase();
@@ -55,11 +58,16 @@ export function PluginPage() {
     [companies, resolvedCompanyId],
   );
 
-  const { data: contributions } = useQuery({
+  const validatedContributions = outletContext?.source === "sps-workspace-layout"
+    && outletContext.companyId === resolvedCompanyId
+    ? outletContext.contributions
+    : undefined;
+  const contributionQuery = useQuery({
     queryKey: queryKeys.plugins.uiContributions(resolvedCompanyId),
     queryFn: () => pluginsApi.listUiContributions(resolvedCompanyId),
-    enabled: !!resolvedCompanyId && (!!pluginId || !!pluginRoutePath),
+    enabled: !!resolvedCompanyId && (!!pluginId || !!pluginRoutePath) && !validatedContributions,
   });
+  const contributions = validatedContributions ?? contributionQuery.data;
 
   const pageSlot = useMemo(() => {
     if (!contributions) return null;
@@ -92,6 +100,10 @@ export function PluginPage() {
     return matches[0] ?? null;
   }, [pluginId, pluginRoutePath, contributions]);
 
+  const pageContributions = useMemo(() => contributions?.filter((contribution) =>
+    contribution.pluginId === pageSlot?.pluginId), [contributions, pageSlot?.pluginId]);
+  usePluginModuleLoader(pageContributions);
+
   const context = useMemo(
     () => ({
       companyId: resolvedCompanyId ?? null,
@@ -121,7 +133,7 @@ export function PluginPage() {
   // They must not inherit generic plugin-settings navigation chrome.
   const spsCoreWorkspacePluginRoute = isSpsBasicModeEnabled()
     && isSpsCoreBaselineModeEnabled()
-    && Boolean(pluginRoutePath);
+    && (Boolean(pluginRoutePath) || validatedContributions !== undefined);
   const workspaceRouteTitle = spsCoreWorkspacePluginRoute
     ? pageSlot?.displayName ?? null
     : spsRouteTitle;
@@ -194,7 +206,7 @@ export function PluginPage() {
   }
 
   return (
-    <div className={spsWorkplaneRoute ? "h-full" : "space-y-4"}>
+    <div className={validatedContributions !== undefined ? "h-full min-h-0" : spsWorkplaneRoute ? "h-full" : "space-y-4"}>
       {!routeSidebarActive && !spsWorkplaneRoute && !spsSettingsRoute && !spsCoreWorkspacePluginRoute && (
         <div className="flex items-center gap-2">
           <Button variant="ghost" size="sm" asChild>
@@ -208,7 +220,7 @@ export function PluginPage() {
       <PluginSlotMount
         slot={pageSlot}
         context={context}
-        className="min-h-(--sz-200px)"
+        className={validatedContributions !== undefined ? "h-full min-h-0" : "min-h-(--sz-200px)"}
         missingBehavior="placeholder"
       />
     </div>

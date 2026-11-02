@@ -8,6 +8,8 @@ import type {
   CompanyPortabilityPreviewRequest,
   CompanyPortabilityPreviewResult,
   UpdateCompanyBranding,
+  SpsWorkspaceExecutionAction,
+  SpsWorkspaceExecutionStatus,
 } from "@paperclipai/shared";
 import { api } from "./client";
 
@@ -17,6 +19,9 @@ export const companiesApi = {
   list: () => api.get<Company[]>("/companies"),
   get: (companyId: string) => api.get<Company>(`/companies/${companyId}`),
   stats: () => api.get<CompanyStats>("/companies/stats"),
+  getExecutionControl: (companyId: string) => api.get<SpsWorkspaceExecutionStatus>(`/companies/${companyId}/execution-control`),
+  controlExecution: (companyId: string, input: SpsWorkspaceExecutionAction) =>
+    api.post<SpsWorkspaceExecutionStatus>(`/companies/${companyId}/execution-control`, input),
   create: (data: {
     name: string;
     description?: string | null;

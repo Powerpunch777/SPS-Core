@@ -1,6 +1,10 @@
 import path from "node:path";
+import os from "node:os";
+import { mkdtemp, rm, stat } from "node:fs/promises";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createApp } from "../app.js";
+import { createPluginWorkerManager } from "../services/plugin-worker-manager.js";
+import type { createSpsPluginArtifactReferenceReader } from "../services/sps-plugin-artifact-references.js";
 
 const mocks = vi.hoisted(() => {
   const calls: string[] = [];
@@ -12,10 +16,12 @@ const mocks = vi.hoisted(() => {
       options?: { installMissing?: boolean };
     }>,
     registry: {
+      list: vi.fn(async () => []),
       getByKey: vi.fn(),
       getById: vi.fn(),
     },
     loader: {
+      readPreparedArtifactReferences: vi.fn(() => []),
       installPlugin: vi.fn(),
       loadAll: vi.fn(),
     },
@@ -28,6 +34,7 @@ const mocks = vi.hoisted(() => {
     },
     lifecycle: {
       attachRuntimeLoader: vi.fn(),
+      recoverPackageOperations: vi.fn(async () => { calls.push("package-recovery"); }),
       load: vi.fn(),
     },
     eventBus: {
@@ -55,10 +62,13 @@ const mocks = vi.hoisted(() => {
   };
 });
 
-vi.mock("../services/plugin-loader.js", () => ({
-  DEFAULT_LOCAL_PLUGIN_DIR: "C:/sps/plugins",
-  pluginLoader: vi.fn(() => mocks.loader),
-}));
+vi.mock("../services/plugin-loader.js", async () => {
+  const nativePath = await import("node:path");
+  return {
+    DEFAULT_LOCAL_PLUGIN_DIR: nativePath.resolve("fixture-plugin-roots", "local"),
+    pluginLoader: vi.fn(() => mocks.loader),
+  };
+});
 
 vi.mock("../services/plugin-registry.js", () => ({
   pluginRegistryService: vi.fn(() => mocks.registry),
@@ -129,6 +139,11 @@ const envKeys = [
 const originalEnv = new Map(envKeys.map((key) => [key, process.env[key]]));
 const bundledPaths = ["workflow", "optional"].map(name => path.resolve("fixture-bundle", name));
 const bundledRefreshPath = path.resolve("fixture-bundle", "refresh");
+const pluginFixturePaths = {
+  kubernetes: path.resolve("fixture-plugin-roots", "kubernetes"),
+  loaded: path.resolve("fixture-plugin-roots", "loaded"),
+  late: path.resolve("fixture-plugin-roots", "late"),
+};
 
 function setRecoveryEnvironment(mode: string | undefined) {
   if (mode === undefined) delete process.env.SPS_PLUGIN_RECOVERY_MODE;
@@ -137,8 +152,8 @@ function setRecoveryEnvironment(mode: string | undefined) {
   process.env.SPS_BUNDLED_PLUGIN_REFRESH_PATHS = bundledRefreshPath;
 }
 
-async function createTestApp() {
-  return createApp({} as never, {
+async function createTestApp(overrides: Partial<Parameters<typeof createApp>[1]> = {}, db = {} as never) {
+  return createApp(db, {
     uiMode: "none",
     serverPort: 3100,
     storageService: {} as never,
@@ -149,6 +164,7 @@ async function createTestApp() {
     authReady: true,
     companyDeletionEnabled: false,
     pluginWorkerManager: mocks.workerManager as never,
+    ...overrides,
   });
 }
 
@@ -160,7 +176,7 @@ beforeEach(() => {
     id: "kubernetes-plugin-id",
     pluginKey: "paperclip.kubernetes-sandbox-provider",
     status: "ready",
-    packagePath: "C:/plugins/kubernetes",
+    packagePath: pluginFixturePaths.kubernetes,
     version: "1.0.0",
   });
   mocks.loader.loadAll.mockImplementation(async () => {
@@ -168,7 +184,7 @@ beforeEach(() => {
     return {
       results: [{
         success: true,
-        plugin: { id: "loaded-plugin-id", packagePath: "C:/plugins/loaded" },
+        plugin: { id: "loaded-plugin-id", packagePath: pluginFixturePaths.loaded },
       }],
     };
   });
@@ -183,6 +199,44 @@ afterEach(() => {
 });
 
 describe("createApp plugin recovery startup contract", () => {
+  it.each([true, false])("composes the private Core-only reference reader with supported Worker owner %s", async supported => {
+    setRecoveryEnvironment("all-disabled");
+    const root = await mkdtemp(path.join(os.tmpdir(), "sps-app-artifact-references-"));
+    const manager = supported ? createPluginWorkerManager() : mocks.workerManager;
+    const query: any = {};
+    query.from = vi.fn(() => query); query.where = vi.fn(() => query); query.orderBy = vi.fn(() => query);
+    query.limit = vi.fn(async () => []);
+    query.then = (resolve: (rows: unknown[]) => unknown, reject: (error: unknown) => unknown) => Promise.resolve([]).then(resolve, reject);
+    const select = vi.fn(() => query);
+    const db = { select, transaction: vi.fn(async (action, options) => {
+      expect(options).toEqual({ isolationLevel: "repeatable read", accessMode: "read only" });
+      return action({ select });
+    }) };
+    let reader!: ReturnType<typeof createSpsPluginArtifactReferenceReader>;
+    const app = await createTestApp({ localPluginDir: path.join(root, "packages"), registryStagingDir: path.join(root, "stages"),
+      pluginWorkerManager: manager as never, onPluginArtifactReferenceReader: value => { reader = value; } }, db as never);
+    try {
+      expect(reader).toBeDefined();
+      const action = vi.fn(async (scope: { coverage: string; references: readonly unknown[]; assertCurrent(): Promise<void> }) => {
+        expect(scope.coverage).toBe("core-only");
+        expect(scope.references).toEqual([]);
+        await scope.assertCurrent();
+      });
+      if (supported) {
+        await reader.withSnapshot(action);
+        expect(action).toHaveBeenCalledOnce();
+        expect(mocks.registry.list).toHaveBeenCalled();
+        expect(mocks.loader.readPreparedArtifactReferences).toHaveBeenCalled();
+        expect(db.transaction).toHaveBeenCalled();
+      } else {
+        await expect(reader.withSnapshot(action)).rejects.toMatchObject({ code: "SPS_PLUGIN_ARTIFACT_REFERENCES_UNAVAILABLE" });
+        expect(action).not.toHaveBeenCalled();
+      }
+      await expect(stat(path.join(root, "packages"))).rejects.toMatchObject({ code: "ENOENT" });
+      await expect(stat(path.join(root, "stages"))).rejects.toMatchObject({ code: "ENOENT" });
+    } finally { await app.locals.paperclipShutdown(); await rm(root, { recursive: true, force: true }); }
+  });
+
   it("suppresses bundle install/refresh/load and every plugin runtime startup effect in all-disabled mode", async () => {
     setRecoveryEnvironment("all-disabled");
 
@@ -223,6 +277,7 @@ describe("createApp plugin recovery startup contract", () => {
       "coordinator-start",
       "scheduler-start",
       "tools-initialize",
+      "package-recovery",
       "bundle-install",
       "bundle-refresh",
       "load-all",
@@ -237,7 +292,7 @@ describe("createApp plugin recovery startup contract", () => {
       expect.objectContaining({ loader: mocks.loader, lifecycle: mocks.lifecycle, pluginRegistry: mocks.registry }),
       expect.objectContaining({ loader: mocks.loader, lifecycle: mocks.lifecycle, pluginRegistry: mocks.registry }),
     ]);
-    expect(mocks.watcher.watch).toHaveBeenCalledWith("loaded-plugin-id", "C:/plugins/loaded");
+    expect(mocks.watcher.watch).toHaveBeenCalledWith("loaded-plugin-id", pluginFixturePaths.loaded);
 
     await app.locals.paperclipShutdown();
     expect(mocks.watcher.close).toHaveBeenCalledOnce();
@@ -252,7 +307,7 @@ describe("createApp plugin recovery startup contract", () => {
     const startup = new Promise<void>(resolve => { releaseStartup = resolve; });
     mocks.loader.loadAll.mockImplementationOnce(async () => {
       await startup;
-      return { results: [{ success: true, plugin: { id: "late-plugin", packagePath: "C:/fixture/late" } }] };
+      return { results: [{ success: true, plugin: { id: "late-plugin", packagePath: pluginFixturePaths.late } }] };
     });
     const app = await createTestApp();
     await vi.waitFor(() => expect(mocks.loader.loadAll).toHaveBeenCalledOnce());

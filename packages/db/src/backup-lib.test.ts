@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import postgres from "postgres";
 import { createBufferedTextFileWriter, runDatabaseBackup, runDatabaseRestore } from "./backup-lib.js";
 import { ensurePostgresDatabase } from "./client.js";
@@ -410,48 +410,55 @@ describeEmbeddedPostgres("runDatabaseBackup", () => {
     60_000,
   );
 
-  it(
-    "restores legacy public-only backups without migration history",
-    async () => {
-      const restoreConnectionString = await createTempDatabase();
-      const restoreSql = postgres(restoreConnectionString, { max: 1, onnotice: () => {} });
-      const backupDir = createTempDir("paperclip-db-restore-manual-");
-      const backupFile = path.join(backupDir, "manual.sql");
+  describe("legacy public-only restore", () => {
+    let restoreConnectionString: string;
 
-      try {
-        await fs.promises.writeFile(
-          backupFile,
-          [
-            "-- Paperclip database backup",
-            "-- Created: 2026-04-06T00:00:00.000Z",
-            "",
-            "BEGIN;",
-            "-- paperclip statement breakpoint 69f6f3f1-42fd-46a6-bf17-d1d85f8f3900",
-            "CREATE TABLE public.restore_stream_test (id integer primary key, payload text not null);",
-            "-- paperclip statement breakpoint 69f6f3f1-42fd-46a6-bf17-d1d85f8f3900",
-            "INSERT INTO public.restore_stream_test (id, payload)",
-            "VALUES (1, 'hello');",
-            "-- paperclip statement breakpoint 69f6f3f1-42fd-46a6-bf17-d1d85f8f3900",
-            "COMMIT;",
-            "-- paperclip statement breakpoint 69f6f3f1-42fd-46a6-bf17-d1d85f8f3900",
-          ].join("\n"),
-          "utf8",
-        );
+    beforeEach(async () => {
+      restoreConnectionString = await createTempDatabase();
+    }, 60_000);
 
-        await runDatabaseRestore({
-          connectionString: restoreConnectionString,
-          backupFile,
-        });
+    it(
+      "restores legacy public-only backups without migration history",
+      async () => {
+        const restoreSql = postgres(restoreConnectionString, { max: 1, onnotice: () => {} });
+        const backupDir = createTempDir("paperclip-db-restore-manual-");
+        const backupFile = path.join(backupDir, "manual.sql");
 
-        const rows = await restoreSql.unsafe<{ payload: string }[]>(`
-          SELECT payload
-          FROM public.restore_stream_test
-        `);
-        expect(rows).toEqual([{ payload: "hello" }]);
-      } finally {
-        await restoreSql.end();
-      }
-    },
-    20_000,
-  );
+        try {
+          await fs.promises.writeFile(
+            backupFile,
+            [
+              "-- Paperclip database backup",
+              "-- Created: 2026-04-06T00:00:00.000Z",
+              "",
+              "BEGIN;",
+              "-- paperclip statement breakpoint 69f6f3f1-42fd-46a6-bf17-d1d85f8f3900",
+              "CREATE TABLE public.restore_stream_test (id integer primary key, payload text not null);",
+              "-- paperclip statement breakpoint 69f6f3f1-42fd-46a6-bf17-d1d85f8f3900",
+              "INSERT INTO public.restore_stream_test (id, payload)",
+              "VALUES (1, 'hello');",
+              "-- paperclip statement breakpoint 69f6f3f1-42fd-46a6-bf17-d1d85f8f3900",
+              "COMMIT;",
+              "-- paperclip statement breakpoint 69f6f3f1-42fd-46a6-bf17-d1d85f8f3900",
+            ].join("\n"),
+            "utf8",
+          );
+
+          await runDatabaseRestore({
+            connectionString: restoreConnectionString,
+            backupFile,
+          });
+
+          const rows = await restoreSql.unsafe<{ payload: string }[]>(`
+            SELECT payload
+            FROM public.restore_stream_test
+          `);
+          expect(rows).toEqual([{ payload: "hello" }]);
+        } finally {
+          await restoreSql.end();
+        }
+      },
+      20_000,
+    );
+  });
 });

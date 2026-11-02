@@ -312,6 +312,8 @@ describe("CompanySettingsSidebar", () => {
     await flushReact();
 
     expect(container.textContent).toContain("Host settings");
+    expect(container.textContent).toContain("Model connections");
+    expect(container.textContent).toContain("Credentials");
     expect(container.textContent).toContain("Agents");
     expect(container.textContent).toContain("Sources");
     expect(container.textContent).toContain("Nodes");

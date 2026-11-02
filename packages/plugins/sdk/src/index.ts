@@ -267,6 +267,7 @@ export type {
   PluginSpsRun,
   PluginSpsRunEvent,
   PluginSpsClient,
+  PluginSpsConnectivity,
   PluginSpsModelConnection,
   PluginSpsModelRun,
   PluginSpsModelTextResult,
@@ -319,6 +320,7 @@ export type {
   PluginAuthorizationAuditEntry,
   PluginAgentSessionsClient,
   AgentSessionRunState,
+    AgentSessionRequestState,
   PluginSpsExecutionLane,
   PluginSpsUsageMetric,
   PluginSpsUsageEvidence,
@@ -336,6 +338,10 @@ export type {
   PluginPlatformThreadSendInput,
   PluginPlatformStateInput,
   AgentSession,
+  AgentSessionEnsureInput,
+  AgentSessionEnsureResult,
+  AgentSessionExecutionPolicy,
+  AgentSessionPolicySupport,
   AgentSessionEvent,
   AgentSessionSendResult,
   PluginGoalsClient,
@@ -465,7 +471,7 @@ export type {
  * });
  * ```
  */
-export { z } from "zod";
+export { z } from "zod/v3";
 
 // ---------------------------------------------------------------------------
 // Constants re-exports (for plugin code that needs to check values at runtime)

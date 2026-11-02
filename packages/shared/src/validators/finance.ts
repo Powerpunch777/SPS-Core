@@ -1,4 +1,4 @@
-import { z } from "zod";
+import { z } from "zod/v3";
 import { AGENT_ADAPTER_TYPES, FINANCE_DIRECTIONS, FINANCE_EVENT_KINDS, FINANCE_UNITS } from "../constants.js";
 
 export const createFinanceEventSchema = z.object({

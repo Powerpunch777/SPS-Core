@@ -463,10 +463,18 @@ export function pluginRegistryService(db: Db) {
      * @param query - Optional filters (type, externalId) and pagination (limit, offset).
      * @returns A list of matching `PluginEntityRecord` objects.
      */
-    listEntities: (pluginId: string, query?: PluginEntityQuery) => {
+    listEntities: (pluginId: string, query?: PluginEntityQuery & {
+      scopeKind?: typeof pluginEntities.$inferSelect.scopeKind;
+      scopeId?: string;
+    }, tenantCompanyId?: string) => {
       const conditions = [eq(pluginEntities.pluginId, pluginId)];
       if (query?.entityType) conditions.push(eq(pluginEntities.entityType, query.entityType));
+      // Preserve legacy Host query behavior; fixed-owner adapters opt into the
+      // tenant and logical-scope predicates together.
+      if (tenantCompanyId !== undefined && query?.scopeKind) conditions.push(eq(pluginEntities.scopeKind, query.scopeKind));
+      if (tenantCompanyId !== undefined && query?.scopeId) conditions.push(eq(pluginEntities.scopeId, query.scopeId));
       if (query?.externalId) conditions.push(eq(pluginEntities.externalId, query.externalId));
+      if (tenantCompanyId !== undefined) conditions.push(eq(pluginEntities.companyId, tenantCompanyId));
 
       return db
         .select()

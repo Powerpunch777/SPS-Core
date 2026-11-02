@@ -1,4 +1,4 @@
-import { z } from "zod";
+import { z } from "zod/v3";
 import { APPROVAL_TYPES } from "../constants.js";
 import { multilineTextSchema } from "./text.js";
 

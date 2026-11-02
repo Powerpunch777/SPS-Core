@@ -65,6 +65,8 @@ export interface CompanyPluginRecord {
   displayName: string;
   version: string;
   status: PluginStatus;
+  /** Capabilities declared by this plugin's installed manifest. */
+  capabilities?: string[];
   activation: CompanyPluginActivation;
 }
 

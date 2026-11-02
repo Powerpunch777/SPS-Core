@@ -1,4 +1,4 @@
-import { z } from "zod";
+import { z } from "zod/v3";
 
 // This is the public, capability-only contract between the Hub and SPS
 // Desktop. Keep it shared so the Node management screen cannot offer a grant
@@ -127,6 +127,11 @@ export const spsNodeSignedRequestSchema = z.object({
   timestamp: z.string().datetime({ offset: true }),
   nonce: z.string().regex(/^[A-Za-z0-9_-]{32,256}$/),
   signature: z.string().regex(/^[A-Za-z0-9+/]+={0,2}$/).min(64).max(2048),
+});
+
+export const SPS_NODE_CLAIM_REQUEST_ID_PATTERN = "^v1:([1-9][0-9]{12}):[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$";
+export const spsNodeClaimRequestSchema = spsNodeSignedRequestSchema.extend({
+  claimRequestId: z.string().max(80).regex(new RegExp(SPS_NODE_CLAIM_REQUEST_ID_PATTERN)).optional(),
 });
 
 export const spsNodeCommandEventSchema = z.object({

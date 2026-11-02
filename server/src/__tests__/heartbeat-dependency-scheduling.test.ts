@@ -114,7 +114,7 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
     let stablePolls = 0;
     for (let attempt = 0; attempt < 100; attempt += 1) {
       const runs = await db
-        .select({ status: heartbeatRuns.status })
+        .select({ id: heartbeatRuns.id, status: heartbeatRuns.status })
         .from(heartbeatRuns);
       const wakeups = await db
         .select({ status: agentWakeupRequests.status })
@@ -129,6 +129,12 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
         stablePolls += 1;
       } else {
         stablePolls = 0;
+      }
+      if (!hasActiveRuns && runningProcesses.size === 0) {
+        // A terminal status can be persisted before executeRun finishes its
+        // awaited event/document cleanup. Wait on the service's real execution
+        // fence before the next cleanup-stability observation.
+        await Promise.all(runs.map((run) => heartbeat.waitForRunExecutionDrain(run.id)));
       }
       if (stablePolls >= 3) break;
       previousSnapshot = snapshot;

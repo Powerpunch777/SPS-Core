@@ -72,6 +72,7 @@ import type {
   EventFilter,
   AgentSessionEvent,
   AgentSessionContext,
+  AgentSessionEnsureInput,
 } from "./types.js";
 import { createPluginPlatformClient } from "./platform-client.js";
 import type {
@@ -427,6 +428,7 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
     const spsTransport: PluginSpsRuntimeTransport = Object.freeze({
       request(operation: PluginSpsRuntimeOperation, input: Record<string, unknown>): Promise<unknown> {
         switch (operation) {
+          case "sps.connectivity.current":
           case "sps.executions.list":
           case "sps.executions.get":
           case "sps.executions.summarize":
@@ -454,6 +456,12 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
     });
 
     const sps: PluginSpsClient = {
+      connectivity: {
+        async current(...args: never[]) {
+          if (args.length) throw new TypeError("Connectivity current accepts no arguments");
+          return callHost("sps.connectivity.current", {});
+        },
+      },
       models: {
         async list(companyId) { return callHost("sps.models.list", { companyId }); },
         async submit(input) { return callHost("sps.models.submit", input); },
@@ -722,6 +730,10 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
             stateKey: input.stateKey,
             value,
           });
+        },
+
+        async compareAndSet(input, expected, value) {
+          return callHost("state.compareAndSet", { ...input, expected, value });
         },
 
         async delete(input: ScopeKey): Promise<void> {
@@ -1209,11 +1221,26 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
         },
 
         sessions: {
+          async getRequest(sessionId: string, companyId: string, requestId: string) {
+            return callHost("agents.sessions.getRequest", { sessionId, companyId, requestId });
+          },
+          async ensure(agentId: string, companyId: string, opts: Pick<AgentSessionEnsureInput, "taskKey" | "expectedSessionId" | "context">) {
+            return callHost("agents.sessions.ensure", {
+              agentId,
+              companyId,
+              taskKey: opts.taskKey,
+              expectedSessionId: opts.expectedSessionId,
+              context: opts.context,
+            });
+          },
           async getRun(sessionId: string, companyId: string, runId: string) {
             return callHost("agents.sessions.getRun", { sessionId, companyId, runId });
           },
           async cancel(sessionId: string, companyId: string, runId: string) {
             return callHost("agents.sessions.cancel", { sessionId, companyId, runId });
+          },
+          async describePolicySupport(sessionId: string, companyId: string) {
+            return callHost("agents.sessions.describePolicySupport", { sessionId, companyId });
           },
           async create(agentId: string, companyId: string, opts?: { taskKey?: string; reason?: string; context?: AgentSessionContext }) {
             return callHost("agents.sessions.create", {
@@ -1232,6 +1259,8 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
           async sendMessage(sessionId: string, companyId: string, opts: {
             prompt: string;
             reason?: string;
+            requestId?: string;
+            executionPolicy?: import("./types.js").AgentSessionExecutionPolicy;
             onEvent?: (event: AgentSessionEvent) => void;
           }) {
             if (opts.onEvent) {
@@ -1243,6 +1272,8 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
                 companyId,
                 prompt: opts.prompt,
                 reason: opts.reason,
+                requestId: opts.requestId,
+                executionPolicy: opts.executionPolicy,
               });
             } catch (err) {
               sessionEventCallbacks.delete(sessionId);

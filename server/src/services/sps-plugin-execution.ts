@@ -11,6 +11,7 @@ import {
 } from "../compat/paperclip/db.js";
 import { spsNodeExecutableRuntimeKindSchema } from "../compat/paperclip/shared.js";
 import { normalizeSpsPluginExecutionTimeout } from "./sps-execution-timeout.js";
+import { registerSpsWorkspaceExecutionStopHandler, withSpsWorkspaceExecutionAdmission } from "./sps-workspace-execution-control.js";
 import { describeSpsRuntimeConnection, isSpsNodeHeartbeatRecent } from "./sps-runtime-connection.js";
 
 const RUNNER_COMMAND_BY_KIND = {
@@ -187,6 +188,25 @@ function runnerCanAcceptRun(runner: typeof spsNodeRunnerProfiles.$inferSelect) {
  */
 export function spsPluginExecutionService(db: Db, pluginKey: string) {
   const normalizedPluginKey = requiredString(pluginKey, "pluginKey", 200);
+  const unregisterWorkspaceExecutionStopHandler = registerSpsWorkspaceExecutionStopHandler(
+    db,
+    "sps-plugin-node-runs",
+    async (companyId, reason, stoppedEpoch) => {
+      const runs = await db.select({ id: spsPluginNodeRuns.id, workspaceExecutionEpoch: spsPluginNodeRuns.workspaceExecutionEpoch,
+        status: spsPluginNodeRuns.status }).from(spsPluginNodeRuns).where(and(
+        eq(spsPluginNodeRuns.companyId, companyId), inArray(spsPluginNodeRuns.status, ["queued", "claimed", "running"]),
+      ));
+      const priorEpoch = BigInt(stoppedEpoch);
+      const staleRuns = runs.filter(run => BigInt(run.workspaceExecutionEpoch ?? "0") < priorEpoch);
+      const now = new Date();
+      for (const run of staleRuns) {
+        await db.update(spsPluginNodeRuns).set(run.status === "queued"
+          ? { status: "cancelled", error: reason, finishedAt: now, updatedAt: now }
+          : { status: "cancelling", error: reason, updatedAt: now })
+          .where(and(eq(spsPluginNodeRuns.id, run.id), eq(spsPluginNodeRuns.status, run.status)));
+      }
+    },
+  );
 
   async function resolveTarget(input: {
     companyId: string;
@@ -241,6 +261,7 @@ export function spsPluginExecutionService(db: Db, pluginKey: string) {
   }
 
   return {
+    disposeWorkspaceExecutionStopHandler: unregisterWorkspaceExecutionStopHandler,
     async listWorkspaceSources(companyId: string) {
       const sources = await db
         .select()
@@ -392,10 +413,11 @@ export function spsPluginExecutionService(db: Db, pluginKey: string) {
       const timeoutMs = normalizeSpsPluginExecutionTimeout(input.timeoutMs);
       const stdin = input.stdin == null ? null : String(input.stdin);
       if (stdin !== null && stdin.length > 1_000_000) throw new Error("stdin must not exceed 1,000,000 characters");
-      const run = await db
+      const run = await withSpsWorkspaceExecutionAdmission(db, input.companyId, async (tx, workspaceExecutionEpoch) => tx
         .insert(spsPluginNodeRuns)
         .values({
           companyId: input.companyId,
+          workspaceExecutionEpoch,
           pluginKey: normalizedPluginKey,
           subjectKey: grant.subjectKey,
           executionGrantId: grant.id,
@@ -410,7 +432,7 @@ export function spsPluginExecutionService(db: Db, pluginKey: string) {
           timeoutMs,
         })
         .returning()
-        .then((rows) => rows[0]!);
+        .then((rows) => rows[0]!));
       return publicRun(run);
     },
 

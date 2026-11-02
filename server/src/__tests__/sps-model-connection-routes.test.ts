@@ -1,6 +1,6 @@
 import express from "express";
 import request from "supertest";
-import { ZodError } from "zod";
+import { ZodError } from "zod/v3";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Db } from "../compat/paperclip/db.js";
 import { spsModelConnectionRoutes } from "../routes/sps-model-connections.js";

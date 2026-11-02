@@ -125,7 +125,7 @@ function SpsWorkplaneDashboard({
         <SpsHomeMetric icon={Bot} label="실행 중 Agent" value={data.agents.running} detail={`사용 가능 ${data.agents.active} · 오류 ${data.agents.error}`} to="/agents/all" />
       </section>
 
-      <section className="grid gap-6 lg:grid-cols-[minmax(0,1.25fr)_minmax(18rem,0.75fr)]">
+      <section className="grid gap-6 lg:grid-cols-(--gtc-sps-home-dashboard)">
         <div className="min-w-0">
           <div className="mb-3 flex items-center justify-between gap-3">
             <div>

@@ -70,6 +70,8 @@ const DEFAULT_BACKUP_WRITE_BUFFER_BYTES = 1024 * 1024;
 const BACKUP_DATA_CURSOR_ROWS = 100;
 const BACKUP_CLI_STDERR_BYTES = 64 * 1024;
 const BACKUP_BREAKPOINT_DETECT_BYTES = 64 * 1024;
+const POSTGRES_UNKNOWN_OID = 705;
+const RESTORE_MAX_BIND_PARAMETERS = 65535;
 
 const STATEMENT_BREAKPOINT = "-- paperclip statement breakpoint 69f6f3f1-42fd-46a6-bf17-d1d85f8f3900";
 
@@ -397,7 +399,13 @@ async function hasStatementBreakpoints(backupFile: string): Promise<boolean> {
   }
 }
 
-async function* readRestoreStatements(backupFile: string): AsyncGenerator<string> {
+type RestoreStatement =
+  | { type: "sql"; statement: string }
+  | { type: "copy-start"; target: string }
+  | { type: "copy-row"; line: string }
+  | { type: "copy-end" };
+
+async function* readRestoreStatements(backupFile: string): AsyncGenerator<RestoreStatement> {
   const raw = createReadStream(backupFile);
   const stream = backupFile.endsWith(".gz") ? raw.pipe(createGunzip()) : raw;
   stream.setEncoding("utf8");
@@ -406,6 +414,7 @@ async function* readRestoreStatements(backupFile: string): AsyncGenerator<string
     crlfDelay: Infinity,
   });
   let statementLines: string[] = [];
+  let copying = false;
 
   const flushStatement = () => {
     const statement = statementLines.join("\n").trim();
@@ -415,25 +424,70 @@ async function* readRestoreStatements(backupFile: string): AsyncGenerator<string
 
   try {
     for await (const line of reader) {
+      // COPY data is not SQL. In particular, a row that happens to equal our
+      // SQL delimiter is still data until the explicit COPY terminator.
+      if (copying) {
+        if (line === "\\.") {
+          copying = false;
+          yield { type: "copy-end" };
+        } else {
+          yield { type: "copy-row", line };
+        }
+        continue;
+      }
       if (line === STATEMENT_BREAKPOINT) {
         const statement = flushStatement();
         if (statement.length > 0) {
-          yield statement;
+          yield { type: "sql", statement };
         }
+        continue;
+      }
+      const copyHeader = /^COPY\s+(.+)\s+FROM\s+stdin;$/i.exec(line.trim());
+      if (copyHeader && statementLines.every((prefix) => /^\s*(?:--.*)?$/.test(prefix))) {
+        statementLines = [];
+        copying = true;
+        yield { type: "copy-start", target: copyHeader[1]! };
         continue;
       }
       statementLines.push(line);
     }
 
+    if (copying) throw new Error("Database backup has an unterminated COPY data block.");
     const trailingStatement = flushStatement();
     if (trailingStatement.length > 0) {
-      yield trailingStatement;
+      yield { type: "sql", statement: trailingStatement };
     }
   } finally {
     reader.close();
     stream.destroy();
     raw.destroy();
   }
+}
+
+function decodeRestoreCopyField(field: string): string | null {
+  if (field === "\\N") return null;
+  if (!field.includes("\\")) return field;
+  // COPY text fields use byte escapes, unlike SQL string literals. Decode
+  // escapes before binding parameters so bytea, arrays, JSON and nulls keep
+  // their PostgreSQL input representations. Values never become SQL text.
+  const chunks: Buffer[] = [];
+  const escapes: Record<string, number> = { b: 8, f: 12, n: 10, r: 13, t: 9, v: 11 };
+  const pattern = /\\([0-7]{1,3}|x[0-9a-fA-F]{1,2}|.)/gsu;
+  let offset = 0;
+  for (const match of field.matchAll(pattern)) {
+    chunks.push(Buffer.from(field.slice(offset, match.index), "utf8"));
+    const escape = match[1]!;
+    if (/^[0-7]/.test(escape)) chunks.push(Buffer.from([parseInt(escape, 8)]));
+    else if (/^x[0-9a-fA-F]/.test(escape)) chunks.push(Buffer.from([parseInt(escape.slice(1), 16)]));
+    else if (escapes[escape] !== undefined) chunks.push(Buffer.from([escapes[escape]!]));
+    else chunks.push(Buffer.from(escape, "utf8"));
+    offset = match.index! + match[0].length;
+  }
+  if (field.endsWith("\\") && (field.length - field.replace(/\\+$/, "").length) % 2 !== 0) {
+    throw new Error("Database backup has an incomplete COPY field escape.");
+  }
+  chunks.push(Buffer.from(field.slice(offset), "utf8"));
+  return new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks));
 }
 
 export function createBufferedTextFileWriter(filePath: string, maxBufferedBytes = DEFAULT_BACKUP_WRITE_BUFFER_BYTES) {
@@ -1000,8 +1054,43 @@ export async function runDatabaseRestore(opts: RunDatabaseRestoreOptions): Promi
 
   try {
     await sql`SELECT 1`;
-    for await (const statement of readRestoreStatements(opts.backupFile)) {
-      await sql.unsafe(statement).execute();
+    let copyTarget = "";
+    let copyRows: (string | null)[][] = [];
+    let copyBytes = 0;
+    const flushCopy = async () => {
+      if (copyRows.length === 0) return;
+      const parameters: ReturnType<typeof sql.typed>[] = [];
+      const values = copyRows.map((row) => `(${row.map((value) => {
+        // COPY already supplies PostgreSQL text input. UNKNOWNOID lets the
+        // server infer the destination type without the client's inferred
+        // JSON, boolean or bytea serializers encoding those strings again.
+        parameters.push(sql.typed(value, POSTGRES_UNKNOWN_OID));
+        return `$${parameters.length}`;
+      }).join(", ")})`);
+      await sql.unsafe(`INSERT INTO ${copyTarget} VALUES ${values.join(", ")}`, parameters).execute();
+      copyRows = [];
+      copyBytes = 0;
+    };
+    for await (const item of readRestoreStatements(opts.backupFile)) {
+      if (item.type === "copy-start") {
+        copyTarget = item.target;
+      } else if (item.type === "copy-row") {
+        const row = item.line.split("\t").map(decodeRestoreCopyField);
+        if (row.length > RESTORE_MAX_BIND_PARAMETERS) throw new Error("Database backup exceeds the COPY field limit.");
+        if (copyRows.length > 0 && copyRows[0]!.length !== row.length) {
+          throw new Error("Database backup has inconsistent COPY field counts.");
+        }
+        // Bound memory and stay below PostgreSQL's 65535 bind-parameter limit.
+        if (copyRows.length > 0 && (copyRows.length + 1) * row.length > RESTORE_MAX_BIND_PARAMETERS) await flushCopy();
+        copyRows.push(row);
+        copyBytes += Buffer.byteLength(item.line, "utf8");
+        if (copyRows.length >= BACKUP_DATA_CURSOR_ROWS || copyBytes >= DEFAULT_BACKUP_WRITE_BUFFER_BYTES) await flushCopy();
+      } else if (item.type === "copy-end") {
+        await flushCopy();
+        copyTarget = "";
+      } else {
+        await sql.unsafe(item.statement).execute();
+      }
     }
   } catch (error) {
     const statementPreview = typeof error === "object" && error !== null && typeof (error as Record<string, unknown>).query === "string"

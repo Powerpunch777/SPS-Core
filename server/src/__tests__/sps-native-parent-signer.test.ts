@@ -123,6 +123,24 @@ describe("SPS Native parent signer IPC client", () => {
     expect(channel.messages).toEqual([]);
   });
 
+  it("forwards a validated expected SPKI pin and rejects malformed pins before IPC", async () => {
+    const { value, channel } = client();
+    const expectedSpkiSha256 = "d".repeat(64);
+    const resultPromise = value.sign({ ...validSignInput(), expectedSpkiSha256 });
+    const request = channel.messages[0] as Record<string, unknown>;
+    expect(request).toMatchObject({ operation: "sign", payload: { expectedSpkiSha256 } });
+    channel.reply(response(request.id as string, { certificate: CERTIFICATE,
+      requestSha256: createHash("sha256").update(REQUEST_PEM).digest("hex") }));
+    await expect(resultPromise).resolves.toEqual({ certificate: CERTIFICATE,
+      requestSha256: createHash("sha256").update(REQUEST_PEM).digest("hex") });
+
+    for (const malformed of ["D".repeat(64), "a".repeat(63), "a".repeat(65)]) {
+      await expect(value.sign({ ...validSignInput(), expectedSpkiSha256: malformed })).rejects
+        .toThrow("Invalid SPS Native signer request.");
+    }
+    expect(channel.messages).toHaveLength(1);
+  });
+
   it("rejects malformed or non-canonical responses without exposing their data", async () => {
     const { value, channel } = client();
     const resultPromise = value.inspect();

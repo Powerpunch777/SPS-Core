@@ -1,4 +1,4 @@
-import { z } from "zod";
+import { z } from "zod/v3";
 import {
   PLUGIN_STATUSES,
   PLUGIN_CATEGORIES,
@@ -55,6 +55,29 @@ export const jsonSchemaSchema = z.record(z.string(), z.unknown()).refine(
   },
   { message: "Must be a valid JSON Schema object (requires at least a 'type', '$ref', or composition keyword)" },
 );
+
+function containsSecretRefFormat(value: unknown): boolean {
+  if (Array.isArray(value)) return value.some(containsSecretRefFormat);
+  if (!value || typeof value !== "object") return false;
+  const record = value as Record<string, unknown>;
+  if (record.format === "secret-ref") return true;
+  return Object.values(record).some(containsSecretRefFormat);
+}
+
+function isSafeWorkspaceWorkerPath(value: string): boolean {
+  if (value.length === 0 || value.length > 512 || /[\\\x00-\x1f\x7f?*\[\]{}!#]/.test(value)
+    || value.startsWith("/") || /^[A-Za-z][A-Za-z0-9+.-]*:/.test(value)) return false;
+  const relative = value.startsWith("./") ? value.slice(2) : value;
+  return relative.length > 0 && relative.split("/").every((segment) => segment !== "" && segment !== "." && segment !== "..");
+}
+
+function containsAsyncSchema(value: unknown): boolean {
+  if (Array.isArray(value)) return value.some(containsAsyncSchema);
+  if (!value || typeof value !== "object") return false;
+  const record = value as Record<string, unknown>;
+  if (record.$async === true) return true;
+  return Object.values(record).some(containsAsyncSchema);
+}
 
 // ---------------------------------------------------------------------------
 // Manifest sub-type schemas
@@ -1002,9 +1025,12 @@ export const pluginManifestV1Schema = z.object({
   capabilities: z.array(z.enum(PLUGIN_CAPABILITIES)).min(1),
   entrypoints: z.object({
     worker: z.string().min(1),
+    workspaceWorker: z.string().refine(isSafeWorkspaceWorkerPath,
+      "Must be a safe relative package path").optional(),
     ui: z.string().min(1).optional(),
   }),
   instanceConfigSchema: jsonSchemaSchema.optional(),
+  workspaceConfigSchema: jsonSchemaSchema.optional(),
   jobs: z.array(pluginJobDeclarationSchema).optional(),
   webhooks: z.array(pluginWebhookDeclarationSchema).optional(),
   tools: z.array(pluginToolDeclarationSchema).optional(),
@@ -1039,6 +1065,27 @@ export const pluginManifestV1Schema = z.object({
     actions: z.array(pluginInboxActionDeclarationSchema).min(1).max(100).optional(),
   }).optional(),
 }).superRefine((manifest, ctx) => {
+  if (manifest.workspaceConfigSchema && !manifest.entrypoints.workspaceWorker) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "workspaceConfigSchema requires entrypoints.workspaceWorker",
+      path: ["workspaceConfigSchema"],
+    });
+  }
+  if (manifest.workspaceConfigSchema && containsSecretRefFormat(manifest.workspaceConfigSchema)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "workspaceConfigSchema cannot declare secret-ref fields until Workspace-scoped plugin secrets are supported",
+      path: ["workspaceConfigSchema"],
+    });
+  }
+  if (manifest.workspaceConfigSchema && containsAsyncSchema(manifest.workspaceConfigSchema)) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "workspaceConfigSchema cannot declare async schemas",
+      path: ["workspaceConfigSchema"],
+    });
+  }
   const requiredIds = manifest.requiredDependencies?.map((dependency) => dependency.id) ?? [];
   const conflictIds = manifest.conflicts?.map((conflict) => conflict.id) ?? [];
   for (const [field, ids] of [["requiredDependencies", requiredIds], ["conflicts", conflictIds]] as const) {

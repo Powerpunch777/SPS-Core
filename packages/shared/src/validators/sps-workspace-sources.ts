@@ -1,4 +1,4 @@
-import { z } from "zod";
+import { z } from "zod/v3";
 
 const spsWorkspaceSourceNameSchema = z.string().trim().min(1).max(96);
 const spsWorkspaceSourceSharePathSchema = z.string().trim().min(5).max(1024);

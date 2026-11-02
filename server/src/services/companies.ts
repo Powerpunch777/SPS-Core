@@ -8,6 +8,7 @@ import {
   agentApiKeys,
   agentRuntimeState,
   agentTaskSessions,
+  spsSessionDispatches,
   agentWakeupRequests,
   issues,
   issueComments,
@@ -22,6 +23,7 @@ import {
   approvals,
   activityLog,
   companySecrets,
+  pluginState,
   joinRequests,
   invites,
   principalPermissionGrants,
@@ -36,6 +38,9 @@ import { heartbeatService } from "./heartbeat.js";
 import { logActivity } from "./activity-log.js";
 import { builtInAgentService } from "./built-in-agents.js";
 import { isSpsCoreBaselineModeEnabled } from "../ui-branding.js";
+import { assertSpsWorkspaceExecutionReadyForDeletion } from "./sps-workspace-execution-control.js";
+import type { SpsPluginArtifactMaintenance } from "./sps-plugin-artifact-maintenance.js";
+import { withSpsPluginArtifactMutation } from "./sps-plugin-artifact-mutation.js";
 
 export interface CompanyActivityActor {
   actorType: "user" | "agent" | "system" | "plugin";
@@ -51,7 +56,7 @@ const SYSTEM_COMPANY_ACTOR: CompanyActivityActor = {
   runId: null,
 };
 
-export function companyService(db: Db) {
+export function companyService(db: Db, options: { artifactMaintenance?: SpsPluginArtifactMaintenance } = {}) {
   const ISSUE_PREFIX_FALLBACK = "CMP";
   const environmentsSvc = environmentService(db);
   const heartbeat = heartbeatService(db);
@@ -432,8 +437,20 @@ export function companyService(db: Db) {
       return result.company;
     },
 
-    remove: (id: string) =>
-      db.transaction(async (tx) => {
+    remove: (id: string, expectedExecution?: { epoch: string; revision: number }) =>
+      withSpsPluginArtifactMutation(options.artifactMaintenance, () => db.transaction(async (tx) => {
+        // The route drains process-owned resources before removal. Recheck the
+        // durable stop token and all pending lanes under the same control-row
+        // lock as Workspace deletion so a concurrent resume cannot admit new
+        // work between the drain and the cascading delete.
+        if (expectedExecution) await assertSpsWorkspaceExecutionReadyForDeletion(tx, id, expectedExecution);
+        // Plugin state uses a textual scope key rather than a company FK.
+        // Remove this Workspace's explicit company scope in the same atomic
+        // deletion, preserving shared state and unrelated legacy scope kinds.
+        await tx.delete(pluginState).where(and(
+          eq(pluginState.scopeKind, "company"),
+          eq(pluginState.scopeId, id),
+        ));
         // Delete from child tables in dependency order
         const companyRunIds = await tx
           .select({ id: heartbeatRuns.id })
@@ -446,6 +463,7 @@ export function companyService(db: Db) {
             .delete(heartbeatRunEvents)
             .where(inArray(heartbeatRunEvents.runId, companyRunIds.map((run) => run.id)));
         }
+        await tx.delete(spsSessionDispatches).where(eq(spsSessionDispatches.companyId, id));
         await tx.delete(agentTaskSessions).where(eq(agentTaskSessions.companyId, id));
         await tx.delete(activityLog).where(eq(activityLog.companyId, id));
         await tx.delete(heartbeatRuns).where(eq(heartbeatRuns.companyId, id));
@@ -480,7 +498,7 @@ export function companyService(db: Db) {
           .where(eq(companies.id, id))
           .returning();
         return rows[0] ?? null;
-      }),
+      })),
 
     stats: () =>
       Promise.all([

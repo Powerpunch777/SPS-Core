@@ -38,6 +38,7 @@ import {
 import { sanitizeRemoteExecutionEnv } from "./remote-execution-env.js";
 import { preferredShellForSandbox, shellCommandArgs } from "./sandbox-shell.js";
 import type { RuntimeProgressSink, RuntimeStatusSink } from "./runtime-progress.js";
+import { createProcessSessionInputQueue } from "./process-session-input-queue.js";
 
 export type { RuntimeProgressSink } from "./runtime-progress.js";
 
@@ -1412,6 +1413,15 @@ export async function startAdapterExecutionTargetProcessSessionBridge(input: {
     timeoutMs,
     shellCommand,
   });
+  const publishInputFrame = client.writeResponseFile;
+  if (!publishInputFrame) throw new Error("Process session input requires atomic queue publication.");
+  const inputQueue = createProcessSessionInputQueue({
+    stdinDir,
+    publish: async (filePath, body) => {
+      const result = await publishInputFrame(filePath, body);
+      if (!result.wrote) throw new Error("Process session input frame was not published.");
+    },
+  });
 
   await client.makeDir(stdinDir);
   await client.makeDir(eventsDir);
@@ -1448,7 +1458,6 @@ export async function startAdapterExecutionTargetProcessSessionBridge(input: {
 
   let socket: net.Socket | null = null;
   let stopping = false;
-  let stdinSeq = 0;
   let pollTimer: NodeJS.Timeout | null = null;
   const pendingRemoteEvents: Array<{
     type?: string;
@@ -1537,17 +1546,14 @@ export async function startAdapterExecutionTargetProcessSessionBridge(input: {
           socket = nextSocket;
           flushPendingRemoteEvents();
         }
-        void (async () => {
-          if (message.type === "stdin" && typeof message.data === "string") {
-            stdinSeq += 1;
-            const name = `${String(stdinSeq).padStart(12, "0")}.json`;
-            await client.writeTextFile(path.posix.join(stdinDir, name), jsonLine({ type: "stdin", data: message.data }));
-          } else if (message.type === "stdinEnd") {
-            stdinSeq += 1;
-            const name = `${String(stdinSeq).padStart(12, "0")}.json`;
-            await client.writeTextFile(path.posix.join(stdinDir, name), jsonLine({ type: "stdinEnd" }));
-          }
-        })().catch((error) => {
+        // Buffered output still authenticates and drains after remote exit;
+        // further input must not recreate session files during stop/cleanup.
+        if (stopping) continue;
+        const frame = message.type === "stdin" && typeof message.data === "string"
+          ? { type: "stdin" as const, data: message.data }
+          : message.type === "stdinEnd" ? { type: "stdinEnd" as const } : null;
+        if (!frame) continue;
+        void inputQueue.write(frame).catch((error) => {
           nextSocket.write(jsonLine({ type: "error", message: error instanceof Error ? error.message : String(error) }));
           nextSocket.destroy();
         });
@@ -1596,10 +1602,9 @@ export async function startAdapterExecutionTargetProcessSessionBridge(input: {
       if (pollTimer) clearTimeout(pollTimer);
       for (const liveSocket of liveSockets) liveSocket.destroy();
       await new Promise<void>((resolve) => server.close(() => resolve())).catch(() => undefined);
-      await client.writeTextFile(
-        path.posix.join(stdinDir, `${String(stdinSeq + 1).padStart(12, "0")}.json`),
-        jsonLine({ type: "stdinEnd" }),
-      ).catch(() => undefined);
+      // Joining the same queue keeps in-flight writes ahead of EOF and ensures
+      // no earlier upload can recreate files after the session is removed.
+      await inputQueue.finish().catch(() => undefined);
       await client.remove(sessionDir).catch(() => undefined);
       await fs.rm(proxyDir, { recursive: true, force: true }).catch(() => undefined);
     },

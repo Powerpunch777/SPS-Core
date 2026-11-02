@@ -7,7 +7,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SpsWorkspaceShellState } from "@/api/workspace-surfaces";
 
-const mocks = vi.hoisted(() => ({ shell: vi.fn(), legacy: vi.fn(), select: vi.fn(), reload: vi.fn() }));
+const mocks = vi.hoisted(() => ({ shell: vi.fn(), contributions: vi.fn(), legacy: vi.fn(), select: vi.fn(), reload: vi.fn() }));
 const companyState = vi.hoisted(() => ({
   companies: [
     { id: "workspace-a", name: "Workspace A", issuePrefix: "SPS" },
@@ -24,6 +24,7 @@ vi.mock("@/context/CompanyContext", () => ({
   useCompany: () => ({ ...companyState, setSelectedCompanyId: mocks.select, reloadCompanies: mocks.reload }),
 }));
 vi.mock("@/api/workspace-surfaces", () => ({ workspaceSurfacesApi: { getShell: mocks.shell } }));
+vi.mock("@/api/plugins", () => ({ pluginsApi: { listUiContributions: mocks.contributions } }));
 vi.mock("./Layout", () => ({ Layout: () => { mocks.legacy(); return <div data-legacy-layout="true"><Outlet /></div>; } }));
 vi.mock("@/pages/NotFound", () => ({ NotFoundPage: () => <div>Workspace not found</div> }));
 
@@ -38,7 +39,22 @@ let navigate: ReturnType<typeof useNavigate>;
 
 function RouteProbe() {
   navigate = useNavigate();
-  return <div data-current-route={useLocation().pathname} />;
+  const location = useLocation();
+  return <div data-current-route={location.pathname} data-current-location={`${location.pathname}${location.search}${location.hash}`} />;
+}
+
+function pageContribution(pluginId: string, routePath: string) {
+  return {
+    pluginId,
+    pluginKey: pluginId,
+    displayName: pluginId,
+    version: "1.0.0",
+    uiEntryFile: "index.js",
+    slots: [{ type: "page" as const, id: `${pluginId}-page`, displayName: pluginId, exportName: "Page", routePath }],
+    launchers: [],
+    workspaceShell: null,
+    dashboardWidgets: [],
+  };
 }
 
 describe("SpsWorkspaceLayout", () => {
@@ -58,6 +74,7 @@ describe("SpsWorkspaceLayout", () => {
     companyState.error = null;
     vi.clearAllMocks();
     mocks.shell.mockResolvedValue(neutral);
+    mocks.contributions.mockResolvedValue([]);
     mocks.reload.mockResolvedValue(undefined);
   });
 
@@ -80,6 +97,17 @@ describe("SpsWorkspaceLayout", () => {
           <Routes>
             <Route path=":companyPrefix" element={<SpsWorkspaceLayout />}>
               <Route index element={<p>Compatibility index</p>} />
+              <Route path="plugins/:pluginId" element={<p data-testid="plugin-id-page">Plugin id page</p>} />
+              <Route path="company/settings/*" element={<p data-testid="settings-route">Core settings route</p>} />
+              <Route path="execution-workspaces/*" element={<p data-testid="execution-workspaces-route">Execution Workspaces route</p>} />
+              <Route path="projects/*" element={<p data-testid="projects-route">Projects route</p>} />
+              <Route path="agents/*" element={<p data-testid="agents-route">Agents route</p>} />
+              <Route path="assistants/*" element={<p data-testid="assistants-route">Assistants route</p>} />
+              <Route path="agent-rooms/*" element={<p data-testid="agent-rooms-route">Legacy rooms route</p>} />
+              <Route path="tasks/*" element={<p data-testid="tasks-route">Legacy tasks route</p>} />
+              <Route path="organization/*" element={<p data-testid="organization-route">Legacy organization route</p>} />
+              <Route path=":pluginRoutePath" element={<p data-testid="plugin-alias-page">Plugin alias page</p>} />
+              <Route path=":pluginRoutePath/*" element={<p data-testid="plugin-alias-page">Plugin nested page</p>} />
               <Route path="*" element={<p>Compatibility page</p>} />
             </Route>
           </Routes>
@@ -135,18 +163,118 @@ describe("SpsWorkspaceLayout", () => {
     expect(mocks.legacy).not.toHaveBeenCalled();
   });
 
+  it("does not resolve a deep plugin route for an invalid Workspace prefix", async () => {
+    await render("/UNKNOWN/discover");
+    expect(mocks.contributions).not.toHaveBeenCalled();
+    expect(mocks.legacy).toHaveBeenCalled();
+  });
+
   it("canonicalizes prefix case before opening a plugin route", async () => {
     mocks.shell.mockResolvedValue(selected);
     await render("/sps");
     expect(container.querySelector("[data-current-route]")?.getAttribute("data-current-route")).toBe("/SPS/builder");
   });
 
-  it("retains the selected plugin route and legacy layout for existing manifests", async () => {
+  it("renders the selected Primary page without the compatibility layout", async () => {
     mocks.shell.mockResolvedValue(selected);
+    mocks.contributions.mockResolvedValue([pageContribution("plugin-a", "builder")]);
     await render();
     expect(container.querySelector("[data-current-route]")?.getAttribute("data-current-route")).toBe("/SPS/builder");
-    expect(mocks.legacy).toHaveBeenCalled();
-    expect(container.textContent).toContain("Compatibility page");
+    expect(container.querySelector('[data-testid="plugin-alias-page"]')).not.toBeNull();
+    expect(mocks.legacy).not.toHaveBeenCalled();
+    expect(mocks.contributions).toHaveBeenCalledWith("workspace-a");
+    expect(container.querySelector('[data-sps-plugin-surface="true"]')?.className).toContain("h-dvh");
+  });
+
+  it("renders an enabled Extension page route full-screen and syncs its Workspace", async () => {
+    mocks.contributions.mockResolvedValue([pageContribution("extension-plugin", "wiki")]);
+    await render("/SPS/wiki/nested/page?view=full#section");
+    expect(container.querySelector('[data-testid="plugin-alias-page"]')?.textContent).toBe("Plugin nested page");
+    expect(container.querySelector("[data-current-location]")?.getAttribute("data-current-location")).toBe("/SPS/wiki/nested/page?view=full#section");
+    expect(mocks.legacy).not.toHaveBeenCalled();
+    expect(mocks.select).toHaveBeenCalledWith("workspace-a", { source: "route_sync" });
+  });
+
+  it("renders the direct plugin-id page route full-screen", async () => {
+    mocks.contributions.mockResolvedValue([pageContribution("plugin-a", "unused-alias")]);
+    await render("/SPS/plugins/plugin-a");
+    expect(container.querySelector('[data-testid="plugin-id-page"]')).not.toBeNull();
+    expect(mocks.legacy).not.toHaveBeenCalled();
+  });
+
+  it.each(["dashboard", "inbox", "assistants/new", "company/settings/instance/plugins"])(
+    "keeps explicit Core route %s in the compatibility layout",
+    async (route) => {
+      mocks.contributions.mockResolvedValue([pageContribution("extension-plugin", route.split("/")[0]!)]);
+      await render(`/SPS/${route}`);
+      expect(mocks.legacy).toHaveBeenCalled();
+      expect(mocks.contributions).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ["tasks", "tasks-route"],
+    ["agent-rooms", "agent-rooms-route"],
+    ["organization", "organization-route"],
+    ["project/project-a", "plugin-alias-page"],
+    ["projects/project-a", "projects-route"],
+    ["execution-workspaces/workspace-a", "execution-workspaces-route"],
+    ["agents", "agents-route"],
+  ])("renders declared Plugin alias %s without the compatibility layout", async (route, testId) => {
+    mocks.contributions.mockResolvedValue([pageContribution("extension-plugin", route.split("/")[0]!)]);
+    await render(`/SPS/${route}`);
+    expect(container.querySelector(`[data-testid="${testId}"]`)).not.toBeNull();
+    expect(mocks.legacy).not.toHaveBeenCalled();
+    expect(mocks.contributions).toHaveBeenCalledWith("workspace-a");
+  });
+
+  it("canonicalizes the company prefix without replacing a plugin deep link, query, or hash", async () => {
+    mocks.contributions.mockResolvedValue([pageContribution("extension-plugin", "discover")]);
+    await render("/sps/discover/templates?tab=one#selected");
+    expect(container.querySelector("[data-current-location]")?.getAttribute("data-current-location"))
+      .toBe("/SPS/discover/templates?tab=one#selected");
+    expect(container.querySelector('[data-testid="plugin-alias-page"]')).not.toBeNull();
+    expect(mocks.legacy).not.toHaveBeenCalled();
+  });
+
+  it("shows a generic retry state when Plugin page lookup fails, then resolves the declared page", async () => {
+    let resolveRetry!: (contributions: ReturnType<typeof pageContribution>[]) => void;
+    mocks.contributions.mockRejectedValueOnce(new Error("private diagnostic"))
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveRetry = resolve; }));
+    await render("/SPS/discover");
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain("Plugin page could not be loaded.");
+    expect(container.textContent).not.toContain("private diagnostic");
+    expect(container.querySelector('[data-testid="plugin-alias-page"]')).toBeNull();
+    expect(mocks.legacy).not.toHaveBeenCalled();
+    const retry = Array.from(container.querySelectorAll("button")).find((button) => button.textContent === "Retry");
+    expect(retry).toBeDefined();
+    act(() => retry!.click());
+    await settle();
+    expect(container.querySelector('[role="status"]')?.textContent).toContain("Loading workspace");
+    expect(container.querySelector('[data-testid="plugin-alias-page"]')).toBeNull();
+    expect(mocks.legacy).not.toHaveBeenCalled();
+    await act(async () => resolveRetry([pageContribution("extension-plugin", "discover")]));
+    await settle();
+    expect(container.querySelector('[data-testid="plugin-alias-page"]')).not.toBeNull();
+    expect(mocks.legacy).not.toHaveBeenCalled();
+  });
+
+  it("does not render cached Plugin content or CompatibilityLayout while revalidating, including after failure", async () => {
+    client.setQueryData(queryKeys.plugins.uiContributions("workspace-a"), [pageContribution("extension-plugin", "discover")]);
+    let reject!: (reason: Error) => void;
+    mocks.contributions.mockImplementation(() => new Promise((_resolve, rejectPromise) => { reject = rejectPromise; }));
+    await render("/SPS/discover");
+
+    expect(container.querySelector('[role="status"]')?.textContent).toContain("Loading workspace");
+    expect(container.querySelector('[data-testid="plugin-alias-page"]')).toBeNull();
+    expect(mocks.legacy).not.toHaveBeenCalled();
+
+    await act(async () => reject(new Error("private stale-cache diagnostic")));
+    await settle();
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain("Plugin page could not be loaded.");
+    expect(container.querySelector('[data-testid="plugin-alias-page"]')).toBeNull();
+    expect(container.textContent).not.toContain("private stale-cache diagnostic");
+    expect(mocks.legacy).not.toHaveBeenCalled();
   });
 
   it("keeps root-valued old manifests out of a redirect loop", async () => {

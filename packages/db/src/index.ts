@@ -14,8 +14,10 @@ export {
 export {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
+  formatEmbeddedPostgresTestSupportFailure,
   type EmbeddedPostgresTestDatabase,
   type EmbeddedPostgresTestSupport,
+  type EmbeddedPostgresStartupSqlState,
 } from "./test-embedded-postgres.js";
 export {
   runDatabaseBackup,

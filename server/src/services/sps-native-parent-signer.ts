@@ -20,6 +20,7 @@ type SignPayload = {
   requestPem: string;
   notBefore: number;
   notAfter: number;
+  expectedSpkiSha256?: string;
 };
 type InspectResult = {
   hostId: string;
@@ -188,7 +189,8 @@ function validateSignPayload(value: Record<string, unknown>): SignPayload {
     throw invalidInput();
   }
   return { hostId, serverSpkiSha256, issuerSpkiSha256, deviceKeyId, requestPem,
-    notBefore: notBefore as number, notAfter: notAfter as number };
+    notBefore: notBefore as number, notAfter: notAfter as number,
+    ...(Object.hasOwn(value, "expectedSpkiSha256") ? { expectedSpkiSha256: requirePin(value.expectedSpkiSha256) } : {}) };
 }
 
 function validateInspectResult(value: unknown): InspectResult {
@@ -384,7 +386,7 @@ export function createSpsNativeParentSignerClient(
       return await request<InspectResult>("inspect", undefined, signalValue(options.signal));
     },
     async sign(inputValue: SpsNativeParentSignerRequest): Promise<SignResult> {
-      const input = ownRecord(inputValue, ["hostId", "serverSpkiSha256", "issuerSpkiSha256", "deviceKeyId", "requestPem", "notBefore", "notAfter", "signal"],
+      const input = ownRecord(inputValue, ["hostId", "serverSpkiSha256", "issuerSpkiSha256", "deviceKeyId", "requestPem", "notBefore", "notAfter", "expectedSpkiSha256", "signal"],
         ["hostId", "serverSpkiSha256", "issuerSpkiSha256", "deviceKeyId", "requestPem", "notBefore", "notAfter"]);
       const payload = validateSignPayload(input);
       return await request<SignResult>("sign", payload, signalValue(input.signal));

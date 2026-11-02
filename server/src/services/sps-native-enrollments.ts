@@ -1,7 +1,7 @@
 import { createHash, X509Certificate } from "node:crypto";
 import { TLSSocket } from "node:tls";
 import { and, eq } from "drizzle-orm";
-import { spsMemberDevices, spsNativeEnrollments, spsNativePairings, spsNativePairingEvents, type Db } from "../compat/paperclip/db.js";
+import { spsMemberDevices, spsMemberDeviceRenewalCertificates, spsNativeEnrollments, spsNativePairings, spsNativePairingEvents, type Db } from "../compat/paperclip/db.js";
 import { spsNativePairingService, type SpsNativePairingAuthorizer, type SpsNativePairingPolicy } from "./sps-native-pairings.js";
 import { registerPendingSpsMemberDeviceInTransaction } from "./sps-member-devices.js";
 
@@ -21,6 +21,12 @@ type Options = {
   pairingPolicy: SpsNativePairingPolicy; certificateLifetimeMs: number;
   signingTimeoutMs: number; maxConcurrentSignings: number;
 };
+const mainPeerProof = new WeakMap<object, { certificateDer: Buffer; assertActive(): void }>();
+export type SpsNativeMainIngressPeer = Readonly<{
+  protocol: "TLSv1.3";
+  resumed: false;
+  assertActive(): void;
+}>;
 const UUID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/;
 const SHA = /^[0-9a-f]{64}$/;
 const CLIENT_AUTH = "1.3.6.1.5.5.7.3.2";
@@ -67,6 +73,75 @@ function certificate(value: unknown) {
   if (!parsed.raw.equals(bytes)) deny();
   return parsed;
 }
+
+/** Private adapter only: caller must have received the fields over the direct
+ * Main-owned child IPC stream after validating the live TLS client-auth socket.
+ * No HTTP header or renderer-facing contract can create this evidence. */
+export function createSpsNativeMainIngressPeer(input: {
+  protocol: "TLSv1.3";
+  resumed: false;
+  certificateDer: Buffer;
+  assertActive(): void;
+}): SpsNativeMainIngressPeer {
+  if (!input || typeof input !== "object" || Array.isArray(input)
+    || ![Object.prototype, null].includes(Object.getPrototypeOf(input))) deny();
+  const fields = Object.getOwnPropertyDescriptors(input);
+  const keys = Reflect.ownKeys(fields);
+  if (keys.length !== 4 || keys.some(key => typeof key !== "string"
+    || !["protocol", "resumed", "certificateDer", "assertActive"].includes(key))) deny();
+  for (const key of ["protocol", "resumed", "certificateDer", "assertActive"] as const) {
+    if (!fields[key]?.enumerable || !("value" in fields[key]!)) deny();
+  }
+  const protocol = fields.protocol!.value;
+  const resumed = fields.resumed!.value;
+  const certificateDer = fields.certificateDer!.value;
+  const assertActive = fields.assertActive!.value;
+  if (protocol !== "TLSv1.3" || resumed !== false || !Buffer.isBuffer(certificateDer)
+    || certificateDer.length < 1 || certificateDer.length > 4096 || typeof assertActive !== "function") deny();
+  const guardedActive = () => {
+    const value = (assertActive as () => unknown)();
+    if (value && typeof (value as { then?: unknown }).then === "function") {
+      void Promise.resolve(value).catch(() => {});
+      deny();
+    }
+    if (value !== undefined) deny();
+  };
+  guardedActive();
+  const der = Buffer.from(certificateDer);
+  const cert = new X509Certificate(der);
+  if (!cert.raw.equals(der)) deny();
+  const proof = Object.freeze({
+    protocol: "TLSv1.3" as const,
+    resumed: false as const,
+    assertActive: guardedActive,
+  });
+  mainPeerProof.set(proof, { certificateDer: Buffer.from(cert.raw), assertActive: guardedActive });
+  return proof;
+}
+
+/** Trusted internal inspection only; the private proof is created by the owned
+ * Main adapter after a real fresh TLS socket, never from an HTTP selector. */
+export function getSpsNativeEnrollmentPeerCertificate(peerOrSocket: TLSSocket | SpsNativeMainIngressPeer): X509Certificate {
+  if (peerOrSocket instanceof TLSSocket) {
+    const socket = peerOrSocket;
+    if (socket.destroyed || !socket.encrypted || !socket.authorized
+      || socket.getProtocol() !== "TLSv1.3" || socket.isSessionReused()) deny();
+    const value = socket.getPeerX509Certificate();
+    if (!value) deny();
+    return certificate(value.raw.toString("base64url"));
+  }
+  if (!peerOrSocket || typeof peerOrSocket !== "object") deny();
+  const proof = mainPeerProof.get(peerOrSocket);
+  if (!proof) deny();
+  proof.assertActive();
+  if (peerOrSocket.protocol !== "TLSv1.3" || peerOrSocket.resumed !== false) deny();
+  const parsed = certificate(proof.certificateDer.toString("base64url"));
+  proof.assertActive();
+  return parsed;
+}
+function peerFingerprint(peerOrSocket: TLSSocket | SpsNativeMainIngressPeer): string {
+  return digest(getSpsNativeEnrollmentPeerCertificate(peerOrSocket).raw);
+}
 function request(value: unknown) {
   if (typeof value !== "string" || value.length > 3000) deny();
   const body = value.replace(/^-----BEGIN CERTIFICATE REQUEST-----\n/, "").replace(/\n-----END CERTIFICATE REQUEST-----\n$/, "");
@@ -105,7 +180,7 @@ export function spsNativeEnrollmentService(db: Db, options: Options, sign: SpsNa
     if (!Number.isFinite(Date.parse(issuer.validFrom)) || !Number.isFinite(Date.parse(issuer.validTo))
       || Date.parse(issuer.validFrom) > Date.now() || Date.parse(issuer.validTo) <= Date.now()) deny();
   }
-  function leaf(value: unknown, deviceKeyId: string) {
+  function leaf(value: unknown, deviceKeyId: string, historical = false) {
     currentIssuer();
     const parsed = certificate(value);
     const before = Date.parse(parsed.validFrom), after = Date.parse(parsed.validTo);
@@ -113,7 +188,7 @@ export function spsNativeEnrollmentService(db: Db, options: Options, sign: SpsNa
       || parsed.subject !== `CN=SPS Member Device ${deviceKeyId}\nOU=SPS Native Host ${hostId}`
       || parsed.publicKey.asymmetricKeyType !== "ec" || parsed.publicKey.asymmetricKeyDetails?.namedCurve !== "prime256v1"
       || parsed.keyUsage?.length !== 1 || parsed.keyUsage[0] !== CLIENT_AUTH
-      || !Number.isFinite(before) || !Number.isFinite(after) || before > Date.now() || after <= Date.now()
+      || !Number.isFinite(before) || !Number.isFinite(after) || after <= before || before > Date.now() || (!historical && after <= Date.now())
       || before < Date.parse(issuer.validFrom) || after > Date.parse(issuer.validTo) || after - before > MAX_LIFETIME) deny();
     return { parsed, before, after, sha256: digest(parsed.raw) };
   }
@@ -136,19 +211,11 @@ export function spsNativeEnrollmentService(db: Db, options: Options, sign: SpsNa
   async function safe<T>(operation: () => Promise<T>) {
     try { return await operation(); } catch { throw new SpsNativeEnrollmentError(); }
   }
-  function peer(socket: TLSSocket) {
-    if (!(socket instanceof TLSSocket) || socket.destroyed || !socket.encrypted || !socket.authorized
-      || socket.getProtocol() !== "TLSv1.3" || socket.isSessionReused()) deny();
-    const value = socket.getPeerX509Certificate();
-    if (!value) deny();
-    return digest(value.raw);
-  }
-
   return {
     // A lost completion response must never be repaired by consuming or issuing
     // again. Only the current session and the exact issued TLS key can read the
     // already-consumed invitation's live device linkage.
-    reconcileFromTlsPeer(socket: TLSSocket, input: ReconcileInput, authorizeInTransaction: SpsNativeEnrollmentAuthorizer) {
+    reconcileFromTlsPeer(socket: TLSSocket | SpsNativeMainIngressPeer, input: ReconcileInput, authorizeInTransaction: SpsNativeEnrollmentAuthorizer) {
       return safe(async () => {
         if (typeof authorizeInTransaction !== "function") deny();
         const authorize = authorizeInTransaction;
@@ -158,7 +225,7 @@ export function spsNativeEnrollmentService(db: Db, options: Options, sign: SpsNa
         if (typeof raw.userId !== "string" || !raw.userId.trim() || raw.userId.length > 200
           || /[\u0000-\u001f\u007f]/.test(raw.userId)) deny();
         const userId = raw.userId;
-        const fingerprint = peer(socket);
+        const fingerprint = peerFingerprint(socket);
         currentIssuer();
         const result = await db.transaction(async tx => {
           await authorize(tx, userId);
@@ -168,10 +235,15 @@ export function spsNativeEnrollmentService(db: Db, options: Options, sign: SpsNa
             eq(spsNativeEnrollments.userId, userId),
           )).for("share");
           if (!row || row.status !== "issued" || row.serverSpkiSha256 !== serverPin
-            || row.issuerSpkiSha256 !== issuerPin || row.certificateSha256 !== fingerprint
+            || row.issuerSpkiSha256 !== issuerPin
             || !row.certificate || !row.issuedAt || row.createdAt.getTime() > Date.now()) deny();
-          const checked = leaf(row.certificate, row.deviceKeyId);
-          if (checked.sha256 !== fingerprint) deny();
+          // The enrollment's original certificate is immutable history. Only
+          // the actual, currently valid registered peer proves today's identity.
+          const checked = leaf(row.certificate, row.deviceKeyId, true);
+          if (checked.sha256 !== row.certificateSha256) deny();
+          const peerCertificate = getSpsNativeEnrollmentPeerCertificate(socket).raw.toString("base64url");
+          const current = leaf(peerCertificate, row.deviceKeyId);
+          if (current.sha256 !== fingerprint) deny();
           const [invitation] = await tx.select().from(spsNativePairings).where(and(
             eq(spsNativePairings.id, row.pairingId), eq(spsNativePairings.hostId, hostId),
           )).for("share");
@@ -186,19 +258,29 @@ export function spsNativeEnrollmentService(db: Db, options: Options, sign: SpsNa
             eq(spsMemberDevices.ownerUserId, userId),
           )).for("share");
           if (!device || !["pending", "approved", "revoked"].includes(device.status)
-            || device.certificate !== row.certificate || device.certificateSha256 !== fingerprint
+            || device.certificate !== row.certificate || device.certificateSha256 !== row.certificateSha256
             || device.spkiSha256 !== digest(checked.parsed.publicKey.export({ type: "spki", format: "der" }))
             || device.certificateNotBefore.getTime() !== checked.before
             || device.certificateNotAfter.getTime() !== checked.after) deny();
+          if (fingerprint !== device.certificateSha256) {
+            const [renewed] = await tx.select().from(spsMemberDeviceRenewalCertificates).where(and(
+              eq(spsMemberDeviceRenewalCertificates.deviceId, device.id),
+              eq(spsMemberDeviceRenewalCertificates.certificateSha256, fingerprint),
+            )).for("share");
+            if (!renewed || renewed.certificate !== peerCertificate || renewed.spkiSha256 !== device.spkiSha256
+              || renewed.issuerSpkiSha256 !== issuerPin || renewed.deviceKeyId !== row.deviceKeyId
+              || renewed.certificateNotBefore.getTime() !== current.before
+              || renewed.certificateNotAfter.getTime() !== current.after) deny();
+          }
           await authorize(tx, userId);
           assertActive();
-          if (peer(socket) !== fingerprint || leaf(row.certificate, row.deviceKeyId).sha256 !== fingerprint) deny();
+          if (peerFingerprint(socket) !== fingerprint || leaf(peerCertificate, row.deviceKeyId).sha256 !== fingerprint) deny();
           return { deviceId: device.id, status: device.status as "pending" | "approved" | "revoked",
-            certificate: row.certificate, deviceKeyId: row.deviceKeyId };
+            certificate: peerCertificate, deviceKeyId: row.deviceKeyId };
         });
         assertActive();
         currentIssuer();
-        if (peer(socket) !== fingerprint || leaf(result.certificate, result.deviceKeyId).sha256 !== fingerprint) deny();
+        if (peerFingerprint(socket) !== fingerprint || leaf(result.certificate, result.deviceKeyId).sha256 !== fingerprint) deny();
         return Object.freeze({ deviceId: result.deviceId, status: result.status });
       });
     },
@@ -277,7 +359,7 @@ export function spsNativeEnrollmentService(db: Db, options: Options, sign: SpsNa
         } finally { if (!deferredRelease) active--; }
       });
     },
-    completeFromTlsPeer(socket: TLSSocket, input: CompleteInput, authorizeInTransaction?: SpsNativeEnrollmentAuthorizer) {
+    completeFromTlsPeer(socket: TLSSocket | SpsNativeMainIngressPeer, input: CompleteInput, authorizeInTransaction?: SpsNativeEnrollmentAuthorizer) {
       return safe(async () => {
         const authorize = authorizer(authorizeInTransaction);
         assertActive();
@@ -285,7 +367,7 @@ export function spsNativeEnrollmentService(db: Db, options: Options, sign: SpsNa
         const scope = admission(raw), enrollmentId = uuid(raw.enrollmentId);
         if (typeof raw.displayName !== "string") deny();
         const displayName = raw.displayName;
-        const fingerprint = peer(socket);
+        const fingerprint = peerFingerprint(socket);
         currentIssuer();
         return pairing.withEnrollmentInvitation(scope, async (tx, invitation) => {
           assertActive();
@@ -298,11 +380,11 @@ export function spsNativeEnrollmentService(db: Db, options: Options, sign: SpsNa
             || row.createdAt < invitation.createdAt || row.createdAt.getTime() > Date.now()
             || row.expiresAt.getTime() <= Date.now()) deny();
           projection(row);
-          if (peer(socket) !== fingerprint) deny();
+          if (peerFingerprint(socket) !== fingerprint) deny();
           const device = await registerPendingSpsMemberDeviceInTransaction(tx, hostId, {
             userId: scope.userId, displayName, certificate: row.certificate!,
           });
-          if (device.status !== "pending" || device.certificateSha256 !== fingerprint || peer(socket) !== fingerprint) deny();
+          if (device.status !== "pending" || device.certificateSha256 !== fingerprint || peerFingerprint(socket) !== fingerprint) deny();
           await tx.update(spsNativePairings).set({
             status: "consumed", consumedAt: new Date(), consumedByUserId: scope.userId,
             consumedDeviceId: device.id, consumedDeviceSnapshotId: device.id,
@@ -314,7 +396,7 @@ export function spsNativeEnrollmentService(db: Db, options: Options, sign: SpsNa
           await authorize(tx, scope.userId);
           assertActive();
           projection(row);
-          if (peer(socket) !== fingerprint) deny();
+          if (peerFingerprint(socket) !== fingerprint) deny();
           return device;
         }, authorize);
       });

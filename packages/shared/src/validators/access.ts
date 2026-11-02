@@ -1,4 +1,4 @@
-import { z } from "zod";
+import { z } from "zod/v3";
 import {
   AGENT_ADAPTER_TYPES,
   HUMAN_COMPANY_MEMBERSHIP_ROLES,

@@ -1,4 +1,4 @@
-import { z } from "zod";
+import { z } from "zod/v3";
 import { workspaceFileRefSchema } from "./workspace-file-resource.js";
 
 function attachmentContentPath(attachmentId: string): string {

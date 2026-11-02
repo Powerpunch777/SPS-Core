@@ -1,13 +1,14 @@
 import { and, eq } from "drizzle-orm";
 import { agents, agentTaskSessions, heartbeatRuns, type Db } from "../compat/paperclip/db.js";
 import { readPluginConversationContext } from "./plugin-conversation-runtime.js";
+import type { SpsSessionExecutionPolicy } from "@paperclipai/adapter-utils/sps-session-policy";
 
 const uuid = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i;
 
 /** A projectless call cannot borrow a different run, session, or plugin scope. */
-export async function resolvePluginSessionToolScope(db: Db, input: {
+export async function resolvePluginSessionToolContext(db: Db, input: {
   agentId: string; companyId: string; runId: string;
-}): Promise<string | null> {
+}): Promise<Readonly<{ pluginKey: string; sessionId: string; executionPolicy?: SpsSessionExecutionPolicy }> | null> {
   if (![input.agentId, input.companyId, input.runId].every(value => typeof value === "string" && uuid.test(value))) return null;
   const agent = await db.select({ companyId: agents.companyId, status: agents.status }).from(agents)
     .where(and(eq(agents.id, input.agentId), eq(agents.companyId, input.companyId)))
@@ -29,5 +30,12 @@ export async function resolvePluginSessionToolScope(db: Db, input: {
     || session.companyId !== input.companyId || session.status !== "active" || session.closedAt != null
     || session.taskKey !== context?.taskKey
     || !session.taskKey.startsWith(`plugin:${conversation.pluginKey}:session:`)) return null;
-  return conversation.pluginKey;
+  return Object.freeze({ pluginKey: conversation.pluginKey, sessionId: session.id,
+    ...(conversation.executionPolicy ? { executionPolicy: conversation.executionPolicy } : {}) });
+}
+
+export async function resolvePluginSessionToolScope(db: Db, input: {
+  agentId: string; companyId: string; runId: string;
+}): Promise<string | null> {
+  return (await resolvePluginSessionToolContext(db, input))?.pluginKey ?? null;
 }

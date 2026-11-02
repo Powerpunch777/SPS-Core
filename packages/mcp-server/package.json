@@ -14,16 +14,14 @@
   },
   "type": "module",
   "bin": {
-    "sps-mcp-server": "./dist/stdio.js",
-    "sps-marketplace-assistant-mcp": "./dist/marketplace-assistant-stdio.js"
+    "sps-mcp-server": "./dist/stdio.js"
   },
   "exports": {
     ".": "./src/index.ts"
   },
   "publishConfig": {
     "bin": {
-      "sps-mcp-server": "./dist/stdio.js",
-      "sps-marketplace-assistant-mcp": "./dist/marketplace-assistant-stdio.js"
+      "sps-mcp-server": "./dist/stdio.js"
     },
     "exports": {
       ".": {
@@ -47,7 +45,7 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.0",
     "@paperclipai/shared": "workspace:*",
-    "zod": "^3.24.2"
+    "zod": "4.6.6"
   },
   "devDependencies": {
     "@types/node": "^22.19.21",

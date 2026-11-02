@@ -35,6 +35,7 @@ const TABLES_TO_DELETE = [
   "sps_agent_node_bindings",
   "sps_node_runner_profiles",
   "sps_node_heartbeats",
+  "sps_native_node_bindings",
   "sps_nodes",
   "sps_native_enrollments",
   "sps_native_pairings",
@@ -50,6 +51,45 @@ type UpdatePlan = {
 };
 
 const UPDATE_PLANS: UpdatePlan[] = [
+  {
+    // Restored plugin data is durable, but executable packages must be
+    // reviewed on the new Host before reinstalling or enabling them.
+    table: "plugins",
+    assignments: {
+      status: "'uninstalled'",
+      last_error: "'Host restore requires review before reinstall; plugin data was retained.'",
+    },
+    requiredWhereColumns: ["status"],
+    where: `"status" IN ('installed', 'active', 'ready', 'disabled', 'error', 'upgrade_pending')`,
+  },
+  {
+    // Clear paths from every row, including already-uninstalled plugins.
+    table: "plugins",
+    assignments: { package_path: "NULL" },
+  },
+  {
+    // Package paths belong to the original Host. Restoring a backup must not
+    // replay a deletion against a different machine's filesystem. Preserve
+    // intent history while retiring its automatic execution authority.
+    table: "sps_plugin_package_operations",
+    assignments: { kind: "'cancelled_after_restore'", active_plugin_id: "NULL", completed_at: "NOW()", updated_at: "NOW()" },
+    requiredWhereColumns: ["completed_at"],
+    where: `"completed_at" IS NULL`,
+  },
+  {
+    table: "sps_plugin_authority_catalog",
+    assignments: { revision: "gen_random_uuid()" },
+    requiredWhereColumns: ["id"],
+    where: `"id" = 'runtime'`,
+  },
+  {
+    table: "sps_workspace_plugin_authority",
+    assignments: { revision: "gen_random_uuid()" },
+  },
+  {
+    table: "sps_workspace_plugin_runtime_configs",
+    assignments: { revision: "gen_random_uuid()", updated_at: "NOW()" },
+  },
   {
     table: "sps_model_connections",
     assignments: { status: "'disabled'", secret_id: "NULL", updated_at: "NOW()" },
@@ -134,7 +174,7 @@ const UPDATE_PLANS: UpdatePlan[] = [
       finished_at: "NOW()",
     },
     requiredWhereColumns: ["status"],
-    where: `"status" IN ('pending', 'queued', 'running')`,
+    where: `"status" IN ('pending', 'queued', 'running', 'cancelling')`,
   },
   {
     table: "environment_custom_image_setup_sessions",

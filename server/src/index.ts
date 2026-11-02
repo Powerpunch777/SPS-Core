@@ -33,7 +33,14 @@ import detectPort from "detect-port";
 import { createApp } from "./app.js";
 import { shutdownSpsModelBroker } from "./services/sps-model-broker.js";
 import { attachSpsOwnedShutdown } from "./services/sps-owned-shutdown.js";
+import { requireSpsOwnedListenPort } from "./services/sps-owned-listen-port.js";
+import { createSpsPluginArtifactParentChannel } from "./services/sps-plugin-artifact-parent-channel.js";
 import { createSpsNativeHostManagement, type SpsNativeHostManagement } from "./services/sps-native-host-management.js";
+import { createSpsNativeParentEnrollmentService, type SpsNativeParentEnrollment } from "./services/sps-native-parent-enrollment.js";
+import { createSpsNativeParentIngress } from "./services/sps-native-parent-ingress.js";
+import type { createSpsNativeWorkspaceChannel as CreateSpsNativeWorkspaceChannel } from "./services/sps-native-workspace-channel.js";
+import type { createSpsNativePluginRuntime } from "./services/sps-native-plugin-runtime.js";
+import type { createSpsNativeNodeRuntime } from "./services/sps-native-node-runtime.js";
 import { loadConfig } from "./config.js";
 import { logger } from "./middleware/logger.js";
 import { setupEnvironmentCustomImageTerminalWebSocketServer } from "./realtime/environment-custom-image-terminal-ws.js";
@@ -120,6 +127,10 @@ export async function startServer(): Promise<StartedServer> {
   // a specific product name. Plugin minimumHostVersion checks must never run
   // against an implicit or stale desktop version.
   const hostVersion = configuredHostVersion || "0.0.0";
+  // Fail before database startup on an owned Desktop port collision. The later
+  // actual listen still rejects a bind race; it never falls back to another port.
+  const ownedDesktopListenPort = process.env.SPS_DESKTOP_OWNED_SHUTDOWN_PIPE === "1"
+    ? await requireSpsOwnedListenPort(config.port, detectPort) : null;
   initTelemetry({ enabled: config.telemetryEnabled });
   if (process.env.PAPERCLIP_SECRETS_PROVIDER === undefined) {
     process.env.PAPERCLIP_SECRETS_PROVIDER = config.secretsProvider;
@@ -531,7 +542,7 @@ export async function startServer(): Promise<StartedServer> {
   }
 
   const requestedListenPort = config.port;
-  const listenPort = await detectPort(requestedListenPort);
+  const listenPort = ownedDesktopListenPort ?? await detectPort(requestedListenPort);
   if (config.authBaseUrlMode === "explicit" && config.authPublicBaseUrl) {
     config.authPublicBaseUrl = rewriteLocalUrlPort(config.authPublicBaseUrl, listenPort);
   }
@@ -540,6 +551,11 @@ export async function startServer(): Promise<StartedServer> {
   let betterAuthHandler: RequestHandler | undefined;
   let spsIdentityHandler: RequestHandler | undefined;
   let nativeConnectivityManagement: SpsNativeHostManagement | undefined;
+  let nativeParentEnrollment: SpsNativeParentEnrollment | undefined;
+  let nativeParentIngress: ReturnType<typeof createSpsNativeParentIngress> | undefined;
+  let nativeWorkspaceChannel: ReturnType<typeof CreateSpsNativeWorkspaceChannel> | undefined;
+  let nativePluginRuntime: ReturnType<typeof createSpsNativePluginRuntime> | undefined;
+  let nativeNodeRuntime: ReturnType<typeof createSpsNativeNodeRuntime> | undefined;
   let resolveSession:
     | ((req: ExpressRequest) => Promise<BetterAuthSessionResult | null>)
     | undefined;
@@ -567,6 +583,80 @@ export async function startServer(): Promise<StartedServer> {
           ownerUserId: process.env.SPS_NATIVE_HOST_OWNER_USER_ID ?? "",
         }); }
         catch { logger.warn("Native Host device management is unavailable; existing Host access is unchanged."); }
+      }
+      // This private Main-to-Core enrollment dispatcher opens no HTTP route or
+      // socket. Desktop Main must prepare the Host and set explicit opt-in flags
+      // before Core binds it to its owned child.
+      if (process.env.SPS_NATIVE_PARENT_INGRESS === "1") {
+        if (!nativeConnectivityManagement) {
+          logger.warn("Native parent ingress is unavailable because Native Host management was not prepared.");
+        } else {
+          try {
+            nativeConnectivityManagement.assertActive();
+            nativeParentEnrollment = await createSpsNativeParentEnrollmentService(db as any, {
+              pairingPolicy: { maxTtlMs: 60 * 60 * 1000, maxAttempts: 5, maxActiveInvites: 10 },
+              certificateLifetimeMs: 90 * 24 * 60 * 60 * 1000,
+              signingTimeoutMs: 10_000,
+              maxConcurrentSignings: 2,
+            });
+            const binding = nativeParentEnrollment.identity;
+            if (binding.hostId !== nativeConnectivityManagement.hostId
+              || binding.serverSpkiSha256 !== nativeConnectivityManagement.serverSpkiSha256
+              || binding.issuerSpkiSha256 !== nativeConnectivityManagement.issuerSpkiSha256) {
+              throw new Error("Native parent identity does not match the prepared Host binding.");
+            }
+            nativeParentIngress = createSpsNativeParentIngress(identityAuth, nativeParentEnrollment, {
+              maxPending: 2,
+              maxRequests: 4096,
+              assertCurrent: () => nativeConnectivityManagement?.assertActive(),
+            });
+            nativeConnectivityManagement.assertActive();
+            nativeParentIngress.assertAvailable();
+          } catch {
+            nativeParentIngress?.dispose();
+            nativeParentIngress = undefined;
+            nativeParentEnrollment?.dispose();
+            nativeParentEnrollment = undefined;
+            logger.warn("Native parent ingress is unavailable; no Native network listener was opened.");
+          }
+        }
+      }
+      // Workspace surfaces use a separate per-child key and a dedicated
+      // loopback listener. The enrollment IPC remains independently usable if
+      // this optional bootstrap fails.
+      if (process.env.SPS_NATIVE_WORKSPACE_CHANNEL === "1") {
+        if (!nativeConnectivityManagement || !nativeParentEnrollment || !nativeParentIngress) {
+          logger.warn("Native Workspace channel is unavailable because prepared Host ingress is not active.");
+        } else {
+          try {
+            const { createSpsNativeWorkspaceChannel } = await import("./services/sps-native-workspace-channel.js");
+            const management = nativeConnectivityManagement;
+            const enrollment = nativeParentEnrollment;
+            const parentIngress = nativeParentIngress;
+            const binding = enrollment.identity;
+            nativeWorkspaceChannel = createSpsNativeWorkspaceChannel({
+              db: db as any,
+              identity: identityAuth,
+              hostId: binding.hostId,
+              serverSpkiSha256: binding.serverSpkiSha256,
+              issuerSpkiSha256: binding.issuerSpkiSha256,
+              getPluginRuntime: () => nativePluginRuntime,
+              getNodeRuntime: () => nativeNodeRuntime,
+              assertCurrent: () => {
+                management.assertActive();
+                enrollment.assertActive();
+                parentIngress.assertAvailable();
+              },
+            });
+            await nativeWorkspaceChannel.ready;
+            nativeWorkspaceChannel.assertAvailable();
+          } catch {
+            try { await nativeWorkspaceChannel?.dispose(); }
+            catch { process.exitCode = 1; }
+            nativeWorkspaceChannel = undefined;
+            logger.warn("Native Workspace channel is unavailable; existing Host ingress remains active.");
+          }
+        }
       }
       logger.info(
         {
@@ -697,7 +787,16 @@ export async function startServer(): Promise<StartedServer> {
     }
   };
   const pluginWorkerManager = createPluginWorkerManager();
+  let pluginArtifactParentChannel: ReturnType<typeof createSpsPluginArtifactParentChannel> | undefined;
   const app = await createApp(db as any, {
+    onPluginArtifactReferenceReader: reader => {
+      if (process.env.SPS_DESKTOP_ARTIFACT_CHANNEL === "1" && process.env.SPS_DESKTOP_OWNED_SHUTDOWN_PIPE === "1"
+        && process.connected === true && typeof process.send === "function") {
+        pluginArtifactParentChannel = createSpsPluginArtifactParentChannel(reader, process as Parameters<typeof createSpsPluginArtifactParentChannel>[1]);
+      }
+    },
+    onNativePluginRuntime: runtime => { nativePluginRuntime = runtime; },
+    onNativeNodeRuntime: runtime => { nativeNodeRuntime = runtime; },
     uiMode,
     serverPort: listenPort,
     storageService,
@@ -1193,7 +1292,15 @@ export async function startServer(): Promise<StartedServer> {
   
   {
     const shutdown = async (signal: "SIGINT" | "SIGTERM") => {
+      pluginArtifactParentChannel?.dispose();
+      try { await nativeWorkspaceChannel?.dispose(); }
+      catch {
+        process.exitCode = 1;
+        logger.warn("Native Workspace channel did not stop cleanly.");
+      }
       nativeConnectivityManagement?.dispose();
+      nativeParentIngress?.dispose();
+      nativeParentEnrollment?.dispose();
       heartbeatSchedulerStopped = true;
       if (heartbeatSchedulerInterval) {
         clearInterval(heartbeatSchedulerInterval);
@@ -1238,7 +1345,7 @@ export async function startServer(): Promise<StartedServer> {
       // await the exporter's final batch is dropped on exit.
       await shutdownInstrumentation();
 
-      process.exit(pluginShutdownFailed ? 1 : 0);
+      process.exit(pluginShutdownFailed || process.exitCode === 1 ? 1 : 0);
     };
 
     let stopping: Promise<void> | undefined;

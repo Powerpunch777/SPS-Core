@@ -50,6 +50,7 @@ import type {
   PermissionKey,
   PluginToolDeclaration,
 } from "@paperclipai/shared";
+import type { PluginSpsConnectivity } from "./sps-connectivity-types.js";
 export type { PluginLauncherRenderContextSnapshot } from "@paperclipai/shared";
 
 import type {
@@ -309,6 +310,10 @@ export interface PluginInvocationContext {
 export interface WorkerHostCallContext {
   invocationScope?: PluginInvocationScope | null;
   invalidInvocationScope?: boolean;
+  /** Host-process liveness check for this exact invocation. Never sent over RPC. */
+  assertCurrentInvocation?: () => Promise<void>;
+  /** Host-process callback from an authenticated Native invocation. Never sent over RPC. */
+  readNativeConnectivity?: () => Promise<PluginSpsConnectivity>;
 }
 
 // ---------------------------------------------------------------------------
@@ -1017,6 +1022,7 @@ export interface WorkerToHostMethods {
   ];
 
   // Workflow-neutral SPS infrastructure
+  "sps.connectivity.current": [params: Record<string, never>, result: PluginSpsConnectivity];
   "sps.models.list": [params: { companyId: string }, result: PluginSpsModelConnection[]];
   "sps.models.submit": [params: PluginSpsModelSubmitInput, result: PluginSpsModelRun];
   "sps.models.get": [params: { companyId: string; runId: string }, result: PluginSpsModelRun | null];
@@ -1112,6 +1118,11 @@ export interface WorkerToHostMethods {
   "state.set": [
     params: { scopeKind: string; scopeId?: string; namespace?: string; stateKey: string; value: unknown },
     result: void,
+  ];
+  "state.compareAndSet": [
+    params: { scopeKind: "company"; scopeId: string; namespace?: string; stateKey: string; value: unknown;
+      expected: { exists: false } | { exists: true; value: unknown } },
+    result: { swapped: boolean },
   ];
   "state.delete": [
     params: { scopeKind: string; scopeId?: string; namespace?: string; stateKey: string },
@@ -1673,6 +1684,14 @@ export interface WorkerToHostMethods {
   ];
 
   // Agent Sessions
+  "agents.sessions.getRequest": [
+    params: { sessionId: string; companyId: string; requestId: string },
+    result: import("./types.js").AgentSessionRequestState | null,
+  ];
+  "agents.sessions.describePolicySupport": [
+    params: { sessionId: string; companyId: string },
+    result: import("./types.js").AgentSessionPolicySupport,
+  ];
   "agents.sessions.getRun": [
     params: { sessionId: string; companyId: string; runId: string },
     result: import("./types.js").AgentSessionRunState,
@@ -1685,12 +1704,16 @@ export interface WorkerToHostMethods {
     params: { agentId: string; companyId: string; taskKey?: string; reason?: string; context?: AgentSessionContext },
     result: { sessionId: string; agentId: string; companyId: string; status: "active" | "closed"; createdAt: string; context?: AgentSessionContext; lastRunId: string | null; lastError: string | null },
   ];
+  "agents.sessions.ensure": [
+    params: import("./types.js").AgentSessionEnsureInput,
+    result: import("./types.js").AgentSessionEnsureResult,
+  ];
   "agents.sessions.list": [
     params: { agentId: string; companyId: string },
     result: Array<{ sessionId: string; agentId: string; companyId: string; status: "active" | "closed"; createdAt: string; context?: AgentSessionContext; lastRunId: string | null; lastError: string | null }>,
   ];
   "agents.sessions.sendMessage": [
-    params: { sessionId: string; companyId: string; prompt: string; reason?: string },
+    params: { sessionId: string; companyId: string; prompt: string; reason?: string; requestId?: string; executionPolicy?: import("./types.js").AgentSessionExecutionPolicy },
     result: { runId: string },
   ];
   "agents.sessions.close": [

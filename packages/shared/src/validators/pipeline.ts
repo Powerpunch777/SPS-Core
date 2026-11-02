@@ -1,4 +1,4 @@
-import { z } from "zod";
+import { z } from "zod/v3";
 import {
   ISSUE_EXECUTION_WORKSPACE_PREFERENCES,
   issueExecutionWorkspaceSettingsSchema,

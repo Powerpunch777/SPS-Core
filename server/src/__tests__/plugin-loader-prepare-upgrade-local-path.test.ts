@@ -17,6 +17,7 @@ vi.mock("../services/plugin-registry.js", () => ({
 }));
 
 import { pluginLoader } from "../services/plugin-loader.js";
+import { createSpsPluginArtifactOwnership } from "../services/sps-plugin-artifact-ownership.js";
 
 const activeManifest = {
   id: pluginKey,
@@ -132,6 +133,10 @@ describe("pluginLoader.prepareUpgrade local-path staging", () => {
       "i",
     ));
     expect(stagedPath).not.toBe(validCandidate);
+    const allocationId = stagedRelativePath.split("/")[2]!;
+    const witness = await createSpsPluginArtifactOwnership(localPluginDir).read(allocationId);
+    expect(witness.allocation).toMatchObject({ kind: "upgrade", pluginRecordId: pluginId });
+    expect(witness.package).toEqual({ pluginKey, packageName: "@sps/valid-candidate", version: "1.1.0" });
     expect(await readFile(path.join(stagedPath, "candidate-marker.txt"), "utf8")).toBe("valid-candidate-source");
     expect(await readFile(path.join(activePackage, "active-marker.txt"), "utf8")).toBe("active-package-content");
     expect(await readFile(path.join(validCandidate, "candidate-marker.txt"), "utf8")).toBe("valid-candidate-source");

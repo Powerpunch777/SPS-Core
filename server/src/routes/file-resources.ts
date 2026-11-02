@@ -1,7 +1,7 @@
 import { createReadStream } from "node:fs";
 import { pipeline } from "node:stream/promises";
 import { Router } from "express";
-import { ZodError } from "zod";
+import { ZodError } from "zod/v3";
 import type { Db } from "@paperclipai/db";
 import {
   workspaceFileListQuerySchema,

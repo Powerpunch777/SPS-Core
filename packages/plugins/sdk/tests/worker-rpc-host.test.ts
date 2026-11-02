@@ -169,6 +169,87 @@ describe("worker performAction context", () => {
       workerToHost.destroy();
     }
   });
+
+  it("sends session ensure as its own RPC and fails closed when an older Host lacks it", async () => {
+    const hostToWorker = new PassThrough();
+    const workerToHost = new PassThrough();
+    const hostReadline = createInterface({ input: workerToHost });
+    const pending = new Map<string, (response: JsonRpcResponse) => void>();
+    const outboundMethods: string[] = [];
+    const outboundParams: unknown[] = [];
+    let nextRequestId = 1;
+    let ensureAttempt = 0;
+    const plugin = definePlugin({
+      async setup(ctx) {
+        ctx.actions.register("ensure", async (params) => {
+          const input = params as { agentId: string; companyId: string; taskKey: string; expectedSessionId?: string };
+          return ctx.agents.sessions.ensure(input.agentId, input.companyId, {
+            taskKey: input.taskKey, expectedSessionId: input.expectedSessionId,
+          });
+        });
+      },
+    });
+    const worker = startWorkerRpcHost({ plugin, stdin: hostToWorker, stdout: workerToHost });
+
+    function callWorker(method: string, params: unknown) {
+      const id = `host-${nextRequestId++}`;
+      const result = new Promise<unknown>((resolve, reject) => {
+        pending.set(id, (response) => {
+          if ("error" in response && response.error) {
+            reject(new Error(response.error.message));
+            return;
+          }
+          resolve((response as { result?: unknown }).result);
+        });
+      });
+      hostToWorker.write(serializeMessage(createRequest(method, params, id)));
+      return result;
+    }
+
+    hostReadline.on("line", (line) => {
+      const message = parseMessage(line);
+      if (isJsonRpcResponse(message)) {
+        pending.get(String(message.id))?.(message);
+        pending.delete(String(message.id));
+        return;
+      }
+      if (!isJsonRpcRequest(message)) return;
+      outboundMethods.push(message.method);
+      outboundParams.push(message.params);
+      if (message.method !== "agents.sessions.ensure") return;
+      ensureAttempt += 1;
+      const response = ensureAttempt === 1
+        ? createSuccessResponse(message.id, { sessionId: "77777777-7777-4777-8777-777777777777", created: false })
+        : createErrorResponse(message.id, PLUGIN_RPC_ERROR_CODES.METHOD_NOT_IMPLEMENTED, "Method not implemented");
+      hostToWorker.write(serializeMessage(response));
+    });
+
+    try {
+      await expect(callWorker("initialize", {
+        manifest: {
+          id: "paperclip.test-session-ensure", apiVersion: 1, version: "1.0.0",
+          displayName: "Session Ensure Test", description: "Test plugin", author: "Paperclip",
+          categories: ["automation"], capabilities: ["agent.sessions.create"], entrypoints: {},
+        },
+        config: {}, databaseNamespace: null,
+      })).resolves.toMatchObject({ ok: true });
+
+      const params = {
+        agentId: "agent-a", companyId: "company-a", taskKey: "plugin:paperclip.test-session-ensure:session:key",
+        expectedSessionId: "77777777-7777-4777-8777-777777777777",
+      };
+      await expect(callWorker("performAction", { key: "ensure", params }))
+        .resolves.toEqual({ sessionId: params.expectedSessionId, created: false });
+      await expect(callWorker("performAction", { key: "ensure", params })).rejects.toThrow("Method not implemented");
+      expect(outboundMethods).toEqual(["agents.sessions.ensure", "agents.sessions.ensure"]);
+      expect(outboundParams).toEqual([params, params]);
+    } finally {
+      worker.stop();
+      hostReadline.close();
+      hostToWorker.destroy();
+      workerToHost.destroy();
+    }
+  });
 });
 
 describe("worker event delivery", () => {

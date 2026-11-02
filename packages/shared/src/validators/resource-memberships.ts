@@ -1,4 +1,4 @@
-import { z } from "zod";
+import { z } from "zod/v3";
 import { RESOURCE_MEMBERSHIP_STATES } from "../types/resource-memberships.js";
 
 export const resourceMembershipStateSchema = z.enum(RESOURCE_MEMBERSHIP_STATES);

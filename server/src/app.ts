@@ -40,6 +40,7 @@ import { userProfileRoutes } from "./routes/user-profiles.js";
 import { sidebarBadgeRoutes } from "./routes/sidebar-badges.js";
 import { sidebarPreferenceRoutes } from "./routes/sidebar-preferences.js";
 import { spsWorkspaceSurfaceRoutes } from "./routes/sps-workspace-surfaces.js";
+import { spsWorkspacePluginConfigRoutes } from "./routes/sps-workspace-plugin-config.js";
 import { resourceMembershipRoutes } from "./routes/resource-memberships.js";
 import { inboxDismissalRoutes } from "./routes/inbox-dismissals.js";
 import { instanceSettingsRoutes } from "./routes/instance-settings.js";
@@ -56,10 +57,10 @@ import { spsNodeRoutes } from "./routes/sps-nodes.js";
 import { spsExecutionRoutes } from "./routes/sps-executions.js";
 import { spsModelConnectionRoutes } from "./routes/sps-model-connections.js";
 import { spsMemberDeviceRoutes } from "./routes/sps-member-devices.js";
+import { spsNativePairingRoutes } from "./routes/sps-native-pairings.js";
 import type { SpsNativeHostManagement } from "./services/sps-native-host-management.js";
 import { getSpsModelBroker } from "./services/sps-model-broker.js";
 import { spsWorkspaceSourceRoutes } from "./routes/sps-workspace-sources.js";
-import { spsMarketplaceRoutes } from "./routes/sps-marketplace.js";
 import { pluginRoutes } from "./routes/plugins.js";
 import { adapterRoutes } from "./routes/adapters.js";
 import { pluginUiStaticRoutes } from "./routes/plugin-ui-static.js";
@@ -68,7 +69,15 @@ import { resolveStaticUiDist } from "./static-ui-dist.js";
 import { applyUiBranding } from "./ui-branding.js";
 import { logger } from "./middleware/logger.js";
 import { DEFAULT_LOCAL_PLUGIN_DIR, pluginLoader } from "./services/plugin-loader.js";
+import { createSpsPluginPackageOperations } from "./services/sps-plugin-package-operations.js";
+import { createSpsPluginArtifactMaintenance } from "./services/sps-plugin-artifact-maintenance.js";
+import { createSpsPluginArtifactReferenceReader, SpsPluginArtifactReferencesUnavailableError } from "./services/sps-plugin-artifact-references.js";
+import { readSpsSourceArtifactInventory } from "./services/sps-source-artifact-inventory.js";
+import { registryStagingService } from "./services/registry-staging.js";
 import { createPluginWorkerManager, type PluginWorkerManager } from "./services/plugin-worker-manager.js";
+import { createSpsNativePluginRuntime } from "./services/sps-native-plugin-runtime.js";
+import { createSpsWorkspacePluginWorkers } from "./services/sps-workspace-plugin-workers.js";
+import { createSpsNativeNodeRuntime } from "./services/sps-native-node-runtime.js";
 import { createPluginJobScheduler } from "./services/plugin-job-scheduler.js";
 import { pluginJobStore } from "./services/plugin-job-store.js";
 import { createPluginToolDispatcher } from "./services/plugin-tool-dispatcher.js";
@@ -76,6 +85,7 @@ import { pluginLifecycleManager } from "./services/plugin-lifecycle.js";
 import { createPluginJobCoordinator } from "./services/plugin-job-coordinator.js";
 import { buildHostServices, flushPluginLogBuffer } from "./services/plugin-host-services.js";
 import { createPluginEventBus } from "./services/plugin-event-bus.js";
+import { createPluginStreamBus } from "./services/plugin-stream-bus.js";
 import { createCompanyMemoryProviderRuntime } from "./services/memory-provider-runtime.js";
 import { setPluginEventBus } from "./services/activity-log.js";
 import { createPluginDevWatcher } from "./services/plugin-dev-watcher.js";
@@ -182,6 +192,10 @@ export async function createApp(
     registryStagingDir?: string;
     pluginMigrationDb?: Db;
     pluginWorkerManager?: PluginWorkerManager;
+    /** Host-private Core-only observation; not an HTTP/SDK cleanup capability. */
+    onPluginArtifactReferenceReader?: (reader: ReturnType<typeof createSpsPluginArtifactReferenceReader>) => void;
+    onNativePluginRuntime?: (runtime: ReturnType<typeof createSpsNativePluginRuntime>) => void;
+    onNativeNodeRuntime?: (runtime: ReturnType<typeof createSpsNativeNodeRuntime>) => void;
     betterAuthHandler?: express.RequestHandler;
     resolveSession?: (req: ExpressRequest) => Promise<BetterAuthSessionResult | null>;
     spsIdentityHandler?: express.RequestHandler;
@@ -192,6 +206,7 @@ export async function createApp(
     throw new TypeError("Native Host management binding mismatch.");
   }
   const pluginRecoveryState = resolvePluginRecoveryState();
+  const packageOperations = createSpsPluginPackageOperations(db);
   const app = express();
   app.locals.paperclipDb = db;
   const captureRawBody = (req: express.Request, _res: express.Response, buf: Buffer) => {
@@ -234,6 +249,8 @@ export async function createApp(
       resolveSession: opts.resolveSession,
     }),
   );
+  // Retain restrictions on legacy Assistant credentials after public discovery
+  // retirement; removing the scope fence must not widen old credentials.
   app.use(marketplaceAssistantScopeGuard());
   app.use("/api/auth", authRoutes(db));
   if (opts.spsIdentityHandler) {
@@ -246,6 +263,22 @@ export async function createApp(
 
   const hostServicesDisposers = new Map<string, () => void>();
   const workerManager = opts.pluginWorkerManager ?? createPluginWorkerManager();
+  const artifactMaintenance = workerManager.artifactMaintenance ?? createSpsPluginArtifactMaintenance();
+  const eventBus = createPluginEventBus();
+  const streamBus = createPluginStreamBus();
+  const workspacePluginWorkers = createSpsWorkspacePluginWorkers(db, workerManager, {
+    assertPackageOperationClear: pluginId => packageOperations.assertClear(pluginId),
+    localPluginDir: opts.localPluginDir ?? DEFAULT_LOCAL_PLUGIN_DIR,
+    instanceInfo: { instanceId: opts.instanceId ?? "default", hostVersion: opts.hostVersion ?? "0.0.0" },
+    eventBus,
+    streamBus,
+  });
+  const nativePluginRuntime = createSpsNativePluginRuntime(db, workerManager, {
+    localPluginDir: opts.localPluginDir ?? DEFAULT_LOCAL_PLUGIN_DIR,
+    instanceInfo: { instanceId: opts.instanceId ?? "default", hostVersion: opts.hostVersion ?? "0.0.0" },
+    workspaceWorkers: workspacePluginWorkers,
+  });
+  const nativeNodeRuntime = createSpsNativeNodeRuntime(db);
 
   // Mount API routes
   const api = Router();
@@ -261,14 +294,14 @@ export async function createApp(
     }),
   );
   api.use(openApiRoutes());
-  api.use("/companies", companyRoutes(db, opts.storageService));
+  api.use("/companies", companyRoutes(db, opts.storageService, { workspaceWorkers: workspacePluginWorkers, artifactMaintenance }));
   api.use(llmRoutes(db));
   api.use(companySkillRoutes(db));
   api.use(builtInAgentRoutes(db));
   api.use(teamsCatalogRoutes(db));
   api.use(agentRoutes(db, { pluginWorkerManager: workerManager }));
   api.use(assetRoutes(db, opts.storageService));
-  api.use(projectRoutes(db));
+  api.use(projectRoutes(db, { artifactMaintenance }));
   api.use(issueRoutes(db, opts.storageService, {
     feedbackExportService: opts.feedbackExportService,
     pluginWorkerManager: workerManager,
@@ -298,11 +331,13 @@ export async function createApp(
     api.use(instanceDatabaseBackupRoutes(opts.databaseBackupService));
   }
   const pluginRegistry = pluginRegistryService(db);
-  const eventBus = createPluginEventBus();
   setPluginEventBus(eventBus);
   const jobStore = pluginJobStore(db);
   const lifecycle = pluginLifecycleManager(db, {
+    artifactMaintenance,
+    packageOperations,
     workerManager,
+    workspaceRuntime: workspacePluginWorkers,
     migrationDb: opts.pluginMigrationDb ?? db,
     databaseBackupService: opts.databaseBackupService,
   });
@@ -332,12 +367,16 @@ export async function createApp(
     db,
     {
       localPluginDir: opts.localPluginDir ?? DEFAULT_LOCAL_PLUGIN_DIR,
+      artifactMaintenance,
       migrationDb: opts.pluginMigrationDb,
       recoveryState: pluginRecoveryState,
+      packageOperations,
     },
     {
       workerManager,
       eventBus,
+      streamBus,
+      workspaceRuntime: workspacePluginWorkers,
       jobScheduler: scheduler,
       jobStore,
       toolDispatcher,
@@ -378,6 +417,35 @@ export async function createApp(
     workerManager,
     scheduler,
   });
+  const registryStagingRoot = opts.registryStagingDir ?? path.join(
+    process.env.PAPERCLIP_HOME?.trim() || path.join(opts.localPluginDir ?? DEFAULT_LOCAL_PLUGIN_DIR, ".."),
+    "registry-staging",
+  );
+  const artifactReferenceStages = registryStagingService(registryStagingRoot, artifactMaintenance);
+  const artifactReferenceReader = createSpsPluginArtifactReferenceReader({
+    localPluginDir: path.resolve(opts.localPluginDir ?? DEFAULT_LOCAL_PLUGIN_DIR),
+    maintenance: artifactMaintenance,
+    readers: {
+      listPlugins: () => pluginRegistry.list(),
+      listPending: () => packageOperations.listPending(),
+      listRetainedReviews: () => {
+        if (!packageOperations.listRetainedArtifactReviews) throw new SpsPluginArtifactReferencesUnavailableError();
+        return packageOperations.listRetainedArtifactReviews();
+      },
+      readWorkers: () => {
+        if (workerManager.artifactMaintenance !== artifactMaintenance || !workerManager.readArtifactReferences) {
+          throw new SpsPluginArtifactReferencesUnavailableError();
+        }
+        return workerManager.readArtifactReferences();
+      },
+      readPreparations: () => {
+        if (!loader.readPreparedArtifactReferences) throw new SpsPluginArtifactReferencesUnavailableError();
+        return loader.readPreparedArtifactReferences();
+      },
+      readRegistryStages: () => artifactReferenceStages.readArtifactReferences(),
+      readSourceInventory: () => readSpsSourceArtifactInventory(db),
+    },
+  });
   api.use(
     pluginRoutes(
       db,
@@ -385,24 +453,24 @@ export async function createApp(
       { scheduler, jobStore },
       { workerManager },
       { toolDispatcher },
-      { workerManager },
+      { workerManager, workspaceWorkers: workspacePluginWorkers, streamBus, resolveSession: opts.resolveSession },
       { runtime: memoryProviderRuntime },
       {
-        stagingRoot: opts.registryStagingDir
-          ?? path.join(
-            process.env.PAPERCLIP_HOME?.trim()
-              || path.join(opts.localPluginDir ?? DEFAULT_LOCAL_PLUGIN_DIR, ".."),
-            "registry-staging",
-          ),
+        artifactMaintenance,
+        stagingRoot: registryStagingRoot,
       },
       lifecycle,
       { diagnostics: canonicalPluginDiagnostics },
       pluginRecoveryState,
     ),
   );
-  api.use(spsWorkspaceSurfaceRoutes(db, workerManager));
+  api.use(spsWorkspaceSurfaceRoutes(db, workerManager, workspacePluginWorkers));
+  api.use(spsWorkspacePluginConfigRoutes(db, {
+    invalidate: (workspaceId, pluginId, previousRevision) =>
+      nativePluginRuntime.invalidateWorkspaceConfig(workspaceId, pluginId, previousRevision),
+  }));
   api.use(adapterRoutes());
-  api.use(spsNodeRoutes(db));
+  api.use(spsNodeRoutes(db, { artifactMaintenance }));
   api.use(spsExecutionRoutes(db));
   api.use(spsModelConnectionRoutes(db));
   if (opts.nativeConnectivityManagement || opts.nativeConnectivityHostId) {
@@ -410,10 +478,10 @@ export async function createApp(
       hostId: opts.nativeConnectivityManagement?.hostId ?? opts.nativeConnectivityHostId!,
       management: opts.nativeConnectivityManagement,
     }));
+    if (opts.nativeConnectivityManagement) api.use(spsNativePairingRoutes(db, opts.nativeConnectivityManagement));
   }
   getSpsModelBroker(db); // Recovery never replays inputs or starts a provider request.
-  api.use(spsWorkspaceSourceRoutes(db));
-  api.use(spsMarketplaceRoutes(db, workerManager));
+  api.use(spsWorkspaceSourceRoutes(db, { artifactMaintenance }));
   api.use(
     accessRoutes(db, {
       deploymentMode: opts.deploymentMode,
@@ -649,6 +717,7 @@ export async function createApp(
   );
   const ensureConfiguredBundledPlugins = async (): Promise<void> => {
     await installConfiguredBundledPlugins(configuredBundledPluginPaths, {
+      artifactMaintenance,
       loader,
       lifecycle,
       logger,
@@ -657,6 +726,7 @@ export async function createApp(
   };
   const refreshConfiguredBundledPlugins = async (): Promise<void> => {
     await installConfiguredBundledPlugins(configuredBundledPluginRefreshPaths, {
+      artifactMaintenance,
       loader,
       lifecycle,
       logger,
@@ -664,8 +734,14 @@ export async function createApp(
     }, { installMissing: false });
   };
   let pluginRuntimeStopping = false;
-  const pluginStartup = runPluginStartupUnlessRecovering(pluginRecoveryState, () =>
-    ensureBundledKubernetesPlugin()
+  const pluginStartup = runPluginStartupUnlessRecovering(pluginRecoveryState, () => artifactMaintenance.withActivity(async () => {
+    // HTTP may begin serving before these bundled-plugin checks finish. Arm
+    // the per-plugin barrier synchronously so bridge calls arriving in that
+    // window can join their plugin's activation instead of racing a missing worker.
+    const releaseInitialLoad = loader.prepareInitialLoad?.();
+    return Promise.resolve()
+      .then(() => lifecycle.recoverPackageOperations?.())
+      .then(() => ensureBundledKubernetesPlugin())
       .then(() => ensureConfiguredBundledPlugins())
       .then(() => refreshConfiguredBundledPlugins())
       .then(() => loader.loadAll())
@@ -676,8 +752,9 @@ export async function createApp(
             devWatcher.watch(loaded.plugin.id, loaded.plugin.packagePath);
           }
         }
-      }),
-  );
+      })
+      .finally(() => releaseInitialLoad?.());
+  }));
   void pluginStartup?.catch((err) => {
     logger.error({ err }, "Failed to load ready plugins on startup");
   });
@@ -693,6 +770,7 @@ export async function createApp(
   const shutdownAppServices = () => {
     if (appServicesShutdown) return;
     appServicesShutdown = true;
+    streamBus.shutdown();
     disableFeedbackExportFlushes();
     stopPluginDiscovery();
     viteHtmlRenderer?.dispose();
@@ -704,6 +782,11 @@ export async function createApp(
   const shutdownPluginRuntime = () => {
     if (pluginRuntimeShutdown) return pluginRuntimeShutdown;
     pluginRuntimeStopping = true;
+    // Close idle and active SSE subscriptions before worker notifications or
+    // Host services can be disposed. The bus shutdown is synchronous/idempotent.
+    streamBus.shutdown();
+    nativePluginRuntime.dispose();
+    nativeNodeRuntime.dispose();
     stopPluginDiscovery();
     // Close admission synchronously, before a still-running startup can fork
     // another worker. Keep Host services alive until owned workers have stopped.
@@ -711,6 +794,7 @@ export async function createApp(
     pluginRuntimeShutdown = Promise.allSettled([
       Promise.resolve(pluginStartup).catch(() => undefined),
       stoppingWorkers,
+      nativePluginRuntime.shutdownWorkspaceWorkers(),
     ]).then(results => {
       const failures = results.filter((result): result is PromiseRejectedResult => result.status === "rejected");
       if (failures.length) throw new AggregateError(failures.map(result => result.reason), "Plugin runtime shutdown failed.");
@@ -724,5 +808,8 @@ export async function createApp(
     void flushPluginLogBuffer();
   });
 
+  opts.onNativePluginRuntime?.(nativePluginRuntime);
+  opts.onPluginArtifactReferenceReader?.(artifactReferenceReader);
+  opts.onNativeNodeRuntime?.(nativeNodeRuntime);
   return app;
 }

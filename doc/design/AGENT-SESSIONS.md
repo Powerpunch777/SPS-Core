@@ -1,5 +1,11 @@
 # Running an AI-agent session against the design system
 
+> **Historical/compatibility design reference (2026-11-02 classification).**
+> [SPS normative baseline](../SPS-DOCUMENTATION-BASELINE-2026-11-02.md) takes precedence over product assumptions below.
+> Paperclip Company/Issue/org/Agent/UI models are compatibility, not mandatory SPS behavior.
+> Do not force Core chrome, Builder, AI or a workflow through this reference; preserve APIs/data pending explicit migration.
+> Documentation classification only; implementation and dated test results are unchanged.
+
 A guide for the *human* driving the session. You don't need to know the codebase — the system briefs the agent for you (AGENTS.md → `DESIGN.md` → `doc/design/`). Your job is to say what you want, look at pictures, and say yes or no. This document tells you how to do that well.
 
 ## The golden rule

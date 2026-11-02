@@ -1,4 +1,4 @@
-import { z } from "zod";
+import { z } from "zod/v3";
 
 export const COMPANY_ARTIFACTS_DEFAULT_LIMIT = 30;
 export const COMPANY_ARTIFACTS_MAX_LIMIT = 100;

@@ -31,6 +31,8 @@ describe("Better Auth cookie scoping", () => {
 
     expect(advanced).toEqual({
       cookiePrefix: "paperclip-sat-worktree",
+      disableOriginCheck: false,
+      disableCSRFCheck: false,
     });
     expect(getCookies({ advanced } as BetterAuthOptions).sessionToken.name).toMatch(
       /paperclip-sat-worktree\.session_token$/,
@@ -42,6 +44,8 @@ describe("Better Auth cookie scoping", () => {
 
     expect(buildBetterAuthAdvancedOptions({ disableSecureCookies: true })).toEqual({
       cookiePrefix: "paperclip-pap-worktree",
+      disableOriginCheck: false,
+      disableCSRFCheck: false,
       useSecureCookies: false,
     });
     expect(getCookies({

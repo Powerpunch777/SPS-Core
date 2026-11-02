@@ -160,6 +160,8 @@ export interface HostServices {
   state: {
     get(params: WorkerToHostMethods["state.get"][0]): Promise<WorkerToHostMethods["state.get"][1]>;
     set(params: WorkerToHostMethods["state.set"][0]): Promise<void>;
+    compareAndSet?(params: WorkerToHostMethods["state.compareAndSet"][0],
+      assertCurrentInvocation: () => void | Promise<void>): Promise<{ swapped: boolean }>;
     delete(params: WorkerToHostMethods["state.delete"][0]): Promise<void>;
   };
 
@@ -316,6 +318,9 @@ export interface HostServices {
 
   /** Provides `agents.sessions.create`, `agents.sessions.list`, `agents.sessions.sendMessage`, `agents.sessions.close`. */
   agentSessions: {
+    describePolicySupport?(params: WorkerToHostMethods["agents.sessions.describePolicySupport"][0]): Promise<WorkerToHostMethods["agents.sessions.describePolicySupport"][1]>;
+    getRequest(params: WorkerToHostMethods["agents.sessions.getRequest"][0]): Promise<WorkerToHostMethods["agents.sessions.getRequest"][1]>;
+    ensure(params: WorkerToHostMethods["agents.sessions.ensure"][0]): Promise<WorkerToHostMethods["agents.sessions.ensure"][1]>;
     getRun(params: WorkerToHostMethods["agents.sessions.getRun"][0]): Promise<WorkerToHostMethods["agents.sessions.getRun"][1]>;
     cancel(params: WorkerToHostMethods["agents.sessions.cancel"][0]): Promise<WorkerToHostMethods["agents.sessions.cancel"][1]>;
     create(params: WorkerToHostMethods["agents.sessions.create"][0]): Promise<WorkerToHostMethods["agents.sessions.create"][1]>;
@@ -433,6 +438,7 @@ const METHOD_CAPABILITY_MAP: Record<WorkerToHostMethodName, PluginCapability | n
   "sps.workspaceSources.list": "sps.workspaceSources.read",
   "sps.runtimes.list": "sps.runtimes.read",
   "sps.models.list": "sps.models.read",
+  "sps.connectivity.current": "sps.connectivity.read",
   "sps.models.submit": "sps.models.submit",
   "sps.models.get": "sps.models.read",
   "sps.models.cancel": "sps.models.cancel",
@@ -450,6 +456,7 @@ const METHOD_CAPABILITY_MAP: Record<WorkerToHostMethodName, PluginCapability | n
   // State
   "state.get": "plugin.state.read",
   "state.set": "plugin.state.write",
+  "state.compareAndSet": "plugin.state.write",
   "state.delete": "plugin.state.write",
   "inbox.publish": "inbox.items.publish",
   "inbox.update": "inbox.items.update",
@@ -549,10 +556,13 @@ const METHOD_CAPABILITY_MAP: Record<WorkerToHostMethodName, PluginCapability | n
   "agents.managed.reset": "agents.managed",
 
   // Agent Sessions
+  "agents.sessions.describePolicySupport": "agent.sessions.read",
   "agents.sessions.create": "agent.sessions.create",
+  "agents.sessions.ensure": "agent.sessions.create",
   "agents.sessions.list": "agent.sessions.list",
   "agents.sessions.sendMessage": "agent.sessions.send",
   "agents.sessions.getRun": "agent.sessions.read",
+  "agents.sessions.getRequest": "agent.sessions.read",
   "agents.sessions.cancel": "agent.sessions.cancel",
   "agents.sessions.close": "agent.sessions.close",
 
@@ -624,6 +634,55 @@ export function createHostClientHandlers(
     return typeof value === "string" && value.trim().length > 0 ? value.trim() : null;
   }
 
+  function validateConditionalStateFields(params: unknown): void {
+    if (!isRecord(params) || ![Object.prototype, null].includes(Object.getPrototypeOf(params))) {
+      throw new TypeError("Invalid conditional state fields");
+    }
+    const fields = Object.getOwnPropertyDescriptors(params);
+    const allowed = ["scopeKind", "scopeId", "namespace", "stateKey", "value", "expected"];
+    if (Reflect.ownKeys(fields).some(key => typeof key !== "string" || !allowed.includes(key))
+      || allowed.filter(key => key !== "namespace").some(key => !fields[key]?.enumerable || !("value" in fields[key]!))
+      || Object.values(fields).some(field => !field.enumerable || !("value" in field))) throw new TypeError("Invalid conditional state fields");
+    const expectation = params.expected;
+    if (!isRecord(expectation) || ![Object.prototype, null].includes(Object.getPrototypeOf(expectation))) {
+      throw new TypeError("Invalid conditional state expectation");
+    }
+    const expectedFields = Object.getOwnPropertyDescriptors(expectation);
+    const expectedKeys = Reflect.ownKeys(expectedFields);
+    const exists = expectedFields.exists;
+    if (!exists?.enumerable || !("value" in exists)
+      || (exists.value === false ? expectedKeys.length !== 1
+        : exists.value !== true || expectedKeys.length !== 2 || !expectedFields.value?.enumerable || !("value" in expectedFields.value))) {
+      throw new TypeError("Invalid conditional state expectation");
+    }
+    // This new RPC accepts only bounded JSON data, not getters, custom codecs or sparse arrays.
+    const pending: Array<{ value: unknown; depth: number }> = [{ value: params.value, depth: 0 }];
+    if (exists.value === true) pending.push({ value: expectedFields.value!.value, depth: 0 });
+    let visited = 0;
+    while (pending.length) {
+      const { value, depth } = pending.pop()!;
+      if (++visited > 50_000 || depth > 64) throw new TypeError("Conditional state JSON exceeds its structural limit");
+      if (value === null || typeof value === "string" || typeof value === "boolean") continue;
+      if (typeof value === "number" && Number.isFinite(value)) continue;
+      if (!value || typeof value !== "object") throw new TypeError("Conditional state values must be JSON data");
+      const array = Array.isArray(value);
+      if (!array && ![Object.prototype, null].includes(Object.getPrototypeOf(value))) throw new TypeError("Conditional state values must be plain JSON data");
+      const descriptors = Object.getOwnPropertyDescriptors(value);
+      const keys = Reflect.ownKeys(descriptors);
+      if (array && keys.length !== value.length + 1) throw new TypeError("Conditional state arrays must be dense");
+      for (const key of keys) {
+        if (array && key === "length") continue;
+        const field = typeof key === "string" ? descriptors[key] : undefined;
+        if (!field?.enumerable || !("value" in field)
+          || array && !/^(?:0|[1-9][0-9]*)$/.test(String(key))) throw new TypeError("Conditional state values must have data fields");
+        pending.push({ value: field.value, depth: depth + 1 });
+      }
+    }
+    if (new TextEncoder().encode(JSON.stringify(params)).byteLength > 262_144) {
+      throw new TypeError("Conditional state JSON exceeds 256 KiB");
+    }
+  }
+
   function requestedCompanyScope(
     method: WorkerToHostMethodName,
     params: unknown,
@@ -652,9 +711,6 @@ export function createHostClientHandlers(
     params: unknown,
     context?: WorkerHostCallContext,
   ): void {
-    const requested = requestedCompanyScope(method, params);
-    if (requested.kind === "none") return;
-
     if (context?.invalidInvocationScope) {
       throw new InvocationScopeDeniedError(
         pluginId,
@@ -662,6 +718,9 @@ export function createHostClientHandlers(
         "the worker referenced a missing, expired, or unknown invocation scope",
       );
     }
+
+    const requested = requestedCompanyScope(method, params);
+    if (requested.kind === "none") return;
 
     const allowedCompanyId = readNonEmptyString(context?.invocationScope?.companyId);
     if (!allowedCompanyId) return;
@@ -710,6 +769,12 @@ export function createHostClientHandlers(
   ): HostHandler<M> {
     return async (params: WorkerToHostMethods[M][0], context?: WorkerHostCallContext) => {
       requireCapability(method);
+      // Reject selectors/accessors before the generic scope helper reads companyId.
+      if (method === "sps.connectivity.current" && (!params || typeof params !== "object" || Array.isArray(params)
+        || ![Object.prototype, null].includes(Object.getPrototypeOf(params)) || Reflect.ownKeys(params).length !== 0)) {
+        throw new TypeError("Connectivity current accepts no target or credential fields");
+      }
+      if (method === "state.compareAndSet") validateConditionalStateFields(params);
       requireInvocationCompanyScope(method, params, context);
       return handler(params, context);
     };
@@ -743,6 +808,30 @@ export function createHostClientHandlers(
   }
 
   return {
+    "sps.connectivity.current": gated("sps.connectivity.current", async (params, context) => {
+      const workspaceId = context?.invocationScope?.companyId;
+      const uuid = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/;
+      if (context?.invalidInvocationScope || typeof workspaceId !== "string" || !uuid.test(workspaceId)) {
+        throw new InvocationScopeDeniedError(pluginId, "sps.connectivity.current", "a current Workspace invocation is required");
+      }
+      if (!params || typeof params !== "object" || Array.isArray(params)
+        || ![Object.prototype, null].includes(Object.getPrototypeOf(params)) || Reflect.ownKeys(params).length !== 0) {
+        throw new TypeError("Connectivity current accepts no target or credential fields");
+      }
+      if (!context?.readNativeConnectivity) return Object.freeze({ state: "unavailable" as const,
+        transport: "native_tls" as const, hostId: null, workspaceId, authorization: "unknown" as const,
+        evidence: "none" as const, observedAt: new Date().toISOString() });
+      const result = await context.readNativeConnectivity();
+      if (!result || result.workspaceId !== workspaceId || result.state !== "verified"
+        || result.transport !== "native_tls" || typeof result.hostId !== "string" || !uuid.test(result.hostId)
+        || result.authorization !== "authorized" || result.evidence !== "authenticated_request"
+        || typeof result.observedAt !== "string" || new Date(result.observedAt).toISOString() !== result.observedAt) {
+        throw new InvocationScopeDeniedError(pluginId, "sps.connectivity.current", "Native request evidence is unavailable");
+      }
+      // Project only the public observation; never return a provider's extra fields.
+      return Object.freeze({ state: result.state, transport: result.transport, hostId: result.hostId,
+        workspaceId, authorization: result.authorization, evidence: result.evidence, observedAt: result.observedAt });
+    }),
     "sps.models.list": gated("sps.models.list", async (params, context) => {
       requireModelScope(params, context, "sps.models.list", ["companyId"]);
       if (!services.sps?.models) throw new Error("This SPS host does not expose model requests");
@@ -876,6 +965,23 @@ export function createHostClientHandlers(
     }),
     "state.set": gated("state.set", async (params) => {
       return services.state.set(params);
+    }),
+    "state.compareAndSet": gated("state.compareAndSet", async (params, context) => {
+      requireCapability("state.get");
+      const deny = () => new InvocationScopeDeniedError(pluginId, "state.compareAndSet", "a current matching Workspace invocation is required");
+      const uuid = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/;
+      if (params.scopeKind !== "company" || !uuid.test(params.scopeId) || params.scopeId !== context?.invocationScope?.companyId
+        || typeof context?.assertCurrentInvocation !== "function") throw deny();
+      if (typeof params.stateKey !== "string" || !params.stateKey.trim() || params.stateKey.length > 256
+        || params.namespace !== undefined && (typeof params.namespace !== "string" || !params.namespace.trim() || params.namespace.length > 256)) {
+        throw new TypeError("Invalid conditional state key");
+      }
+      if (typeof services.state.compareAndSet !== "function") throw new Error("This SPS Host does not support conditional state storage");
+      const check = async () => { if (await context.assertCurrentInvocation!() !== undefined) throw deny(); };
+      await check();
+      const result = await services.state.compareAndSet(params, check);
+      await check();
+      return result;
     }),
     "state.delete": gated("state.delete", async (params) => {
       return services.state.delete(params);
@@ -1131,8 +1237,18 @@ export function createHostClientHandlers(
     }),
 
     // Agent Sessions
+    "agents.sessions.describePolicySupport": gated("agents.sessions.describePolicySupport", async (params) => {
+      if (!services.agentSessions.describePolicySupport) {
+        throw new Error("This Host does not support agent session policy support discovery");
+      }
+      return services.agentSessions.describePolicySupport(params);
+    }),
+    "agents.sessions.getRequest": gated("agents.sessions.getRequest", async params => services.agentSessions.getRequest(params)),
     "agents.sessions.create": gated("agents.sessions.create", async (params) => {
       return services.agentSessions.create(params);
+    }),
+    "agents.sessions.ensure": gated("agents.sessions.ensure", async (params) => {
+      return services.agentSessions.ensure(params);
     }),
     "agents.sessions.list": gated("agents.sessions.list", async (params) => {
       return services.agentSessions.list(params);

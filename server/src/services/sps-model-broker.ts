@@ -8,6 +8,8 @@ import { createSpsModelTextTransport, SpsModelTransportError } from "./sps-model
 import { parseSpsModelTextResponse, type SpsModelTextResponse } from "./sps-model-response.js";
 import { assertSpsPluginAvailable } from "./sps-plugin-availability.js";
 import { buildSpsUsageEvidence } from "./sps-execution-usage.js";
+import { getSpsWorkspaceExecutionControl, lockSpsWorkspaceExecutionControl, registerSpsWorkspaceExecutionStopHandler,
+  withSpsWorkspaceExecutionAdmission } from "./sps-workspace-execution-control.js";
 
 type Run = typeof spsModelRuns.$inferSelect;
 type Connection = typeof spsModelConnections.$inferSelect;
@@ -124,6 +126,26 @@ export function createSpsModelBroker(db: Db, dependencies: { fetch?: typeof glob
     }
     return entry.transport;
   }
+  async function waitForModelRunAdmission(task: Task) {
+    while (true) {
+      if (task.leaseLost || task.controller.signal.aborted) throw new SpsModelTransportError("cancelled", "not_dispatched");
+      const control = await getSpsWorkspaceExecutionControl(db, task.run.companyId);
+      if (control.state === "stopped" || control.epoch !== task.run.workspaceExecutionEpoch) {
+        throw new SpsModelTransportError("cancelled", "not_dispatched");
+      }
+      if (control.state === "running") return;
+      await new Promise<void>(resolve => {
+        let timer: ReturnType<typeof setTimeout>;
+        const done = () => {
+          clearTimeout(timer);
+          task.controller.signal.removeEventListener("abort", done);
+          resolve();
+        };
+        timer = setTimeout(done, 250);
+        task.controller.signal.addEventListener("abort", done, { once: true });
+      });
+    }
+  }
   async function sweepTask(task: Task) {
     try {
       if (task.done && task.settled) {
@@ -193,10 +215,22 @@ export function createSpsModelBroker(db: Db, dependencies: { fetch?: typeof glob
     try {
       const target = await targetFor(task.run);
       if (task.leaseLost || task.controller.signal.aborted) throw new SpsModelTransportError("cancelled", "not_dispatched");
-      const claimed = await db.update(spsModelRuns).set({ status: "running", startedAt: new Date(), updatedAt: new Date() })
-        .where(and(eq(spsModelRuns.id, task.run.id), eq(spsModelRuns.leaseOwnerId, ownerId), liveLease(), eq(spsModelRuns.status, "queued"), isNull(spsModelRuns.cancellationRequestedAt))).returning();
-      if (!claimed[0]) throw new SpsModelTransportError("cancelled", "not_dispatched");
-      task.run = claimed[0];
+      while (true) {
+        await waitForModelRunAdmission(task);
+        const claim = await db.transaction(async tx => {
+          const control = await lockSpsWorkspaceExecutionControl(tx, task.run.companyId);
+          if (control.epoch !== task.run.workspaceExecutionEpoch || control.state === "stopped") return { state: "stopped" as const, rows: [] };
+          if (control.state === "paused") return { state: "paused" as const, rows: [] };
+          const rows = await tx.update(spsModelRuns).set({ status: "running", startedAt: new Date(), updatedAt: new Date() })
+            .where(and(eq(spsModelRuns.id, task.run.id), eq(spsModelRuns.leaseOwnerId, ownerId), liveLease(), eq(spsModelRuns.status, "queued"),
+              isNull(spsModelRuns.cancellationRequestedAt), eq(spsModelRuns.workspaceExecutionEpoch, control.epoch))).returning();
+          return { state: "running" as const, rows };
+        });
+        if (claim.state === "paused") continue;
+        if (!claim.rows[0]) throw new SpsModelTransportError("cancelled", "not_dispatched");
+        task.run = claim.rows[0];
+        break;
+      }
       const credential = createSpsModelCredentialResolver(db, { companyId: task.run.companyId, pluginId: task.run.pluginId, connectionId: task.run.connectionId,
         bindingId: target.grant.bindingId!, expectedSecretId: target.connection.secretId!, expectedVersionSelector: target.connection.versionSelector,
         onResolvedVersion: version => { task.run.credentialVersion = version; } });
@@ -204,8 +238,13 @@ export function createSpsModelBroker(db: Db, dependencies: { fetch?: typeof glob
         if (task.leaseLost || signal.aborted) throw new Error("Model dispatch is unavailable");
         await targetFor(task.run);
         if (task.leaseLost || signal.aborted || task.run.credentialVersion === null) throw new Error("Model dispatch is unavailable");
-        const rows = await db.update(spsModelRuns).set({ externalEffects: "unknown", credentialVersion: task.run.credentialVersion, updatedAt: new Date() })
-          .where(and(eq(spsModelRuns.id, task.run.id), eq(spsModelRuns.leaseOwnerId, ownerId), liveLease(), eq(spsModelRuns.status, "running"), isNull(spsModelRuns.cancellationRequestedAt))).returning({ id: spsModelRuns.id });
+        const rows = await db.transaction(async tx => {
+          const control = await lockSpsWorkspaceExecutionControl(tx, task.run.companyId);
+          if (control.state === "stopped" || control.epoch !== task.run.workspaceExecutionEpoch) return [];
+          return tx.update(spsModelRuns).set({ externalEffects: "unknown", credentialVersion: task.run.credentialVersion, updatedAt: new Date() })
+            .where(and(eq(spsModelRuns.id, task.run.id), eq(spsModelRuns.leaseOwnerId, ownerId), liveLease(), eq(spsModelRuns.status, "running"),
+              isNull(spsModelRuns.cancellationRequestedAt), eq(spsModelRuns.workspaceExecutionEpoch, control.epoch))).returning({ id: spsModelRuns.id });
+        });
         if (!rows[0]) throw new Error("Model dispatch is unavailable");
         effects = "unknown";
       } });
@@ -248,6 +287,17 @@ export function createSpsModelBroker(db: Db, dependencies: { fetch?: typeof glob
     }
   }
 
+  const unregisterStopHandler = registerSpsWorkspaceExecutionStopHandler(db, "models", async (companyId, reason, stoppedEpoch) => {
+    await db.update(spsModelRuns).set({ cancellationRequestedAt: sql`coalesce(${spsModelRuns.cancellationRequestedAt}, now())`, updatedAt: new Date() })
+      .where(and(eq(spsModelRuns.companyId, companyId), eq(spsModelRuns.resourcePending, true),
+        inArray(spsModelRuns.status, ["queued", "running"]), sql`${spsModelRuns.workspaceExecutionEpoch}::numeric < ${stoppedEpoch}::numeric`));
+    for (const task of tracked.values()) {
+      if (task.run.companyId === companyId && BigInt(task.run.workspaceExecutionEpoch) < BigInt(stoppedEpoch) && !task.controller.signal.aborted) {
+        task.controller.abort(new Error(reason));
+      }
+    }
+  });
+
   return {
     recoverExpired,
     async list(companyId: string, pluginId: string) { await recoverExpired(); return authority.listForPlugin(companyId, pluginId); },
@@ -257,7 +307,7 @@ export function createSpsModelBroker(db: Db, dependencies: { fetch?: typeof glob
       await recoverExpired();
       const target = await authority.authorized({ ...input, pluginId });
       const inputHash = createHash("sha256").update(JSON.stringify({ connectionId: input.connectionId, input: input.input })).digest("hex");
-      const saved = await db.transaction(async tx => {
+      const saved = await withSpsWorkspaceExecutionAdmission(db, input.companyId, async (tx, epoch) => {
         const [connection] = await tx.select({ id: spsModelConnections.id }).from(spsModelConnections)
           .where(and(eq(spsModelConnections.id, input.connectionId), eq(spsModelConnections.companyId, input.companyId), eq(spsModelConnections.status, "active"))).for("update");
         if (!connection) throw new Error("Model connection is unavailable");
@@ -273,7 +323,8 @@ export function createSpsModelBroker(db: Db, dependencies: { fetch?: typeof glob
           eq(spsModelGrants.revision, target.grant.revision), eq(spsModelGrants.status, "active"), isNull(spsModelGrants.revokedAt)));
         if (!grant) throw new Error("Model connection is unavailable");
         const [created] = await tx.insert(spsModelRuns).values({ companyId: input.companyId, pluginId, pluginKey: target.pluginKey, connectionId: input.connectionId,
-          grantId: target.grant.id, grantRevision: target.grant.revision, requestKey: input.requestKey, inputHash, leaseOwnerId: ownerId, leaseExpiresAt: leaseExpiry })
+          grantId: target.grant.id, grantRevision: target.grant.revision, requestKey: input.requestKey, inputHash, workspaceExecutionEpoch: epoch,
+          leaseOwnerId: ownerId, leaseExpiresAt: leaseExpiry })
           .onConflictDoNothing().returning();
         if (created) return { run: created, inserted: true };
         const [duplicate] = await tx.select().from(spsModelRuns).where(and(eq(spsModelRuns.companyId, input.companyId), eq(spsModelRuns.pluginId, pluginId), eq(spsModelRuns.requestKey, input.requestKey)));
@@ -304,7 +355,7 @@ export function createSpsModelBroker(db: Db, dependencies: { fetch?: typeof glob
       return publicRun((await ownRun(companyId, pluginId, runId))!);
     },
     async shutdown() {
-      closed = true; clearInterval(timer);
+      closed = true; clearInterval(timer); unregisterStopHandler();
       for (const task of tasks.values()) task.controller.abort();
       let closeTimer: ReturnType<typeof setTimeout> | undefined;
       try {

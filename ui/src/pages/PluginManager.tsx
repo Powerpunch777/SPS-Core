@@ -2,7 +2,7 @@
  * @fileoverview Plugin Manager page — admin UI for discovering,
  * installing, enabling/disabling, and uninstalling plugins.
  *
- * @see PLUGIN_SPEC.md §9 — Plugin Marketplace / Manager
+ * @see PLUGIN_SPEC.md §9 — Plugin Manager
  */
 import { useEffect, useMemo, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
@@ -33,7 +33,6 @@ import { cn } from "@/lib/utils";
 import { isSpsBasicModeEnabled } from "@/lib/sps-basic-mode";
 import { isSpsCoreBaselineModeEnabled } from "@/lib/sps-core-baseline-mode";
 import { SpsExtensionsManager } from "./SpsExtensionsManager";
-import { SpsMarketplacePanel } from "@/components/SpsMarketplacePanel";
 
 function firstNonEmptyLine(value: string | null | undefined): string | null {
   if (!value) return null;
@@ -109,7 +108,6 @@ function GenericPluginManager() {
   const [uninstallPluginId, setUninstallPluginId] = useState<string | null>(null);
   const [uninstallPluginName, setUninstallPluginName] = useState<string>("");
   const [errorDetailsPlugin, setErrorDetailsPlugin] = useState<PluginRecord | null>(null);
-  const [activeSection, setActiveSection] = useState<"installed" | "marketplace">("installed");
   const coreBaselineMode = isSpsCoreBaselineModeEnabled();
 
   useEffect(() => {
@@ -201,25 +199,6 @@ function GenericPluginManager() {
     [installedPlugins]
   );
 
-  const sectionTabs = (
-    <div className="flex w-fit gap-1 rounded-md border bg-muted/40 p-1" role="tablist" aria-label="Plugin sections">
-      <Button type="button" size="sm" variant={activeSection === "installed" ? "secondary" : "ghost"} role="tab" aria-selected={activeSection === "installed"} onClick={() => setActiveSection("installed")}>Installed</Button>
-      <Button type="button" size="sm" variant={activeSection === "marketplace" ? "secondary" : "ghost"} role="tab" aria-selected={activeSection === "marketplace"} onClick={() => setActiveSection("marketplace")}>Marketplace</Button>
-    </div>
-  );
-
-  if (activeSection === "marketplace") {
-    return (
-      <div className="max-w-6xl space-y-5">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-2"><Puzzle className="h-6 w-6 text-muted-foreground" /><h1 className="text-xl font-semibold">Plugins</h1></div>
-          {sectionTabs}
-        </div>
-        {selectedCompany?.id ? <SpsMarketplacePanel key={selectedCompany.id} companyId={selectedCompany.id} /> : <p className="text-sm text-muted-foreground">Choose a Workspace to open Marketplace.</p>}
-      </div>
-    );
-  }
-
   if (isLoading) return <div className="p-4 text-sm text-muted-foreground">Loading plugins...</div>;
   if (error) return <div className="p-4 text-sm text-destructive">Failed to load plugins.</div>;
 
@@ -231,7 +210,7 @@ function GenericPluginManager() {
           <h1 className="text-xl font-semibold">Plugin Manager</h1>
         </div>
         
-        <div className="flex items-center gap-2">{sectionTabs}<Dialog open={installDialogOpen} onOpenChange={setInstallDialogOpen}>
+        <div className="flex items-center gap-2"><Dialog open={installDialogOpen} onOpenChange={setInstallDialogOpen}>
           <DialogTrigger asChild>
             <Button size="sm" className="gap-2">
               <Plus className="h-4 w-4" />

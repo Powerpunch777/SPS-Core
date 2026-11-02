@@ -1,4 +1,4 @@
-import { z } from "zod";
+import { z } from "zod/v3";
 import {
   AUTH_BASE_URL_MODES,
   BIND_MODES,

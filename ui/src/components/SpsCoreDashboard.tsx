@@ -81,9 +81,9 @@ export function SpsCoreDashboard({
     <main data-od-id="core-dashboard" className="space-y-6 pb-2">
       <header data-od-id="dashboard-header" className="flex flex-col gap-5 border-b border-border pb-6 lg:flex-row lg:items-end lg:justify-between">
         <div className="max-w-2xl space-y-2">
-          <p className="font-mono text-xs font-medium uppercase tracking-[0.12em] text-muted-foreground">SPS Core · 실행 개요</p>
+          <p className="font-mono text-xs font-medium uppercase tracking-normal text-muted-foreground">SPS Core · 실행 개요</p>
           <div className="space-y-1">
-            <h1 data-od-id="dashboard-title" className="text-2xl font-semibold tracking-tight text-foreground">작업 공간</h1>
+            <h1 data-od-id="dashboard-title" className="text-2xl font-semibold tracking-normal text-foreground">작업 공간</h1>
             <p className="text-sm leading-6 text-muted-foreground">
               지금 확인할 작업과 실행 중인 Agent를 한곳에서 파악하고, 필요한 화면으로 바로 이동합니다.
             </p>
@@ -127,7 +127,7 @@ export function SpsCoreDashboard({
         <DashboardMetric id="metric-agents" icon={Bot} label="실행 중인 Agent" value={data.agents.running} detail={`사용 가능 ${data.agents.active} · 오류 ${data.agents.error}`} to="/agents/all" />
       </section>
 
-      <section data-od-id="dashboard-workspace" className="grid gap-5 xl:grid-cols-[minmax(0,1.55fr)_minmax(18rem,0.85fr)]">
+      <section data-od-id="dashboard-workspace" className="grid gap-5 xl:grid-cols-(--gtc-sps-core-dashboard)">
         <section data-od-id="priority-tasks" aria-labelledby="priority-tasks-heading" className="min-w-0 overflow-hidden rounded-lg border border-border bg-card">
           <div className="flex flex-col gap-3 border-b border-border px-5 py-4 sm:flex-row sm:items-start sm:justify-between">
             <div>

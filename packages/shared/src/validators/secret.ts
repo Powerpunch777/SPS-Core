@@ -1,4 +1,4 @@
-import { z } from "zod";
+import { z } from "zod/v3";
 import {
   SECRET_BINDING_TARGET_TYPES,
   SECRET_MANAGED_MODES,

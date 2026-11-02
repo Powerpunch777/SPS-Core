@@ -1,5 +1,5 @@
 import { Router, type Request, type Response } from "express";
-import { z } from "zod";
+import { z } from "zod/v3";
 import type { Db } from "@paperclipai/db";
 import { validate } from "../middleware/validate.js";
 import { assertCompanyAccess, getActorInfo } from "./authz.js";

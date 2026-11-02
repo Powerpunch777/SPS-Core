@@ -174,7 +174,7 @@ export function SpsCoreServerSettings() {
                   void run("disable-team", async () => { await bridge.disablePrivateTeamAccess(); setLatestInvite(null); }, "Private team access was disabled.");
                 }} disabled={busy !== null}>Disable private access</Button>
               </div>
-              {latestInvite ? <div className="flex flex-wrap gap-2"><Input aria-label="Full SPS2 invitation" readOnly value={latestInvite} className="min-w-[16rem] flex-1 font-mono text-xs" /><Button type="button" variant="outline" onClick={() => void copyInvite()}><Copy className="mr-1.5 h-4 w-4" />Copy</Button></div> : null}
+              {latestInvite ? <div className="flex flex-wrap gap-2"><Input aria-label="Full SPS2 invitation" readOnly value={latestInvite} className="min-w-(--sz-16rem) flex-1 font-mono text-xs" /><Button type="button" variant="outline" onClick={() => void copyInvite()}><Copy className="mr-1.5 h-4 w-4" />Copy</Button></div> : null}
               <div className="space-y-2 border-t pt-4">
                 <h3 className="text-sm font-medium">Active invitations</h3>
                 {invites.length === 0 ? <p className="text-sm text-muted-foreground">No active private-team invitations.</p> : invites.map((invite) => <div key={invite.id} className="flex flex-wrap items-center justify-between gap-3 rounded-md border px-3 py-2 text-sm"><span>Expires {formatDate(invite.expiresAt)}</span><Button type="button" size="sm" variant="ghost" disabled={busy !== null} onClick={() => void run(`revoke-${invite.id}`, async () => { await bridge.revokeMemberInvite({ inviteId: invite.id }); }, "Invitation revoked.")}><XCircle className="mr-1.5 h-3.5 w-3.5" />Revoke</Button></div>)}

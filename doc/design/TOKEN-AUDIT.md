@@ -1,5 +1,11 @@
 # TOKEN-AUDIT.md — Design Token Drift Audit (Phase 1)
 
+> **Historical/compatibility design reference (2026-11-02 classification).**
+> [SPS normative baseline](../SPS-DOCUMENTATION-BASELINE-2026-11-02.md) takes precedence over product assumptions below.
+> Paperclip Company/Issue/org/Agent/UI models are compatibility, not mandatory SPS behavior.
+> Do not force Core chrome, Builder, AI or a workflow through this reference; preserve APIs/data pending explicit migration.
+> Documentation classification only; implementation and dated test results are unchanged.
+
 Run scope: `ui/src/` only, on branch `design/token-extraction`. Read-only audit — no source files were modified. See `DESIGN.md` for the token layer contract and `PRIOR-ART.md` for prior findings (only 6/220 exact-mappable).
 
 **Method:** ripgrep over `ui/src/**/*.{ts,tsx,css}`. Counts below are current as of this run (2026-07-06), not the PRIOR-ART numbers. Test files (`*.test.ts(x)`) are included in totals where noted but broken out separately — they are not shipped UI, but they do encode the same hardcoded values and will need companion updates if Phase 2 changes the values they assert against.

@@ -145,7 +145,7 @@ export function StatusIcon({
             >
               <StatusIcon status={s} size="lg" />
               <span className="min-w-0 truncate">{statusLabel(s)}</span>
-              {unavailableReason ? <span className="ml-auto text-[10px] text-muted-foreground">Assign first</span> : null}
+              {unavailableReason ? <span className="ml-auto text-(length:--text-nano) text-muted-foreground">Assign first</span> : null}
             </Button>
           );
         })}

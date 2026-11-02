@@ -8,7 +8,7 @@
 // plugin's own package.json so the published tarballs cannot carry a lifecycle
 // script that escapes their package directory at install time.
 
-import { existsSync, lstatSync, mkdirSync, readdirSync, readlinkSync, rmSync, symlinkSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, symlinkSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -69,6 +69,10 @@ export function readPluginsUnder(parentDir) {
 }
 
 export function linkSdkInto(packageDir) {
+  if (!existsSync(sdkDir) || !lstatSync(sdkDir).isDirectory()) {
+    throw new Error("The in-repo Plugin SDK directory is missing or invalid.");
+  }
+  const sdkRealPath = realpathSync(sdkDir);
   const scopeDir = join(packageDir, "node_modules", "@paperclipai");
   const linkTarget = join(scopeDir, "plugin-sdk");
   const relativeSdkDir = relative(scopeDir, sdkDir);
@@ -78,11 +82,24 @@ export function linkSdkInto(packageDir) {
   try {
     const stat = lstatSync(linkTarget);
     if (stat.isSymbolicLink()) {
-      if (readlinkSync(linkTarget) === relativeSdkDir) {
+      let currentTarget;
+      try {
+        currentTarget = realpathSync(linkTarget);
+      } catch (error) {
+        // A dangling or unreadable link is not ours to replace.
+        if (error?.code === "ENOENT") return false;
+        throw error;
+      }
+      const sameTarget = process.platform === "win32"
+        ? resolve(currentTarget).toLowerCase() === resolve(sdkRealPath).toLowerCase()
+        : resolve(currentTarget) === resolve(sdkRealPath);
+      if (sameTarget) {
         // Already linked to the in-repo SDK; nothing to do.
         return false;
       }
-      rmSync(linkTarget, { force: true });
+      // A different symlink or junction may belong to the package manager or
+      // developer. Never remove or replace it as part of this dev-only link.
+      return false;
     } else {
       // A real install has already populated @paperclipai/plugin-sdk (e.g. the
       // plugin host did `npm install` of the published tarball). Leave it.
@@ -93,6 +110,12 @@ export function linkSdkInto(packageDir) {
     if (error?.code !== "ENOENT") throw error;
   }
 
-  symlinkSync(relativeSdkDir, linkTarget, "dir");
+  if (process.platform === "win32") {
+    // Junction creation does not require the Windows symbolic-link privilege.
+    // Windows also requires the junction target to be absolute.
+    symlinkSync(sdkRealPath, linkTarget, "junction");
+  } else {
+    symlinkSync(relativeSdkDir, linkTarget, "dir");
+  }
   return true;
 }

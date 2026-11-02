@@ -4,6 +4,7 @@ import {
   agentTaskSessions as agentTaskSessionsTable,
   agents as agentsTable,
   budgetIncidents,
+  companyMemberships,
   costEvents,
   heartbeatRuns,
   invites,
@@ -82,6 +83,12 @@ import { isCoreManagedMemoryLifecycleSubscription } from "./memory-providers.js"
 import { spsPluginExecutionService } from "./sps-plugin-execution.js";
 import { spsWorkspaceSurfaceService } from "./sps-workspace-surfaces.js";
 import { spsAgentSessionRunService } from "./sps-agent-session-runs.js";
+import { spsAgentSessionCreationService } from "./sps-agent-session-creation.js";
+import { spsSessionDispatchService } from "./sps-session-dispatches.js";
+import { createSpsSessionDispatchContext } from "./sps-session-dispatch-context.js";
+import { describeSpsSessionPolicySupport } from "./sps-session-policy.js";
+import { parseSpsSessionExecutionPolicy } from "@paperclipai/adapter-utils/sps-session-policy";
+import { assertSpsWorkspaceAgentSessionInvocation } from "./sps-workspace-agent-session-invocation.js";
 import { spsExecutionHistoryService } from "./sps-execution-history.js";
 import { describeSpsAgentExecution } from "./sps-agent-execution-descriptor.js";
 import { findActiveServerAdapter } from "../adapters/registry.js";
@@ -103,6 +110,53 @@ const TELEMETRY_EVENT_NAME_REGEX = /^[a-z0-9][a-z0-9_-]*$/;
 const MEMORY_LIFECYCLE_EVENTS = new Set<string>(PLUGIN_MEMORY_LIFECYCLE_EVENTS);
 const MEMORY_LIFECYCLE_ENTITY_TYPES = new Set(["project", "room", "task", "artifact"]);
 const MAX_MEMORY_LIFECYCLE_REFERENCE_LENGTH = 200;
+
+/** Targeted Workspace inbox items must address an active member of that Workspace. */
+export async function assertSpsWorkspaceInboxTargetMember(db: Db, workspaceId: string, userId?: string | null): Promise<void> {
+  if (userId == null) return;
+  const [membership] = await db.select({ id: companyMemberships.id }).from(companyMemberships).where(and(
+    eq(companyMemberships.companyId, workspaceId),
+    eq(companyMemberships.principalType, "user"),
+    eq(companyMemberships.principalId, userId),
+    eq(companyMemberships.status, "active"),
+  )).limit(1);
+  if (!membership) throw badRequest("Inbox targetUserId must be an active member of this Workspace.");
+}
+
+/** Entity storage adapter that binds private Workspace workers to their tenant row scope. */
+export function createPluginHostEntityService(
+  registry: Pick<ReturnType<typeof pluginRegistryService>, "upsertEntity" | "listEntities">,
+  pluginId: string,
+  workspaceId?: string,
+) {
+  return {
+    async upsert(params: Parameters<HostServices["entities"]["upsert"]>[0]) {
+      if (!workspaceId) return registry.upsertEntity(pluginId, params as any) as any;
+      const input = params as typeof params & { companyId?: string };
+      if (input.companyId !== undefined && input.companyId !== workspaceId) {
+        throw badRequest("Workspace entity cannot target another Workspace.");
+      }
+      if (input.scopeKind !== "company" || input.scopeId !== workspaceId) {
+        throw badRequest("Workspace entities require the owning company scope.");
+      }
+      return registry.upsertEntity(pluginId, { ...params, companyId: workspaceId } as any) as any;
+    },
+    async list(params: Parameters<HostServices["entities"]["list"]>[0]) {
+      if (!workspaceId) return registry.listEntities(pluginId, params as any) as any;
+      const query = params as typeof params & { companyId?: string };
+      if ((query.companyId !== undefined && query.companyId !== workspaceId)
+        || (query.scopeKind !== undefined && query.scopeKind !== "company")
+        || (query.scopeId !== undefined && query.scopeId !== workspaceId)) {
+        throw badRequest("Workspace entity queries must use the owning company scope.");
+      }
+      return registry.listEntities(pluginId, {
+        ...params,
+        scopeKind: "company",
+        scopeId: workspaceId,
+      }, workspaceId) as any;
+    },
+  };
+}
 
 /**
  * Check if an IP address is in a private/reserved range (RFC 1918, loopback,
@@ -526,6 +580,8 @@ export function buildHostServices(
   options: {
     pluginWorkerManager?: PluginWorkerManager;
     manifest?: import("@paperclipai/shared").PaperclipPluginManifestV1;
+    /** Trusted fixed owner for a private Workspace worker's Host services. */
+    workspaceId?: string;
     dynamicToolRegistrar?: (tools: PluginToolDeclaration[]) => Promise<{ registered: number }> | { registered: number };
   } = {},
 ): HostServices & { dispose(): void } {
@@ -592,6 +648,21 @@ export function buildHostServices(
     if (!companyId) throw new Error("companyId is required for this operation");
     return companyId;
   };
+
+  const assertSessionAuthority = async (companyId: string) => {
+    if (disposed) throw new Error("Host services have been disposed");
+    if (options.workspaceId !== undefined) {
+      if (companyId !== options.workspaceId) throw new Error("Workspace Agent Session invocation is unavailable or expired.");
+      await assertSpsWorkspaceAgentSessionInvocation(pluginId, companyId);
+      if (disposed) throw new Error("Host services have been disposed");
+    }
+  };
+
+  const sessionCreation = spsAgentSessionCreationService(db, pluginKey, agentId => agents.getById(agentId), assertSessionAuthority);
+  const sessionDispatches = spsSessionDispatchService(db, pluginId, pluginKey, async companyId => {
+    await assertSessionAuthority(companyId);
+    await ensurePluginAvailableForCompany(companyId);
+  });
 
   const optionalLifecycleReference = (value: unknown, field: string): string | null => {
     if (value == null) return null;
@@ -1336,6 +1407,22 @@ export function buildHostServices(
           value: params.value,
         });
       },
+      async compareAndSet(params, assertCurrentInvocation) {
+        const companyId = ensureCompanyId(params.scopeId);
+        if (params.scopeKind !== "company" || typeof assertCurrentInvocation !== "function") {
+          throw badRequest("Conditional state storage requires a current Workspace invocation.");
+        }
+        return db.transaction(async tx => {
+          await assertCurrentInvocation();
+          const result = await pluginStateStore(tx).compareAndSet(pluginId, {
+            scopeKind: "company", scopeId: companyId, namespace: params.namespace,
+            stateKey: params.stateKey, value: params.value,
+          }, params.expected);
+          // Revocation observed after SQL must roll back instead of committing it.
+          await assertCurrentInvocation();
+          return result;
+        });
+      },
       async delete(params) {
         await stateStore.delete(pluginId, params.scopeKind as any, params.stateKey, {
           scopeId: params.scopeId,
@@ -1347,6 +1434,8 @@ export function buildHostServices(
     inbox: {
       async publish(params) {
         const companyId = ensureCompanyId(params.companyId);
+        if (options.workspaceId && companyId !== options.workspaceId) throw badRequest("Workspace worker cannot target another Workspace.");
+        if (options.workspaceId) await assertSpsWorkspaceInboxTargetMember(db, options.workspaceId, params.targetUserId);
         const plugin = await registry.getById(pluginId);
         if (!plugin) throw new Error("Plugin installation record is unavailable");
         await ensurePluginAvailableForCompany(companyId);
@@ -1358,6 +1447,8 @@ export function buildHostServices(
       },
       async update(params) {
         const companyId = ensureCompanyId(params.companyId);
+        if (options.workspaceId && companyId !== options.workspaceId) throw badRequest("Workspace worker cannot target another Workspace.");
+        if (options.workspaceId) await assertSpsWorkspaceInboxTargetMember(db, options.workspaceId, params.targetUserId);
         const plugin = await registry.getById(pluginId);
         if (!plugin) throw new Error("Plugin installation record is unavailable");
         await ensurePluginAvailableForCompany(companyId);
@@ -1390,14 +1481,7 @@ export function buildHostServices(
       },
     },
 
-    entities: {
-      async upsert(params) {
-        return registry.upsertEntity(pluginId, params as any) as any;
-      },
-      async list(params) {
-        return registry.listEntities(pluginId, params as any) as any;
-      },
-    },
+    entities: createPluginHostEntityService(registry, pluginId, options.workspaceId),
 
     events: {
       async emit(params) {
@@ -2870,133 +2954,36 @@ export function buildHostServices(
     },
 
     agentSessions: {
+      async getRequest(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        return sessionDispatches.getRequest({ ...params, companyId });
+      },
       async getRun(params) {
         const companyId = ensureCompanyId(params.companyId);
+        await assertSessionAuthority(companyId);
         await ensurePluginAvailableForCompany(companyId);
-        return spsAgentSessionRunService(db, pluginKey, runId => heartbeat.cancelRun(runId)).getRun({ ...params, companyId });
+        return spsAgentSessionRunService(db, pluginKey, runId => heartbeat.cancelRun(runId), () => assertSessionAuthority(companyId)).getRun({ ...params, companyId });
       },
       async cancel(params) {
         const companyId = ensureCompanyId(params.companyId);
+        await assertSessionAuthority(companyId);
         await ensurePluginAvailableForCompany(companyId);
-        return spsAgentSessionRunService(db, pluginKey, runId => heartbeat.cancelRun(runId)).cancel({ ...params, companyId });
+        return spsAgentSessionRunService(db, pluginKey, runId => heartbeat.cancelRun(runId), () => assertSessionAuthority(companyId)).cancel({ ...params, companyId });
       },
       async create(params) {
         const companyId = ensureCompanyId(params.companyId);
         await ensurePluginAvailableForCompany(companyId);
-        const agent = await agents.getById(params.agentId);
-        requireInCompany("Agent", agent, companyId);
-        const taskKey = params.taskKey ?? `plugin:${pluginKey}:session:${randomUUID()}`;
-
-        let normalizedContext: import("@paperclipai/shared").AgentSessionContext | null = null;
-        if (params.context) {
-          const { projectId, projectWorkspaceId, issueId } = params.context;
-
-          let validatedProjectId = projectId || null;
-          if (projectId) {
-            const project = await db
-              .select()
-              .from(projectsTable)
-              .where(and(eq(projectsTable.id, projectId), eq(projectsTable.companyId, companyId)))
-              .then((rows) => rows[0] ?? null);
-            if (!project) {
-              throw new Error("Project not found");
-            }
-          }
-
-          let workspaceProjectId: string | null = null;
-          if (projectWorkspaceId) {
-            const workspace = await db
-              .select()
-              .from(projectWorkspacesTable)
-              .where(and(eq(projectWorkspacesTable.id, projectWorkspaceId), eq(projectWorkspacesTable.companyId, companyId)))
-              .then((rows) => rows[0] ?? null);
-            if (!workspace) {
-              throw new Error("Project workspace not found");
-            }
-            workspaceProjectId = workspace.projectId;
-          }
-
-          let issueProjectId: string | null = null;
-          if (issueId) {
-            const issue = await db
-              .select()
-              .from(issuesTable)
-              .where(and(eq(issuesTable.id, issueId), eq(issuesTable.companyId, companyId)))
-              .then((rows) => rows[0] ?? null);
-            if (!issue) {
-              throw new Error("Issue not found");
-            }
-            issueProjectId = issue.projectId;
-          }
-
-          if (projectWorkspaceId && projectId && workspaceProjectId !== projectId) {
-            throw new Error("Workspace does not belong to the project");
-          }
-
-          if (issueId && projectId && issueProjectId !== projectId) {
-            throw new Error("Issue does not belong to the project");
-          }
-
-          if (!validatedProjectId) {
-            if (workspaceProjectId && issueProjectId) {
-              if (workspaceProjectId !== issueProjectId) {
-                throw new Error("Workspace and issue point to different projects");
-              }
-              validatedProjectId = workspaceProjectId;
-            } else if (workspaceProjectId) {
-              validatedProjectId = workspaceProjectId;
-            } else if (issueProjectId) {
-              validatedProjectId = issueProjectId;
-            }
-          }
-
-          const builtContext: import("@paperclipai/shared").AgentSessionContext = {};
-          if (validatedProjectId) {
-            builtContext.projectId = validatedProjectId;
-          }
-          if (projectWorkspaceId) {
-            builtContext.projectWorkspaceId = projectWorkspaceId;
-          }
-          if (issueId) {
-            builtContext.issueId = issueId;
-          }
-
-          if (Object.keys(builtContext).length > 0) {
-            normalizedContext = builtContext;
-          }
-        }
-
-        const row = await db
-          .insert(agentTaskSessionsTable)
-          .values({
-            companyId,
-            agentId: params.agentId,
-            adapterType: agent!.adapterType,
-            taskKey,
-            sessionParamsJson: null,
-            sessionDisplayId: null,
-            contextJson: normalizedContext,
-            lastRunId: null,
-            lastError: null,
-          })
-          .returning()
-          .then((rows) => rows[0]);
-
-        return {
-          sessionId: row!.id,
-          agentId: params.agentId,
-          companyId,
-          status: "active" as const,
-          createdAt: row!.createdAt.toISOString(),
-          updatedAt: row!.updatedAt.toISOString(),
-          context: row!.contextJson ?? undefined,
-          lastRunId: row!.lastRunId,
-          lastError: row!.lastError,
-        };
+        return sessionCreation.create({ ...params, companyId });
+      },
+      async ensure(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        return sessionCreation.ensure({ ...params, companyId });
       },
 
       async list(params) {
         const companyId = ensureCompanyId(params.companyId);
+        await assertSessionAuthority(companyId);
         await ensurePluginAvailableForCompany(companyId);
         const rows = await db
           .select()
@@ -3010,6 +2997,7 @@ export function buildHostServices(
           )
           .orderBy(desc(agentTaskSessionsTable.createdAt));
 
+        await assertSessionAuthority(companyId);
         return rows.map((row) => ({
           sessionId: row.id,
           agentId: row.agentId,
@@ -3023,13 +3011,41 @@ export function buildHostServices(
         }));
       },
 
+      async describePolicySupport(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        await assertSessionAuthority(companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        const support = await describeSpsSessionPolicySupport(db, { ...params, companyId, pluginKey },
+          type => Boolean(findActiveServerAdapter(type)), async () => {
+            await assertSessionAuthority(companyId); await ensurePluginAvailableForCompany(companyId);
+          });
+        const currentPlugin = await registry.getById(pluginId);
+        await assertSessionAuthority(companyId);
+        return currentPlugin?.manifestJson.entrypoints.workspaceWorker ? support : { ...support, modes: [] };
+      },
       async sendMessage(params) {
         if (disposed) {
           throw new Error("Host services have been disposed");
         }
 
         const companyId = ensureCompanyId(params.companyId);
+        const executionPolicy = parseSpsSessionExecutionPolicy(params.executionPolicy);
+        const sendParams = { sessionId: params.sessionId, companyId, prompt: params.prompt,
+          ...(params.reason === undefined ? {} : { reason: params.reason }),
+          ...(params.requestId === undefined ? {} : { requestId: params.requestId }),
+          ...(executionPolicy ? { executionPolicy } : {}) };
+        await assertSessionAuthority(companyId);
         await ensurePluginAvailableForCompany(companyId);
+        if (executionPolicy) {
+          if (sendParams.requestId === undefined) throw new Error("Restricted session execution requires a durable request ID.");
+          const support = await describeSpsSessionPolicySupport(db, { companyId, sessionId: sendParams.sessionId, pluginKey },
+            type => Boolean(findActiveServerAdapter(type)), () => assertSessionAuthority(companyId));
+          if (!support.modes.includes(executionPolicy.mode)) throw new Error("This session does not support the requested execution policy; unrestricted fallback is forbidden.");
+          const currentPlugin = await registry.getById(pluginId);
+          if (!currentPlugin?.manifestJson.entrypoints.workspaceWorker) throw new Error("Restricted sessions require invocation-bound Workspace plugin tools.");
+          const declared = new Set(currentPlugin?.manifestJson.tools?.map(tool => tool.name) ?? []);
+          if (executionPolicy.toolNames.some(name => !declared.has(name))) throw new Error("The execution policy names a tool not declared by this plugin.");
+        }
 
         // Verify session exists and belongs to this plugin
         const session = await db
@@ -3037,29 +3053,34 @@ export function buildHostServices(
           .from(agentTaskSessionsTable)
           .where(
             and(
-              eq(agentTaskSessionsTable.id, params.sessionId),
+              eq(agentTaskSessionsTable.id, sendParams.sessionId),
               eq(agentTaskSessionsTable.companyId, companyId),
               sql`starts_with(${agentTaskSessionsTable.taskKey}, ${`plugin:${pluginKey}:session:`})`,
             ),
           )
           .then((rows) => rows[0] ?? null);
-        if (!session) throw new Error(`Session not found: ${params.sessionId}`);
+        await assertSessionAuthority(companyId);
+        if (!session) throw new Error(`Session not found: ${sendParams.sessionId}`);
 
-        const run = await heartbeat.wakeup(session.agentId, {
+        const wake = (idempotencyKey?: string) => heartbeat.wakeup(session.agentId, {
           source: "automation",
           triggerDetail: "system",
-          reason: params.reason ?? null,
-          payload: { prompt: params.prompt },
-          contextSnapshot: {
-            taskKey: session.taskKey,
-            spsPluginConversation: { pluginKey, sessionId: session.id, message: params.prompt },
-            wakeSource: "automation",
-            wakeTriggerDetail: "system",
-            ...(session.contextJson ? session.contextJson : {}),
-          },
+          reason: sendParams.reason ?? null,
+          payload: { prompt: sendParams.prompt },
+          contextSnapshot: createSpsSessionDispatchContext({ pluginKey, sessionId: session.id, taskKey: session.taskKey,
+            prompt: sendParams.prompt, requestId: sendParams.requestId, reason: sendParams.reason, executionPolicy: executionPolicy ?? undefined,
+            sessionContext: session.contextJson as Record<string, unknown> | null }),
           requestedByActorType: "system",
           requestedByActorId: pluginId,
+          ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
         });
+        let run: { id: string } | null;
+        if (sendParams.requestId !== undefined) {
+          const receipt = await sessionDispatches.dispatch({ ...sendParams, requestId: sendParams.requestId }, wake);
+          if (receipt.replayed) return { runId: receipt.runId };
+          run = { id: receipt.runId };
+        } else run = await wake();
+        await assertSessionAuthority(companyId);
         if (!run) throw new Error("Agent wakeup was skipped by heartbeat policy");
 
         await db
@@ -3067,16 +3088,17 @@ export function buildHostServices(
           .set({ lastRunId: run.id, lastError: null, updatedAt: new Date() })
           .where(
             and(
-              eq(agentTaskSessionsTable.id, params.sessionId),
+              eq(agentTaskSessionsTable.id, sendParams.sessionId),
               eq(agentTaskSessionsTable.companyId, companyId),
               sql`starts_with(${agentTaskSessionsTable.taskKey}, ${`plugin:${pluginKey}:session:`})`,
             ),
           );
 
+        await assertSessionAuthority(companyId);
         // Subscribe to live events and forward to the plugin worker as notifications.
         // Track the subscription so it can be cleaned up on dispose() if the run
         // never reaches a terminal status (hang, crash, network partition).
-        if (notifyWorker) {
+        if (notifyWorker && options.workspaceId === undefined) {
           const TERMINAL_STATUSES = new Set(["succeeded", "interrupted", "failed", "cancelled", "timed_out"]);
           let terminalDelivered = false;
           let terminalDeliveryInProgress = false;

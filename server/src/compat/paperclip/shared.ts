@@ -1,4 +1,5 @@
 export {
+  pluginManifestV1Schema,
   createSpsModelConnectionSchema,
   createSpsMemberDeviceRequestSchema,
   updateSpsModelConnectionStatusSchema,
@@ -11,6 +12,7 @@ export {
   isAgentStatusAssignableToWork,
   isAgentStatusInvokable,
   reportSpsNodeRunnerAvailabilitySchema,
+  spsWorkspaceExecutionActionSchema,
   spsNodeCapabilityForAdapter,
   spsNodeCommandCompleteSchema,
   spsPluginNodeRunCompleteSchema,
@@ -21,11 +23,15 @@ export {
   spsNodeHeartbeatSchema,
   spsNodeSignedRequestMessage,
   spsNodeSignedRequestSchema,
+  spsNodeClaimRequestSchema,
+  SPS_NODE_CLAIM_REQUEST_ID_PATTERN,
   spsNodeSupportsAdapter,
   updateSpsWorkspaceSourceSchema,
   upsertSpsHostProjectShareSchema,
 } from "@paperclipai/shared";
 export type {
+  AgentSessionContext,
+  JsonSchema,
   PaperclipPluginManifestV1,
   SpsMemberDevice,
   SpsMemberDeviceEvent,
@@ -34,4 +40,5 @@ export type {
   PluginRecord,
   PluginWorkspaceShellDeclaration,
   SpsNodeRunnerProfile,
+  SpsWorkspaceExecutionAction,
 } from "@paperclipai/shared";

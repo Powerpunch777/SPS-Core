@@ -8,6 +8,7 @@ type Identity = Pick<ReturnType<typeof createSpsIdentityAuth>, "resolveNativeEnr
 export type SpsNativeHostManagement = Readonly<{
   hostId: string;
   serverSpkiSha256: string;
+  issuerSpkiSha256: string;
   assertActive(): void;
   resolveHostSession(request: Request): Promise<SpsIdentityNativeEnrollmentSession>;
   dispose(): void;
@@ -38,6 +39,7 @@ export async function createSpsNativeHostManagement(
     return Object.freeze({
       hostId: binding.hostId,
       serverSpkiSha256: binding.serverSpkiSha256,
+      issuerSpkiSha256: binding.issuerSpkiSha256,
       assertActive,
       async resolveHostSession(request: Request) {
         const checkRequest = () => {

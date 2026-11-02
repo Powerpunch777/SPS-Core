@@ -44,6 +44,75 @@ function run(executor: ReturnType<typeof fakeExecutor>) {
 }
 
 describe("sanitizePostRestoreDatabaseWithExecutor", () => {
+  it("retires pending package deletions after restore while preserving intent history", async () => {
+    const executor = fakeExecutor({
+      tables: ["sps_plugin_package_operations"],
+      columnsByTable: { sps_plugin_package_operations: ["kind", "active_plugin_id", "completed_at", "updated_at"] },
+    });
+    await run(executor);
+    const update = executor.calls.find(query => query.startsWith('UPDATE "sps_plugin_package_operations"'));
+    expect(update).toContain('"kind" = \'cancelled_after_restore\'');
+    expect(update).toContain('"active_plugin_id" = NULL');
+    expect(update).toContain('"completed_at" = NOW()');
+    expect(update).toContain('WHERE "completed_at" IS NULL');
+    expect(update).not.toMatch(/snapshot_json|package_path/);
+    expect(executor.calls).not.toContain('DELETE FROM "sps_plugin_package_operations"');
+    expect(executor.calls.indexOf(update!)).toBeGreaterThan(executor.calls.indexOf("BEGIN"));
+    expect(executor.calls.indexOf(update!)).toBeLessThan(executor.calls.indexOf("COMMIT"));
+    const legacy = fakeExecutor({ tables: ["account"] });
+    await run(legacy);
+    expect(legacy.calls.some(query => query.includes('"sps_plugin_package_operations"'))).toBe(false);
+  });
+
+  it("uninstalls restored plugins for Host review and clears every old package path", async () => {
+    const executor = fakeExecutor({
+      tables: ["plugins"],
+      columnsByTable: {
+        plugins: ["id", "plugin_key", "version", "manifest_json", "status", "last_error", "package_path"],
+      },
+    });
+
+    const result = await run(executor);
+
+    const reviewUpdate = executor.calls.find((query) =>
+      query.startsWith('UPDATE "plugins" SET "status" ='),
+    );
+    const pathUpdate = executor.calls.find((query) =>
+      query.startsWith('UPDATE "plugins" SET "package_path" ='),
+    );
+    expect(reviewUpdate).toContain(`"status" = 'uninstalled'`);
+    expect(reviewUpdate).toContain(
+      `"last_error" = 'Host restore requires review before reinstall; plugin data was retained.'`,
+    );
+    expect(reviewUpdate).toContain(
+      `WHERE "status" IN ('installed', 'active', 'ready', 'disabled', 'error', 'upgrade_pending')`,
+    );
+    expect(pathUpdate).toBe('UPDATE "plugins" SET "package_path" = NULL');
+    expect(reviewUpdate).not.toMatch(/plugin_key|version|manifest_json|config|state|entity|migration/i);
+    expect(pathUpdate).not.toMatch(/WHERE/);
+    expect(result.scrubbedTables.plugins).toBe(2);
+    expect(executor.calls.indexOf(reviewUpdate!)).toBeGreaterThan(executor.calls.indexOf("BEGIN"));
+    expect(executor.calls.indexOf(pathUpdate!)).toBeLessThan(executor.calls.indexOf("COMMIT"));
+  });
+
+  it("clears plugin paths with partial legacy schemas and skips status reset without status", async () => {
+    const executor = fakeExecutor({
+      tables: ["plugins"],
+      columnsByTable: { plugins: ["id", "package_path"] },
+    });
+
+    await run(executor);
+
+    expect(executor.calls).toContain('UPDATE "plugins" SET "package_path" = NULL');
+    expect(executor.calls.some((query) => query.startsWith('UPDATE "plugins" SET "status"'))).toBe(false);
+
+    const noPathColumn = fakeExecutor({
+      tables: ["plugins"],
+      columnsByTable: { plugins: ["id", "manifest_json"] },
+    });
+    await run(noPathColumn);
+    expect(noPathColumn.calls.some((query) => query.startsWith('UPDATE "plugins"'))).toBe(false);
+  });
   it("deletes FK children before parents", async () => {
     const executor = fakeExecutor({
       tables: [
@@ -52,6 +121,7 @@ describe("sanitizePostRestoreDatabaseWithExecutor", () => {
         "sps_node_command_events",
         "sps_node_commands",
         "sps_node_runner_profiles",
+        "sps_native_node_bindings",
         "sps_nodes",
         "sps_native_enrollments",
         "sps_native_pairings",
@@ -72,6 +142,12 @@ describe("sanitizePostRestoreDatabaseWithExecutor", () => {
     );
     expect(executor.calls.indexOf('DELETE FROM "sps_node_runner_profiles"')).toBeLessThan(
       executor.calls.indexOf('DELETE FROM "sps_nodes"'),
+    );
+    expect(executor.calls.indexOf('DELETE FROM "sps_native_node_bindings"')).toBeLessThan(
+      executor.calls.indexOf('DELETE FROM "sps_nodes"'),
+    );
+    expect(executor.calls.indexOf('DELETE FROM "sps_native_node_bindings"')).toBeLessThan(
+      executor.calls.indexOf('DELETE FROM "sps_member_devices"'),
     );
     expect(executor.calls.indexOf('DELETE FROM "sps_native_enrollments"')).toBeGreaterThanOrEqual(0);
     expect(executor.calls.indexOf('DELETE FROM "sps_native_enrollments"')).toBeLessThan(
@@ -143,6 +219,9 @@ describe("sanitizePostRestoreDatabaseWithExecutor", () => {
     expect(executor.calls.find((query) => query.startsWith('UPDATE "plugin_job_runs" SET'))).toContain(
       `"status" = 'cancelled'`,
     );
+    expect(executor.calls.find((query) => query.startsWith('UPDATE "plugin_job_runs" SET'))).toContain(
+      `WHERE "status" IN ('pending', 'queued', 'running', 'cancelling')`,
+    );
   });
 
   it("clears provider sessions, credentials, and machine-bound workspace routes", async () => {
@@ -202,6 +281,51 @@ describe("sanitizePostRestoreDatabaseWithExecutor", () => {
     expect(executor.calls.filter(query => query.startsWith('UPDATE "sps_model_runs"')).join(" ")).not.toMatch(/result_json|usage_json/);
   });
 
+  it("rotates plugin authority revisions after restore without creating missing legacy tables", async () => {
+    const executor = fakeExecutor({
+      tables: ["sps_plugin_authority_catalog", "sps_workspace_plugin_authority"],
+      columnsByTable: {
+        sps_plugin_authority_catalog: ["id", "revision"],
+        sps_workspace_plugin_authority: ["workspace_id", "revision"],
+      },
+    });
+
+    await run(executor);
+
+    expect(executor.calls).toContain(
+      `UPDATE "sps_plugin_authority_catalog" SET "revision" = gen_random_uuid() WHERE "id" = 'runtime'`,
+    );
+    expect(executor.calls).toContain(
+      `UPDATE "sps_workspace_plugin_authority" SET "revision" = gen_random_uuid()`,
+    );
+    expect(executor.calls.indexOf("BEGIN")).toBeLessThan(
+      executor.calls.indexOf(`UPDATE "sps_plugin_authority_catalog" SET "revision" = gen_random_uuid() WHERE "id" = 'runtime'`),
+    );
+    expect(executor.calls.indexOf(`UPDATE "sps_workspace_plugin_authority" SET "revision" = gen_random_uuid()`)).toBeLessThan(
+      executor.calls.indexOf("COMMIT"),
+    );
+
+    const legacy = fakeExecutor({ tables: ["account"] });
+    await run(legacy);
+    expect(legacy.calls.some((query) => query.includes('"sps_plugin_authority_catalog"'))).toBe(false);
+    expect(legacy.calls.some((query) => query.includes('"sps_workspace_plugin_authority"'))).toBe(false);
+  });
+
+  it("rotates restored Workspace plugin runtime config revision tokens", async () => {
+    const executor = fakeExecutor({
+      tables: ["sps_workspace_plugin_runtime_configs"],
+      columnsByTable: { sps_workspace_plugin_runtime_configs: ["revision", "updated_at"] },
+    });
+    await run(executor);
+    expect(executor.calls).toContain(
+      `UPDATE "sps_workspace_plugin_runtime_configs" SET "revision" = gen_random_uuid(), "updated_at" = NOW()`,
+    );
+
+    const legacy = fakeExecutor({ tables: ["account"] });
+    await run(legacy);
+    expect(legacy.calls.some((query) => query.includes('"sps_workspace_plugin_runtime_configs"'))).toBe(false);
+  });
+
   it("rolls back atomically when a scrub operation fails", async () => {
     const executor = fakeExecutor({ tables: ["session"], failOn: 'DELETE FROM "session"' });
 
@@ -222,6 +346,20 @@ describe("sanitizePostRestoreDatabaseWithExecutor", () => {
     expect(executor.calls).not.toContain("COMMIT");
     expect(executor.calls).not.toContain('DELETE FROM "sps_native_pairings"');
     expect(executor.calls.some((query) => query.includes('"sps_native_pairing_events"'))).toBe(false);
+  });
+
+  it("rolls back when the restored plugin review reset fails", async () => {
+    const executor = fakeExecutor({
+      tables: ["plugins"],
+      columnsByTable: { plugins: ["status", "last_error", "package_path"] },
+      failOn: 'UPDATE "plugins" SET "status"',
+    });
+
+    await expect(run(executor)).rejects.toThrow("sanitizer failure");
+
+    expect(executor.calls.at(-1)).toBe("ROLLBACK");
+    expect(executor.calls).not.toContain("COMMIT");
+    expect(executor.calls).not.toContain('UPDATE "plugins" SET "package_path" = NULL');
   });
 
   it("is safe to run repeatedly", async () => {

@@ -43,13 +43,14 @@ import { appendWithCap } from "../adapters/utils.js";
 import { assertEnvironmentSelectionForCompany } from "./environment-selection.js";
 import { environmentService } from "../services/environments.js";
 import { secretService } from "../services/secrets.js";
+import type { SpsPluginArtifactMaintenance } from "../services/sps-plugin-artifact-maintenance.js";
 
 const WORKSPACE_CONTROL_OUTPUT_MAX_CHARS = 256 * 1024;
 const SHARED_WORKSPACE_STOP_AND_RESTART_ACTIONS = new Set(["stop", "restart"]);
 
-export function projectRoutes(db: Db) {
+export function projectRoutes(db: Db, options: { artifactMaintenance?: SpsPluginArtifactMaintenance } = {}) {
   const router = Router();
-  const svc = projectService(db);
+  const svc = projectService(db, options);
   const projectAccess = projectAccessService(db);
   const access = accessService(db);
   const secretsSvc = secretService(db);

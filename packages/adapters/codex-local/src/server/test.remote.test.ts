@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import os from "node:os";
+import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AdapterExecutionTarget } from "@paperclipai/adapter-utils/execution-target";
 
@@ -72,6 +73,14 @@ const {
     restoreWorkspace,
   };
 });
+
+function expectTempDirectoryWithPrefix(directory: string | undefined, prefix: string) {
+  expect(directory).toBeDefined();
+  if (!directory) return;
+  const expectedPrefixPath = path.join(os.tmpdir(), prefix);
+  expect(path.dirname(directory)).toBe(path.dirname(expectedPrefixPath));
+  expect(path.basename(directory).startsWith(path.basename(expectedPrefixPath))).toBe(true);
+}
 
 vi.mock("@paperclipai/adapter-utils/execution-target", async () => {
   const actual = await vi.importActual<typeof import("@paperclipai/adapter-utils/execution-target")>(
@@ -149,9 +158,9 @@ describe("codex remote environment diagnostics", () => {
     // The probe must upload only a minimal credentials-only home, never the
     // full managed CODEX_HOME (which can be hundreds of MB of session history).
     const homeAsset = runtimeInput?.assets?.find((asset) => asset.key === "home");
-    expect(homeAsset?.localDir).toContain(`${os.tmpdir()}/paperclip-codex-probe-home-`);
+    expectTempDirectoryWithPrefix(homeAsset?.localDir, "paperclip-codex-probe-home-");
     expect(capturedHomeAssetFiles.value).toEqual(["auth.json", "config.toml"]);
-    expect(runtimeInput?.workspaceLocalDir).toContain(`${os.tmpdir()}/paperclip-codex-envtest-`);
+    expectTempDirectoryWithPrefix(runtimeInput?.workspaceLocalDir, "paperclip-codex-envtest-");
     expect(runtimeInput?.workspaceLocalDir).not.toBe("/remote/workspace");
     expect(await fs.stat(runtimeInput!.workspaceLocalDir).catch(() => null)).toBeNull();
     expect(runtimeInput?.target?.remoteCwd).toBe("/remote/workspace");

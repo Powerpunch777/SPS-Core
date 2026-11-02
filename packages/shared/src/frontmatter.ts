@@ -1,4 +1,4 @@
-import { z } from "zod";
+import { z } from "zod/v3";
 
 export interface MarkdownDoc {
   frontmatter: Record<string, unknown>;

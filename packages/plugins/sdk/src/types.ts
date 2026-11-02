@@ -10,6 +10,8 @@
  */
 
 import type { PluginSpsModelConnection, PluginSpsModelRun, PluginSpsModelSubmitInput } from "./sps-model-types.js";
+import type { PluginSpsConnectivity } from "./sps-connectivity-types.js";
+export type { PluginSpsConnectivity } from "./sps-connectivity-types.js";
 export type { PluginSpsModelConnection, PluginSpsModelTextResult, PluginSpsModelRun, PluginSpsModelSubmitInput } from "./sps-model-types.js";
 import type {
   PaperclipPluginManifestV1,
@@ -269,6 +271,9 @@ export interface ToolRunContext {
   /** UUID of the retained project, when present. Projectless calls are limited
    * to the invoking plugin's verified active Agent session. */
   projectId?: string;
+  /** Verified active Plugin Agent session, injected by the dedicated Workspace
+   * tool lane. Never take a session claim from tool parameters as authority. */
+  sessionId?: string;
 }
 
 /**
@@ -730,6 +735,7 @@ export interface PluginSpsExecutionSummary {
 
 /** Finite SPS Runtime operations, excluding general plugin RPC methods. */
 export type PluginSpsRuntimeOperation =
+  | "sps.connectivity.current"
   | "sps.executions.list"
   | "sps.executions.get"
   | "sps.executions.summarize"
@@ -766,6 +772,10 @@ export interface PluginSpsRuntimeTransport {
  * the calling plugin; Core does not interpret it as an Agent, Task, or role.
  */
 export interface PluginSpsClient {
+  connectivity: {
+    /** Requires a current Workspace invocation and sps.connectivity.read. No target selectors. */
+    current(): Promise<PluginSpsConnectivity>;
+  };
   models: {
     list(companyId: string): Promise<PluginSpsModelConnection[]>;
     submit(input: PluginSpsModelSubmitInput): Promise<PluginSpsModelRun>;
@@ -1086,6 +1096,10 @@ export interface PluginStateClient {
    * @param value - JSON-serializable value to store
    */
   set(input: ScopeKey, value: unknown): Promise<void>;
+
+  /** Optional Host feature. No fallback to an unconditional write is safe. */
+  compareAndSet?(input: ScopeKey & { scopeKind: "company"; scopeId: string },
+    expected: { exists: false } | { exists: true; value: unknown }, value: unknown): Promise<{ swapped: boolean }>;
 
   /**
    * Delete a state value. No-ops silently if the entry does not exist
@@ -1946,6 +1960,32 @@ export interface AgentSession {
   lastError: string | null;
 }
 
+export interface AgentSessionEnsureInput {
+  agentId: string;
+  companyId: string;
+  taskKey: string;
+  expectedSessionId?: string;
+  context?: AgentSessionContext;
+}
+
+export interface AgentSessionEnsureResult {
+  sessionId: string;
+  created: boolean;
+}
+
+export interface AgentSessionExecutionPolicy {
+  mode: "plugin-tools-only-v1";
+  toolNames: readonly string[];
+}
+
+export interface AgentSessionPolicySupport {
+  schemaVersion: 1;
+  modes: readonly "plugin-tools-only-v1"[];
+  enforcement: "dispatch-and-run";
+  readiness: "unknown";
+  osIsolation: "not-certified";
+}
+
 /**
  * A streaming event received during a session's `sendMessage` call.
  * Delivered via JSON-RPC notifications from host to worker.
@@ -1983,9 +2023,21 @@ export interface AgentSessionRunState {
   error: string | null;
   /** Additive metadata; absent on older development Hosts. */
   execution?: PluginSpsExecution;
+  /** Additive bounded answer; absent on older Hosts. Never the raw adapter result. */
+  output?: Readonly<{ state: "available"; text: string }>
+    | Readonly<{ state: "not_ready"; text: null }>
+    | Readonly<{ state: "withheld"; text: null; reason: "missing" | "invalid" | "too_large" | "not_successful" }>;
+}
+
+export interface AgentSessionRequestState {
+  requestId: string;
+  state: "pending" | "submitted" | "uncertain";
+  runId: string | null;
 }
 
 export interface PluginAgentSessionsClient {
+  /** Describe host policy plumbing; optional for compatibility with older clients. Requires `agent.sessions.read`. */
+  describePolicySupport?(sessionId: string, companyId: string): Promise<AgentSessionPolicySupport>;
   /** Create a new conversational session with an agent. Requires `agent.sessions.create`. */
   create(agentId: string, companyId: string, opts?: {
     taskKey?: string;
@@ -1993,11 +2045,20 @@ export interface PluginAgentSessionsClient {
     context?: AgentSessionContext;
   }): Promise<AgentSession>;
 
+  /** Return the active session for this plugin-owned key or create it. Requires `agent.sessions.create`. */
+  ensure(agentId: string, companyId: string, opts: {
+    taskKey: string;
+    expectedSessionId?: string;
+    context?: AgentSessionContext;
+  }): Promise<AgentSessionEnsureResult>;
+
   /** List active sessions for an agent owned by this plugin. Requires `agent.sessions.list`. */
   list(agentId: string, companyId: string): Promise<AgentSession[]>;
 
   /** Read one owned session run. Requires `agent.sessions.read`. */
   getRun(sessionId: string, companyId: string, runId: string): Promise<AgentSessionRunState>;
+  /** Read a durable admission receipt; null is not permission to replay an uncertain request. */
+  getRequest(sessionId: string, companyId: string, requestId: string): Promise<AgentSessionRequestState | null>;
   /** Request cancellation of this exact run, not the whole Agent or session. */
   cancel(sessionId: string, companyId: string, runId: string): Promise<AgentSessionRunState>;
 
@@ -2009,6 +2070,9 @@ export interface PluginAgentSessionsClient {
   sendMessage(sessionId: string, companyId: string, opts: {
     prompt: string;
     reason?: string;
+    executionPolicy?: AgentSessionExecutionPolicy;
+    /** Stable caller-generated UUID. Reusing it with different input is rejected. */
+    requestId?: string;
     onEvent?: (event: AgentSessionEvent) => void;
   }): Promise<AgentSessionSendResult>;
 

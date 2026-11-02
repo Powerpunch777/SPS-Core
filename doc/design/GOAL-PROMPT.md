@@ -1,5 +1,11 @@
 # /goal Prompt — Design Language Simplification, Run 1 (v3)
 
+> **Historical/compatibility design reference (2026-11-02 classification).**
+> [SPS normative baseline](../SPS-DOCUMENTATION-BASELINE-2026-11-02.md) takes precedence over product assumptions below.
+> Paperclip Company/Issue/org/Agent/UI models are compatibility, not mandatory SPS behavior.
+> Do not force Core chrome, Builder, AI or a workflow through this reference; preserve APIs/data pending explicit migration.
+> Documentation classification only; implementation and dated test results are unchanged.
+
 Paste everything inside the code block below into Claude Code after typing `/goal`, from inside this worktree. Prerequisites already satisfied on this branch: DESIGN.md, PRIOR-ART.md, KNOWN-DUPLICATES.md at repo root; token-auditor + codemod-runner in `.claude/agents/`.
 
 v3: condensed under the /goal 4,000-character limit (v2 was 4,648 and got rejected). The paste block now carries only mission + DONE-WHEN + guardrails; the full phase spec lives in the "Phase spec" section below, which the run reads from this file on disk.

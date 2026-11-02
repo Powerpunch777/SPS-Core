@@ -1,5 +1,11 @@
 # Local Plugin Development
 
+> **Historical/compatibility design reference (2026-11-02 classification).**
+> [SPS normative baseline](../SPS-DOCUMENTATION-BASELINE-2026-11-02.md) takes precedence over product assumptions below.
+> Paperclip Company/Issue/org/Agent/UI models are compatibility, not mandatory SPS behavior.
+> Do not force Core chrome, Builder, AI or a workflow through this reference; preserve APIs/data pending explicit migration.
+> Documentation classification only; implementation and dated test results are unchanged.
+
 This is the short happy-path guide for developing a Paperclip plugin from a folder on your machine. You will scaffold a plugin, run it in watch mode, install it into a running Paperclip instance from an absolute local path, and edit code with the plugin worker reloading after each rebuild.
 
 For the full alpha surface — manifest fields, capabilities, managed agents/projects/routines/skills, UI slots, scoped API routes — see [`PLUGIN_AUTHORING_GUIDE.md`](./PLUGIN_AUTHORING_GUIDE.md).

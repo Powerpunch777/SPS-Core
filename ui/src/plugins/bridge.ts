@@ -25,7 +25,7 @@
  * @see PLUGIN_SPEC.md §19.7 — Error Propagation Through The Bridge
  */
 
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
+import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { useLocation as useRouterLocation, useNavigate as useRouterNavigate, type NavigateOptions } from "react-router-dom";
 import type {
   PluginBridgeErrorCode,
@@ -581,6 +581,7 @@ export function usePluginToast(): PluginToastFn {
 // ---------------------------------------------------------------------------
 
 export interface PluginStreamResult<T = unknown> {
+  /** The newest 128 messages received from this stream. */
   events: T[];
   lastEvent: T | null;
   connecting: boolean;
@@ -588,6 +589,9 @@ export interface PluginStreamResult<T = unknown> {
   error: Error | null;
   close(): void;
 }
+
+const PLUGIN_STREAM_MAX_PAYLOAD_BYTES = 64 * 1024;
+const PLUGIN_STREAM_MAX_EVENTS = 128;
 
 export function usePluginStream<T = unknown>(
   channel: string,
@@ -601,10 +605,18 @@ export function usePluginStream<T = unknown>(
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState<Error | null>(null);
   const sourceRef = useRef<EventSource | null>(null);
+  const sourceGenerationRef = useRef(0);
+  const targetRef = useRef("");
+  const target = JSON.stringify([pluginId, effectiveCompanyId ?? null, channel]);
+
+  useLayoutEffect(() => {
+    targetRef.current = target;
+  }, [target]);
 
   const close = useCallback(() => {
-    sourceRef.current?.close();
+    const source = sourceRef.current;
     sourceRef.current = null;
+    source?.close();
     setConnecting(false);
     setConnected(false);
   }, []);
@@ -624,52 +636,66 @@ export function usePluginStream<T = unknown>(
       `/api/plugins/${encodeURIComponent(pluginId)}/bridge/stream/${encodeURIComponent(channel)}?${params.toString()}`,
       { withCredentials: true },
     );
+    const sourceTarget = target;
+    const isCurrentSource = () => sourceRef.current === source && targetRef.current === sourceTarget;
+    const sourceGeneration = ++sourceGenerationRef.current;
+    const isCurrentGeneration = () => sourceGenerationRef.current === sourceGeneration && targetRef.current === sourceTarget;
     sourceRef.current = source;
     setConnecting(true);
     setConnected(false);
 
     source.onopen = () => {
+      if (!isCurrentSource()) return;
       setConnecting(false);
       setConnected(true);
       setError(null);
     };
 
     source.onmessage = (event) => {
+      if (!isCurrentSource()) return;
       try {
+        if (typeof event.data !== "string" || event.data.length > PLUGIN_STREAM_MAX_PAYLOAD_BYTES
+          || new TextEncoder().encode(event.data).byteLength > PLUGIN_STREAM_MAX_PAYLOAD_BYTES) {
+          sourceRef.current = null;
+          source.close();
+          setConnecting(false);
+          setConnected(false);
+          setError(new Error(`Plugin stream message exceeded the ${PLUGIN_STREAM_MAX_PAYLOAD_BYTES} byte limit`));
+          return;
+        }
         const parsed = JSON.parse(event.data) as T;
-        setEvents((current) => [...current, parsed]);
-        setLastEvent(parsed);
-      } catch (nextError) {
-        setError(nextError instanceof Error ? nextError : new Error(String(nextError)));
+        setEvents((current) => {
+          if (!isCurrentGeneration()) return current;
+          return [...current, parsed].slice(-PLUGIN_STREAM_MAX_EVENTS);
+        });
+        setLastEvent((current) => isCurrentGeneration() ? parsed : current);
+      } catch {
+        if (isCurrentSource()) setError(new Error(`Invalid message received from plugin stream "${channel}"`));
       }
     };
 
     source.addEventListener("close", () => {
+      if (!isCurrentSource()) return;
+      sourceRef.current = null;
       source.close();
-      if (sourceRef.current === source) {
-        sourceRef.current = null;
-      }
       setConnecting(false);
       setConnected(false);
     });
 
     source.onerror = () => {
+      if (!isCurrentSource()) return;
+      sourceRef.current = null;
       setConnecting(false);
       setConnected(false);
       setError(new Error(`Failed to connect to plugin stream "${channel}"`));
       source.close();
-      if (sourceRef.current === source) {
-        sourceRef.current = null;
-      }
     };
 
     return () => {
+      if (sourceRef.current === source) sourceRef.current = null;
       source.close();
-      if (sourceRef.current === source) {
-        sourceRef.current = null;
-      }
     };
-  }, [channel, close, effectiveCompanyId, pluginId]);
+  }, [channel, close, effectiveCompanyId, pluginId, target]);
 
   return { events, lastEvent, connecting, connected, error, close };
 }

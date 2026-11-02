@@ -123,6 +123,8 @@ export function CompanySettingsSidebar() {
           <div className="mt-5 px-3 pb-1 text-(length:--text-micro) font-semibold uppercase tracking-wide text-muted-foreground">Platform</div>
           <div className="flex flex-col gap-0.5">
             <SidebarNavItem to={`${INSTANCE_SETTINGS_PATH_PREFIX}/plugins`} label="Plugins" icon={Puzzle} />
+            <SidebarNavItem to={`${INSTANCE_SETTINGS_PATH_PREFIX}/model-connections`} label="Model connections" icon={Cpu} end />
+            <SidebarNavItem to="/company/settings/secrets" label="Credentials" icon={KeyRound} end />
             {companySettingsPluginSlots
               .filter((slot) => slot.routePath)
               .map((slot) => (
@@ -291,6 +293,7 @@ export function CompanySettingsSidebar() {
             label={spsWorkplaneShell ? "Agent 연결" : "Adapters"}
             icon={Cpu}
           />
+          <SidebarNavItem to={`${INSTANCE_SETTINGS_PATH_PREFIX}/model-connections`} label="Model connections" icon={Cpu} end />
         </div>
       </nav>
     </aside>

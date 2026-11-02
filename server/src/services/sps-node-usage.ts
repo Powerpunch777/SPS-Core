@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { z } from "zod";
+import { z } from "zod/v3";
 import { spsNodeUsageReportSchema } from "../compat/paperclip/shared.js";
 import { buildSpsUsageEvidence, readSpsUsageEvidence, unavailableSpsUsage } from "./sps-execution-usage.js";
 

@@ -1,9 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { SpsNodeExecutionUnavailableError } from "./sps-node-execution.js";
 import {
+  assertNoRetiredMarketplaceAssistantRunContext,
   assertSpsNodeBindingRequiredForAdapter,
-  createMarketplaceAssistantExternalTools,
-  markMarketplaceAssistantNodeRuntime,
 } from "./heartbeat.js";
 
 describe("SPS Hub Node-only execution policy", () => {
@@ -15,50 +14,14 @@ describe("SPS Hub Node-only execution policy", () => {
     })).toThrow(SpsNodeExecutionUnavailableError);
   });
 
-  it("uses only Node-local runtime variables for a remote Marketplace MCP server", () => {
-    const tools = createMarketplaceAssistantExternalTools({
-      apiBaseUrl: "https://host.example/api",
-      scopedToken: "scoped-token",
-      runId: "run-1",
-      companyId: "company-1",
-      remoteNode: true,
-    });
-    const server = tools.mcpServers[0];
-
-    expect(server.command).toBe("node.exe");
-    expect(server.args).toContain("--input-type=module");
-    expect(server.args.join(" ")).toContain("pathToFileURL(process.env.SPS_MARKETPLACE_MCP_ENTRY)");
-    expect(server.args.join(" ")).not.toContain("@sps/mcp-server");
-    expect(server.args).not.toContain(process.execPath);
-    expect(server.env).toContainEqual({ name: "ELECTRON_RUN_AS_NODE", value: "1" });
-    expect(server.revision).toBe("3-node-local-runtime");
-  });
-
-  it("marks only a remote Marketplace Assistant command for Node-local MCP materialization", () => {
-    const original = { env: { EXISTING: "yes" }, model: "test" };
-    expect(markMarketplaceAssistantNodeRuntime(original, true)).toEqual({
-      env: { EXISTING: "yes", SPS_MARKETPLACE_MCP_REQUIRED: "1" },
-      model: "test",
-    });
-    expect(markMarketplaceAssistantNodeRuntime(original, false)).toBe(original);
-  });
-
-  it("uses the Desktop-provided absolute Marketplace MCP entry for a local run", () => {
-    const entry = process.platform === "win32"
-      ? "C:\\SPS\\runtime\\marketplace-assistant-stdio.js"
-      : "/opt/sps/runtime/marketplace-assistant-stdio.js";
-    const tools = createMarketplaceAssistantExternalTools({
-      apiBaseUrl: "http://127.0.0.1:31310/api",
-      scopedToken: "scoped-token",
-      runId: "run-local",
-      companyId: "company-1",
-      remoteNode: false,
-      localEntryPath: entry,
-    });
-
-    expect(tools.mcpServers[0].command).toBe(process.execPath);
-    expect(tools.mcpServers[0].args).toEqual([entry]);
-    expect(tools.mcpServers[0].env).not.toContainEqual({ name: "ELECTRON_RUN_AS_NODE", value: "1" });
+  it("rejects legacy Marketplace Assistant run markers before ordinary Agent setup", () => {
+    expect(() => assertNoRetiredMarketplaceAssistantRunContext({
+      spsMarketplaceAssistant: { sessionId: "legacy", message: "old prompt" },
+    })).toThrow("Marketplace Assistant runs are retired");
+    expect(() => assertNoRetiredMarketplaceAssistantRunContext({
+      spsMarketplaceAssistant: null,
+    })).toThrow("Marketplace Assistant runs are retired");
+    expect(() => assertNoRetiredMarketplaceAssistantRunContext({ issueId: "ordinary" })).not.toThrow();
   });
 
   it("allows a local CLI adapter when the approved Node target exists", () => {

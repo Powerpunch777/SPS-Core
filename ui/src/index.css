@@ -1843,6 +1843,8 @@ span.paperclip-mention-chip[data-mention-kind="external-object"] {
   --gtc-56: minmax(0,1fr) minmax(14rem,18rem); /* Extracted from ui/src/pages/TeamCatalog.tsx (grid-cols-[minmax(0,1fr)_minmax(14rem,18rem)]). */
   --gtc-57: repeat(14,minmax(0,1fr)); /* Extracted from ui/src/pages/UserProfile.tsx (grid-cols-[repeat(14,minmax(0,1fr))]). */
   --gtc-58: auto 1fr auto; /* Extracted from ui/src/pages/UserProfile.tsx (grid-cols-[auto_1fr_auto]). */
+  --gtc-sps-core-dashboard: minmax(0,1.55fr) minmax(18rem,0.85fr);
+  --gtc-sps-home-dashboard: minmax(0,1.25fr) minmax(18rem,0.75fr);
   --gtr-1: auto auto; /* Extracted from ui/src/components/ui/card.tsx (grid-rows-[auto_auto]). */
   --gtr-2: 1fr; /* Extracted from ui/src/pages/CompanySkills.tsx (grid-rows-[1fr]). */
   --gtr-3: 0fr; /* Extracted from ui/src/pages/CompanySkills.tsx (grid-rows-[0fr]). */

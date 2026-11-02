@@ -4,7 +4,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PluginExecutionWorkspaceMetadata } from "@paperclipai/plugin-sdk";
 import type { WorkspaceDiffQueryOptions } from "../src/contracts.js";
 import { WORKSPACE_DIFF_CAPS, workspaceDiffService } from "../src/workspace-diff.js";
@@ -60,11 +60,24 @@ function workingTreeQuery(overrides: Partial<WorkspaceDiffQueryOptions> = {}): W
   };
 }
 
+beforeEach(async () => {
+  const tmpDir = await fs.realpath(os.tmpdir());
+  const existing = process.env.GIT_CEILING_DIRECTORIES;
+  vi.stubEnv(
+    "GIT_CEILING_DIRECTORIES",
+    existing ? `${existing}${path.delimiter}${tmpDir}` : tmpDir,
+  );
+});
+
 afterEach(async () => {
-  for (const dir of tempDirs) {
-    await fs.rm(dir, { recursive: true, force: true });
+  try {
+    for (const dir of tempDirs) {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  } finally {
+    tempDirs.clear();
+    vi.unstubAllEnvs();
   }
-  tempDirs.clear();
 });
 
 describe("plugin workspace diff service", () => {
@@ -162,10 +175,25 @@ describe("plugin workspace diff service", () => {
     const secretContent = "external secret should not appear\n";
     const secretPath = path.join(outsideDir, "secret.txt");
     await fs.writeFile(secretPath, secretContent, "utf8");
-    await fs.symlink(secretPath, path.join(repoRoot, "leak.txt"));
+    let leakFile = "leak.txt";
+    try {
+      await fs.symlink(secretPath, path.join(repoRoot, leakFile));
+    } catch (error) {
+      if (
+        process.platform !== "win32"
+        || typeof error !== "object"
+        || error === null
+        || !("code" in error)
+        || error.code !== "EPERM"
+      ) {
+        throw error;
+      }
+      await fs.symlink(outsideDir, path.join(repoRoot, "outside-link"), "junction");
+      leakFile = "outside-link/secret.txt";
+    }
 
     const diff = await workspaceDiffService().getDiff(createWorkspace(repoRoot), workingTreeQuery());
-    const leak = diff.files.find((file) => file.path === "leak.txt");
+    const leak = diff.files.find((file) => file.path === leakFile);
     const serialized = JSON.stringify(diff);
 
     expect(leak).toMatchObject({ untracked: true, status: "untracked", additions: 0, sizeBytes: null });
@@ -176,7 +204,7 @@ describe("plugin workspace diff service", () => {
     });
     expect(diff.warnings).toContainEqual(expect.objectContaining({
       code: "symlink_target_outside_workspace",
-      path: "leak.txt",
+      path: leakFile,
     }));
     expect(serialized).not.toContain(secretContent.trim());
   }, 20_000);

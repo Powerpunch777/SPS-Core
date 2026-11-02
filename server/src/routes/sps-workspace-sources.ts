@@ -19,6 +19,8 @@ import {
   logActivity,
 } from "../compat/paperclip/control-plane.js";
 import { validate } from "../middleware/validate.js";
+import type { SpsPluginArtifactMaintenance } from "../services/sps-plugin-artifact-maintenance.js";
+import { withSpsPluginArtifactMutation } from "../services/sps-plugin-artifact-mutation.js";
 
 function actorUserId(req: Request) {
   return req.actor.type === "board" ? req.actor.userId ?? "local-board" : "local-board";
@@ -41,7 +43,10 @@ function publicSource(source: typeof spsWorkspaceSources.$inferSelect) {
  * their route or Node grants; the Host's selected local folder never reaches
  * this API.
  */
-export function spsWorkspaceSourceRoutes(db: Db) {
+export function spsWorkspaceSourceRoutes(
+  db: Db,
+  options: { artifactMaintenance?: SpsPluginArtifactMaintenance } = {},
+) {
   const router = Router();
 
   function assertHost(req: Request, companyId: string) {
@@ -117,25 +122,27 @@ export function spsWorkspaceSourceRoutes(db: Db) {
     async (req, res) => {
       const companyId = req.params.companyId as string;
       assertHost(req, companyId);
-      const source = await db
-        .insert(spsWorkspaceSources)
-        .values({
+      return withSpsPluginArtifactMutation(options.artifactMaintenance, async () => {
+        const source = await db
+          .insert(spsWorkspaceSources)
+          .values({
+            companyId,
+            displayName: req.body.displayName,
+            createdByUserId: actorUserId(req),
+          })
+          .returning()
+          .then((rows) => rows[0]!);
+        await logActivity(db, {
           companyId,
-          displayName: req.body.displayName,
-          createdByUserId: actorUserId(req),
-        })
-        .returning()
-        .then((rows) => rows[0]!);
-      await logActivity(db, {
-        companyId,
-        actorType: "user",
-        actorId: actorUserId(req),
-        action: "sps_workspace_source.created",
-        entityType: "sps_workspace_source",
-        entityId: source.id,
-        details: { displayName: source.displayName },
+          actorType: "user",
+          actorId: actorUserId(req),
+          action: "sps_workspace_source.created",
+          entityType: "sps_workspace_source",
+          entityId: source.id,
+          details: { displayName: source.displayName },
+        });
+        res.status(201).json(publicSource(source));
       });
-      res.status(201).json(publicSource(source));
     },
   );
 
@@ -145,44 +152,48 @@ export function spsWorkspaceSourceRoutes(db: Db) {
     async (req, res) => {
       const companyId = req.params.companyId as string;
       assertHost(req, companyId);
-      const source = await getSource(companyId, req.params.sourceId as string);
-      if (req.body.sharePath !== undefined && req.body.sharePath !== null && !req.body.sharePath.startsWith("\\\\")) {
-        throw badRequest("SPS Workspace Source routes must be managed UNC share paths");
-      }
-      const updated = await db
-        .update(spsWorkspaceSources)
-        .set({ ...req.body, updatedAt: new Date() })
-        .where(eq(spsWorkspaceSources.id, source.id))
-        .returning()
-        .then((rows) => rows[0]!);
-      await logActivity(db, {
-        companyId,
-        actorType: "user",
-        actorId: actorUserId(req),
-        action: "sps_workspace_source.updated",
-        entityType: "sps_workspace_source",
-        entityId: source.id,
-        details: { changed: Object.keys(req.body).sort() },
+      return withSpsPluginArtifactMutation(options.artifactMaintenance, async () => {
+        const source = await getSource(companyId, req.params.sourceId as string);
+        if (req.body.sharePath !== undefined && req.body.sharePath !== null && !req.body.sharePath.startsWith("\\\\")) {
+          throw badRequest("SPS Workspace Source routes must be managed UNC share paths");
+        }
+        const updated = await db
+          .update(spsWorkspaceSources)
+          .set({ ...req.body, updatedAt: new Date() })
+          .where(eq(spsWorkspaceSources.id, source.id))
+          .returning()
+          .then((rows) => rows[0]!);
+        await logActivity(db, {
+          companyId,
+          actorType: "user",
+          actorId: actorUserId(req),
+          action: "sps_workspace_source.updated",
+          entityType: "sps_workspace_source",
+          entityId: source.id,
+          details: { changed: Object.keys(req.body).sort() },
+        });
+        res.json(publicSource(updated));
       });
-      res.json(publicSource(updated));
     },
   );
 
   router.delete("/companies/:companyId/sps-workspace-sources/:sourceId", async (req, res) => {
     const companyId = req.params.companyId as string;
     assertHost(req, companyId);
-    const source = await getSource(companyId, req.params.sourceId as string);
-    await db.delete(spsWorkspaceSources).where(eq(spsWorkspaceSources.id, source.id));
-    await logActivity(db, {
-      companyId,
-      actorType: "user",
-      actorId: actorUserId(req),
-      action: "sps_workspace_source.deleted",
-      entityType: "sps_workspace_source",
-      entityId: source.id,
-      details: { displayName: source.displayName },
+    return withSpsPluginArtifactMutation(options.artifactMaintenance, async () => {
+      const source = await getSource(companyId, req.params.sourceId as string);
+      await db.delete(spsWorkspaceSources).where(eq(spsWorkspaceSources.id, source.id));
+      await logActivity(db, {
+        companyId,
+        actorType: "user",
+        actorId: actorUserId(req),
+        action: "sps_workspace_source.deleted",
+        entityType: "sps_workspace_source",
+        entityId: source.id,
+        details: { displayName: source.displayName },
+      });
+      res.status(204).end();
     });
-    res.status(204).end();
   });
 
   router.put(
@@ -191,93 +202,97 @@ export function spsWorkspaceSourceRoutes(db: Db) {
     async (req, res) => {
       const companyId = req.params.companyId as string;
       assertHost(req, companyId);
-      const [source, node] = await Promise.all([
-        getSource(companyId, req.params.sourceId as string),
-        db
+      return withSpsPluginArtifactMutation(options.artifactMaintenance, async () => {
+        const [source, node] = await Promise.all([
+          getSource(companyId, req.params.sourceId as string),
+          db
+            .select()
+            .from(spsNodes)
+            .where(and(eq(spsNodes.companyId, companyId), eq(spsNodes.id, req.params.nodeId as string)))
+            .then((rows) => rows[0] ?? null),
+        ]);
+        if (!node) throw notFound("SPS Node not found");
+        if (source.status !== "active") throw badRequest("Resume this Workspace Source before granting Node access");
+        if (!source.sharePath) throw badRequest("Configure a Host-managed transport route before granting this Workspace Source to a Node");
+        if (node.status !== "active" || !node.keyVerifiedAt || !node.transportPublicKey) {
+          throw badRequest("This SPS Node must be active and publish a transport public key before it can receive Workspace Source access");
+        }
+        const now = new Date();
+        const existing = await db
           .select()
-          .from(spsNodes)
-          .where(and(eq(spsNodes.companyId, companyId), eq(spsNodes.id, req.params.nodeId as string)))
-          .then((rows) => rows[0] ?? null),
-      ]);
-      if (!node) throw notFound("SPS Node not found");
-      if (source.status !== "active") throw badRequest("Resume this Workspace Source before granting Node access");
-      if (!source.sharePath) throw badRequest("Configure a Host-managed transport route before granting this Workspace Source to a Node");
-      if (node.status !== "active" || !node.keyVerifiedAt || !node.transportPublicKey) {
-        throw badRequest("This SPS Node must be active and publish a transport public key before it can receive Workspace Source access");
-      }
-      const now = new Date();
-      const existing = await db
-        .select()
-        .from(spsWorkspaceSourceNodeGrants)
-        .where(and(
-          eq(spsWorkspaceSourceNodeGrants.sourceId, source.id),
-          eq(spsWorkspaceSourceNodeGrants.nodeId, node.id),
-        ))
-        .then((rows) => rows[0] ?? null);
-      const grant = existing
-        ? await db
-          .update(spsWorkspaceSourceNodeGrants)
-          .set({
-            credentialAlgorithm: req.body.credentialAlgorithm,
-            credentialEnvelope: req.body.credentialEnvelope,
-            grantedByUserId: actorUserId(req),
-            revokedAt: null,
-            updatedAt: now,
-          })
-          .where(eq(spsWorkspaceSourceNodeGrants.id, existing.id))
-          .returning()
-          .then((rows) => rows[0]!)
-        : await db
-          .insert(spsWorkspaceSourceNodeGrants)
-          .values({
-            companyId,
-            sourceId: source.id,
-            nodeId: node.id,
-            credentialAlgorithm: req.body.credentialAlgorithm,
-            credentialEnvelope: req.body.credentialEnvelope,
-            grantedByUserId: actorUserId(req),
-          })
-          .returning()
-          .then((rows) => rows[0]!);
-      await logActivity(db, {
-        companyId,
-        actorType: "user",
-        actorId: actorUserId(req),
-        action: "sps_workspace_source.node_granted",
-        entityType: "sps_node",
-        entityId: node.id,
-        details: { sourceId: source.id },
+          .from(spsWorkspaceSourceNodeGrants)
+          .where(and(
+            eq(spsWorkspaceSourceNodeGrants.sourceId, source.id),
+            eq(spsWorkspaceSourceNodeGrants.nodeId, node.id),
+          ))
+          .then((rows) => rows[0] ?? null);
+        const grant = existing
+          ? await db
+            .update(spsWorkspaceSourceNodeGrants)
+            .set({
+              credentialAlgorithm: req.body.credentialAlgorithm,
+              credentialEnvelope: req.body.credentialEnvelope,
+              grantedByUserId: actorUserId(req),
+              revokedAt: null,
+              updatedAt: now,
+            })
+            .where(eq(spsWorkspaceSourceNodeGrants.id, existing.id))
+            .returning()
+            .then((rows) => rows[0]!)
+          : await db
+            .insert(spsWorkspaceSourceNodeGrants)
+            .values({
+              companyId,
+              sourceId: source.id,
+              nodeId: node.id,
+              credentialAlgorithm: req.body.credentialAlgorithm,
+              credentialEnvelope: req.body.credentialEnvelope,
+              grantedByUserId: actorUserId(req),
+            })
+            .returning()
+            .then((rows) => rows[0]!);
+        await logActivity(db, {
+          companyId,
+          actorType: "user",
+          actorId: actorUserId(req),
+          action: "sps_workspace_source.node_granted",
+          entityType: "sps_node",
+          entityId: node.id,
+          details: { sourceId: source.id },
+        });
+        res.json({ id: grant.id, nodeId: grant.nodeId, grantedAt: grant.updatedAt });
       });
-      res.json({ id: grant.id, nodeId: grant.nodeId, grantedAt: grant.updatedAt });
     },
   );
 
   router.delete("/companies/:companyId/sps-workspace-sources/:sourceId/nodes/:nodeId", async (req, res) => {
     const companyId = req.params.companyId as string;
     assertHost(req, companyId);
-    const source = await getSource(companyId, req.params.sourceId as string);
-    const now = new Date();
-    const revoked = await db
-      .update(spsWorkspaceSourceNodeGrants)
-      .set({ revokedAt: now, updatedAt: now })
-      .where(and(
-        eq(spsWorkspaceSourceNodeGrants.sourceId, source.id),
-        eq(spsWorkspaceSourceNodeGrants.nodeId, req.params.nodeId as string),
-        isNull(spsWorkspaceSourceNodeGrants.revokedAt),
-      ))
-      .returning()
-      .then((rows) => rows[0] ?? null);
-    if (!revoked) throw notFound("SPS Workspace Source Node grant not found");
-    await logActivity(db, {
-      companyId,
-      actorType: "user",
-      actorId: actorUserId(req),
-      action: "sps_workspace_source.node_revoked",
-      entityType: "sps_node",
-      entityId: revoked.nodeId,
-      details: { sourceId: source.id },
+    return withSpsPluginArtifactMutation(options.artifactMaintenance, async () => {
+      const source = await getSource(companyId, req.params.sourceId as string);
+      const now = new Date();
+      const revoked = await db
+        .update(spsWorkspaceSourceNodeGrants)
+        .set({ revokedAt: now, updatedAt: now })
+        .where(and(
+          eq(spsWorkspaceSourceNodeGrants.sourceId, source.id),
+          eq(spsWorkspaceSourceNodeGrants.nodeId, req.params.nodeId as string),
+          isNull(spsWorkspaceSourceNodeGrants.revokedAt),
+        ))
+        .returning()
+        .then((rows) => rows[0] ?? null);
+      if (!revoked) throw notFound("SPS Workspace Source Node grant not found");
+      await logActivity(db, {
+        companyId,
+        actorType: "user",
+        actorId: actorUserId(req),
+        action: "sps_workspace_source.node_revoked",
+        entityType: "sps_node",
+        entityId: revoked.nodeId,
+        details: { sourceId: source.id },
+      });
+      res.status(204).end();
     });
-    res.status(204).end();
   });
 
   return router;

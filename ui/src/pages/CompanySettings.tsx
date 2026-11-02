@@ -16,6 +16,7 @@ import { isSpsBasicModeEnabled } from "@/lib/sps-basic-mode";
 import { isWorkplaneModeEnabled } from "@/lib/workplane-mode";
 import { Link } from "@/lib/router";
 import { CompanyPatternIcon } from "../components/CompanyPatternIcon";
+import { WorkspaceExecutionControl } from "../components/WorkspaceExecutionControl";
 import {
   Field,
   ToggleField,
@@ -181,6 +182,7 @@ export function CompanySettings() {
       </div>
 
       {/* General */}
+      <WorkspaceExecutionControl key={selectedCompany.id} companyId={selectedCompany.id} />
       <div className="space-y-4">
         <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
           {spsWorkplaneShell ? "기본 정보" : "General"}

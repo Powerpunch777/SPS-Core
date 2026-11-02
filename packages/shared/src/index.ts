@@ -1608,6 +1608,8 @@ export {
   spsNodeHeartbeatSchema,
   spsNodeHeartbeatMessage,
   spsNodeSignedRequestSchema,
+  spsNodeClaimRequestSchema,
+  SPS_NODE_CLAIM_REQUEST_ID_PATTERN,
   spsNodeCommandEventSchema,
   spsNodeCommandCompleteSchema,
   spsNodeUsageReportSchema,
@@ -1918,3 +1920,5 @@ export {
   type CreateEnvironmentCustomImageTerminalSessionToken,
   type EnvironmentCustomImageTerminalSessionToken,
 } from "./validators/environment-custom-images.js";
+export { spsWorkspaceExecutionActionSchema } from "./sps-workspace-execution.js";
+export type { SpsWorkspaceExecutionAction, SpsWorkspaceExecutionStatus } from "./sps-workspace-execution.js";

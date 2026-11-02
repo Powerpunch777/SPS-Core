@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { createTestHarness } from "../src/testing.js";
 import type { PaperclipPluginManifestV1 } from "../src/types.js";
+import type { Agent } from "@paperclipai/shared";
 
 const manifest = {
   id: "paperclip.test-actions",
@@ -87,6 +88,95 @@ describe("createTestHarness SPS execution history", () => {
     await expect(harness.ctx.sps.executions.summarize("company-1", {
       from: "2026-10-01T00:00:00.000Z", to: "2026-10-02T00:00:00.000Z",
     })).rejects.toThrow("The in-memory plugin test harness does not provide SPS execution summaries");
+  });
+});
+
+describe("createTestHarness Agent session ensure", () => {
+  it("models remembered task-key ownership and configuration, without claiming database durability", async () => {
+    const agent = { id: "agent-a", companyId: "company-1", adapterType: "test" } as Agent;
+    const otherAgent = { id: "agent-b", companyId: "company-1", adapterType: "test" } as Agent;
+    const denied = createTestHarness({ manifest });
+    denied.seed({ agents: [agent, otherAgent] });
+    await expect(denied.ctx.agents.sessions.ensure("agent-a", "company-1", { taskKey: "plugin:task-1" }))
+      .rejects.toThrow("agent.sessions.create");
+
+    const harness = createTestHarness({
+      manifest,
+      capabilities: ["agent.sessions.create", "agent.sessions.close"],
+    });
+    harness.seed({ agents: [agent, otherAgent] });
+    const context = { projectId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" };
+    const taskKey = `plugin:${manifest.id}:session:task-1`;
+    const first = await harness.ctx.agents.sessions.ensure("agent-a", "company-1", {
+      taskKey, context,
+    });
+    const retry = await harness.ctx.agents.sessions.ensure("agent-a", "company-1", {
+      taskKey, expectedSessionId: first.sessionId, context,
+    });
+    const uppercaseRetry = await harness.ctx.agents.sessions.ensure("agent-a", "company-1", {
+      taskKey, expectedSessionId: first.sessionId.toUpperCase(), context,
+    });
+    const otherAgentSession = await harness.ctx.agents.sessions.ensure("agent-b", "company-1", {
+      taskKey, context,
+    });
+
+    expect(first).toMatchObject({ created: true });
+    expect(retry).toEqual({ sessionId: first.sessionId, created: false });
+    expect(uppercaseRetry).toEqual({ sessionId: first.sessionId, created: false });
+    expect(otherAgentSession).toMatchObject({ created: true });
+    expect(otherAgentSession.sessionId).not.toBe(first.sessionId);
+    await expect(harness.ctx.agents.sessions.ensure("agent-a", "company-1", {
+      taskKey, expectedSessionId: "99999999-9999-4999-8999-999999999999", context,
+    })).rejects.toThrow("does not match the remembered task key");
+    await expect(harness.ctx.agents.sessions.ensure("agent-a", "company-1", {
+      taskKey, context: { projectId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" },
+    })).rejects.toThrow("explicit review is required");
+
+    const adapterKey = `plugin:${manifest.id}:session:task-adapter`;
+    await harness.ctx.agents.sessions.ensure("agent-a", "company-1", { taskKey: adapterKey });
+    harness.seed({ agents: [{ ...agent, adapterType: "changed" }] });
+    await expect(harness.ctx.agents.sessions.ensure("agent-a", "company-1", { taskKey: adapterKey }))
+      .rejects.toThrow("explicit review is required");
+
+    await harness.ctx.agents.sessions.close(first.sessionId, "company-1");
+    await expect(harness.ctx.agents.sessions.ensure("agent-a", "company-1", {
+      taskKey, expectedSessionId: first.sessionId, context,
+    })).rejects.toThrow("explicit review is required");
+    await expect(harness.ctx.agents.sessions.ensure("agent-a", "company-1", {
+      taskKey: `plugin:${manifest.id}:session:missing`, expectedSessionId: "88888888-8888-4888-8888-888888888888",
+    })).rejects.toThrow("no longer available");
+    await expect(harness.ctx.agents.sessions.ensure("agent-a", "company-1", {
+      taskKey: `plugin:${manifest.id}:session:missing`,
+    })).resolves.toMatchObject({ created: true });
+    for (const contextValue of [
+      null,
+      [],
+      "invalid",
+      { unsupported: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" },
+      { projectId: "not-a-uuid" },
+      { issueId: null },
+    ]) {
+      await expect(harness.ctx.agents.sessions.ensure("agent-a", "company-1", {
+        taskKey, context: contextValue as never,
+      })).rejects.toThrow("Session context must contain only supported UUID references");
+    }
+    // Valid UUID syntax is checked here; this in-memory fake cannot validate database references.
+    await expect(harness.ctx.agents.sessions.ensure("agent-a", "company-1", {
+      taskKey: `plugin:${manifest.id}:session:unseeded-reference`,
+      context: { projectWorkspaceId: "cccccccc-cccc-4ccc-8ccc-cccccccccccc" },
+    })).resolves.toMatchObject({ created: true });
+    await expect(harness.ctx.agents.sessions.create("agent-a", "company-1", {
+      context: { unsupported: "legacy-permissive" } as never,
+    })).resolves.toMatchObject({ status: "active" });
+    for (const expectedSessionId of ["", "not-a-uuid", null as unknown as string]) {
+      await expect(harness.ctx.agents.sessions.ensure("agent-a", "company-1", {
+        taskKey, expectedSessionId, context,
+      })).rejects.toThrow("Expected session ID must be a UUID");
+    }
+    for (const invalid of ["plugin:foreign:session:key", `plugin:${manifest.id}:session:`, `${taskKey}\0`, `${taskKey}\ud800`, `${taskKey}${"x".repeat(1024)}`]) {
+      await expect(harness.ctx.agents.sessions.ensure("agent-a", "company-1", { taskKey: invalid }))
+        .rejects.toThrow("owned by this plugin");
+    }
   });
 });
 

@@ -5,12 +5,13 @@ import { SpsNativeEnrollmentError } from "./sps-native-enrollments.js";
 
 type SessionAdapter = ReturnType<typeof createSpsNativeSessionEnrollment>;
 type Adapter = Pick<SessionAdapter, "issue" | "completeFromTlsRequest">
-  & Partial<Pick<SessionAdapter, "reconcileFromTlsRequest">>;
+  & Partial<Pick<SessionAdapter, "reconcileFromTlsRequest" | "renewFromTlsRequest">>;
 type Options = { maxBodyBytes: number; readTimeoutMs: number; operationTimeoutMs: number; maxConcurrentRequests: number };
 type Pending = { cancelled: boolean; response: ServerResponse; operation?: Promise<unknown> };
 const ISSUE = "/sps-native/v1/enrollment/issue";
 const COMPLETE = "/sps-native/v1/enrollment/complete";
 const RECONCILE = "/sps-native/v1/enrollment/reconcile";
+const RENEW = "/sps-native/v1/enrollment/renew";
 const CODE = "native_enrollment_request_unavailable";
 const UUID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/;
 class RequestFailure extends Error { constructor(readonly status: number) { super(CODE); } }
@@ -105,7 +106,7 @@ function input(bytes: Buffer, operation: string) {
     // Private v1 wire format is compact JSON.stringify UTF-8. This rejects
     // duplicate/escaped duplicate keys without another permissive JSON parser.
     if (JSON.stringify(value) !== text) fail(400);
-    const fields = data(value, operation === RECONCILE ? ["enrollmentId"]
+    const fields = data(value, operation === RENEW ? ["deviceKeyId", "requestPem"] : operation === RECONCILE ? ["enrollmentId"]
       : operation === ISSUE ? ["pairingId", "pairingSecret", "deviceKeyId", "requestPem"]
         : ["pairingId", "pairingSecret", "enrollmentId", "displayName"]);
     for (const [key, field] of Object.entries(fields)) {
@@ -116,6 +117,24 @@ function input(bytes: Buffer, operation: string) {
 }
 function project(value: unknown, operation: string) {
   try {
+    if (operation === RENEW) {
+      const fields = data(value, ["renewalId", "deviceId", "predecessorCertificateSha256", "certificate",
+        "issuerCertificate", "certificateNotBefore", "certificateNotAfter"]);
+      if (typeof fields.renewalId !== "string" || !UUID.test(fields.renewalId)
+        || typeof fields.deviceId !== "string" || !UUID.test(fields.deviceId)
+        || typeof fields.predecessorCertificateSha256 !== "string" || !/^[0-9a-f]{64}$/.test(fields.predecessorCertificateSha256)) fail(503);
+      for (const key of ["certificate", "issuerCertificate"] as const) {
+        const field = fields[key];
+        if (typeof field !== "string" || field.length < 1 || field.length > 5462 || !/^[A-Za-z0-9_-]+$/.test(field)
+          || Buffer.from(field, "base64url").length > 4096 || Buffer.from(field, "base64url").toString("base64url") !== field) fail(503);
+      }
+      for (const key of ["certificateNotBefore", "certificateNotAfter"] as const) {
+        const field = fields[key];
+        if (typeof field !== "string" || field.length !== 24 || new Date(field).toISOString() !== field) fail(503);
+      }
+      if (Date.parse(fields.certificateNotAfter as string) <= Date.parse(fields.certificateNotBefore as string)) fail(503);
+      return fields;
+    }
     if (operation === RECONCILE) {
       const fields = data(value, ["deviceId", "status"]);
       if (typeof fields.deviceId !== "string" || !UUID.test(fields.deviceId)
@@ -162,8 +181,9 @@ export function createSpsNativeEnrollmentRequestHandler(adapter: Adapter, inputO
     try {
       if (!(request instanceof IncomingMessage) || !(response instanceof ServerResponse)) fail(403);
       if (disposed) fail(503);
-      if (request.url !== ISSUE && request.url !== COMPLETE && request.url !== RECONCILE) fail(404);
+      if (request.url !== ISSUE && request.url !== COMPLETE && request.url !== RECONCILE && request.url !== RENEW) fail(404);
       if (request.url === RECONCILE && typeof adapter.reconcileFromTlsRequest !== "function") fail(404);
+      if (request.url === RENEW && typeof adapter.renewFromTlsRequest !== "function") fail(404);
       size = length(request, limits.maxBodyBytes);
       if (active.size >= limits.maxConcurrentRequests) fail(429);
     } catch (error) { send(response, failureStatus(error), { code: CODE }); return; }
@@ -184,6 +204,11 @@ export function createSpsNativeEnrollmentRequestHandler(adapter: Adapter, inputO
         settled = false;
         const operation = Promise.resolve().then<unknown>(() => {
           assertActive();
+          if (request.url === RENEW) {
+            if (typeof adapter.renewFromTlsRequest !== "function") fail(404);
+            return adapter.renewFromTlsRequest(request,
+              fields as Parameters<NonNullable<Adapter["renewFromTlsRequest"]>>[1], assertActive);
+          }
           if (request.url === RECONCILE) {
             if (typeof adapter.reconcileFromTlsRequest !== "function") fail(404);
             return adapter.reconcileFromTlsRequest(request,
