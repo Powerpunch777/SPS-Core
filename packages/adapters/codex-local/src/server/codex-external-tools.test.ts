@@ -80,6 +80,25 @@ describe("Codex CLI external MCP transport", () => {
     } as never)).toThrow("arguments are invalid");
   });
 
+  it("keeps injected MCP and existing policy overrides before the resume command boundary", () => {
+    const prefix = ["exec", "--json", "--sandbox", "read-only", "--disable", "shell_tool", "-c",
+      'mcp_servers.local_mcp.tools.execute.approval_mode="prompt"', "-c", 'model_reasoning_effort="high"'];
+    const suffix = ["resume", "11111111-1111-4111-8111-111111111111", "-"];
+    const prepared = prepareCodexExternalTools({ mcpServers: [stdioServer()] } as never);
+    const actual = insertCodexExternalToolArgs([...prefix, ...suffix], prepared.args);
+    expect(actual).toEqual([...prefix, ...prepared.args, ...suffix]);
+    expect(actual.slice(actual.indexOf("resume") + 1)).toEqual(suffix.slice(1));
+    expect(JSON.stringify(actual)).not.toContain(secret);
+  });
+
+  it("does not rearrange an invocation without injected MCP configuration", () => {
+    const args = ["exec", "--json", "resume", "session", "-"];
+    expect(insertCodexExternalToolArgs(args, [])).toEqual(args);
+    expect(insertCodexExternalToolArgs(args, [])).not.toBe(args);
+    expect(() => insertCodexExternalToolArgs(["exec", "--json"], ["-c", "x=true"]))
+      .toThrow("stdin prompt argument is missing");
+  });
+
   it("rejects duplicate server names and conflicting environment bindings", () => {
     expect(() => prepareCodexExternalTools({
       mcpServers: [stdioServer(), stdioServer()],

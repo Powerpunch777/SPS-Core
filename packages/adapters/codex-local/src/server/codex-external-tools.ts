@@ -157,7 +157,10 @@ export function insertCodexExternalToolArgs(
   if (execArgs.at(-1) !== "-") {
     throw new Error("Codex CLI stdin prompt argument is missing.");
   }
-  return [...execArgs.slice(0, -1), ...externalToolArgs, "-"];
+  // Keep all -c overrides at the exec level. Some CLI versions retain only
+  // the deepest command's values, dropping model/tool policy on `resume`.
+  const insertion = execArgs.at(-3) === "resume" ? execArgs.length - 3 : execArgs.length - 1;
+  return [...execArgs.slice(0, insertion), ...externalToolArgs, ...execArgs.slice(insertion)];
 }
 
 export function mergeCodexExternalToolEnv(
